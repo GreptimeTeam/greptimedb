@@ -11,6 +11,8 @@ co_declared_edges:
   - { src: service.instance, dst: service, rel: part_of }
   - { src: k8s.pod, dst: k8s.workload, rel: part_of }
   - { src: service.instance, dst: k8s.pod, rel: runs_on }
+  - { src: service.instance, dst: container, rel: runs_on }
+  - { src: container, dst: host, rel: runs_on }
 
 # Applied only to trace sources; the endpoints are Greptime entity types
 # derived from GenAI semantic-convention attributes.
@@ -30,12 +32,25 @@ virtual_dst_candidates:
   - { column: span_attributes.server.address, connection_type: virtual_node }
 
 # Implicit declarations for greptime_trace_v1 tables; the pod UID bridges
-# trace-side pods onto the kube-state-metrics entities below.
+# trace-side pods onto the kube-state-metrics entities below. host.name and
+# container.name vary by SDK and resource detector, so identity is the id.
+# qualified_by folds the namespace into the service identity the same way the
+# metric sources' `job` already carries it, so both signals name one entity.
 otlp_trace_entities:
   - entity: service
     id: [service_name]
+    qualified_by: resource_attributes.service.namespace
   - entity: service.instance
     id: [service_name, resource_attributes.service.instance.id]
+    qualified_by: resource_attributes.service.namespace
+  - entity: host
+    id: [resource_attributes.host.id]
+    descriptive:
+      - resource_attributes.host.name
+  - entity: container
+    id: [resource_attributes.container.id]
+    descriptive:
+      - resource_attributes.container.name
   - entity: k8s.pod
     id: [resource_attributes.k8s.pod.uid]
     descriptive:
@@ -113,3 +128,32 @@ prometheus_info_metrics:
     - entity: service.instance
       id: [job, instance]
       descriptive_rest: true
+
+# Implicit declarations for the OTLP resource descriptor synthesized at
+# metrics ingestion, gated on source=opentelemetry and metric.type=info.
+# job/instance are the derived Prometheus-compatible identity, so services
+# line up with target_info. Unlike target_info the attribute set is known, so
+# descriptive columns are listed instead of swept up by descriptive_rest,
+# which would misfile other entities' ids under service.instance.
+otel_info_metrics:
+  greptime_otel_resource_info:
+    - entity: service
+      id: [job]
+      descriptive:
+        - service.name
+        - service.namespace
+    - entity: service.instance
+      id: [job, instance]
+    - entity: host
+      id: [host.id]
+      descriptive:
+        - host.name
+    - entity: container
+      id: [container.id]
+      descriptive:
+        - container.name
+    - entity: k8s.pod
+      id: [k8s.pod.uid]
+      descriptive:
+        - k8s.pod.name
+        - k8s.namespace.name

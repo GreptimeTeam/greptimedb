@@ -15,7 +15,7 @@
 use auth::UserProviderRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::status_to_tonic_code;
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use futures::SinkExt;
 use otel_arrow_rust::Consumer;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsService;
@@ -73,7 +73,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
-                let batch_status = BatchStatus {
+                let mut batch_status = BatchStatus {
                     batch_id: batch.batch_id,
                     status_code: 0,
                     status_message: Default::default(),
@@ -99,15 +99,26 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     }
                 };
                 // use metric engine by default
-                if let Err(e) = handler.metrics(request, query_ctx.clone()).await {
-                    let _ = sender
-                        .send(Err(Status::new(
-                            status_to_tonic_code(e.status_code()),
-                            e.to_string(),
-                        )))
-                        .await;
-                    error!(e; "Failed to ingest metrics from otel-arrow");
-                    return;
+                match handler.metrics(request, query_ctx.clone()).await {
+                    Ok(outcome) => {
+                        if let Some(warning) = outcome.warning {
+                            warn!("otel-arrow metrics ingestion warning: {warning}");
+                            // OTAP has no rejected-count field. Keep the batch
+                            // successful and carry the derived-write warning in
+                            // its diagnostic message.
+                            batch_status.status_message = warning;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = sender
+                            .send(Err(Status::new(
+                                status_to_tonic_code(e.status_code()),
+                                e.to_string(),
+                            )))
+                            .await;
+                        error!(e; "Failed to ingest metrics from otel-arrow");
+                        return;
+                    }
                 }
                 let _ = sender.send(Ok(batch_status)).await;
             }

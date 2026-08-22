@@ -50,7 +50,9 @@ use log_query::{AggFunc, Context, Limit, LogExpr, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
@@ -161,6 +163,7 @@ macro_rules! http_tests {
 
                 test_otlp_metrics_new,
                 test_otlp_metric_translation_strategies,
+                test_otlp_metrics_resource_info_conflicts,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
                 test_otlp_traces_v1_entity_graph,
@@ -2200,6 +2203,11 @@ default_merge_mode = "last_non_null"
 
 [jaeger]
 enable = true
+
+[otlp]
+enable = true
+trace_ingest_chunk_size = 512
+experimental_enable_resource_info = true
 
 [prom_store]
 enable = true
@@ -6490,7 +6498,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = "[[\"claude_code_cost_usage_USD_total\"],[\"claude_code_token_usage_tokens_total\"],[\"demo\"],[\"greptime_physical_table\"],[\"numbers\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\"],[\"claude_code_token_usage_tokens_total\"],[\"demo\"],[\"greptime_otel_resource_info\"],[\"greptime_physical_table\"],[\"numbers\"]]";
     validate_data("otlp_metrics_all_tables", &client, "show tables;", expected).await;
 
     // Metric-engine logical table carries the semantic identity. Match substrings
@@ -6557,6 +6565,33 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     )
     .await;
 
+    // The synthesized resource descriptor: a plain mito info table keyed by
+    // the raw OTel attribute keys (service.name is the only allowlisted
+    // resource attribute in this payload), independent of the promote/ignore
+    // headers. The timestamp is the newest data-point time.
+    validate_data(
+        "otlp_metrics_resource_info",
+        &client,
+        "select job, \"service.name\", greptime_value, greptime_timestamp from greptime_otel_resource_info;",
+        "[[\"claude-code\",\"claude-code\",1.0,1753780559836]]",
+    )
+    .await;
+    // All four ownership markers must land on auto-create: the descriptor
+    // write path refuses tables that miss any of them, so a missing stamp
+    // here would silently stop every follow-up descriptor write.
+    validate_data(
+        "otlp_metrics_resource_info_options",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'greptime_otel_resource_info' \
+         and engine = 'mito' \
+         and create_options like '%greptime.semantic.metric.type=info%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=declared%' \
+         and create_options like '%greptime.semantic.signal_type=metric%' \
+         and create_options like '%greptime.semantic.source=opentelemetry%';",
+        "[[1]]",
+    )
+    .await;
+
     // drop table
     let res = client
         .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD_total`;")
@@ -6565,6 +6600,11 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .get("/v1/sql?sql=drop table claude_code_token_usage_tokens_total;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table greptime_otel_resource_info;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -6694,6 +6734,16 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     )
     .await;
 
+    // the descriptor was auto-created again after the earlier drop
+    validate_data(
+        "otlp_metrics_resource_info_recreated",
+        &client,
+        "select count(*) from information_schema.tables \
+         where table_name = 'greptime_otel_resource_info' and engine = 'mito';",
+        "[[1]]",
+    )
+    .await;
+
     // drop table
     let res = client
         .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD_total`;")
@@ -6705,6 +6755,44 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table greptime_otel_resource_info;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // job composition end-to-end: service.namespace folds into "<ns>/<name>"
+    // on both the descriptor and the metric tables
+    let content = r#"
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"service.namespace","value":{"stringValue":"shop"}},{"key":"host.id","value":{"stringValue":"h-1"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"ns_gauge","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":1.0}]}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    validate_data(
+        "otlp_metrics_namespace_job_descriptor",
+        &client,
+        "select job, \"service.name\", \"service.namespace\", \"host.id\" from greptime_otel_resource_info;",
+        "[[\"shop/api\",\"api\",\"shop\",\"h-1\"]]",
+    )
+    .await;
+    validate_data(
+        "otlp_metrics_namespace_job_metric_table",
+        &client,
+        "select job from ns_gauge;",
+        "[[\"shop/api\"]]",
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -6768,6 +6856,24 @@ pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
     )
     .await;
 
+    // the descriptor's columns are the fixed raw keys regardless of the
+    // translation strategy, and only allowlisted attributes are projected
+    validate_data(
+        "otlp_metric_translation_strategy_resource_info",
+        &client,
+        "select job, \"service.name\" from greptime_otel_resource_info;",
+        "[[\"strategy-service\",\"strategy-service\"]]",
+    )
+    .await;
+    validate_data(
+        "otlp_metric_translation_strategy_resource_info_allowlist",
+        &client,
+        "select count(*) from information_schema.columns \
+         where table_name = 'greptime_otel_resource_info' and column_name = 'resource.attr';",
+        "[[0]]",
+    )
+    .await;
+
     let res = send_req(
         &client,
         vec![
@@ -6786,6 +6892,122 @@ pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::BAD_REQUEST, res.status());
+
+    guard.remove_all().await;
+}
+
+pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_metrics_resource_info_conflicts")
+            .await;
+    let client = TestClient::new(app).await;
+
+    let content_type = || {
+        (
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )
+    };
+
+    // A metric named like the descriptor wins the table name: it goes through
+    // the normal metric-engine path and no descriptor is synthesized.
+    let content = r#"
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"host.id","value":{"stringValue":"h-1"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"greptime_otel_resource_info","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":1.0}]}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![content_type()],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+    assert!(body.partial_success.is_none());
+    validate_data(
+        "otlp_metrics_name_collision_engine",
+        &client,
+        "select count(*) from information_schema.tables \
+         where table_name = 'greptime_otel_resource_info' and engine = 'metric';",
+        "[[1]]",
+    )
+    .await;
+    let res = execute_sql(&client, "drop table greptime_otel_resource_info;").await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // A pre-existing table with an incompatible schema fails the descriptor
+    // write, which degrades to an OTLP partial-success warning while the
+    // metric data itself is accepted.
+    let res = execute_sql(
+        &client,
+        "create table greptime_otel_resource_info (ts timestamp time index, job double, greptime_value double);",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = r#"
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"conflict_gauge","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":7.0}]}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![content_type()],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = body.partial_success.as_ref().unwrap();
+    assert_eq!(partial_success.rejected_data_points, 0);
+    assert!(
+        partial_success
+            .error_message
+            .contains("greptime_otel_resource_info"),
+        "unexpected warning: {}",
+        partial_success.error_message
+    );
+    validate_data(
+        "otlp_metrics_conflict_main_data_accepted",
+        &client,
+        "select greptime_value from conflict_gauge;",
+        "[[7.0]]",
+    )
+    .await;
+
+    // The descriptor is auto-created again once the conflicting table is
+    // gone, and a follow-up write into it does not degrade.
+    let res = execute_sql(&client, "drop table greptime_otel_resource_info;").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    for round in 0..2 {
+        let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+        let res = send_req(
+            &client,
+            vec![content_type()],
+            "/v1/otlp/v1/metrics",
+            req.encode_to_vec(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+        let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+        assert!(
+            body.partial_success.is_none(),
+            "round {round} unexpectedly degraded: {:?}",
+            body.partial_success
+        );
+    }
+    validate_data(
+        "otlp_metrics_owned_descriptor_keeps_accepting",
+        &client,
+        "select count(*) from greptime_otel_resource_info;",
+        "[[1]]",
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -6979,7 +7201,7 @@ pub async fn test_otlp_traces_v1_entity_graph(store_type: StorageType) {
     let res = send_trace_v1_req(&client, "graph_traces", req, false).await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = r#"[["service","frontend","service","cart","calls"],["service.instance","resource_attributes.service.instance.id=binst-1,service_name=batch","service","batch","part_of"],["service.instance","resource_attributes.service.instance.id=inst-1,service_name=frontend","service","frontend","part_of"],["service.instance","resource_attributes.service.instance.id=inst-1,service_name=frontend","k8s.pod","uid-9","runs_on"]]"#;
+    let expected = r#"[["service","frontend","service","cart","calls"],["service.instance","batch,binst-1","service","batch","part_of"],["service.instance","frontend,inst-1","service","frontend","part_of"],["service.instance","frontend,inst-1","k8s.pod","uid-9","runs_on"]]"#;
     validate_data(
         "otlp_traces_entity_graph",
         &client,

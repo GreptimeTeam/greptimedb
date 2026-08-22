@@ -19,7 +19,7 @@
 //! with the binary, not an operator-editable configuration surface; explicit
 //! `greptime.semantic.entity.*` declarations always override it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
 use serde::Deserialize;
@@ -43,15 +43,20 @@ pub struct VirtualDstCandidate {
     pub connection_type: String,
 }
 
-/// One implicit entity declaration: of a whitelisted Prometheus info metric,
-/// or of a trace-v1 table's flattened resource attributes.
+/// One implicit entity declaration: of a whitelisted Prometheus or OTel info
+/// metric, or of a trace-v1 table's flattened resource attributes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImplicitEntity {
     pub entity: String,
-    /// Identifying label columns; every one must exist on the table for the
-    /// declaration to apply.
+    /// Identifying label columns, ordered broad to narrow; every one must
+    /// exist on the table for the declaration to apply.
     pub id: Vec<String>,
+    /// Column qualifying `id[0]` as `<qualifier>/<id[0]>`, so a source
+    /// carrying the parts separately matches one carrying them pre-composed.
+    /// Skipped when the column is absent or empty.
+    #[serde(default)]
+    pub qualified_by: Option<String>,
     /// Descriptive label columns, filtered to those present (kube-state-metrics
     /// label sets vary across versions).
     #[serde(default)]
@@ -70,7 +75,12 @@ pub struct Conventions {
     pub trace_co_declared_edges: Vec<EdgeRule>,
     pub virtual_dst_candidates: Vec<VirtualDstCandidate>,
     pub otlp_trace_entities: Vec<ImplicitEntity>,
+    /// Table name -> the entities that table declares, for Prometheus-sourced
+    /// descriptor metrics (`source = prometheus`).
     pub prometheus_info_metrics: BTreeMap<String, Vec<ImplicitEntity>>,
+    /// Table name -> the entities that table declares, for OTLP-sourced
+    /// descriptor tables (`source = opentelemetry`).
+    pub otel_info_metrics: BTreeMap<String, Vec<ImplicitEntity>>,
 }
 
 /// The built-in entity-type vocabulary. User-declared types are open-ended;
@@ -78,6 +88,7 @@ pub struct Conventions {
 pub const ENTITY_TYPE_SERVICE: &str = "service";
 pub const ENTITY_TYPE_SERVICE_INSTANCE: &str = "service.instance";
 pub const ENTITY_TYPE_HOST: &str = "host";
+pub const ENTITY_TYPE_CONTAINER: &str = "container";
 pub const ENTITY_TYPE_PROCESS: &str = "process";
 pub const ENTITY_TYPE_K8S_POD: &str = "k8s.pod";
 pub const ENTITY_TYPE_K8S_NODE: &str = "k8s.node";
@@ -88,10 +99,11 @@ pub const ENTITY_TYPE_GEN_AI_AGENT: &str = "gen_ai.agent";
 pub const ENTITY_TYPE_GEN_AI_MODEL: &str = "gen_ai.model";
 pub const ENTITY_TYPE_GEN_AI_TOOL: &str = "gen_ai.tool";
 
-const ENTITY_TYPES: [&str; 12] = [
+const ENTITY_TYPES: [&str; 13] = [
     ENTITY_TYPE_SERVICE,
     ENTITY_TYPE_SERVICE_INSTANCE,
     ENTITY_TYPE_HOST,
+    ENTITY_TYPE_CONTAINER,
     ENTITY_TYPE_PROCESS,
     ENTITY_TYPE_K8S_POD,
     ENTITY_TYPE_K8S_NODE,
@@ -200,11 +212,16 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
     let per_table = conventions
         .prometheus_info_metrics
         .iter()
+        .chain(&conventions.otel_info_metrics)
         .map(|(table, entities)| (table.as_str(), entities))
         .chain(std::iter::once((
             "otlp traces",
             &conventions.otlp_trace_entities,
         )));
+    // An entity type declared with a different number of id columns by two
+    // sources yields ids that can never match, silently splitting one entity
+    // in two.
+    let mut arity = HashMap::new();
     for (table, entities) in per_table {
         let mut seen_types = HashSet::new();
         for implicit in entities {
@@ -226,12 +243,29 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
                     implicit.entity
                 ));
             }
+            if implicit.qualified_by.as_ref().is_some_and(String::is_empty) {
+                return Err(format!(
+                    "entity `{}` of info metric `{table}` has an empty qualified_by",
+                    implicit.entity
+                ));
+            }
             if implicit.descriptive_rest && !implicit.descriptive.is_empty() {
                 return Err(format!(
                     "entity `{}` of info metric `{table}` sets both descriptive and \
                      descriptive_rest",
                     implicit.entity
                 ));
+            }
+            match arity.insert(implicit.entity.as_str(), implicit.id.len()) {
+                Some(previous) if previous != implicit.id.len() => {
+                    return Err(format!(
+                        "entity `{}` is declared with {previous} id columns elsewhere but \
+                         {} for `{table}`",
+                        implicit.entity,
+                        implicit.id.len()
+                    ));
+                }
+                _ => {}
             }
         }
     }
@@ -249,25 +283,28 @@ mod tests {
 
     /// Each case must fail on exactly the rule it names, so the shared
     /// boilerplate is valid and the mutated part is inside the vocabulary.
-    fn broken(edges: &str, info_metrics: &str) -> String {
+    fn broken(edges: &str, info_metrics: &str, otel_metrics: &str) -> String {
         format!(
             "co_declared_edges: [{edges}]\ntrace_co_declared_edges: []\n\
              virtual_dst_candidates: []\notlp_trace_entities: []\n\
-             prometheus_info_metrics: {{{info_metrics}}}"
+             prometheus_info_metrics: {{{info_metrics}}}\n\
+             otel_info_metrics: {{{otel_metrics}}}"
         )
     }
 
     #[test]
     fn validation_rejects_broken_conventions() {
-        let err = |edges, info| parse(&broken(edges, info)).unwrap_err();
+        let err = |edges, info, otel| parse(&broken(edges, info, otel)).unwrap_err();
 
-        assert!(err("{src: host, dst: service, rel: pets}", "").contains("unknown rel_type"));
+        assert!(err("{src: host, dst: service, rel: pets}", "", "").contains("unknown rel_type"));
         assert!(
-            err("{src: k8s.pods, dst: k8s.node, rel: runs_on}", "").contains("unknown entity type")
+            err("{src: k8s.pods, dst: k8s.node, rel: runs_on}", "", "")
+                .contains("unknown entity type")
         );
         assert!(
             err(
                 "{src: host, dst: service, rel: uses}, {src: host, dst: service, rel: uses}",
+                "",
                 ""
             )
             .contains("duplicate edge rule")
@@ -275,14 +312,27 @@ mod tests {
         assert!(
             err(
                 "",
-                "t: [{entity: host, id: [x], descriptive: [y], descriptive_rest: true}]"
+                "t: [{entity: host, id: [x], descriptive: [y], descriptive_rest: true}]",
+                ""
             )
             .contains("descriptive_rest")
+        );
+        // the otel map runs through the same per-table validation
+        assert!(err("", "", "t: [{entity: hosts, id: [x]}]").contains("unknown entity type"));
+        // ids of a different arity for one type can never match each other
+        assert!(
+            err(
+                "",
+                "a: [{entity: host, id: [x]}]",
+                "b: [{entity: host, id: [x, y]}]"
+            )
+            .contains("id columns")
         );
         // Unknown YAML keys are rejected, catching typos in the embedded file.
         assert!(
             parse(&broken(
                 "{src: host, dst: service, rel: uses, direction: down}",
+                "",
                 ""
             ))
             .is_err()

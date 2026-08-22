@@ -200,9 +200,9 @@ fn co_declared_branch(
                     bin.clone() + bin_interval(),
                     bin.clone() + bin_interval(),
                     lit(src.entity_type.as_str()),
-                    entity_id_expr(&src.id_columns, &|c| ident(c)),
+                    entity_id_expr(&src.id_columns, src.id_qualifier.as_deref(), &|c| ident(c)),
                     lit(dst.entity_type.as_str()),
-                    entity_id_expr(&dst.id_columns, &|c| ident(c)),
+                    entity_id_expr(&dst.id_columns, dst.id_qualifier.as_deref(), &|c| ident(c)),
                     lit(*rel_type),
                     lit(*provenance),
                     lit(1.0_f64),
@@ -553,7 +553,10 @@ fn client_spans(
             ident(SPAN_ID_COLUMN),
             // The cast inside entity_id_expr also normalizes tag columns, which
             // come out of the storage engine dictionary-encoded.
-            entity_id_expr(&service.id_columns, &|c| ident(c)).alias(SRC_ID_COLUMN),
+            entity_id_expr(&service.id_columns, service.id_qualifier.as_deref(), &|c| {
+                ident(c)
+            })
+            .alias(SRC_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
             ident(DURATION_NANO_COLUMN),
             virtual_dst.alias("virtual_dst"),
@@ -578,7 +581,10 @@ fn server_spans(
             ident(TRACE_TIMESTAMP_COLUMN),
             ident(TRACE_ID_COLUMN),
             ident(PARENT_SPAN_ID_COLUMN),
-            entity_id_expr(&service.id_columns, &|c| ident(c)).alias(DST_ID_COLUMN),
+            entity_id_expr(&service.id_columns, service.id_qualifier.as_deref(), &|c| {
+                ident(c)
+            })
+            .alias(DST_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
             ident(DURATION_NANO_COLUMN),
         ])
@@ -609,7 +615,10 @@ fn agent_calls_branch(
                 ident(TRACE_TIMESTAMP_COLUMN),
                 ident(TRACE_ID_COLUMN),
                 ident(SPAN_ID_COLUMN),
-                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias(SRC_ID_COLUMN),
+                entity_id_expr(&agent.id_columns, agent.id_qualifier.as_deref(), &|c| {
+                    ident(c)
+                })
+                .alias(SRC_ID_COLUMN),
             ])?;
         let child = trace
             .scan
@@ -619,7 +628,10 @@ fn agent_calls_branch(
                 ident(TRACE_TIMESTAMP_COLUMN),
                 ident(TRACE_ID_COLUMN),
                 ident(PARENT_SPAN_ID_COLUMN),
-                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias(DST_ID_COLUMN),
+                entity_id_expr(&agent.id_columns, agent.id_qualifier.as_deref(), &|c| {
+                    ident(c)
+                })
+                .alias(DST_ID_COLUMN),
                 ident(SPAN_STATUS_CODE_COLUMN),
                 ident(DURATION_NANO_COLUMN),
             ])?;
@@ -843,6 +855,7 @@ mod tests {
             time_index: TRACE_TIMESTAMP_COLUMN.to_string(),
             entity_type: "service".to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
+            id_qualifier: None,
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -1294,6 +1307,7 @@ mod tests {
             time_index: "ts".to_string(),
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
+            id_qualifier: None,
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -1544,16 +1558,10 @@ mod tests {
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 1);
         let batch = &batches[0];
-        // Composite service identity renders the same sorted `k=v` form the
-        // registry emits, so edges land on registry entity ids.
-        assert_eq!(
-            strings(batch, 5),
-            vec!["service_name=frontend,service_namespace=ns1"]
-        );
-        assert_eq!(
-            strings(batch, 7),
-            vec!["service_name=cart,service_namespace=ns1"]
-        );
+        // Composite service identity renders exactly as the registry emits it,
+        // so edges land on registry entity ids.
+        assert_eq!(strings(batch, 5), vec!["frontend,ns1"]);
+        assert_eq!(strings(batch, 7), vec!["cart,ns1"]);
     }
 
     fn build_relationships_plan_for_test(
