@@ -75,7 +75,7 @@ class ProvisionUserDataTest(unittest.TestCase):
         self.assertIn("RUNNER_TOKEN=TOKEN", script)
         self.assertIn("REPO_URL=https://github.com/GreptimeTeam/greptimedb", script)
         self.assertIn("PATH=/opt/cargo/bin:", script)
-        self.assertIn("systemctl start ephemeral-github-runner.service", script)
+        self.assertIn("systemctl restart --no-block ephemeral-github-runner.service", script)
 
     def test_encode_user_data_round_trips(self) -> None:
         script = self.render()
@@ -95,7 +95,7 @@ class ProvisionUserDataTest(unittest.TestCase):
         self.assertNotIn("mount --bind", script)
         for destination in provision.CACHE_SUBDIRS.values():
             self.assertIn(f'"{destination}"', script)
-        self.assertIn("systemctl start ephemeral-github-runner.service", script)
+        self.assertIn("systemctl restart --no-block ephemeral-github-runner.service", script)
 
     def test_user_data_enables_swap_and_masks_oomd(self) -> None:
         for cache_disk_id in ("d-bp1abc-def", None):
@@ -111,8 +111,9 @@ class ProvisionUserDataTest(unittest.TestCase):
                 self.assertIn(f'fallocate --length {provision.SWAP_SIZE_GIB}G "{provision.SWAP_FILE}"', script)
                 self.assertIn(f'swapon "{provision.SWAP_FILE}"', script)
                 self.assertIn("sysctl --write vm.swappiness=10", script)
-                self.assertIn("OOMScoreAdjust=-500", script)
-                self.assertLess(script.index("swapon"), script.index("systemctl start ephemeral-github-runner.service"))
+                self.assertIn("OOMPolicy=continue", script)
+                self.assertNotIn("OOMScoreAdjust", script)
+                self.assertLess(script.index("swapon"), script.index("systemctl restart --no-block ephemeral-github-runner.service"))
 
 
 class TeardownExpiryTest(unittest.TestCase):

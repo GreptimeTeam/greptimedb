@@ -30,9 +30,11 @@
 
 Creates one pay-as-you-go ECS instance from the query-regression custom image,
 attaches the retained build-cache disk, and waits until the instance registers
-itself as an ephemeral GitHub Actions runner with a per-run label. On runner
-online timeout the instance console output is collected for diagnosis and the
-instance is deleted before exiting non-zero.
+itself as an ephemeral GitHub Actions runner with a per-run label. Instance
+id is written to job outputs as soon as the VM exists so the teardown job
+is the single DeleteInstance caller (a timeout here used to delete and then
+teardown deleted again). On runner online timeout the console is dumped and
+the job fails; teardown releases the instance.
 
 The Aliyun credentials are used only in this control-plane job (ubuntu-latest)
 and are never passed to the ECS instance; the instance receives only a
@@ -222,15 +224,22 @@ cat > /etc/systemd/system/ephemeral-github-runner.service.d/console.conf <<'CONF
 StandardOutput=journal+console
 StandardError=journal+console
 CONFEOF
-# If the kernel OOM killer still fires, prefer a rustc child over the
-# runner listener/worker so GitHub sees a compile failure instead of a
-# cancelled step with no telemetry.
+# systemd's DefaultOOMPolicy=stop SIGTERM-s the whole unit when *any*
+# process in the cgroup is OOM-killed (typically rustc during thin LTO).
+# That is the "Session terminated, killing shell..." / job Canceled path:
+# runuser dies, GitHub deletes the ephemeral registration, always() steps
+# never run. continue keeps the runner up so cargo can report signal 9.
 cat > /etc/systemd/system/ephemeral-github-runner.service.d/oom.conf <<'CONFEOF'
 [Service]
-OOMScoreAdjust=-500
+OOMPolicy=continue
 CONFEOF
 systemctl daemon-reload
-systemctl start ephemeral-github-runner.service
+# restart (not start): the image enables this unit, so it may already
+# have come up without the drop-ins if it raced cloud-init. restart
+# applies OOMPolicy=continue to the running cgroup. --no-block matters:
+# newer image units carry After=cloud-final.service, and this script IS
+# cloud-final — a blocking restart would deadlock until TimeoutStartSec.
+systemctl restart --no-block ephemeral-github-runner.service
 """
 
 
@@ -402,15 +411,6 @@ def dump_console_output(client, region_id: str, instance_id: str) -> None:
             summary.write("\n```\n</details>\n")
 
 
-def delete_instance_quietly(client, instance_id: str) -> None:
-    from alibabacloud_ecs20140526 import models as ecs_models
-
-    try:
-        client.delete_instance(ecs_models.DeleteInstanceRequest(instance_id=instance_id, force=True))
-    except Exception as error:  # noqa: BLE001
-        print(f"Cleanup delete of {instance_id} failed (janitor will retry): {error}", flush=True)
-
-
 def append_github_output(name: str, value: str) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
@@ -489,6 +489,11 @@ def provision(config: ProvisionConfig) -> int:
     print(f"::group::Run instance {runner_name}", flush=True)
     instance_id = run_instance(client, config, user_data)
     print(f"Instance id: {instance_id}", flush=True)
+    # Teardown is the only DeleteInstance caller. Write outputs immediately
+    # so a later attach/status/online failure still releases this VM.
+    append_github_output("label", runner_label)
+    append_github_output("instance_id", instance_id)
+    append_github_output("runner_name", runner_name)
     wait_for_instance_status(client, config.region_id, instance_id, "Running", time.monotonic() + 5 * 60)
     if config.cache_disk_id is not None:
         client.attach_disk(
@@ -497,12 +502,6 @@ def provision(config: ProvisionConfig) -> int:
             )
         )
     print("::endgroup::", flush=True)
-
-    # Record outputs early so the teardown job can clean up even when the
-    # runner never comes online below.
-    append_github_output("label", runner_label)
-    append_github_output("instance_id", instance_id)
-    append_github_output("runner_name", runner_name)
 
     print("::group::Wait for runner online", flush=True)
     deadline = time.monotonic() + RUNNER_ONLINE_TIMEOUT_SECONDS
@@ -525,9 +524,12 @@ def provision(config: ProvisionConfig) -> int:
         time.sleep(POLL_INTERVAL_SECONDS)
 
     print("::endgroup::", flush=True)
-    print(f"Runner {runner_name} did not come online in time; deleting instance", flush=True)
+    print(
+        f"Runner {runner_name} did not come online in time; "
+        "leaving instance for the teardown job to delete",
+        flush=True,
+    )
     dump_console_output(client, config.region_id, instance_id)
-    delete_instance_quietly(client, instance_id)
     return 1
 
 

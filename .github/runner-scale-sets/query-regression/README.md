@@ -54,11 +54,11 @@ The system disk is 50 GiB, which covers the image, a 16 GiB swapfile, and
 the checkout. Attach `QUERY_REGRESSION_CACHE_DISK_ID` for cold nightly
 builds; without it the target dir shares this disk and may ENOSPC.
 cloud-init masks `systemd-oomd`, creates `/swapfile`, and sets
-`OOMScoreAdjust=-500` on the runner unit: Ubuntu 24.04 otherwise
-SIGTERM-s the whole runner cgroup under memory pressure, which GitHub
-reports as `The operation was canceled` with no telemetry. Swap is a
-safety net for 16 GiB types, not a substitute for 32 GiB; linking on
-swap is slow.
+`OOMPolicy=continue` on the runner unit. Ubuntu 24.04 defaults to
+`DefaultOOMPolicy=stop`, which SIGTERM-s the whole unit when rustc is
+OOM-killed and GitHub reports `The operation was canceled` with no
+telemetry. Swap is a safety net for 16 GiB types, not a substitute for
+32 GiB; linking on swap is slow.
 
 Trust model on the ECS path: the instance receives only the one-hour runner
 registration token via user data and holds no cloud credentials; the Aliyun
