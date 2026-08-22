@@ -1,0 +1,22 @@
+-- Runs on the NEW binary. Old scheduled-streaming metadata
+-- (flow_type=streaming plus EVAL INTERVAL persisted by a binary without EVAL
+-- OFFSET support) must be explicitly rejected at the dual-engine boundary on
+-- recovery: the flow must not be silently routed to the streaming engine
+-- (which would discard its schedule) and must not be migrated to batching.
+
+-- The metadata is still readable; it is not deleted.
+SELECT flow_name, source_table_names
+FROM information_schema.flows
+WHERE flow_name = 'compat_eval_interval_streaming_old_flow';
+
+SHOW CREATE FLOW compat_eval_interval_streaming_old_flow;
+
+-- Inserting into the instant-TTL source must NOT produce sink rows: the flow
+-- was rejected on recovery instead of silently recovered as a streaming flow.
+INSERT INTO compat_eval_interval_streaming_old_input VALUES
+  ('2026-06-25 00:00:00', 'a', 1.0),
+  ('2026-06-25 00:00:01', 'b', 2.0);
+
+-- SQLNESS SLEEP 2s
+SELECT count(*) AS sink_rows
+FROM compat_eval_interval_streaming_old_sink;

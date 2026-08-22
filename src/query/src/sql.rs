@@ -32,8 +32,9 @@ use common_catalog::format_full_table_name;
 use common_datasource::file_format::{FileFormat, Format, infer_schemas};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{LocalFileAccess, build_backend_with_path};
+use common_error::ext::BoxedError;
 use common_meta::SchemaOptions;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{FlowType, effective_eval_schedule_from_flow_info};
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
 use common_query::prelude::greptime_timestamp;
@@ -1076,10 +1077,24 @@ pub fn show_create_flow(
         if_not_exists: true,
         expire_after: flow_val.expire_after(),
         eval_interval: flow_val.eval_interval(),
+        // Derive the offset from the effective typed schedule anchor. A zero
+        // anchor (default) is omitted on display.
+        eval_offset: effective_eval_schedule_from_flow_info(&flow_val)
+            .map_err(BoxedError::new)
+            .context(error::QueryExecutionSnafu)?
+            .map(|schedule| schedule.anchor_secs)
+            .filter(|anchor_secs| *anchor_secs != 0),
         comment,
+        // Defense-in-depth for SHOW CREATE: never surface the internal
+        // transient transport keys, even if malformed/old metadata carries
+        // them in `options`.
         flow_options: OptionMap::from_filtered_string_map(
             flow_val.options(),
-            &[FlowType::FLOW_TYPE_KEY],
+            &[
+                FlowType::FLOW_TYPE_KEY,
+                common_meta::ddl::create_flow::INTERNAL_EVAL_OFFSET_KEY,
+                common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY,
+            ],
         ),
         query,
     };

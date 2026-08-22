@@ -387,7 +387,9 @@ impl FlowDualEngine {
                         comment: Some(info.comment().clone()),
                         sql: info.raw_sql().clone(),
                         flow_options: info.options().clone(),
-                        eval_schedule: effective_eval_schedule_from_flow_info(&info),
+                        eval_schedule: effective_eval_schedule_from_flow_info(&info)
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?,
                         query_ctx: info
                             .query_context()
                             .clone()
@@ -684,6 +686,23 @@ impl FlowEngine for FlowDualEngine {
 
         let flow_id = args.flow_id;
         let src_table_ids = args.source_table_ids.clone();
+
+        // Historical persisted metadata may pair `flow_type=streaming` with an
+        // `EVAL INTERVAL` / schedule (created before EVAL OFFSET support, when
+        // an interval over an instant-TTL source silently fell back to
+        // streaming). The streaming engine has no scheduler, so recovering
+        // such metadata would silently discard the schedule. Reject it clearly
+        // at the dual-engine boundary; do not attempt to migrate it.
+        if flow_type == FlowType::Streaming
+            && (args.eval_interval.is_some() || args.eval_schedule.is_some())
+        {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "flow {flow_id} is persisted with flow_type=streaming but carries an EVAL INTERVAL/schedule; the streaming engine cannot honor scheduled evaluation. Refusing to recover the flow instead of silently discarding its schedule. Recreate the flow without EVAL INTERVAL, or with a non-instant source TTL so it can use the batching scheduler"
+                ),
+            }
+            .fail();
+        }
 
         let res = match flow_type {
             FlowType::Batching => self.batching_engine.create_flow(args).await,

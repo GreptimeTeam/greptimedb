@@ -172,8 +172,16 @@ impl FlowScheduleConfig {
     }
 
     pub fn default_with_start(start_secs: i64, eval_interval_secs: i64) -> Self {
+        Self::with_anchor(Self::DEFAULT_ANCHOR_SECS, start_secs, eval_interval_secs)
+    }
+
+    /// Builds a schedule anchored at `anchor_secs` (the `EVAL OFFSET` phase,
+    /// in Unix epoch seconds) with `start_secs` as the first scheduled time.
+    /// Callers must ensure `0 <= anchor_secs < eval_interval_secs` and that
+    /// `start_secs` lies on an `anchor_secs + k * eval_interval_secs` boundary.
+    pub fn with_anchor(anchor_secs: i64, start_secs: i64, eval_interval_secs: i64) -> Self {
         Self {
-            anchor_secs: Self::DEFAULT_ANCHOR_SECS,
+            anchor_secs,
             start_secs,
             missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
             catchup_max_runs: Self::DEFAULT_CATCHUP_MAX_RUNS,

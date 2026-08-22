@@ -1,0 +1,8 @@
+name = "flow_eval_interval_streaming_old_metadata"
+reason = "Old binary scheduled-streaming metadata (flow_type=streaming plus EVAL INTERVAL over an instant-TTL source, created before EVAL OFFSET support) must be explicitly rejected at the dual-engine boundary by a new binary instead of silently routed to the streaming engine and stripped of its schedule."
+introduced_by = "EVAL OFFSET feature"
+topologies = ["distributed", "standalone"]
+from_range = ["<=v1.1.1"]
+to_range = [">v1.1.1"]
+features = ["flow", "table"]
+owner = "flow"
