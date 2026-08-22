@@ -473,24 +473,6 @@ jobs:
             find "${root}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
           }
 
-          clear_cargo_extracted_trees() {
-            require_expected_root CARGO_REGISTRY "${CARGO_HOME}/registry" "${EXPECTED_CARGO_REGISTRY}"
-            require_expected_root CARGO_GIT "${CARGO_HOME}/git" "${EXPECTED_CARGO_GIT}"
-            rm -rf -- "${CARGO_HOME}/registry/src" "${CARGO_HOME}/git/checkouts"
-          }
-
-          cargo_size_kib() {
-            du -sk -- "${CARGO_HOME}/registry" "${CARGO_HOME}/git" | awk '{ total += $1 } END { print total }'
-          }
-
-          target_size_kib() {
-            du -sk -- "${CARGO_TARGET_DIR}" | cut -f1
-          }
-
-          free_kib() {
-            df -Pk "${CARGO_TARGET_DIR}" | awk 'NR == 2 { print $4 }'
-          }
-
           report_cache_usage() {
             du -sh -- "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
               "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
@@ -598,46 +580,13 @@ jobs:
 
           report_cache_usage
 
-          target_size="$(target_size_kib)"
-          if (( target_size >= 400 * 1024 * 1024 )); then
-            printf 'Warning: target cache is at least 400 GiB (%s KiB)\n' "${target_size}" >&2
-          fi
-          if (( target_size >= 450 * 1024 * 1024 )); then
-            printf 'Target cache is at least 450 GiB; clearing complete target root\n' >&2
-            clear_directory "${CARGO_TARGET_DIR}"
-          fi
-
-          cargo_size="$(cargo_size_kib)"
-          if (( cargo_size >= 60 * 1024 * 1024 )); then
-            printf 'Warning: Cargo cache is at least 60 GiB (%s KiB)\n' "${cargo_size}" >&2
-          fi
-          if (( cargo_size >= 80 * 1024 * 1024 )); then
-            printf 'Cargo cache is at least 80 GiB; removing extracted sources and checkouts\n' >&2
-            clear_cargo_extracted_trees
-            cargo_size="$(cargo_size_kib)"
-            if (( cargo_size >= 80 * 1024 * 1024 )); then
-              printf 'Cargo cache remains at least 80 GiB after cleanup (%s KiB)\n' "${cargo_size}" >&2
-              exit 1
-            fi
-          fi
-
-          free_space="$(free_kib)"
-          if (( free_space < 300 * 1024 * 1024 )); then
-            printf 'Free space is below 300 GiB; clearing complete target root\n' >&2
-            clear_directory "${CARGO_TARGET_DIR}"
-            free_space="$(free_kib)"
-            if (( free_space < 300 * 1024 * 1024 )); then
-              printf 'Free space remains below 300 GiB; removing Cargo extracted sources and checkouts\n' >&2
-              clear_cargo_extracted_trees
-              free_space="$(free_kib)"
-              if (( free_space < 300 * 1024 * 1024 )); then
-                printf 'Free space remains below 300 GiB after cleanup (%s KiB)\n' "${free_space}" >&2
-                exit 1
-              fi
-            fi
-          fi
-
-          report_cache_usage
+          # The old size/free-space watermarks (clear target at 450GiB, fail
+          # below 300GiB free, ...) only made sense with the retained cache
+          # disk, where caches accumulated across runs. Without it every run
+          # starts from a fresh system disk and there is nothing to reclaim;
+          # a run that overflows the disk fails the build outright, which the
+          # telemetry step makes diagnosable. Restore size-based cleanup if
+          # QUERY_REGRESSION_CACHE_DISK_ID is ever set again.
 
           sccache --start-server
           sccache --zero-stats
