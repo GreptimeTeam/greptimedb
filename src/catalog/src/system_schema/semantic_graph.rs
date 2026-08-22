@@ -57,12 +57,44 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 use table::TableRef;
+use table::metadata::TableInfo;
 
 use crate::CatalogManager;
 use crate::error::{InternalSnafu, Result};
 use crate::system_schema::{SystemSchemaProviderInner, SystemTable, SystemTableRef, utils};
 
 pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
+
+/// Where a table's entity declaration came from.
+pub enum DeclarationOrigin {
+    /// A `greptime.semantic.entity.<type>.*` table option.
+    Declared,
+    /// The built-in derivation conventions shipped with the binary.
+    Convention,
+}
+
+impl DeclarationOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Convention => "convention",
+        }
+    }
+}
+
+/// One entity a table declares, as `information_schema.table_semantics`
+/// reports it. A catalog-side projection of the derivation's own declaration
+/// type, which lives above this crate.
+pub struct TableEntityDeclaration {
+    pub entity_type: String,
+    pub origin: DeclarationOrigin,
+    pub id_columns: Vec<String>,
+    pub id_qualifier: Option<String>,
+    /// Columns whose presence on a row withdraws this declaration for that row.
+    /// Reported because the declaration otherwise reads as unconditional.
+    pub suppressed_by_columns: Vec<String>,
+    pub descriptive_columns: Vec<String>,
+}
 
 /// Produces the rows of the computed entity-graph tables at read time.
 ///
@@ -94,6 +126,13 @@ pub trait EntityGraphProvider: Send + Sync {
         request: ScanRequest,
         query_ctx: Option<QueryContextRef>,
     ) -> std::result::Result<Option<SendableRecordBatchStream>, BoxedError>;
+
+    /// The entities `table_info` contributes to the graph: its explicit
+    /// declarations merged with the ones the conventions derive. This is the
+    /// only way an operator can see the derived half, so it backs
+    /// `information_schema.table_semantics`. Metadata-only by contract — it
+    /// runs per table on that view's scan and must not touch the query engine.
+    fn table_declarations(&self, table_info: &TableInfo) -> Vec<TableEntityDeclaration>;
 }
 
 /// Serves the computed graph tables under `greptime_private`, overlaid on the

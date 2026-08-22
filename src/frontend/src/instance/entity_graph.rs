@@ -32,7 +32,9 @@ use auth::{
     PermissionTableTargets, SEMANTIC_GRAPH_QUERY,
 };
 use catalog::CatalogManager;
-use catalog::system_schema::semantic_graph::EntityGraphProvider;
+use catalog::system_schema::semantic_graph::{
+    DeclarationOrigin, EntityGraphProvider, TableEntityDeclaration,
+};
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, OBSERVED_AT_COLUMN,
     PG_CATALOG_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
@@ -659,6 +661,31 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
             return Ok(None);
         };
         self.execute_plan(catalog, plan, query_ctx).await
+    }
+
+    fn table_declarations(&self, table_info: &TableInfo) -> Vec<TableEntityDeclaration> {
+        // A broken embedded conventions file leaves the explicit declarations
+        // reportable; the scan paths surface the error itself.
+        let Ok(conventions) = conventions() else {
+            return vec![];
+        };
+        let mut declarations = Self::declarations_for(table_info, conventions)
+            .into_iter()
+            .map(|declaration| TableEntityDeclaration {
+                origin: if Self::explicitly_declares(table_info, &declaration.entity_type) {
+                    DeclarationOrigin::Declared
+                } else {
+                    DeclarationOrigin::Convention
+                },
+                entity_type: declaration.entity_type,
+                id_columns: declaration.id_columns,
+                id_qualifier: declaration.id_qualifier,
+                suppressed_by_columns: declaration.suppressed_by_columns,
+                descriptive_columns: declaration.descriptive_columns,
+            })
+            .collect::<Vec<_>>();
+        declarations.sort_by(|a, b| a.entity_type.cmp(&b.entity_type));
+        declarations
     }
 }
 

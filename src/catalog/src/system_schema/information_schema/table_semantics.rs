@@ -13,16 +13,22 @@
 // limitations under the License.
 
 //! `information_schema.table_semantics`: the queryable view over the table
-//! semantic layer. One row per table that carries at least one
-//! `greptime.semantic.*` option, so a consumer can discover the observability
-//! concept a table stands for with a single SQL query instead of parsing every
-//! table's `create_options`.
+//! semantic layer. One row per table that is part of it, so a consumer can
+//! discover the observability concept a table stands for with a single SQL
+//! query instead of parsing every table's `create_options`.
 //!
 //! The few signal-agnostic keys are promoted to their own columns
 //! (`signal_type` / `source` / `source_version` / `pipeline` /
 //! `metadata_quality`); the remaining signal-specific keys are folded into a
 //! `semantic_options` JSON string, keyed by the option name with the
 //! `greptime.semantic.` prefix stripped.
+//!
+//! `entity_declarations` reports the entities the table actually contributes to
+//! the graph. Options alone cannot answer that: the built-in conventions derive
+//! declarations for trace tables and whitelisted descriptor metrics without any
+//! option being set, so "why is my table not in the graph" was previously only
+//! answerable from debug logs. A table that declares nothing by option but
+//! derives entities by convention gets a row here too.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
@@ -54,6 +60,8 @@ use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::system_schema::information_schema::{InformationTable, Predicates, TABLE_SEMANTICS};
+use crate::system_schema::semantic_graph::{EntityGraphProviderRef, TableEntityDeclaration};
+use crate::system_schema::utils;
 
 pub const TABLE_CATALOG: &str = "table_catalog";
 pub const TABLE_SCHEMA: &str = "table_schema";
@@ -65,6 +73,7 @@ pub const SOURCE_VERSION: &str = "source_version";
 pub const PIPELINE: &str = "pipeline";
 pub const METADATA_QUALITY: &str = "metadata_quality";
 pub const SEMANTIC_OPTIONS: &str = "semantic_options";
+pub const ENTITY_DECLARATIONS: &str = "entity_declarations";
 
 const INIT_CAPACITY: usize = 42;
 
@@ -72,8 +81,49 @@ fn optional_value(v: Option<&str>) -> Value {
     v.map(Value::from).unwrap_or(Value::Null)
 }
 
+/// Renders a table's effective entity declarations as a JSON array, or `None`
+/// when the table declares none. Field order follows the declaration's own
+/// structure (type, where it came from, then identity before description).
+fn entity_declarations_json(declarations: &[TableEntityDeclaration]) -> Option<String> {
+    if declarations.is_empty() {
+        return None;
+    }
+    let entries = declarations
+        .iter()
+        .map(|declaration| {
+            let mut entry = serde_json::Map::new();
+            entry.insert(
+                "entity_type".to_string(),
+                declaration.entity_type.clone().into(),
+            );
+            entry.insert("origin".to_string(), declaration.origin.as_str().into());
+            entry.insert("id".to_string(), declaration.id_columns.clone().into());
+            if let Some(qualifier) = &declaration.id_qualifier {
+                entry.insert("id_qualifier".to_string(), qualifier.clone().into());
+            }
+            if !declaration.suppressed_by_columns.is_empty() {
+                entry.insert(
+                    "suppressed_by".to_string(),
+                    declaration.suppressed_by_columns.clone().into(),
+                );
+            }
+            if !declaration.descriptive_columns.is_empty() {
+                entry.insert(
+                    "descriptive".to_string(),
+                    declaration.descriptive_columns.clone().into(),
+                );
+            }
+            serde_json::Value::Object(entry)
+        })
+        .collect::<Vec<_>>();
+    // Serializing a string/array map cannot realistically fail; fold a failure
+    // into `None` rather than panicking the query path, as the options tail does.
+    serde_json::to_string(&entries).ok()
+}
+
 /// The semantic projection of a single table: the signal-agnostic keys promoted
 /// to columns, plus a JSON tail for the rest. Borrows from the table's options.
+#[derive(Default)]
 struct SemanticRow<'a> {
     signal_type: Option<&'a str>,
     source: Option<&'a str>,
@@ -167,6 +217,11 @@ impl InformationSchemaTableSemantics {
             ColumnSchema::new(PIPELINE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(METADATA_QUALITY, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(SEMANTIC_OPTIONS, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                ENTITY_DECLARATIONS,
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
         ]))
     }
 
@@ -228,6 +283,7 @@ struct InformationSchemaSemanticTablesBuilder {
     pipelines: StringVectorBuilder,
     metadata_qualities: StringVectorBuilder,
     semantic_options: StringVectorBuilder,
+    entity_declarations: StringVectorBuilder,
 }
 
 impl InformationSchemaSemanticTablesBuilder {
@@ -250,6 +306,7 @@ impl InformationSchemaSemanticTablesBuilder {
             pipelines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             metadata_qualities: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             semantic_options: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            entity_declarations: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -260,11 +317,21 @@ impl InformationSchemaSemanticTablesBuilder {
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         let predicates = Predicates::from_scan_request(&request);
+        // Resolved once for the whole scan: the lookup downcasts the catalog
+        // manager, while the per-table call behind it is pure metadata work.
+        // Absent on a node with no query engine, leaving the column NULL.
+        let graph_provider = utils::entity_graph_provider(&self.catalog_manager)?;
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
             let mut table_stream = catalog_manager.tables(&catalog_name, &schema_name, None);
             while let Some(table) = table_stream.try_next().await? {
-                self.add_table(&predicates, &catalog_name, &schema_name, table.table_info());
+                self.add_table(
+                    &predicates,
+                    &catalog_name,
+                    &schema_name,
+                    table.table_info(),
+                    graph_provider.as_ref(),
+                );
             }
         }
 
@@ -277,11 +344,19 @@ impl InformationSchemaSemanticTablesBuilder {
         catalog_name: &str,
         schema_name: &str,
         table_info: Arc<TableInfo>,
+        graph_provider: Option<&EntityGraphProviderRef>,
     ) {
-        // A table with no semantic key is not part of the semantic layer.
-        let Some(row) = SemanticRow::extract(&table_info) else {
+        let row = SemanticRow::extract(&table_info);
+        let declarations_json = graph_provider
+            .map(|provider| provider.table_declarations(&table_info))
+            .as_deref()
+            .and_then(entity_declarations_json);
+        // A table is part of the semantic layer when it carries a semantic key
+        // or when the conventions derive entities from it.
+        if row.is_none() && declarations_json.is_none() {
             return;
-        };
+        }
+        let row = row.unwrap_or_default();
 
         let table_name = table_info.name.as_ref();
         let catalog_v = Value::from(catalog_name);
@@ -316,6 +391,7 @@ impl InformationSchemaSemanticTablesBuilder {
         self.pipelines.push(row.pipeline);
         self.metadata_qualities.push(row.metadata_quality);
         self.semantic_options.push(row.options_json.as_deref());
+        self.entity_declarations.push(declarations_json.as_deref());
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -330,6 +406,7 @@ impl InformationSchemaSemanticTablesBuilder {
             Arc::new(self.pipelines.finish()),
             Arc::new(self.metadata_qualities.finish()),
             Arc::new(self.semantic_options.finish()),
+            Arc::new(self.entity_declarations.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
