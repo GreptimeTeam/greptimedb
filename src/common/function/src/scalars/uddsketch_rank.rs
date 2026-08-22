@@ -29,6 +29,11 @@ use crate::function_registry::FunctionRegistry;
 const NAME: &str = "uddsketch_rank";
 
 /// Implements the scalar function `uddsketch_rank`.
+///
+/// It accepts a value and a serialized UDDSketch state, then estimates the
+/// value's quantile rank by counting half of the matching bucket. Both current
+/// and legacy state encodings are supported. Null arguments, empty or invalid
+/// states, and invalid values produce null results.
 #[derive(Debug)]
 pub(crate) struct UddSketchRankFunction {
     signature: Signature,
