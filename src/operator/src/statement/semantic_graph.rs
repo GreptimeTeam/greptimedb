@@ -41,8 +41,9 @@ use common_catalog::consts::{
     ENTITY_DESCRIPTIVE_COLUMN, ENTITY_ID_ATTRS_COLUMN, ENTITY_ID_COLUMN, ENTITY_SCOPE_COLUMN,
     ENTITY_TYPE_COLUMN, ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, GENERATION_ID_COLUMN,
     OBSERVED_AT_COLUMN, PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN,
-    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SOURCE_TABLES_COLUMN, SRC_ID_COLUMN,
-    SRC_TYPE_COLUMN, VALID_FROM_COLUMN, VALID_UNTIL_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
+    SEMANTIC_GRAPH_WINDOW_NANOS, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SOURCE_TABLES_COLUMN,
+    SRC_ID_COLUMN, SRC_TYPE_COLUMN, VALID_FROM_COLUMN, VALID_UNTIL_COLUMN, WINDOW_END_COLUMN,
+    WINDOW_START_COLUMN,
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
@@ -122,9 +123,10 @@ pub fn declared_relationships_schema_matches(table_info: &table::metadata::Table
         })
 }
 
-/// Bin width for the temporal window of derived rows: 60s buckets, matching the
-/// service-graph convention.
-const BIN_NANOS: i64 = 60 * 1_000_000_000;
+/// Bin width for the temporal window of derived rows, matching the
+/// service-graph convention. Shared so ingestion-synthesized observations
+/// land in the same buckets.
+const BIN_NANOS: i64 = SEMANTIC_GRAPH_WINDOW_NANOS;
 
 /// Default retention for the declared-edge table; expiry slides the topology window.
 const DEFAULT_DECLARED_RELATIONSHIPS_TTL: &str = "90d";

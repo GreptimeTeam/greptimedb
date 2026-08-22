@@ -75,10 +75,11 @@ pub struct Conventions {
     pub trace_co_declared_edges: Vec<EdgeRule>,
     pub virtual_dst_candidates: Vec<VirtualDstCandidate>,
     pub otlp_trace_entities: Vec<ImplicitEntity>,
+    /// Table name -> the entities that table declares, for Prometheus-sourced
+    /// descriptor metrics (`source = prometheus`).
     pub prometheus_info_metrics: BTreeMap<String, Vec<ImplicitEntity>>,
-    /// Implicit declarations of OTLP-sourced descriptor tables (the
-    /// ingestion-synthesized `otel_resource_info`), gated on
-    /// `source = opentelemetry` instead of `prometheus`.
+    /// Table name -> the entities that table declares, for OTLP-sourced
+    /// descriptor tables (`source = opentelemetry`).
     pub otel_info_metrics: BTreeMap<String, Vec<ImplicitEntity>>,
 }
 

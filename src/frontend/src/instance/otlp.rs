@@ -24,7 +24,7 @@ use auth::{
     PermissionTableTargets,
 };
 use client::Output;
-use common_catalog::consts::{MITO_ENGINE, trace_operations_table_name, trace_services_table_name};
+use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
@@ -43,8 +43,7 @@ use servers::query_handler::{
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::requests::{
-    METADATA_QUALITY_DECLARED, OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM,
-    SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_TYPE, SEMANTIC_PER_TABLE_INDEX_KEY,
+    OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PER_TABLE_INDEX_KEY,
     SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
     SOURCE_OPENTELEMETRY,
 };
@@ -88,18 +87,6 @@ fn trace_permission_targets(
 /// created, so a user's same-named table never receives descriptor rows.
 /// Not atomic: the insert path resolves the name again, so a concurrent DROP
 /// plus CREATE can still slip a foreign table into that window.
-fn is_owned_resource_info_table(table: &table::metadata::TableInfo) -> bool {
-    let options = &table.meta.options.extra_options;
-    table.meta.engine == MITO_ENGINE
-        && options.get(SEMANTIC_SIGNAL_TYPE).map(String::as_str) == Some(SIGNAL_TYPE_METRIC)
-        && options.get(SEMANTIC_SOURCE).map(String::as_str) == Some(SOURCE_OPENTELEMETRY)
-        && options.get(SEMANTIC_METRIC_TYPE).map(String::as_str)
-            == Some(servers::semantic::METRIC_TYPE_INFO)
-        && options
-            .get(SEMANTIC_METRIC_METADATA_QUALITY)
-            .map(String::as_str)
-            == Some(METADATA_QUALITY_DECLARED)
-}
 
 #[async_trait]
 impl OpenTelemetryProtocolHandler for Instance {
@@ -137,6 +124,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .cloned()
             .unwrap_or_default();
         metric_ctx.is_legacy = is_legacy;
+        metric_ctx.resource_info = self.otlp_resource_info;
 
         let otlp::metrics::MetricsConversion {
             requests,
@@ -187,34 +175,16 @@ impl OpenTelemetryProtocolHandler for Instance {
         // accepted, so every failure degrades to a warning instead.
         let mut warning = None;
         if let Some(resource_info) = resource_info {
-            let existing = self
-                .catalog_manager()
-                .table(
-                    ctx.current_catalog(),
-                    &ctx.current_schema(),
-                    otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME,
-                    None,
-                )
-                .await;
-            let written = match existing {
-                Ok(Some(table)) if !is_owned_resource_info_table(&table.table_info()) => {
-                    Err(format!(
-                        "table `{}` already exists without the descriptor's semantic ownership markers",
-                        otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME
-                    ))
-                }
-                Ok(_) => match self.check_row_insert_permission(
-                    &resource_info,
-                    &ctx,
-                    PermissionReq::Action(OTLP_WRITE),
-                ) {
-                    Ok(_) => self
-                        .handle_row_inserts(resource_info, ctx, false, false)
-                        .await
-                        .map_err(BoxedError::new)
-                        .map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                },
+            let written = match self.check_row_insert_permission(
+                &resource_info,
+                &ctx,
+                PermissionReq::Action(OTLP_WRITE),
+            ) {
+                Ok(_) => self
+                    .handle_row_inserts(resource_info, ctx, false, false)
+                    .await
+                    .map_err(BoxedError::new)
+                    .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
             };
             match written {

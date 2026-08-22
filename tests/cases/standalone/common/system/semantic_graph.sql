@@ -388,14 +388,14 @@ drop table target_info;
 
 drop table http_requests_total;
 
--- OTel conventions: the ingestion-synthesized otel_resource_info descriptor
+-- OTel conventions: the ingestion-synthesized greptime_otel_resource_info descriptor
 -- (stamped signal_type=metric + source=opentelemetry + metric.type=info) gets implicit
 -- declarations under the raw OTel column names. host/container identities are
 -- the stable ids only, so rows with an empty host.id / container.id link no
 -- infrastructure, and a row without an instance value declares no
 -- service.instance. The same table name stamped source=prometheus is not
 -- whitelisted.
-create table otel_resource_info (
+create table greptime_otel_resource_info (
   greptime_timestamp timestamp(3) time index,
   job string,
   instance string,
@@ -414,7 +414,7 @@ create table otel_resource_info (
   'greptime.semantic.metric.type' = 'info'
 );
 
-insert into otel_resource_info values
+insert into greptime_otel_resource_info values
   (now(), 'shop/api', 'inst-1', 'api', 'shop', 'h-1', 'node-a', 'c-1', 'api-ctr', 1),
   (now(), 'shop/api', 'inst-2', 'api', 'shop', '', 'laptop', '', '', 1),
   (now(), 'worker', '', 'worker', '', 'h-1', 'node-a', '', '', 1);
@@ -429,11 +429,11 @@ select src_type, src_id, dst_type, dst_id, rel_type, provenance
 from greptime_private.semantic_relationships
 order by rel_type, src_id, dst_id;
 
-drop table otel_resource_info;
+drop table greptime_otel_resource_info;
 
 -- The descriptor whitelist is gated on source=opentelemetry: the same table
 -- shape stamped as a prometheus source contributes nothing.
-create table otel_resource_info (
+create table greptime_otel_resource_info (
   greptime_timestamp timestamp(3) time index,
   job string,
   instance string,
@@ -445,7 +445,7 @@ create table otel_resource_info (
   'greptime.semantic.source' = 'prometheus'
 );
 
-insert into otel_resource_info values
+insert into greptime_otel_resource_info values
   (now(), 'shop/api', 'inst-1', 'h-1', 1);
 
 -- SQLNESS PROTOCOL MYSQL
@@ -453,7 +453,7 @@ select entity_type, entity_id
 from greptime_private.semantic_entities
 order by entity_type, entity_id;
 
-drop table otel_resource_info;
+drop table greptime_otel_resource_info;
 
 -- Cross-signal identity: the same service reaches the graph as trace spans and
 -- as an ingestion-synthesized descriptor. The two sources name their identity
@@ -475,7 +475,7 @@ create table graph_xsignal_traces (
     "resource_attributes.service.instance.id")
 ) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
 
-create table otel_resource_info (
+create table greptime_otel_resource_info (
   greptime_timestamp timestamp(3) time index,
   job string,
   instance string,
@@ -493,7 +493,7 @@ insert into graph_xsignal_traces values
   (now(), 't1', 's1', NULL, 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'api', 100, 'shop', 'inst-1'),
   (now(), 't2', 's2', NULL, 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'worker', 100, '', 'inst-2');
 
-insert into otel_resource_info values
+insert into greptime_otel_resource_info values
   (now(), 'shop/api', 'inst-1', 'api', 'shop', 1),
   (now(), 'worker', 'inst-2', 'worker', '', 1);
 
@@ -505,4 +505,4 @@ order by entity_type, entity_id, source_tables;
 
 drop table graph_xsignal_traces;
 
-drop table otel_resource_info;
+drop table greptime_otel_resource_info;

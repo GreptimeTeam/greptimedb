@@ -627,14 +627,14 @@ drop table http_requests_total;
 
 Affected Rows: 0
 
--- OTel conventions: the ingestion-synthesized otel_resource_info descriptor
+-- OTel conventions: the ingestion-synthesized greptime_otel_resource_info descriptor
 -- (stamped signal_type=metric + source=opentelemetry + metric.type=info) gets implicit
 -- declarations under the raw OTel column names. host/container identities are
 -- the stable ids only, so rows with an empty host.id / container.id link no
 -- infrastructure, and a row without an instance value declares no
 -- service.instance. The same table name stamped source=prometheus is not
 -- whitelisted.
-create table otel_resource_info (
+create table greptime_otel_resource_info (
   greptime_timestamp timestamp(3) time index,
   job string,
   instance string,
@@ -655,7 +655,7 @@ create table otel_resource_info (
 
 Affected Rows: 0
 
-insert into otel_resource_info values
+insert into greptime_otel_resource_info values
   (now(), 'shop/api', 'inst-1', 'api', 'shop', 'h-1', 'node-a', 'c-1', 'api-ctr', 1),
   (now(), 'shop/api', 'inst-2', 'api', 'shop', '', 'laptop', '', '', 1),
   (now(), 'worker', '', 'worker', '', 'h-1', 'node-a', '', '', 1);
@@ -667,16 +667,16 @@ select entity_type, entity_id, source_tables
 from greptime_private.semantic_entities
 order by entity_type, entity_id, source_tables;
 
-+------------------+-----------------+-------------------------------+
-| entity_type      | entity_id       | source_tables                 |
-+------------------+-----------------+-------------------------------+
-| container        | c-1             | ["public.otel_resource_info"] |
-| host             | h-1             | ["public.otel_resource_info"] |
-| service          | shop/api        | ["public.otel_resource_info"] |
-| service          | worker          | ["public.otel_resource_info"] |
-| service.instance | shop/api,inst-1 | ["public.otel_resource_info"] |
-| service.instance | shop/api,inst-2 | ["public.otel_resource_info"] |
-+------------------+-----------------+-------------------------------+
++------------------+-----------------+----------------------------------------+
+| entity_type      | entity_id       | source_tables                          |
++------------------+-----------------+----------------------------------------+
+| container        | c-1             | ["public.greptime_otel_resource_info"] |
+| host             | h-1             | ["public.greptime_otel_resource_info"] |
+| service          | shop/api        | ["public.greptime_otel_resource_info"] |
+| service          | worker          | ["public.greptime_otel_resource_info"] |
+| service.instance | shop/api,inst-1 | ["public.greptime_otel_resource_info"] |
+| service.instance | shop/api,inst-2 | ["public.greptime_otel_resource_info"] |
++------------------+-----------------+----------------------------------------+
 
 -- SQLNESS PROTOCOL MYSQL
 select src_type, src_id, dst_type, dst_id, rel_type, provenance
@@ -693,13 +693,13 @@ order by rel_type, src_id, dst_id;
 | service.instance | shop/api,inst-1 | host      | h-1      | runs_on  | attribute  |
 +------------------+-----------------+-----------+----------+----------+------------+
 
-drop table otel_resource_info;
+drop table greptime_otel_resource_info;
 
 Affected Rows: 0
 
 -- The descriptor whitelist is gated on source=opentelemetry: the same table
 -- shape stamped as a prometheus source contributes nothing.
-create table otel_resource_info (
+create table greptime_otel_resource_info (
   greptime_timestamp timestamp(3) time index,
   job string,
   instance string,
@@ -713,7 +713,7 @@ create table otel_resource_info (
 
 Affected Rows: 0
 
-insert into otel_resource_info values
+insert into greptime_otel_resource_info values
   (now(), 'shop/api', 'inst-1', 'h-1', 1);
 
 Affected Rows: 1
@@ -725,7 +725,7 @@ order by entity_type, entity_id;
 
 affected_rows: 0
 
-drop table otel_resource_info;
+drop table greptime_otel_resource_info;
 
 Affected Rows: 0
 
@@ -751,7 +751,7 @@ create table graph_xsignal_traces (
 
 Affected Rows: 0
 
-create table otel_resource_info (
+create table greptime_otel_resource_info (
   greptime_timestamp timestamp(3) time index,
   job string,
   instance string,
@@ -773,7 +773,7 @@ insert into graph_xsignal_traces values
 
 Affected Rows: 2
 
-insert into otel_resource_info values
+insert into greptime_otel_resource_info values
   (now(), 'shop/api', 'inst-1', 'api', 'shop', 1),
   (now(), 'worker', 'inst-2', 'worker', '', 1);
 
@@ -785,24 +785,24 @@ from greptime_private.semantic_entities
 where entity_type in ('service', 'service.instance')
 order by entity_type, entity_id, source_tables;
 
-+------------------+-----------------+---------------------------------+
-| entity_type      | entity_id       | source_tables                   |
-+------------------+-----------------+---------------------------------+
-| service          | shop/api        | ["public.otel_resource_info"]   |
-| service          | shop/api        | ["public.graph_xsignal_traces"] |
-| service          | worker          | ["public.otel_resource_info"]   |
-| service          | worker          | ["public.graph_xsignal_traces"] |
-| service.instance | shop/api,inst-1 | ["public.otel_resource_info"]   |
-| service.instance | shop/api,inst-1 | ["public.graph_xsignal_traces"] |
-| service.instance | worker,inst-2   | ["public.otel_resource_info"]   |
-| service.instance | worker,inst-2   | ["public.graph_xsignal_traces"] |
-+------------------+-----------------+---------------------------------+
++------------------+-----------------+----------------------------------------+
+| entity_type      | entity_id       | source_tables                          |
++------------------+-----------------+----------------------------------------+
+| service          | shop/api        | ["public.graph_xsignal_traces"]        |
+| service          | shop/api        | ["public.greptime_otel_resource_info"] |
+| service          | worker          | ["public.graph_xsignal_traces"]        |
+| service          | worker          | ["public.greptime_otel_resource_info"] |
+| service.instance | shop/api,inst-1 | ["public.graph_xsignal_traces"]        |
+| service.instance | shop/api,inst-1 | ["public.greptime_otel_resource_info"] |
+| service.instance | worker,inst-2   | ["public.graph_xsignal_traces"]        |
+| service.instance | worker,inst-2   | ["public.greptime_otel_resource_info"] |
++------------------+-----------------+----------------------------------------+
 
 drop table graph_xsignal_traces;
 
 Affected Rows: 0
 
-drop table otel_resource_info;
+drop table greptime_otel_resource_info;
 
 Affected Rows: 0
 

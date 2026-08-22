@@ -114,11 +114,11 @@ pub fn to_grpc_insert_requests(
     let mut resource_info = ResourceInfoData::default();
 
     for resource in &request.resource_metrics {
-        if !metric_ctx.is_legacy
+        if metric_ctx.resource_info
+            && !metric_ctx.is_legacy
             && let Some(r) = resource.resource.as_ref()
-            && let Some(max_ts) = resource_info::max_data_point_time_nanos(resource)
         {
-            resource_info.observe(&r.attributes, max_ts);
+            resource_info.observe(&r.attributes, resource);
         }
 
         let resource_attrs = resource.resource.as_ref().map(|r| {
@@ -940,6 +940,14 @@ mod tests {
         }
     }
 
+    /// The descriptor is opt-in; the tests covering it turn it on.
+    fn descriptor_ctx() -> OtlpMetricCtx {
+        OtlpMetricCtx {
+            resource_info: true,
+            ..Default::default()
+        }
+    }
+
     fn attr_value(attrs: &[KeyValue], key: &str) -> Option<String> {
         attrs
             .iter()
@@ -999,7 +1007,7 @@ mod tests {
             vec![keyvalue("service.name", "api"), keyvalue("host.id", "h-1")],
             "my_gauge",
         );
-        let conversion = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+        let conversion = to_grpc_insert_requests(request, &mut descriptor_ctx()).unwrap();
 
         // descriptor keeps raw OTel keys while the metric table's labels went
         // through the (default underscore-escaping) translation strategy
@@ -1035,7 +1043,7 @@ mod tests {
         );
         let mut ctx = OtlpMetricCtx {
             is_legacy: true,
-            ..Default::default()
+            ..descriptor_ctx()
         };
         let conversion = to_grpc_insert_requests(request, &mut ctx).unwrap();
         assert!(conversion.resource_info.is_none());
@@ -1054,7 +1062,7 @@ mod tests {
             vec![keyvalue("service.name", "api")],
             OTEL_RESOURCE_INFO_TABLE_NAME,
         );
-        let conversion = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+        let conversion = to_grpc_insert_requests(request, &mut descriptor_ctx()).unwrap();
         assert!(conversion.resource_info.is_none());
         // the metric itself still goes through the main path
         assert!(

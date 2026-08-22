@@ -136,7 +136,7 @@ prometheus_info_metrics:
 # descriptive columns are listed instead of swept up by descriptive_rest,
 # which would misfile other entities' ids under service.instance.
 otel_info_metrics:
-  otel_resource_info:
+  greptime_otel_resource_info:
     - entity: service
       id: [job]
       descriptive:

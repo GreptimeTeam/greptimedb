@@ -998,9 +998,9 @@ mod tests {
     ];
 
     #[test]
-    fn otel_resource_info_gets_implicit_declarations() {
+    fn greptime_otel_resource_info_gets_implicit_declarations() {
         let info = prom_table_info(
-            "otel_resource_info",
+            "greptime_otel_resource_info",
             &[
                 "job",
                 "instance",
@@ -1045,7 +1045,7 @@ mod tests {
 
         // an id column the table lacks drops that entity, not the table
         let partial = prom_table_info(
-            "otel_resource_info",
+            "greptime_otel_resource_info",
             &["job", "service.name", "host.id"],
             OTEL_STAMPS,
         );
@@ -1061,13 +1061,22 @@ mod tests {
         let labels: &[&str] = &["job", "instance", "host.id"];
         // a prometheus-stamped table under the otel-whitelisted name
         assert!(
-            sorted_declarations(&prom_table_info("otel_resource_info", labels, PROM_STAMPS))
-                .is_empty()
+            sorted_declarations(&prom_table_info(
+                "greptime_otel_resource_info",
+                labels,
+                PROM_STAMPS
+            ))
+            .is_empty()
         );
         let mut stamps = OTEL_STAMPS.to_vec();
         stamps.push((PHYSICAL_TABLE_METADATA_KEY, "true"));
         assert!(
-            sorted_declarations(&prom_table_info("otel_resource_info", labels, &stamps)).is_empty()
+            sorted_declarations(&prom_table_info(
+                "greptime_otel_resource_info",
+                labels,
+                &stamps
+            ))
+            .is_empty()
         );
         // drift guard: the ingestion-side table name must stay whitelisted
         assert!(
@@ -1083,8 +1092,12 @@ mod tests {
             (SEMANTIC_METRIC_TYPE, servers::semantic::METRIC_TYPE_GAUGE),
         ];
         assert!(
-            sorted_declarations(&prom_table_info("otel_resource_info", labels, &wrong_type))
-                .is_empty()
+            sorted_declarations(&prom_table_info(
+                "greptime_otel_resource_info",
+                labels,
+                &wrong_type
+            ))
+            .is_empty()
         );
     }
 

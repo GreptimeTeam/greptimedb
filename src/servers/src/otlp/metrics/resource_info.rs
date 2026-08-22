@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 
 use api::v1::RowInsertRequests;
+use common_catalog::consts::SEMANTIC_GRAPH_WINDOW_NANOS;
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue;
@@ -30,10 +31,15 @@ use otel_arrow_rust::proto::opentelemetry::metrics::v1::{ResourceMetrics, metric
 
 use crate::error::Result;
 use crate::otlp::metrics::{INSTANCE_KEY, JOB_KEY, scalar_value_string, service_identity};
-use crate::otlp::trace::{KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE};
+use crate::otlp::trace::{
+    KEY_CONTAINER_ID, KEY_CONTAINER_NAME, KEY_HOST_ID, KEY_HOST_NAME, KEY_K8S_NAMESPACE_NAME,
+    KEY_K8S_POD_NAME, KEY_K8S_POD_UID, KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE,
+};
 use crate::row_writer::{self, MultiTableData};
 
-pub const OTEL_RESOURCE_INFO_TABLE_NAME: &str = "otel_resource_info";
+/// Prefixed like the other engine-managed tables, so a user metric is
+/// unlikely to claim the name.
+pub const OTEL_RESOURCE_INFO_TABLE_NAME: &str = "greptime_otel_resource_info";
 
 /// Attributes projected under their raw OTel keys. `service.instance.id` is
 /// absent on purpose: it lands in `instance`.
@@ -45,13 +51,13 @@ fn is_projected_attr(key: &str) -> bool {
         key,
         KEY_SERVICE_NAME
             | KEY_SERVICE_NAMESPACE
-            | "host.id"
-            | "host.name"
-            | "container.id"
-            | "container.name"
-            | "k8s.pod.uid"
-            | "k8s.pod.name"
-            | "k8s.namespace.name"
+            | KEY_HOST_ID
+            | KEY_HOST_NAME
+            | KEY_CONTAINER_ID
+            | KEY_CONTAINER_NAME
+            | KEY_K8S_POD_UID
+            | KEY_K8S_POD_NAME
+            | KEY_K8S_NAMESPACE_NAME
     )
 }
 
@@ -59,17 +65,23 @@ fn is_projected_attr(key: &str) -> bool {
 /// used to size the per-row buffers.
 const MAX_PROJECTED_TAGS: usize = 11;
 
-/// One row per distinct projected attribute set in a request, stamped with
-/// the newest data-point time that observed it. Dedup is request-local; the
-/// storage engine merges repeats across requests.
+/// Projected attributes (sorted `(name, value)` pairs) -> graph window ->
+/// the newest data-point time seen in that window, which is what the row for
+/// that window is stamped with.
+///
+/// Windows are an inner map so the attributes are stored, and moved, once per
+/// resource. They are keyed separately because one request may carry data for
+/// several of them: a single row per resource would describe only the newest
+/// window, leaving the earlier ones with metric rows but no entities.
 #[derive(Debug, Default)]
 pub struct ResourceInfoData {
-    rows: BTreeMap<Vec<(String, String)>, i64>,
+    rows: BTreeMap<Vec<(String, String)>, BTreeMap<i64, i64>>,
 }
 
 impl ResourceInfoData {
-    /// Takes the raw attributes, before the promote filter runs on them.
-    pub fn observe(&mut self, raw_attrs: &[KeyValue], max_ts_nanos: i64) {
+    /// Takes the raw attributes, before the promote filter runs on them, and
+    /// the times of the data points this resource actually writes.
+    pub fn observe(&mut self, raw_attrs: &[KeyValue], resource: &ResourceMetrics) {
         let mut tags = Vec::with_capacity(MAX_PROJECTED_TAGS);
         let (job, instance) = service_identity(raw_attrs);
         if let Some(job) = job {
@@ -92,10 +104,25 @@ impl ResourceInfoData {
         // columns keep a stable order.
         tags.sort_unstable();
 
-        self.rows
-            .entry(tags)
-            .and_modify(|ts| *ts = (*ts).max(max_ts_nanos))
-            .or_insert(max_ts_nanos);
+        let mut observed: BTreeMap<i64, i64> = BTreeMap::new();
+        for_each_encoded_time(resource, |ts| {
+            let window = ts - ts.rem_euclid(SEMANTIC_GRAPH_WINDOW_NANOS);
+            observed
+                .entry(window)
+                .and_modify(|newest| *newest = (*newest).max(ts))
+                .or_insert(ts);
+        });
+        if observed.is_empty() {
+            return;
+        }
+
+        let windows = self.rows.entry(tags).or_default();
+        for (window, newest) in observed {
+            windows
+                .entry(window)
+                .and_modify(|seen| *seen = (*seen).max(newest))
+                .or_insert(newest);
+        }
     }
 
     /// Every projected attribute becomes a tag, so auto-create puts it in the
@@ -109,20 +136,22 @@ impl ResourceInfoData {
         let table = writer.get_or_default_table_data(
             OTEL_RESOURCE_INFO_TABLE_NAME,
             MAX_PROJECTED_TAGS + 2,
-            self.rows.len(),
+            self.rows.values().map(BTreeMap::len).sum(),
         );
-        for (tags, ts_nanos) in self.rows {
-            let mut row = table.alloc_one_row();
-            row_writer::write_tags(table, tags.into_iter(), &mut row)?;
-            row_writer::write_f64(table, greptime_value(), 1.0, &mut row)?;
-            row_writer::write_ts_to_millis(
-                table,
-                greptime_timestamp(),
-                Some(ts_nanos),
-                Precision::Nanosecond,
-                &mut row,
-            )?;
-            table.add_row(row);
+        for (tags, windows) in &self.rows {
+            for ts_nanos in windows.values().copied() {
+                let mut row = table.alloc_one_row();
+                row_writer::write_tags(table, tags.iter().cloned(), &mut row)?;
+                row_writer::write_f64(table, greptime_value(), 1.0, &mut row)?;
+                row_writer::write_ts_to_millis(
+                    table,
+                    greptime_timestamp(),
+                    Some(ts_nanos),
+                    Precision::Nanosecond,
+                    &mut row,
+                )?;
+                table.add_row(row);
+            }
         }
 
         let (requests, _) = writer.into_row_insert_requests();
@@ -130,34 +159,35 @@ impl ResourceInfoData {
     }
 }
 
-/// The descriptor row's observation time, so it shares a window with the
-/// metric rows it describes. `None` when the resource has no data points.
-pub(crate) fn max_data_point_time_nanos(resource: &ResourceMetrics) -> Option<i64> {
-    let mut max_ts: Option<u64> = None;
-    let mut fold = |ts: u64| max_ts = Some(max_ts.map_or(ts, |cur| cur.max(ts)));
+/// Visits the times of the data points the encoder writes rows for, so a
+/// resource is described exactly where it is measured. Exponential histograms
+/// are excluded: [`super::encode_metrics`] drops them, and describing a
+/// resource whose only data was dropped would invent an entity out of nothing.
+fn for_each_encoded_time(resource: &ResourceMetrics, mut visit: impl FnMut(i64)) {
+    let mut visit_all = |points: &mut dyn Iterator<Item = u64>| {
+        for ts in points {
+            visit(ts as i64);
+        }
+    };
     for scope in &resource.scope_metrics {
         for m in &scope.metrics {
             match &m.data {
                 Some(metric::Data::Gauge(g)) => {
-                    g.data_points.iter().for_each(|p| fold(p.time_unix_nano))
+                    visit_all(&mut g.data_points.iter().map(|p| p.time_unix_nano))
                 }
                 Some(metric::Data::Sum(s)) => {
-                    s.data_points.iter().for_each(|p| fold(p.time_unix_nano))
+                    visit_all(&mut s.data_points.iter().map(|p| p.time_unix_nano))
                 }
                 Some(metric::Data::Histogram(h)) => {
-                    h.data_points.iter().for_each(|p| fold(p.time_unix_nano))
-                }
-                Some(metric::Data::ExponentialHistogram(h)) => {
-                    h.data_points.iter().for_each(|p| fold(p.time_unix_nano))
+                    visit_all(&mut h.data_points.iter().map(|p| p.time_unix_nano))
                 }
                 Some(metric::Data::Summary(s)) => {
-                    s.data_points.iter().for_each(|p| fold(p.time_unix_nano))
+                    visit_all(&mut s.data_points.iter().map(|p| p.time_unix_nano))
                 }
-                None => {}
+                Some(metric::Data::ExponentialHistogram(_)) | None => {}
             }
         }
     }
-    max_ts.map(|ts| ts as i64)
 }
 
 #[cfg(test)]
@@ -166,6 +196,10 @@ mod tests {
     use api::v1::value::ValueData;
     use common_query::prelude::set_default_prefix;
     use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, any_value};
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Metric, NumberDataPoint,
+        ScopeMetrics,
+    };
 
     use super::*;
 
@@ -175,6 +209,27 @@ mod tests {
             value: Some(AnyValue {
                 value: Some(any_value::Value::StringValue(value.into())),
             }),
+        }
+    }
+
+    fn gauge_at(times: &[i64]) -> ResourceMetrics {
+        ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: times
+                            .iter()
+                            .map(|ts| NumberDataPoint {
+                                time_unix_nano: *ts as u64,
+                                ..Default::default()
+                            })
+                            .collect(),
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
         }
     }
 
@@ -188,11 +243,10 @@ mod tests {
             kv("host.id", "h-1"),
             kv("os.type", "linux"),
         ];
-        data.observe(&attrs, 100);
-        data.observe(&attrs, 50);
+        data.observe(&attrs, &gauge_at(&[100, 50]));
         assert_eq!(data.rows.len(), 1);
-        let (tags, ts) = data.rows.iter().next().unwrap();
-        assert_eq!(*ts, 100);
+        let (tags, windows) = data.rows.iter().next().unwrap();
+        assert_eq!(windows.values().copied().collect::<Vec<_>>(), vec![100]);
         assert!(tags.contains(&("job".to_string(), "shop/api".to_string())));
         assert!(tags.contains(&("instance".to_string(), "inst-1".to_string())));
         assert!(tags.contains(&("service.name".to_string(), "api".to_string())));
@@ -201,13 +255,55 @@ mod tests {
                 .all(|(k, _)| k != "os.type" && k != "service.instance.id")
         );
 
-        data.observe(&[kv("host.id", "h-2")], 10);
+        data.observe(&[kv("host.id", "h-2")], &gauge_at(&[10]));
         assert_eq!(data.rows.len(), 2);
 
         // nothing allowlisted: no row at all, rather than an empty one
         let mut empty = ResourceInfoData::default();
-        empty.observe(&[kv("os.type", "linux")], 100);
+        empty.observe(&[kv("os.type", "linux")], &gauge_at(&[100]));
         assert!(empty.into_row_insert_requests().unwrap().is_none());
+    }
+
+    /// Earlier windows would keep their metric rows but lose their entities.
+    #[test]
+    fn observe_keeps_one_row_per_graph_window() {
+        let window = SEMANTIC_GRAPH_WINDOW_NANOS;
+        let mut data = ResourceInfoData::default();
+        data.observe(
+            &[kv("service.name", "api")],
+            &gauge_at(&[window + 1, window + 2, 3 * window + 7]),
+        );
+
+        let windows = data.rows.values().next().unwrap();
+        assert_eq!(
+            windows.iter().collect::<Vec<_>>(),
+            vec![(&window, &(window + 2)), (&(3 * window), &(3 * window + 7))]
+        );
+    }
+
+    /// Describing a resource whose only data the encoder drops invents an
+    /// entity with no measurements.
+    #[test]
+    fn observe_ignores_data_the_encoder_drops() {
+        let mut data = ResourceInfoData::default();
+        let dropped = ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                        data_points: vec![ExponentialHistogramDataPoint {
+                            time_unix_nano: 100,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        data.observe(&[kv("service.name", "api")], &dropped);
+        assert!(data.into_row_insert_requests().unwrap().is_none());
     }
 
     #[test]
@@ -216,7 +312,7 @@ mod tests {
         let mut data = ResourceInfoData::default();
         data.observe(
             &[kv("service.name", "api"), kv("host.id", "h-1")],
-            1_700_000_000_123_456_789,
+            &gauge_at(&[1_700_000_000_123_456_789]),
         );
         let requests = data.into_row_insert_requests().unwrap().unwrap();
         assert_eq!(requests.inserts.len(), 1);

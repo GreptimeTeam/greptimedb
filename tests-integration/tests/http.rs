@@ -6493,7 +6493,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = "[[\"claude_code_cost_usage_USD_total\"],[\"claude_code_token_usage_tokens_total\"],[\"demo\"],[\"greptime_physical_table\"],[\"numbers\"],[\"otel_resource_info\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\"],[\"claude_code_token_usage_tokens_total\"],[\"demo\"],[\"greptime_otel_resource_info\"],[\"greptime_physical_table\"],[\"numbers\"]]";
     validate_data("otlp_metrics_all_tables", &client, "show tables;", expected).await;
 
     // Metric-engine logical table carries the semantic identity. Match substrings
@@ -6567,7 +6567,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     validate_data(
         "otlp_metrics_resource_info",
         &client,
-        "select job, \"service.name\", greptime_value, greptime_timestamp from otel_resource_info;",
+        "select job, \"service.name\", greptime_value, greptime_timestamp from greptime_otel_resource_info;",
         "[[\"claude-code\",\"claude-code\",1.0,1753780559836]]",
     )
     .await;
@@ -6577,7 +6577,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     validate_data(
         "otlp_metrics_resource_info_options",
         &client,
-        "select count(*) from information_schema.tables where table_name = 'otel_resource_info' \
+        "select count(*) from information_schema.tables where table_name = 'greptime_otel_resource_info' \
          and engine = 'mito' \
          and create_options like '%greptime.semantic.metric.type=info%' \
          and create_options like '%greptime.semantic.metric.metadata_quality=declared%' \
@@ -6599,7 +6599,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .get("/v1/sql?sql=drop table otel_resource_info;")
+        .get("/v1/sql?sql=drop table greptime_otel_resource_info;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -6734,7 +6734,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         "otlp_metrics_resource_info_recreated",
         &client,
         "select count(*) from information_schema.tables \
-         where table_name = 'otel_resource_info' and engine = 'mito';",
+         where table_name = 'greptime_otel_resource_info' and engine = 'mito';",
         "[[1]]",
     )
     .await;
@@ -6751,7 +6751,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .get("/v1/sql?sql=drop table otel_resource_info;")
+        .get("/v1/sql?sql=drop table greptime_otel_resource_info;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -6777,7 +6777,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     validate_data(
         "otlp_metrics_namespace_job_descriptor",
         &client,
-        "select job, \"service.name\", \"service.namespace\", \"host.id\" from otel_resource_info;",
+        "select job, \"service.name\", \"service.namespace\", \"host.id\" from greptime_otel_resource_info;",
         "[[\"shop/api\",\"api\",\"shop\",\"h-1\"]]",
     )
     .await;
@@ -6856,7 +6856,7 @@ pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
     validate_data(
         "otlp_metric_translation_strategy_resource_info",
         &client,
-        "select job, \"service.name\" from otel_resource_info;",
+        "select job, \"service.name\" from greptime_otel_resource_info;",
         "[[\"strategy-service\",\"strategy-service\"]]",
     )
     .await;
@@ -6864,7 +6864,7 @@ pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
         "otlp_metric_translation_strategy_resource_info_allowlist",
         &client,
         "select count(*) from information_schema.columns \
-         where table_name = 'otel_resource_info' and column_name = 'resource.attr';",
+         where table_name = 'greptime_otel_resource_info' and column_name = 'resource.attr';",
         "[[0]]",
     )
     .await;
@@ -6908,7 +6908,7 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
     // A metric named like the descriptor wins the table name: it goes through
     // the normal metric-engine path and no descriptor is synthesized.
     let content = r#"
-{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"host.id","value":{"stringValue":"h-1"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"otel_resource_info","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":1.0}]}}]}]}]}
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"host.id","value":{"stringValue":"h-1"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"greptime_otel_resource_info","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":1.0}]}}]}]}]}
     "#;
     let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
     let res = send_req(
@@ -6926,11 +6926,11 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
         "otlp_metrics_name_collision_engine",
         &client,
         "select count(*) from information_schema.tables \
-         where table_name = 'otel_resource_info' and engine = 'metric';",
+         where table_name = 'greptime_otel_resource_info' and engine = 'metric';",
         "[[1]]",
     )
     .await;
-    let res = execute_sql(&client, "drop table otel_resource_info;").await;
+    let res = execute_sql(&client, "drop table greptime_otel_resource_info;").await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // A pre-existing table with an incompatible schema fails the descriptor
@@ -6938,7 +6938,7 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
     // metric data itself is accepted.
     let res = execute_sql(
         &client,
-        "create table otel_resource_info (ts timestamp time index, job double, greptime_value double);",
+        "create table greptime_otel_resource_info (ts timestamp time index, job double, greptime_value double);",
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -6960,7 +6960,9 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
     let partial_success = body.partial_success.as_ref().unwrap();
     assert_eq!(partial_success.rejected_data_points, 0);
     assert!(
-        partial_success.error_message.contains("otel_resource_info"),
+        partial_success
+            .error_message
+            .contains("greptime_otel_resource_info"),
         "unexpected warning: {}",
         partial_success.error_message
     );
@@ -6972,51 +6974,9 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
     )
     .await;
 
-    let res = execute_sql(&client, "drop table otel_resource_info;").await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let res = execute_sql(
-        &client,
-        "create table otel_resource_info (\
-         greptime_timestamp timestamp time index, greptime_value double, \
-         job string, \"service.name\" string, primary key(job, \"service.name\"));",
-    )
-    .await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // A schema-compatible user table is still not descriptor-owned. Writing
-    // into it would appear successful while its missing semantic stamps keep
-    // it out of the entity graph, so reject only the derived write and warn.
-    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
-    let res = send_req(
-        &client,
-        vec![content_type()],
-        "/v1/otlp/v1/metrics",
-        req.encode_to_vec(),
-        false,
-    )
-    .await;
-    assert_eq!(StatusCode::OK, res.status());
-    let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
-    let partial_success = body.partial_success.as_ref().unwrap();
-    assert_eq!(partial_success.rejected_data_points, 0);
-    assert!(
-        partial_success.error_message.contains("semantic ownership"),
-        "unexpected warning: {}",
-        partial_success.error_message
-    );
-    validate_data(
-        "otlp_metrics_compatible_foreign_table_untouched",
-        &client,
-        "select count(*) from otel_resource_info;",
-        "[[0]]",
-    )
-    .await;
-
-    // Once the foreign table is gone, the descriptor is auto-created and a
-    // follow-up write into the now-existing owned table passes the ownership
-    // check without degrading — guards against a marker drift that would
-    // silently stop every descriptor write after the first request.
-    let res = execute_sql(&client, "drop table otel_resource_info;").await;
+    // The descriptor is auto-created again once the conflicting table is
+    // gone, and a follow-up write into it does not degrade.
+    let res = execute_sql(&client, "drop table greptime_otel_resource_info;").await;
     assert_eq!(res.status(), StatusCode::OK);
     for round in 0..2 {
         let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
@@ -7039,7 +6999,7 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
     validate_data(
         "otlp_metrics_owned_descriptor_keeps_accepting",
         &client,
-        "select count(*) from otel_resource_info;",
+        "select count(*) from greptime_otel_resource_info;",
         "[[1]]",
     )
     .await;

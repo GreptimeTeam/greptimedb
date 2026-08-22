@@ -22,6 +22,11 @@ pub struct OtlpOptions {
     pub enable: bool,
     /// Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
     pub trace_ingest_chunk_size: usize,
+    /// Whether to synthesize the `greptime_otel_resource_info` descriptor
+    /// table from the resource attributes of OTLP metrics, so metrics-only
+    /// services reach the semantic graph. Off by default: it creates and
+    /// writes a table the user did not send.
+    pub experimental_enable_resource_info: bool,
 }
 
 impl Default for OtlpOptions {
@@ -29,6 +34,7 @@ impl Default for OtlpOptions {
         Self {
             enable: true,
             trace_ingest_chunk_size: DEFAULT_TRACE_INGEST_CHUNK_SIZE,
+            experimental_enable_resource_info: false,
         }
     }
 }
@@ -42,6 +48,7 @@ mod tests {
         let default = OtlpOptions::default();
         assert!(default.enable);
         assert_eq!(default.trace_ingest_chunk_size, 512);
+        assert!(!default.experimental_enable_resource_info);
 
         let options: OtlpOptions = toml::from_str("enable = false").unwrap();
         assert!(!options.enable);

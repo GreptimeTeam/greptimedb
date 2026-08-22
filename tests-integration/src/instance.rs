@@ -729,7 +729,7 @@ mod tests {
                 if let auth::PermissionTableTargets::Resolved(targets) = targets
                     && targets
                         .iter()
-                        .any(|target| target.table == "otel_resource_info")
+                        .any(|target| target.table == "greptime_otel_resource_info")
                 {
                     return Ok(auth::PermissionResp::Reject);
                 }
@@ -782,7 +782,7 @@ mod tests {
                 .unwrap();
         let warning = outcome.warning.expect("denial must surface as a warning");
         assert!(
-            warning.contains("otel_resource_info"),
+            warning.contains("greptime_otel_resource_info"),
             "unexpected warning: {warning}"
         );
 
@@ -800,7 +800,7 @@ mod tests {
             "metric data was not committed:\n{pretty_print}"
         );
         assert!(
-            !pretty_print.contains("otel_resource_info"),
+            !pretty_print.contains("greptime_otel_resource_info"),
             "denied descriptor table was created:\n{pretty_print}"
         );
     }
