@@ -154,7 +154,9 @@ pub fn to_grpc_insert_requests(
 
     // The metric and the descriptor would fight over the same table across
     // two engines. The user's metric wins.
-    let resource_info = if requests
+    let resource_info = if !metric_ctx.resource_info {
+        None
+    } else if requests
         .inserts
         .iter()
         .any(|r| r.table_name == OTEL_RESOURCE_INFO_TABLE_NAME)

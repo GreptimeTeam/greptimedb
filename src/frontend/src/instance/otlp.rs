@@ -83,11 +83,6 @@ fn trace_permission_targets(
     PermissionTableTargets::resolved(targets)
 }
 
-/// Whether the table under the descriptor's name is the one ingestion
-/// created, so a user's same-named table never receives descriptor rows.
-/// Not atomic: the insert path resolves the name again, so a concurrent DROP
-/// plus CREATE can still slip a foreign table into that window.
-
 #[async_trait]
 impl OpenTelemetryProtocolHandler for Instance {
     #[tracing::instrument(skip_all)]
