@@ -63,6 +63,12 @@ pub struct BatchingModeOptions {
     pub read_preference: ReadPreference,
     /// TLS option for client connections to frontends.
     pub frontend_tls: Option<ClientTlsOption>,
+    /// Dedicated frontend addresses for batching DML queries.
+    ///
+    /// When set to a non-empty list, batching DML queries use only these
+    /// addresses instead of metasrv-discovered frontends. An empty list is
+    /// treated as unset.
+    pub experimental_frontend_endpoints: Option<Vec<String>>,
 }
 
 impl Default for BatchingModeOptions {
@@ -79,6 +85,7 @@ impl Default for BatchingModeOptions {
             experimental_enable_incremental_read: false,
             read_preference: Default::default(),
             frontend_tls: None,
+            experimental_frontend_endpoints: None,
         }
     }
 }
