@@ -187,6 +187,18 @@ REPO_URL=https://github.com/{repo}
 # EnvironmentFile: runner job processes inherit the runner's environment.
 PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENVEOF
+
+# Stream the runner service's own logs (config output, job lifecycle, crash
+# messages) to the serial console, next to the kernel's OOM-killer records.
+# Teardown dumps the console tail before deleting the instance, so the
+# witness of what killed the runner survives the machine.
+mkdir -p /etc/systemd/system/ephemeral-github-runner.service.d
+cat > /etc/systemd/system/ephemeral-github-runner.service.d/console.conf <<'CONFEOF'
+[Service]
+StandardOutput=journal+console
+StandardError=journal+console
+CONFEOF
+systemctl daemon-reload
 systemctl start ephemeral-github-runner.service
 """
 

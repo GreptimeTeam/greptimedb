@@ -108,19 +108,39 @@ def make_ecs_client(region_id: str):
     )
 
 
-def delete_instance(client, instance_id: str) -> bool:
+def delete_instance(client, instance_id: str, region_id: str | None = None) -> bool:
+    import time
+
     from alibabacloud_ecs20140526 import models as ecs_models
 
-    try:
-        client.delete_instance(ecs_models.DeleteInstanceRequest(instance_id=instance_id, force=True))
-        print(f"Deleted instance {instance_id}", flush=True)
-        return True
-    except Exception as error:  # noqa: BLE001
-        if "InvalidInstanceId.NotFound" in str(error):
-            print(f"Instance {instance_id} already gone", flush=True)
+    # Export the serial console before destroying the evidence: a cancelled
+    # run still runs this teardown job, and the console tail (cloud-init,
+    # runner service logs, kernel OOM records) is the only witness of what
+    # happened on the machine.
+    if region_id is not None:
+        provision.dump_console_output(client, region_id, instance_id)
+
+    # DeleteInstance rejects instances that are still Initializing (or in
+    # another transitional status). Teardown runs right after a cancelled
+    # run, when the instance may be only seconds old, so retry the transient
+    # status errors for a few minutes instead of leaking the instance.
+    deadline = time.monotonic() + 5 * 60
+    while True:
+        try:
+            client.delete_instance(ecs_models.DeleteInstanceRequest(instance_id=instance_id, force=True))
+            print(f"Deleted instance {instance_id}", flush=True)
             return True
-        print(f"Failed to delete instance {instance_id}: {error}", flush=True)
-        return False
+        except Exception as error:  # noqa: BLE001
+            message = str(error)
+            if "InvalidInstanceId.NotFound" in message:
+                print(f"Instance {instance_id} already gone", flush=True)
+                return True
+            if "IncorrectInstanceStatus" in message and time.monotonic() < deadline:
+                print(f"Instance {instance_id} is in a transitional status; retrying delete", flush=True)
+                time.sleep(15)
+                continue
+            print(f"Failed to delete instance {instance_id}: {error}", flush=True)
+            return False
 
 
 def deregister_runner(token: str, repo: str, runner_name: str) -> bool:
@@ -170,7 +190,7 @@ def sweep(client, region_id: str, repo: str, github_token: str, ttl: timedelta) 
         print(f"Instance {instance_id} ({instance_name}) exceeds TTL {ttl}; deleting", flush=True)
         # Runner names mirror instance names by construction in the provision
         # script (both are qreg-ecs-<run_id>).
-        ok &= delete_instance(client, instance_id)
+        ok &= delete_instance(client, instance_id, region_id)
         ok &= deregister_runner(github_token, repo, instance_name)
     return 0 if ok else 1
 
@@ -203,7 +223,7 @@ def main() -> int:
 
     ok = True
     if args.instance_id:
-        ok &= delete_instance(client, args.instance_id)
+        ok &= delete_instance(client, args.instance_id, args.region_id)
     else:
         print("No instance id given; skipping instance deletion", flush=True)
     if args.runner_name:
