@@ -443,7 +443,7 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         # ENOSPC also stops the runner itself from writing logs, which
         # surfaces as a canceled job with no evidence. Deleted with the
         # instance.
-        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="100"),
+        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="150"),
         user_data=user_data,
         tag=[
             ecs_models.RunInstancesRequestTag(key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE),

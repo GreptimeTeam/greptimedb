@@ -50,7 +50,7 @@ the data disk, so deleting the instance detaches and retains it. To rebuild
 the cache from scratch, delete or reformat the disk; the next provision
 formats an unformatted disk automatically.
 
-The system disk is 100 GiB, which covers the image, a 16 GiB swapfile, the
+The system disk is 150 GiB, which covers the image, a 16 GiB swapfile, the
 checkout, and — with no cache disk attached — the build caches (target dir,
 cargo registry, sccache) for a cold double nightly build. Do not undersize
 it: ENOSPC stops the runner itself from writing logs, which GitHub reports
