@@ -92,7 +92,7 @@ pub struct TableEntityDeclaration {
     pub id_qualifier: Option<String>,
     /// Columns whose presence on a row withdraws this declaration for that row.
     /// Reported because the declaration otherwise reads as unconditional.
-    pub suppressed_by_columns: Vec<String>,
+    pub superseded_by_columns: Vec<String>,
     pub descriptive_columns: Vec<String>,
 }
 

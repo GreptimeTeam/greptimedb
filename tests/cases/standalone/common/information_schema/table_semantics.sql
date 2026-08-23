@@ -111,7 +111,7 @@ DROP TABLE phy_sem;
 -- entity_declarations reports what a table actually contributes to the graph,
 -- including the declarations the built-in conventions derive. A whitelisted
 -- OTel descriptor table declares its entities without any entity option, and
--- the generic container records that it yields to k8s.container per row.
+-- the generic container records the identity it yields to.
 CREATE TABLE greptime_otel_resource_info (
   greptime_timestamp TIMESTAMP TIME INDEX,
   greptime_value DOUBLE,
@@ -123,7 +123,8 @@ CREATE TABLE greptime_otel_resource_info (
   "container.name" STRING,
   "k8s.pod.uid" STRING,
   "k8s.pod.name" STRING,
-  PRIMARY KEY ("job", "instance", "service.name", "host.id", "container.id", "container.name", "k8s.pod.uid", "k8s.pod.name")
+  "k8s.container.name" STRING,
+  PRIMARY KEY ("job", "instance", "service.name", "host.id", "container.id", "container.name", "k8s.pod.uid", "k8s.pod.name", "k8s.container.name")
 )
 WITH (
   'greptime.semantic.signal_type' = 'metric',

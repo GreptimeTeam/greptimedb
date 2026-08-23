@@ -101,10 +101,10 @@ fn entity_declarations_json(declarations: &[TableEntityDeclaration]) -> Option<S
             if let Some(qualifier) = &declaration.id_qualifier {
                 entry.insert("id_qualifier".to_string(), qualifier.clone().into());
             }
-            if !declaration.suppressed_by_columns.is_empty() {
+            if !declaration.superseded_by_columns.is_empty() {
                 entry.insert(
-                    "suppressed_by".to_string(),
-                    declaration.suppressed_by_columns.clone().into(),
+                    "superseded_by".to_string(),
+                    declaration.superseded_by_columns.clone().into(),
                 );
             }
             if !declaration.descriptive_columns.is_empty() {

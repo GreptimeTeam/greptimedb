@@ -181,7 +181,7 @@ impl EntityGraphProviderImpl {
                         entity_type,
                         id_columns,
                         id_qualifier: None,
-                        suppressed_by_columns: vec![],
+                        superseded_by_columns: vec![],
                         descriptive_columns,
                         scope_columns,
                     })
@@ -203,11 +203,13 @@ impl EntityGraphProviderImpl {
         conventions: &Conventions,
     ) -> Vec<EntityDeclaration> {
         let mut declarations = Self::parse_declarations(table_info);
+        let mut supersessions = Vec::new();
         if is_trace_v1_table(table_info) {
             Self::extend_with_implicit_entities(
                 table_info,
                 &conventions.otlp_trace_entities,
                 &mut declarations,
+                &mut supersessions,
             );
         }
         Self::extend_with_info_metric_conventions(
@@ -216,6 +218,7 @@ impl EntityGraphProviderImpl {
             SOURCE_PROMETHEUS,
             None,
             &mut declarations,
+            &mut supersessions,
         );
         Self::extend_with_info_metric_conventions(
             table_info,
@@ -223,8 +226,29 @@ impl EntityGraphProviderImpl {
             SOURCE_OPENTELEMETRY,
             Some(servers::semantic::METRIC_TYPE_INFO),
             &mut declarations,
+            &mut supersessions,
         );
+        Self::resolve_supersessions(&mut declarations, supersessions);
         declarations
+    }
+
+    /// Binds each `superseded_by` to the identity the superseding type has on
+    /// this table, once every declaration is known. A type nothing declares
+    /// here — its columns are gone, its explicit declaration was skipped —
+    /// leaves the guard empty, so the superseded entity stands instead of
+    /// yielding to a node that will never be derived.
+    fn resolve_supersessions(
+        declarations: &mut [EntityDeclaration],
+        supersessions: Vec<(usize, String)>,
+    ) {
+        let identities: HashMap<String, Vec<String>> = declarations
+            .iter()
+            .map(|d| (d.entity_type.clone(), d.id_columns.clone()))
+            .collect();
+        for (index, entity_type) in supersessions {
+            declarations[index].superseded_by_columns =
+                identities.get(&entity_type).cloned().unwrap_or_default();
+        }
     }
 
     /// Whether the table carries an explicit `entity.<type>.id` option.
@@ -248,6 +272,7 @@ impl EntityGraphProviderImpl {
         expected_source: &str,
         expected_metric_type: Option<&str>,
         declarations: &mut Vec<EntityDeclaration>,
+        supersessions: &mut Vec<(usize, String)>,
     ) {
         let Some(implicit_entities) = whitelist.get(&table_info.name) else {
             return;
@@ -267,7 +292,12 @@ impl EntityGraphProviderImpl {
             );
             return;
         }
-        Self::extend_with_implicit_entities(table_info, implicit_entities, declarations);
+        Self::extend_with_implicit_entities(
+            table_info,
+            implicit_entities,
+            declarations,
+            supersessions,
+        );
     }
 
     /// Synthesizes the applicable subset of `entities` on `table_info`:
@@ -277,6 +307,7 @@ impl EntityGraphProviderImpl {
         table_info: &TableInfo,
         entities: &[ImplicitEntity],
         declarations: &mut Vec<EntityDeclaration>,
+        supersessions: &mut Vec<(usize, String)>,
     ) {
         let schema = &table_info.meta.schema;
         let Some(time_index) = schema.timestamp_column().map(|c| c.name.clone()) else {
@@ -326,14 +357,9 @@ impl EntityGraphProviderImpl {
                 .qualified_by
                 .clone()
                 .filter(|c| schema.column_schema_by_name(c).is_some());
-            // A column the table does not have suppresses nothing, and must
-            // not reach the derivation plan as an unresolvable reference.
-            let suppressed_by_columns = implicit
-                .suppressed_by
-                .iter()
-                .filter(|c| schema.column_schema_by_name(c).is_some())
-                .cloned()
-                .collect();
+            if let Some(entity_type) = &implicit.superseded_by {
+                supersessions.push((declarations.len(), entity_type.clone()));
+            }
             declarations.push(EntityDeclaration {
                 schema: table_info.schema_name.clone(),
                 table: table_info.name.clone(),
@@ -341,7 +367,7 @@ impl EntityGraphProviderImpl {
                 entity_type: implicit.entity.clone(),
                 id_columns: implicit.id.clone(),
                 id_qualifier,
-                suppressed_by_columns,
+                superseded_by_columns: vec![],
                 descriptive_columns,
                 scope_columns: vec![],
             });
@@ -680,7 +706,7 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
                 entity_type: declaration.entity_type,
                 id_columns: declaration.id_columns,
                 id_qualifier: declaration.id_qualifier,
-                suppressed_by_columns: declaration.suppressed_by_columns,
+                superseded_by_columns: declaration.superseded_by_columns,
                 descriptive_columns: declaration.descriptive_columns,
             })
             .collect::<Vec<_>>();
@@ -1045,6 +1071,7 @@ mod tests {
                 "container.name",
                 "k8s.pod.uid",
                 "k8s.pod.name",
+                "k8s.container.name",
                 "k8s.namespace.name",
             ],
             OTEL_STAMPS,
@@ -1059,40 +1086,62 @@ mod tests {
             vec![
                 "container",
                 "host",
+                "k8s.container",
                 "k8s.pod",
                 "service",
                 "service.instance"
             ]
         );
-        // A pod's container belongs to k8s.container; the generic type yields
-        // on those rows instead of doubling the node.
-        assert_eq!(declarations[0].entity_type, "container");
+        // A pod's container is the k8s.container, under the identity
+        // kube-state-metrics gives it; the generic type yields to it.
         assert_eq!(
-            declarations[0].suppressed_by_columns,
-            vec!["k8s.pod.uid"],
-            "the generic container must yield to k8s.container per row"
+            declarations[2].id_columns,
+            vec!["k8s.pod.uid", "k8s.container.name"]
+        );
+        assert_eq!(
+            declarations[0].superseded_by_columns,
+            vec!["k8s.pod.uid", "k8s.container.name"],
+            "the generic container must yield to the k8s.container identity itself"
         );
         assert_eq!(declarations[1].id_columns, vec!["host.id"]);
         assert_eq!(declarations[1].descriptive_columns, vec!["host.name"]);
-        assert_eq!(declarations[3].id_columns, vec!["job"]);
+        assert_eq!(declarations[4].id_columns, vec!["job"]);
         assert_eq!(
-            declarations[3].descriptive_columns,
+            declarations[4].descriptive_columns,
             vec!["service.name", "service.namespace"]
         );
-        assert_eq!(declarations[4].id_columns, vec!["job", "instance"]);
-        assert!(declarations[4].descriptive_columns.is_empty());
+        assert_eq!(declarations[5].id_columns, vec!["job", "instance"]);
+        assert!(declarations[5].descriptive_columns.is_empty());
 
-        // A deployment that never reports pods has no `k8s.pod.uid` column at
-        // all: the suppression drops out instead of reaching the derivation
-        // plan as an unresolvable column reference.
+        // Without the columns that identify a k8s.container, nothing here can
+        // produce one — so the generic container must keep standing, or a
+        // container disappears from the graph rather than changing type.
         let no_k8s = prom_table_info(
             "greptime_otel_resource_info",
-            &["job", "container.id"],
+            &["job", "container.id", "k8s.pod.uid"],
             OTEL_STAMPS,
         );
         let declarations = sorted_declarations(&no_k8s);
         assert_eq!(declarations[0].entity_type, "container");
-        assert!(declarations[0].suppressed_by_columns.is_empty());
+        assert!(declarations[0].superseded_by_columns.is_empty());
+
+        // Same rule when an explicit k8s.container declaration is skipped for
+        // naming a dropped column: it blocks the implicit one, so nothing
+        // declares the type and the generic container must not yield to it.
+        let mut stamps = OTEL_STAMPS.to_vec();
+        stamps.push(("greptime.semantic.entity.k8s.container.id", "gone"));
+        let broken_explicit = prom_table_info(
+            "greptime_otel_resource_info",
+            &["job", "container.id", "k8s.pod.uid", "k8s.container.name"],
+            &stamps,
+        );
+        let declarations = sorted_declarations(&broken_explicit);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(types, vec!["container", "k8s.pod", "service"]);
+        assert!(declarations[0].superseded_by_columns.is_empty());
 
         let partial = prom_table_info(
             "greptime_otel_resource_info",

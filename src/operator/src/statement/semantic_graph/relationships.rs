@@ -871,7 +871,7 @@ mod tests {
             entity_type: "service".to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             id_qualifier: None,
-            suppressed_by_columns: vec![],
+            superseded_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -1325,7 +1325,7 @@ mod tests {
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             id_qualifier: None,
-            suppressed_by_columns: vec![],
+            superseded_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }

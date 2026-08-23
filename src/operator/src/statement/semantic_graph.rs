@@ -292,11 +292,11 @@ pub struct EntityDeclaration {
     /// carrying the parts separately (a trace table's `service.namespace`)
     /// yields the same id as one carrying them pre-composed (`job`).
     pub id_qualifier: Option<String>,
-    /// Columns whose presence on a row suppresses this declaration for that
-    /// row, so a more specific entity type can own it (a pod's container is
-    /// the `k8s.container`, not a generic `container`). Empty for explicit
-    /// declarations: a user who declares a type means it unconditionally.
-    pub suppressed_by_columns: Vec<String>,
+    /// Identity columns of a more specific entity type that takes over on the
+    /// rows carrying all of them (a pod's container is the `k8s.container`, not
+    /// a generic `container`). Empty for explicit declarations: a user who
+    /// declares a type means it unconditionally.
+    pub superseded_by_columns: Vec<String>,
     /// Descriptive columns snapshotted into the `descriptive` JSON (may be empty).
     pub descriptive_columns: Vec<String>,
     /// Scope columns (namespace/environment). One column → scope verbatim;
@@ -440,15 +440,20 @@ pub(crate) fn identifies(column: &str) -> Expr {
 }
 
 /// The row-level guard a declaration carries: every identity component present,
-/// and no suppressing column present. Every branch that turns a declaration
-/// into rows applies this, so the guard cannot drift between them.
+/// and the superseding type's identity not complete. Every branch that turns a
+/// declaration into rows applies this, so the guard cannot drift between them.
 pub(crate) fn declaration_predicate(declaration: &EntityDeclaration) -> Expr {
     let mut predicate = lit(true);
     for column in &declaration.id_columns {
         predicate = predicate.and(identifies(column));
     }
-    for column in &declaration.suppressed_by_columns {
-        predicate = predicate.and(not(identifies(column)));
+    if let Some(superseding) = declaration
+        .superseded_by_columns
+        .iter()
+        .map(|column| identifies(column))
+        .reduce(Expr::and)
+    {
+        predicate = predicate.and(not(superseding));
     }
     predicate
 }
@@ -905,7 +910,7 @@ mod tests {
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             id_qualifier: None,
-            suppressed_by_columns: vec![],
+            superseded_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -1172,10 +1177,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_suppression_is_per_row() {
-        // One descriptor table holds both pod rows and bare-runtime rows, so a
-        // schema-level test could only keep or drop the whole table; the
-        // generic container entity must yield on exactly the pod rows.
+    async fn registry_superseding_is_per_row_and_never_drops_an_entity() {
+        // One descriptor table holds pod rows and bare-runtime rows together, so
+        // a schema-level test could only keep or drop the whole table. Each row
+        // must end up with exactly one container node: the specific type where
+        // its identity is complete, the generic one everywhere else.
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "ts",
@@ -1184,13 +1190,32 @@ mod tests {
             ),
             Field::new("container_id", DataType::Utf8, false),
             Field::new("pod_uid", DataType::Utf8, true),
+            Field::new("container_name", DataType::Utf8, true),
         ]));
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(TimestampMillisecondArray::from(vec![1_000, 2_000, 3_000])) as ArrayRef,
-                Arc::new(StringArray::from(vec!["c-pod", "c-docker", "c-empty"])),
-                Arc::new(StringArray::from(vec![Some("uid-1"), None, Some("")])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1_000, 2_000, 3_000, 4_000,
+                ])) as ArrayRef,
+                Arc::new(StringArray::from(vec![
+                    "c-pod",
+                    "c-docker",
+                    "c-empty",
+                    "c-partial",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("uid-1"),
+                    None,
+                    Some(""),
+                    Some("uid-2"),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("api"),
+                    Some("api"),
+                    Some("api"),
+                    None,
+                ])),
             ],
         )
         .unwrap();
@@ -1201,12 +1226,14 @@ mod tests {
         )
         .unwrap();
 
-        let mut declaration = decl("container", &["container_id"]);
-        declaration.table = "descriptors".to_string();
-        declaration.suppressed_by_columns = vec!["pod_uid".to_string()];
+        let mut generic = decl("container", &["container_id"]);
+        generic.table = "descriptors".to_string();
+        generic.superseded_by_columns = vec!["pod_uid".to_string(), "container_name".to_string()];
+        let mut specific = decl("k8s.container", &["pod_uid", "container_name"]);
+        specific.table = "descriptors".to_string();
         let plan = build_registry_plan(
             vec![RegistrySource {
-                declarations: vec![declaration],
+                declarations: vec![generic, specific],
                 scan: ctx.table("descriptors").await.unwrap(),
             }],
             &test_window(),
@@ -1214,14 +1241,29 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let mut ids: Vec<String> = collect(&ctx, plan)
+        let mut rows: Vec<(String, String)> = collect(&ctx, plan)
             .await
             .iter()
-            .flat_map(|b| strings(b, 5))
+            .flat_map(|b| {
+                strings(b, 4)
+                    .into_iter()
+                    .zip(strings(b, 5))
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        ids.sort();
-        // An empty uid is no uid: it suppresses nothing.
-        assert_eq!(ids, vec!["c-docker", "c-empty"]);
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                // an empty uid is no uid: it supersedes nothing
+                ("container".to_string(), "c-docker".to_string()),
+                ("container".to_string(), "c-empty".to_string()),
+                // the pod row with no container name cannot produce the
+                // specific entity, so the generic one has to stand
+                ("container".to_string(), "c-partial".to_string()),
+                ("k8s.container".to_string(), "uid-1,api".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]

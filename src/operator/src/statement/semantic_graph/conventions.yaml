@@ -51,13 +51,15 @@ otlp_trace_entities:
     id: [resource_attributes.host.id]
     descriptive:
       - resource_attributes.host.name
-  # A container inside a pod is already the k8s.container entity, identified by
-  # [pod uid, container name]; a generic container beside it would be a second
-  # node for one physical container. The generic type therefore yields whenever
-  # the row carries a pod uid.
+  # A container inside a pod is the k8s.container entity, under the identity
+  # kube-state-metrics gives it, so the two sources name one node. The generic
+  # container yields to it — but only on rows that actually produce it, or a
+  # container would vanish instead of merging.
+  - entity: k8s.container
+    id: [resource_attributes.k8s.pod.uid, resource_attributes.k8s.container.name]
   - entity: container
     id: [resource_attributes.container.id]
-    suppressed_by: [resource_attributes.k8s.pod.uid]
+    superseded_by: k8s.container
     descriptive:
       - resource_attributes.container.name
   - entity: k8s.pod
@@ -157,12 +159,13 @@ otel_info_metrics:
       id: [host.id]
       descriptive:
         - host.name
-    # Yields to k8s.container on pod rows, as on the trace side above. One
-    # descriptor table holds both pod rows and bare-runtime rows, so the test
-    # is per row, not per table.
+    - entity: k8s.container
+      id: [k8s.pod.uid, k8s.container.name]
+    # Yields to k8s.container, as on the trace side above. One descriptor table
+    # holds both pod rows and bare-runtime rows, so the test is per row.
     - entity: container
       id: [container.id]
-      suppressed_by: [k8s.pod.uid]
+      superseded_by: k8s.container
       descriptive:
         - container.name
     - entity: k8s.pod
