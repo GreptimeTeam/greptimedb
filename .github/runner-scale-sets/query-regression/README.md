@@ -50,9 +50,12 @@ the data disk, so deleting the instance detaches and retains it. To rebuild
 the cache from scratch, delete or reformat the disk; the next provision
 formats an unformatted disk automatically.
 
-The system disk is 50 GiB, which covers the image, a 16 GiB swapfile, and
-the checkout. Attach `QUERY_REGRESSION_CACHE_DISK_ID` for cold nightly
-builds; without it the target dir shares this disk and may ENOSPC.
+The system disk is 100 GiB, which covers the image, a 16 GiB swapfile, the
+checkout, and — with no cache disk attached — the build caches (target dir,
+cargo registry, sccache) for a cold double nightly build. Do not undersize
+it: ENOSPC stops the runner itself from writing logs, which GitHub reports
+as `The operation was canceled` with no telemetry, indistinguishable from a
+platform-side cancellation.
 cloud-init masks `systemd-oomd`, creates `/swapfile`, and sets
 `OOMPolicy=continue` on the runner unit. Ubuntu 24.04 defaults to
 `DefaultOOMPolicy=stop`, which SIGTERM-s the whole unit when rustc is
