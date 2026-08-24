@@ -15,14 +15,15 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ResultExt, ensure};
 
-use crate::error::{InvalidParameterSnafu, Result};
+use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result};
 
 #[derive(Debug, Deserialize)]
 pub struct WeightParams {
@@ -33,6 +34,20 @@ pub struct WeightParams {
 #[derive(Debug, Deserialize)]
 pub struct MaxPollsParams {
     max_concurrent_polls: usize,
+}
+
+#[axum_macros::debug_handler]
+pub async fn set_enabled_handler(body: Bytes) -> Result<impl IntoResponse> {
+    let enabled: bool = serde_json::from_slice(&body).context(ParseJsonSnafu)?;
+    ensure!(
+        common_runtime::set_workload_scheduler_enabled(enabled),
+        InvalidParameterSnafu {
+            reason: "workload scheduler was not constructed at startup",
+        }
+    );
+    let change_note = format!("Workload scheduler enabled={enabled}");
+    info!("{}", change_note);
+    Ok((StatusCode::OK, change_note))
 }
 
 /// Per-class scheduler counters, mirroring catio's `ClassStats` with the
@@ -51,8 +66,10 @@ pub struct ClassStatusDto {
     total_admission_wait_ms: f64,
 }
 
-/// Point-in-time snapshot of the workload scheduler. When the scheduler is
-/// disabled `enabled` is `false` and the remaining fields are omitted.
+/// Point-in-time snapshot of the workload scheduler. When it was not
+/// constructed at startup, the scheduler-specific fields are omitted. A
+/// dynamically disabled scheduler retains its configuration and historical
+/// counters.
 #[derive(Debug, Serialize)]
 pub struct SchedulerStatusDto {
     enabled: bool,
@@ -69,7 +86,7 @@ pub async fn set_weights_handler(Query(params): Query<WeightParams>) -> Result<i
     ensure!(
         common_runtime::workload_scheduler_stats().is_some(),
         InvalidParameterSnafu {
-            reason: "workload scheduler is not enabled",
+            reason: "workload scheduler was not constructed at startup",
         }
     );
     ensure!(
@@ -96,7 +113,7 @@ pub async fn set_max_concurrent_polls_handler(
     ensure!(
         common_runtime::workload_scheduler_stats().is_some(),
         InvalidParameterSnafu {
-            reason: "workload scheduler is not enabled",
+            reason: "workload scheduler was not constructed at startup",
         }
     );
     ensure!(
@@ -118,10 +135,11 @@ pub async fn set_max_concurrent_polls_handler(
 
 /// Returns the current workload scheduler state (weights, concurrency limits,
 /// and per-class counters). Always returns 200, with `enabled=false` when the
-/// scheduler is not enabled, so operators can distinguish "disabled" from a
-/// failed request.
+/// scheduler is dynamically disabled. If it was not constructed at startup,
+/// scheduler-specific fields are omitted.
 #[axum_macros::debug_handler]
 pub async fn get_status_handler() -> Result<impl IntoResponse> {
+    let enabled = common_runtime::workload_scheduler_enabled();
     let Some(stats) = common_runtime::workload_scheduler_stats() else {
         return Ok(Json(SchedulerStatusDto {
             enabled: false,
@@ -162,7 +180,7 @@ pub async fn get_status_handler() -> Result<impl IntoResponse> {
         .collect();
 
     Ok(Json(SchedulerStatusDto {
-        enabled: true,
+        enabled,
         max_concurrent_polls: Some(stats.max_concurrent_polls),
         active_polls: Some(stats.active_polls),
         classes: Some(classes),

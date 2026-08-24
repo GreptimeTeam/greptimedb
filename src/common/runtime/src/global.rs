@@ -22,6 +22,7 @@ use common_telemetry::{info, warn};
 use once_cell::sync::Lazy;
 use paste::paste;
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Handle;
 
 use crate::metrics::register_workload_scheduler_metrics;
 use crate::runtime::{BuilderBuild, RuntimeTrait};
@@ -139,6 +140,8 @@ struct GlobalRuntimes {
     hb_runtime: Runtime,
     query_runtime: Runtime,
     ingest_runtime: Runtime,
+    query_handle: Handle,
+    ingest_handle: Handle,
     workload_scheduler: Option<Scheduler>,
 }
 
@@ -178,8 +181,11 @@ macro_rules! define_scheduled_spawn {
                 F::Output: Send + 'static,
             {
                 match &self.workload_scheduler {
-                    Some(scheduler) => self.[<$type _runtime>]
-                        .spawn(scheduler.schedule_in($class, future)),
+                    Some(scheduler) => scheduler.spawn_in_on(
+                        &self.[<$type _handle>],
+                        $class,
+                        future,
+                    ),
                     None => self.[<$type _runtime>].spawn(future),
                 }
             }
@@ -218,7 +224,8 @@ impl GlobalRuntimes {
             global.unwrap_or_else(|| create_runtime("global", "global-worker", GLOBAL_WORKERS));
         let query_runtime = query.unwrap_or_else(|| global_runtime.clone());
         let ingest_runtime = ingest.unwrap_or_else(|| global_runtime.clone());
-
+        let query_handle = query_runtime.handle();
+        let ingest_handle = ingest_runtime.handle();
         Self {
             global_runtime,
             compact_runtime: compact.unwrap_or_else(|| {
@@ -235,6 +242,8 @@ impl GlobalRuntimes {
                 .unwrap_or_else(|| create_runtime("heartbeat", "hb-worker", HB_WORKERS)),
             query_runtime,
             ingest_runtime,
+            query_handle,
+            ingest_handle,
             workload_scheduler,
         }
     }
@@ -403,8 +412,32 @@ define_global_runtime_spawn!(hb);
 define_global_runtime_spawn!(query);
 define_global_runtime_spawn!(ingest);
 
-/// Returns scheduler counters when the experimental workload scheduler is
-/// enabled.
+/// Returns whether the experimental workload scheduler is currently enabled.
+/// Returns `false` when no scheduler was constructed at startup.
+pub fn workload_scheduler_enabled() -> bool {
+    GLOBAL_RUNTIMES
+        .workload_scheduler
+        .as_ref()
+        .is_some_and(Scheduler::is_enabled)
+}
+
+/// Enables or disables the experimental workload scheduler for new spawn
+/// submissions. Returns `false` when no scheduler was constructed at startup.
+pub fn set_workload_scheduler_enabled(enabled: bool) -> bool {
+    let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
+        warn!(
+            "The experimental workload scheduler was not constructed at startup; ignoring enabled={enabled}"
+        );
+        return false;
+    };
+
+    scheduler.set_enabled(enabled);
+    info!("Experimental workload scheduler enabled={enabled}");
+    true
+}
+
+/// Returns scheduler counters when the experimental workload scheduler was
+/// constructed at startup, including while it is dynamically disabled.
 pub fn workload_scheduler_stats() -> Option<SchedulerStats> {
     GLOBAL_RUNTIMES
         .workload_scheduler
@@ -412,13 +445,13 @@ pub fn workload_scheduler_stats() -> Option<SchedulerStats> {
         .map(Scheduler::stats)
 }
 
-/// Dynamically adjusts the query and write weights of the experimental
-/// workload scheduler at runtime. Returns `false` and leaves the scheduler
-/// unchanged when the scheduler is disabled or either weight is zero.
+/// Dynamically adjusts the query and write weights of the experimental workload
+/// scheduler at runtime. Returns `false` and leaves the scheduler unchanged when
+/// it was not constructed at startup or either weight is zero.
 pub fn set_workload_scheduler_weights(query_weight: u32, write_weight: u32) -> bool {
     let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
         warn!(
-            "The experimental workload scheduler is not enabled; ignoring query_weight={}, \
+            "The experimental workload scheduler was not constructed at startup; ignoring query_weight={}, \
              write_weight={}",
             query_weight, write_weight
         );
@@ -445,12 +478,12 @@ pub fn set_workload_scheduler_weights(query_weight: u32, write_weight: u32) -> b
 
 /// Dynamically adjusts the maximum number of concurrent polls admitted to
 /// Tokio by the experimental workload scheduler at runtime. Returns `false`
-/// and leaves the scheduler unchanged when the scheduler is disabled or the
-/// limit is zero.
+/// and leaves the scheduler unchanged when it was not constructed at startup
+/// or the limit is zero.
 pub fn set_workload_scheduler_max_concurrent_polls(limit: usize) -> bool {
     let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
         warn!(
-            "The experimental workload scheduler is not enabled; ignoring \
+            "The experimental workload scheduler was not constructed at startup; ignoring \
              max_concurrent_polls={limit}"
         );
         return false;
@@ -600,6 +633,40 @@ mod tests {
         assert_eq!(12, stats.max_concurrent_polls);
         assert_eq!(2, stats.classes[&QUERY_TASK_CLASS].weight);
         assert_eq!(8, stats.classes[&WRITE_TASK_CLASS].weight);
+    }
+
+    #[test]
+    fn test_workload_scheduler_bypasses_disabled_query_and_write_spawns() {
+        let runtime = create_runtime("test-workload-bypass", "test-workload-bypass-worker", 2);
+        let scheduler = Scheduler::builder()
+            .max_concurrent_polls(2)
+            .weight(QUERY_TASK_CLASS, 2)
+            .weight(WRITE_TASK_CLASS, 8)
+            .build();
+        scheduler.set_enabled(false);
+        let runtimes = GlobalRuntimes::new(
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(scheduler.clone()),
+        );
+
+        let query = runtimes.spawn_query(async { "query" });
+        let write = runtimes.spawn_ingest(async { "write" });
+        let (query, write) =
+            runtime.block_on(async { (query.await.unwrap(), write.await.unwrap()) });
+
+        assert_eq!("query", query);
+        assert_eq!("write", write);
+        let stats = scheduler.stats();
+        for class in [QUERY_TASK_CLASS, WRITE_TASK_CLASS] {
+            let class_stats = &stats.classes[&class];
+            assert_eq!(0, class_stats.tasks);
+            assert_eq!(0, class_stats.admitted);
+            assert_eq!(0, class_stats.polls);
+        }
     }
 
     #[test]
