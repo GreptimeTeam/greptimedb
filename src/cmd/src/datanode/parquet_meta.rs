@@ -13,15 +13,14 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
-use parquet::basic::Compression;
-use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader};
+use parquet::file::metadata::ParquetMetaData;
 use serde::Serialize;
 use snafu::ResultExt;
 
+use crate::datanode::tool_util::{compression_name, load_local_parquet_metadata};
 use crate::error;
 
 /// Display parquet file metadata.
@@ -88,21 +87,9 @@ struct ColumnChunkMetaView {
     bloom_filter_length: Option<i32>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum CompressionConfig {
-    Uncompressed,
-    Snappy,
-    Gzip,
-    Lzo,
-    Brotli,
-    Lz4,
-    Zstd,
-    Lz4Raw,
-}
-
 impl ParquetMetaCommand {
     pub async fn run(&self) -> error::Result<()> {
-        let metadata = load_metadata_with_page_index(&self.input)?;
+        let metadata = load_local_parquet_metadata(&self.input)?;
         let view = build_file_meta_view(&self.input, &metadata);
 
         match self.format {
@@ -115,13 +102,6 @@ impl ParquetMetaCommand {
 
         Ok(())
     }
-}
-
-fn load_metadata_with_page_index(path: &Path) -> error::Result<ParquetMetaData> {
-    ParquetMetaDataReader::new()
-        .with_page_index_policy(PageIndexPolicy::Optional)
-        .parse_and_finish(&open_file(path)?)
-        .map_err(|e| parquet_error("read parquet metadata", path, e))
 }
 
 fn build_file_meta_view(path: &Path, metadata: &ParquetMetaData) -> FileMetaView {
@@ -157,7 +137,7 @@ fn build_file_meta_view(path: &Path, metadata: &ParquetMetaData) -> FileMetaView
                         path: column.column_path().string(),
                         physical_type: format!("{:?}", column.column_type()),
                         encodings: column.encodings().map(|enc| format!("{enc:?}")).collect(),
-                        compression: compression_to_string(column.compression()).to_string(),
+                        compression: compression_name(column.compression()).to_string(),
                         num_values: column.num_values(),
                         uncompressed_size: column.uncompressed_size(),
                         compressed_size: column.compressed_size(),
@@ -268,21 +248,6 @@ fn print_meta_text(view: &FileMetaView) {
     }
 }
 
-fn open_file(path: &Path) -> error::Result<File> {
-    File::open(path).context(error::FileIoSnafu)
-}
-
-fn parquet_error(
-    action: &'static str,
-    path: &Path,
-    error: parquet::errors::ParquetError,
-) -> error::Error {
-    error::IllegalConfigSnafu {
-        msg: format!("{action} failed for {}: {error}", path.display()),
-    }
-    .build()
-}
-
 fn dictionary_page_bytes(
     dictionary_page_offset: Option<i64>,
     data_page_offset: i64,
@@ -318,34 +283,9 @@ fn format_optional_i32(value: Option<i32>) -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
-fn compression_to_config(compression: Compression) -> CompressionConfig {
-    match compression {
-        Compression::UNCOMPRESSED => CompressionConfig::Uncompressed,
-        Compression::SNAPPY => CompressionConfig::Snappy,
-        Compression::GZIP(_) => CompressionConfig::Gzip,
-        Compression::LZO => CompressionConfig::Lzo,
-        Compression::BROTLI(_) => CompressionConfig::Brotli,
-        Compression::LZ4 => CompressionConfig::Lz4,
-        Compression::ZSTD(_) => CompressionConfig::Zstd,
-        Compression::LZ4_RAW => CompressionConfig::Lz4Raw,
-    }
-}
-
-fn compression_to_string(compression: Compression) -> &'static str {
-    match compression_to_config(compression) {
-        CompressionConfig::Uncompressed => "uncompressed",
-        CompressionConfig::Snappy => "snappy",
-        CompressionConfig::Gzip => "gzip",
-        CompressionConfig::Lzo => "lzo",
-        CompressionConfig::Brotli => "brotli",
-        CompressionConfig::Lz4 => "lz4",
-        CompressionConfig::Zstd => "zstd",
-        CompressionConfig::Lz4Raw => "lz4-raw",
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::sync::Arc;
 
     use datatypes::arrow::array::{Int32Array, RecordBatch, StringArray};
@@ -363,7 +303,7 @@ mod tests {
         let path = dir.path().join("input.parquet");
         write_test_parquet(&path);
 
-        let metadata = load_metadata_with_page_index(&path).unwrap();
+        let metadata = load_local_parquet_metadata(&path).unwrap();
         let view = build_file_meta_view(&path, &metadata);
 
         assert_eq!(view.num_row_groups, 1);

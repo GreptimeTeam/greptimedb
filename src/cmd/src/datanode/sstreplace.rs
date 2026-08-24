@@ -25,9 +25,11 @@ use object_store::ObjectStore;
 use parquet::file::FOOTER_SIZE;
 use parquet::file::metadata::{FooterTail, ParquetMetaDataReader};
 use store_api::region_request::PathType;
-use store_api::storage::{FileId, RegionId};
 
-use crate::datanode::objbench::{build_object_store, parse_config};
+use crate::datanode::tool_util::{
+    build_object_store, max_row_group_uncompressed_size, parse_config, parse_file_id,
+    parse_path_type, parse_region_id,
+};
 use crate::error;
 
 /// Replace a mito region SST and update the corresponding manifest metadata.
@@ -80,7 +82,7 @@ impl SstReplaceCommand {
 
         let region_id = parse_region_id(&self.region_id)?;
         let file_id = parse_file_id(&self.file_id)?;
-        let path_type = parse_path_type(&self.path_type)?;
+        let path_type = parse_optional_path_type(&self.path_type)?;
         let replacement = self.replacement()?;
 
         let (store_cfg, mito_config, _wal_config) = parse_config(&self.config)?;
@@ -298,19 +300,6 @@ fn validate_replacement(
     Ok(())
 }
 
-fn max_row_group_uncompressed_size(meta: &parquet::file::metadata::ParquetMetaData) -> u64 {
-    meta.row_groups()
-        .iter()
-        .map(|rg| {
-            rg.columns()
-                .iter()
-                .map(|c| c.uncompressed_size() as u64)
-                .sum::<u64>()
-        })
-        .max()
-        .unwrap_or(0)
-}
-
 fn decode_parquet_metadata(
     data: &[u8],
 ) -> Result<parquet::file::metadata::ParquetMetaData, Box<dyn std::error::Error + Send + Sync>> {
@@ -331,55 +320,15 @@ fn decode_parquet_metadata(
     )?)
 }
 
-fn parse_file_id(s: &str) -> error::Result<FileId> {
-    FileId::parse_str(s).map_err(|e| {
-        error::IllegalConfigSnafu {
-            msg: format!("invalid file_id '{}': {}", s, e),
-        }
-        .build()
-    })
-}
-
-fn parse_region_id(s: &str) -> error::Result<RegionId> {
-    if s.contains(':') {
-        let parts: Vec<&str> = s.splitn(2, ':').collect();
-        let table_id: u32 = parts[0].parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid table_id in region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        let region_num: u32 = parts[1].parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid region_num in region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        Ok(RegionId::new(table_id, region_num))
-    } else {
-        let id: u64 = s.parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        Ok(RegionId::from_u64(id))
-    }
-}
-
-fn parse_path_type(s: &str) -> error::Result<Option<PathType>> {
-    match s.to_lowercase().as_str() {
+fn parse_optional_path_type(value: &str) -> error::Result<Option<PathType>> {
+    match value.to_lowercase().as_str() {
         "auto" => Ok(None),
-        "bare" => Ok(Some(PathType::Bare)),
-        "data" => Ok(Some(PathType::Data)),
-        "metadata" => Ok(Some(PathType::Metadata)),
-        _ => error::IllegalConfigSnafu {
-            msg: format!(
-                "invalid path_type '{}', expected: auto, bare, data, metadata",
-                s
-            ),
-        }
-        .fail(),
+        _ => parse_path_type(value).map(Some).map_err(|_| {
+            error::IllegalConfigSnafu {
+                msg: format!("invalid path_type '{value}', expected: auto, bare, data, metadata"),
+            }
+            .build()
+        }),
     }
 }
 

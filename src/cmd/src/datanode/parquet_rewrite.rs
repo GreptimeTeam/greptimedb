@@ -20,7 +20,7 @@ use datatypes::arrow::record_batch::RecordBatchReader;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{BrotliLevel, Compression, Encoding, GzipLevel, ZstdLevel};
-use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader};
+use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use parquet::file::reader::FileReader;
 use parquet::file::serialized_reader::SerializedFileReader;
@@ -28,6 +28,7 @@ use parquet::schema::types::ColumnPath;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+use crate::datanode::tool_util::load_local_parquet_metadata;
 use crate::error;
 
 /// Read and rewrite a parquet file with different writer properties.
@@ -127,7 +128,7 @@ impl ParquetRewriteCommand {
 
     fn dump_properties(&self, path: &Path) -> error::Result<()> {
         ensure_can_write(path, self.overwrite)?;
-        let metadata = load_metadata_with_page_index(&self.input)?;
+        let metadata = load_local_parquet_metadata(&self.input)?;
         let properties = infer_rewrite_properties(&metadata);
         let content = toml::to_string_pretty(&properties).map_err(|e| {
             error::IllegalConfigSnafu {
@@ -183,13 +184,6 @@ impl ParquetRewriteCommand {
         println!("Wrote parquet file to {}", output.display());
         Ok(())
     }
-}
-
-fn load_metadata_with_page_index(path: &Path) -> error::Result<ParquetMetaData> {
-    ParquetMetaDataReader::new()
-        .with_page_index_policy(PageIndexPolicy::Optional)
-        .parse_and_finish(&open_file(path)?)
-        .map_err(|e| parquet_error("read parquet metadata", path, e))
 }
 
 fn infer_rewrite_properties(metadata: &ParquetMetaData) -> RewriteProperties {
@@ -441,7 +435,7 @@ mod tests {
         let output = dir.path().join("output.parquet");
         write_test_parquet(&input, true);
 
-        let metadata = load_metadata_with_page_index(&input).unwrap();
+        let metadata = load_local_parquet_metadata(&input).unwrap();
         let mut properties = infer_rewrite_properties(&metadata);
         properties.columns[1].dictionary_enabled = Some(false);
         let props_path = dir.path().join("props.toml");
@@ -459,7 +453,7 @@ mod tests {
             .rewrite(&output, command.properties.as_ref().unwrap())
             .unwrap();
 
-        let rewritten = load_metadata_with_page_index(&output).unwrap();
+        let rewritten = load_local_parquet_metadata(&output).unwrap();
         assert_eq!(rewritten.file_metadata().num_rows(), 4);
         let key_values = rewritten
             .file_metadata()

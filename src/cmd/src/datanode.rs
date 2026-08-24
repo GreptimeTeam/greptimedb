@@ -28,6 +28,7 @@ pub mod scanbench;
 #[cfg(feature = "dev-tools")]
 #[allow(clippy::print_stdout)]
 mod sstreplace;
+mod tool_util;
 
 use std::path::Path;
 use std::time::Duration;

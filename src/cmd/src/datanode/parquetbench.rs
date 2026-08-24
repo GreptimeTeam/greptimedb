@@ -42,7 +42,10 @@ use store_api::region_request::PathType;
 use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, is_internal_column};
 use store_api::storage::{ColumnId, FileId, RegionId};
 
-use crate::datanode::objbench::{build_object_store, extract_region_metadata, parse_config};
+use crate::datanode::tool_util::{
+    build_object_store, extract_region_metadata, format_bytes, parse_config, parse_file_id,
+    parse_path_type, parse_region_id,
+};
 use crate::error;
 
 const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;
@@ -651,12 +654,7 @@ async fn build_region_source(
     path_type: PathType,
 ) -> error::Result<ParquetbenchSource> {
     let region = parse_region_id(region_id)?;
-    let file_id = FileId::parse_str(file_id).map_err(|e| {
-        error::IllegalConfigSnafu {
-            msg: format!("invalid file_id '{}': {}", file_id, e),
-        }
-        .build()
-    })?;
+    let file_id = parse_file_id(file_id)?;
     let region_file_id = RegionFileId::new(region, file_id);
     let file_path = sst_file_path(&table_dir, region_file_id, path_type);
 
@@ -987,60 +985,6 @@ fn parse_batch_size(s: &str) -> Result<usize, String> {
     Ok(batch_size)
 }
 
-fn parse_region_id(s: &str) -> error::Result<RegionId> {
-    if s.contains(':') {
-        let parts: Vec<&str> = s.splitn(2, ':').collect();
-        let table_id: u32 = parts[0].parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid table_id in region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        let region_num: u32 = parts[1].parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid region_num in region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        Ok(RegionId::new(table_id, region_num))
-    } else {
-        let id: u64 = s.parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        Ok(RegionId::from_u64(id))
-    }
-}
-
-fn parse_path_type(s: &str) -> error::Result<PathType> {
-    match s.to_lowercase().as_str() {
-        "bare" => Ok(PathType::Bare),
-        "data" => Ok(PathType::Data),
-        "metadata" => Ok(PathType::Metadata),
-        _ => Err(error::IllegalConfigSnafu {
-            msg: format!("invalid path_type '{}', expected: bare, data, metadata", s),
-        }
-        .build()),
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
 fn format_rate(rate: f64) -> String {
     if !rate.is_finite() {
         return "inf rows".to_string();
@@ -1112,22 +1056,6 @@ mod tests {
             })
             .primary_key(vec![1]);
         builder.build().unwrap()
-    }
-
-    #[test]
-    fn test_parse_region_id() {
-        assert_eq!(parse_region_id("1024:7").unwrap(), RegionId::new(1024, 7));
-        assert_eq!(
-            parse_region_id(&RegionId::new(1, 2).as_u64().to_string()).unwrap(),
-            RegionId::new(1, 2)
-        );
-    }
-
-    #[test]
-    fn test_parse_path_type() {
-        assert_eq!(parse_path_type("bare").unwrap(), PathType::Bare);
-        assert_eq!(parse_path_type("data").unwrap(), PathType::Data);
-        assert_eq!(parse_path_type("metadata").unwrap(), PathType::Metadata);
     }
 
     #[test]
