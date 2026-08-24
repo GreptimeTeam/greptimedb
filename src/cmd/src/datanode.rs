@@ -27,7 +27,7 @@ pub mod parquetbench;
 pub mod scanbench;
 #[cfg(feature = "dev-tools")]
 #[allow(clippy::print_stdout)]
-mod sstreplace;
+mod sst_replace;
 mod tool_util;
 
 use std::path::Path;
@@ -56,7 +56,7 @@ use crate::datanode::parquet_rewrite::ParquetRewriteCommand;
 use crate::datanode::parquetbench::ParquetbenchCommand;
 use crate::datanode::scanbench::ScanbenchCommand;
 #[cfg(feature = "dev-tools")]
-use crate::datanode::sstreplace::SstReplaceCommand;
+use crate::datanode::sst_replace::SstReplaceCommand;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };

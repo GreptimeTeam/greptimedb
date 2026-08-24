@@ -78,7 +78,7 @@ impl SstReplaceCommand {
             common_telemetry::init_default_ut_logging();
         }
 
-        println!("{}", "Starting sstreplace...".cyan().bold());
+        println!("{}", "Starting sst-replace...".cyan().bold());
 
         let region_id = parse_region_id(&self.region_id)?;
         let file_id = parse_file_id(&self.file_id)?;
