@@ -14,11 +14,14 @@
 
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use store_api::storage::RegionId;
 use store_api::{MIN_VERSION, ManifestVersion};
+#[cfg(test)]
+use tokio::sync::Notify;
 
 use crate::error::Result;
 use crate::manifest::action::{RegionCheckpoint, RegionManifest};
@@ -31,6 +34,9 @@ use crate::metrics::MANIFEST_OP_ELAPSED;
 pub(crate) struct Checkpointer {
     manifest_options: RegionManifestOptions,
     inner: Arc<Inner>,
+    checkpoint_task: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    pending_checkpoint_wait_started: Arc<Notify>,
 }
 
 #[derive(Debug)]
@@ -38,15 +44,10 @@ struct Inner {
     region_id: RegionId,
     manifest_store: ManifestObjectStore,
     last_checkpoint_version: AtomicU64,
-    is_doing_checkpoint: AtomicBool,
 }
 
 impl Inner {
     async fn do_checkpoint(&self, checkpoint: RegionCheckpoint) {
-        let _guard = scopeguard::guard(&self.is_doing_checkpoint, |x| {
-            x.store(false, Ordering::Relaxed);
-        });
-
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["checkpoint"])
             .start_timer();
@@ -90,14 +91,6 @@ impl Inner {
     fn region_id(&self) -> RegionId {
         self.region_id
     }
-
-    fn is_doing_checkpoint(&self) -> bool {
-        self.is_doing_checkpoint.load(Ordering::Relaxed)
-    }
-
-    fn set_doing_checkpoint(&self) {
-        self.is_doing_checkpoint.store(true, Ordering::Relaxed);
-    }
 }
 
 impl Checkpointer {
@@ -113,8 +106,10 @@ impl Checkpointer {
                 region_id,
                 manifest_store,
                 last_checkpoint_version: AtomicU64::new(last_checkpoint_version),
-                is_doing_checkpoint: AtomicBool::new(false),
             }),
+            checkpoint_task: None,
+            #[cfg(test)]
+            pending_checkpoint_wait_started: Arc::new(Notify::new()),
         }
     }
 
@@ -140,7 +135,19 @@ impl Checkpointer {
     /// Check if it's needed to do checkpoint for the region by the checkpoint distance.
     /// If needed, and there's no currently running checkpoint task, it will start a new checkpoint
     /// task running in the background.
-    pub(crate) fn maybe_do_checkpoint(&self, manifest: &RegionManifest) {
+    pub(crate) async fn maybe_do_checkpoint(&mut self, manifest: &RegionManifest) {
+        if self
+            .checkpoint_task
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+        {
+            return;
+        }
+
+        // Reap a completed task before checking whether to start the next one.
+        // This keeps the handle as the single source of truth for task state.
+        self.wait_for_pending_checkpoint().await;
+
         if self.manifest_options.checkpoint_distance == 0 {
             return;
         }
@@ -149,12 +156,6 @@ impl Checkpointer {
         if manifest.manifest_version - last_checkpoint_version
             < self.manifest_options.checkpoint_distance
         {
-            return;
-        }
-
-        // We can simply check whether there's a running checkpoint task like this, all because of
-        // the caller of this function is ran single threaded, inside the lock of RegionManifestManager.
-        if self.inner.is_doing_checkpoint() {
             return;
         }
 
@@ -181,17 +182,44 @@ impl Checkpointer {
         self.do_checkpoint(checkpoint);
     }
 
-    fn do_checkpoint(&self, checkpoint: RegionCheckpoint) {
-        self.inner.set_doing_checkpoint();
-
+    fn do_checkpoint(&mut self, checkpoint: RegionCheckpoint) {
         let inner = self.inner.clone();
-        common_runtime::spawn_global(async move {
+        self.checkpoint_task = Some(common_runtime::spawn_global(async move {
             inner.do_checkpoint(checkpoint).await;
-        });
+        }));
+    }
+
+    /// Waits for the current checkpoint task without removing its handle first.
+    ///
+    /// Keeping the handle in `self` while awaiting is important. If the caller is
+    /// cancelled, another lifecycle transition can still wait for the same task.
+    pub(crate) async fn wait_for_pending_checkpoint(&mut self) {
+        let Some(handle) = self.checkpoint_task.as_mut() else {
+            return;
+        };
+
+        #[cfg(test)]
+        self.pending_checkpoint_wait_started.notify_one();
+
+        let result = (&mut *handle).await;
+        // There is no cancellation point between observing completion and
+        // clearing the handle.
+        self.checkpoint_task = None;
+
+        if let Err(e) = result {
+            warn!(e; "Failed to join checkpoint task for region {}", self.inner.region_id());
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn is_doing_checkpoint(&self) -> bool {
-        self.inner.is_doing_checkpoint()
+        self.checkpoint_task
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_checkpoint_wait_started(&self) -> Arc<Notify> {
+        self.pending_checkpoint_wait_started.clone()
     }
 }
