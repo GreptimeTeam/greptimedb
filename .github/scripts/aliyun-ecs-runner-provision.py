@@ -449,14 +449,10 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         spot_strategy="NoSpot",
         internet_charge_type="PayByTraffic",
         internet_max_bandwidth_out=100,
-        # Holds the image (~12G), the 16G swapfile, the source checkout, the
-        # base+candidate cluster data homes, AND — with no retained cache
-        # disk attached — the build caches (target dir, cargo registry,
-        # sccache). 50G proved too small for a cold double nightly build:
-        # ENOSPC also stops the runner itself from writing logs, which
-        # surfaces as a canceled job with no evidence. Deleted with the
-        # instance.
-        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="150"),
+        # Holds the image (~12G), the 16G swapfile, the source checkout, and
+        # the base+candidate cluster data homes. With no retained cache disk,
+        # build caches share this disk too. Deleted with the instance.
+        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="40"),
         user_data=user_data,
         tag=[
             ecs_models.RunInstancesRequestTag(key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE),

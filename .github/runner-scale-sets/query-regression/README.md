@@ -50,12 +50,11 @@ the data disk, so deleting the instance detaches and retains it. To rebuild
 the cache from scratch, delete or reformat the disk; the next provision
 formats an unformatted disk automatically.
 
-The system disk is 150 GiB, which covers the image, a 16 GiB swapfile, the
-checkout, and — with no cache disk attached — the build caches (target dir,
-cargo registry, sccache) for a cold double nightly build. Do not undersize
-it: ENOSPC stops the runner itself from writing logs, which GitHub reports
-as `The operation was canceled` with no telemetry, indistinguishable from a
-platform-side cancellation.
+The system disk is 40 GiB, which covers the image, a 16 GiB swapfile, and
+the checkout. With no cache disk attached, build caches (target dir, cargo
+registry, sccache) share this disk too. ENOSPC stops the runner itself from
+writing logs, which GitHub reports as `The operation was canceled` with no
+telemetry, indistinguishable from a platform-side cancellation.
 cloud-init masks `systemd-oomd`, disables `unattended-upgrades` /
 `apt-daily-upgrade`, creates `/swapfile`, and sets `OOMPolicy=continue`
 on the runner unit. Ubuntu 24.04 defaults to `DefaultOOMPolicy=stop`,
