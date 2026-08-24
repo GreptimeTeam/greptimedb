@@ -949,7 +949,6 @@ mod tests {
         }
     }
 
-    /// The descriptor is opt-in; the tests covering it turn it on.
     fn descriptor_ctx() -> OtlpMetricCtx {
         OtlpMetricCtx {
             resource_info: true,

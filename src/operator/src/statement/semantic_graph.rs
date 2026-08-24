@@ -496,8 +496,6 @@ fn qualified_id_expr(qualifier: &str, value: Expr, col: &dyn Fn(&str) -> Expr) -
     let qualifier = escaped_id_value(
         core_fns::coalesce().call(vec![cast(col(qualifier), DataType::Utf8), lit("")]),
     );
-    // Built through `Case` rather than the `when().otherwise()` builder, whose
-    // fallible return would need an `expect` on a non-test path.
     Expr::Case(Case::new(
         None,
         vec![(

@@ -81,8 +81,7 @@ pub struct ResourceInfoData {
 }
 
 impl ResourceInfoData {
-    /// Takes the raw attributes, before the promote filter runs on them, and
-    /// the times of the data points this resource actually writes.
+    /// Takes the raw attributes, before the promote filter runs on them.
     pub fn observe(&mut self, raw_attrs: &[KeyValue], resource: &ResourceMetrics) {
         let mut tags = Vec::with_capacity(MAX_PROJECTED_TAGS);
         let ServiceIdentity { job, instance } = service_identity(raw_attrs);
@@ -260,7 +259,6 @@ mod tests {
         data.observe(&[kv("host.id", "h-2")], &gauge_at(&[10]));
         assert_eq!(data.rows.len(), 2);
 
-        // nothing allowlisted: no row at all, rather than an empty one
         let mut empty = ResourceInfoData::default();
         empty.observe(&[kv("os.type", "linux")], &gauge_at(&[100]));
         assert!(empty.into_row_insert_requests().unwrap().is_none());

@@ -860,8 +860,6 @@ mod tests {
             declarations[2].id_columns,
             vec!["service_name", "resource_attributes.service.instance.id"]
         );
-        // No namespace column here, so the identity stays unqualified rather
-        // than the declaration being dropped.
         assert_eq!(declarations[1].id_qualifier, None);
 
         let namespaced = table_info(
@@ -930,8 +928,6 @@ mod tests {
             vec!["resource_attributes.host.name"]
         );
 
-        // Names alone synthesize nothing: host.name/container.name are not
-        // stable identities across SDKs and resource detectors.
         let names_only = table_info(
             &[
                 "service_name",
@@ -1038,12 +1034,9 @@ mod tests {
             declarations[3].descriptive_columns,
             vec!["service.name", "service.namespace"]
         );
-        // no descriptive_rest: other entities' ids must not be filed under
-        // service.instance
         assert_eq!(declarations[4].id_columns, vec!["job", "instance"]);
         assert!(declarations[4].descriptive_columns.is_empty());
 
-        // an id column the table lacks drops that entity, not the table
         let partial = prom_table_info(
             "greptime_otel_resource_info",
             &["job", "service.name", "host.id"],
@@ -1059,7 +1052,6 @@ mod tests {
     #[test]
     fn otel_implicit_declarations_are_gated() {
         let labels: &[&str] = &["job", "instance", "host.id"];
-        // a prometheus-stamped table under the otel-whitelisted name
         assert!(
             sorted_declarations(&prom_table_info(
                 "greptime_otel_resource_info",
@@ -1078,7 +1070,6 @@ mod tests {
             ))
             .is_empty()
         );
-        // drift guard: the ingestion-side table name must stay whitelisted
         assert!(
             conventions()
                 .unwrap()
