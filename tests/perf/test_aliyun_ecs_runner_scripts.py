@@ -108,6 +108,8 @@ class ProvisionUserDataTest(unittest.TestCase):
             )
             with self.subTest(cache_disk_id=cache_disk_id):
                 self.assertIn("systemctl mask systemd-oomd.socket systemd-oomd.service", script)
+                self.assertIn("systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer", script)
+                self.assertIn('APT::Periodic::Unattended-Upgrade "0"', script)
                 self.assertIn(f'fallocate --length {provision.SWAP_SIZE_GIB}G "{provision.SWAP_FILE}"', script)
                 self.assertIn(f'swapon "{provision.SWAP_FILE}"', script)
                 self.assertIn("sysctl --write vm.swappiness=10", script)

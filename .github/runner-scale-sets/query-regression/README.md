@@ -56,12 +56,15 @@ cargo registry, sccache) for a cold double nightly build. Do not undersize
 it: ENOSPC stops the runner itself from writing logs, which GitHub reports
 as `The operation was canceled` with no telemetry, indistinguishable from a
 platform-side cancellation.
-cloud-init masks `systemd-oomd`, creates `/swapfile`, and sets
-`OOMPolicy=continue` on the runner unit. Ubuntu 24.04 defaults to
-`DefaultOOMPolicy=stop`, which SIGTERM-s the whole unit when rustc is
-OOM-killed and GitHub reports `The operation was canceled` with no
-telemetry. Swap is a safety net for 16 GiB types, not a substitute for
-32 GiB; linking on swap is slow.
+cloud-init masks `systemd-oomd`, disables `unattended-upgrades` /
+`apt-daily-upgrade`, creates `/swapfile`, and sets `OOMPolicy=continue`
+on the runner unit. Ubuntu 24.04 defaults to `DefaultOOMPolicy=stop`,
+which SIGTERM-s the whole unit when rustc is OOM-killed and GitHub
+reports `The operation was canceled` with no telemetry. Unattended
+upgrades can do the same via `systemctl restart` of the runner after a
+library update; GitHub then records `UserCancelled` even though the job
+was still valid. Swap is a safety net for 16 GiB types, not a substitute
+for 32 GiB; linking on swap is slow.
 
 When a run dies with an unexplained `The operation was canceled` (no
 "Canceled by" banner, healthy machine), re-dispatch with `keep_instance`

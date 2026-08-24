@@ -187,6 +187,19 @@ chown -R {runner_uid}:{runner_gid} /home/runner"""
 # service cgroup on PSI pressure, and swap thrashing looks like pressure.
 systemctl disable --now systemd-oomd.socket systemd-oomd.service || true
 systemctl mask systemd-oomd.socket systemd-oomd.service || true
+# apt-daily-upgrade / unattended-upgrades can `systemctl restart` services
+# whose libraries were updated. That SIGTERM-s the runner mid-job; GitHub
+# records UserCancelled (job still valid, child exit 143). These VMs live
+# ~1h; security updates belong in the image, not at job time.
+systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service || true
+systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service || true
+systemctl stop unattended-upgrades.service || true
+killall -9 unattended-upgr || true
+cat > /etc/apt/apt.conf.d/99disable-auto-updates <<'APTEOF'
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APTEOF
 if [[ ! -f "{SWAP_FILE}" ]]; then
   fallocate --length {SWAP_SIZE_GIB}G "{SWAP_FILE}"
   chmod 600 "{SWAP_FILE}"
