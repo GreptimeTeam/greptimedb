@@ -25,6 +25,9 @@ mod parquet_rewrite;
 pub mod parquetbench;
 #[allow(clippy::print_stdout)]
 pub mod scanbench;
+#[cfg(feature = "dev-tools")]
+#[allow(clippy::print_stdout)]
+mod sstreplace;
 
 use std::path::Path;
 use std::time::Duration;
@@ -51,6 +54,8 @@ use crate::datanode::parquet_meta::ParquetMetaCommand;
 use crate::datanode::parquet_rewrite::ParquetRewriteCommand;
 use crate::datanode::parquetbench::ParquetbenchCommand;
 use crate::datanode::scanbench::ScanbenchCommand;
+#[cfg(feature = "dev-tools")]
+use crate::datanode::sstreplace::SstReplaceCommand;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
@@ -128,6 +133,8 @@ impl Command {
             SubCommand::ParquetMeta(_) => Self::default_bench_options(),
             #[cfg(feature = "dev-tools")]
             SubCommand::ParquetRewrite(_) => Self::default_bench_options(),
+            #[cfg(feature = "dev-tools")]
+            SubCommand::SstReplace(_) => Self::default_bench_options(),
         }
     }
 
@@ -159,6 +166,9 @@ pub enum SubCommand {
     /// Rewrite a parquet file with different writer properties.
     #[cfg(feature = "dev-tools")]
     ParquetRewrite(ParquetRewriteCommand),
+    /// Replace a Mito region SST and update its manifest metadata.
+    #[cfg(feature = "dev-tools")]
+    SstReplace(SstReplaceCommand),
 }
 
 impl SubCommand {
@@ -187,6 +197,11 @@ impl SubCommand {
             }
             #[cfg(feature = "dev-tools")]
             SubCommand::ParquetRewrite(cmd) => {
+                cmd.run().await?;
+                std::process::exit(0);
+            }
+            #[cfg(feature = "dev-tools")]
+            SubCommand::SstReplace(cmd) => {
                 cmd.run().await?;
                 std::process::exit(0);
             }

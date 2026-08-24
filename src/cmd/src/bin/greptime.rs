@@ -122,6 +122,8 @@ async fn start(cli: Command) -> Result<()> {
             datanode::SubCommand::ParquetMeta(ref cmd) => cmd.run().await,
             #[cfg(feature = "dev-tools")]
             datanode::SubCommand::ParquetRewrite(ref cmd) => cmd.run().await,
+            #[cfg(feature = "dev-tools")]
+            datanode::SubCommand::SstReplace(ref cmd) => cmd.run().await,
         },
         SubCommand::Flownode(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)
