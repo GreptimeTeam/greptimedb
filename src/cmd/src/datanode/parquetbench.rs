@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,19 +52,23 @@ const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;
 pub struct ParquetbenchCommand {
     /// Path to config TOML file (same format as standalone/datanode config)
     #[clap(long, value_name = "FILE")]
-    config: PathBuf,
+    config: Option<PathBuf>,
 
     /// Region ID: either numeric u64 (e.g. "4398046511104") or "table_id:region_num" (e.g. "1024:0")
     #[clap(long)]
-    region_id: String,
+    region_id: Option<String>,
 
     /// Table directory relative to data home (e.g. "data/greptime/public/1024/")
     #[clap(long)]
-    table_dir: String,
+    table_dir: Option<String>,
 
     /// SST file id to benchmark.
     #[clap(long)]
-    file_id: String,
+    file_id: Option<String>,
+
+    /// Local parquet SST file to benchmark with the direct reader.
+    #[clap(long, value_name = "FILE")]
+    file_path: Option<PathBuf>,
 
     /// Path to scan request JSON config file (supports projection_names only)
     #[clap(long, value_name = "FILE")]
@@ -129,6 +133,32 @@ struct IterationStats {
     elapsed: Duration,
 }
 
+#[derive(Debug)]
+enum ParquetbenchInput {
+    LocalFile {
+        file_path: PathBuf,
+    },
+    Region {
+        config: PathBuf,
+        region_id: String,
+        table_dir: String,
+        file_id: String,
+        path_type: PathType,
+    },
+}
+
+struct ParquetbenchSource {
+    object_store: object_store::ObjectStore,
+    file_path: String,
+    display_path: String,
+    region_id_label: String,
+    region_id: RegionId,
+    file_id: FileId,
+    region_file_id: RegionFileId,
+    path_type: Option<PathType>,
+    table_dir: Option<String>,
+}
+
 impl ParquetbenchCommand {
     pub async fn run(&self) -> error::Result<()> {
         if self.verbose {
@@ -145,41 +175,40 @@ impl ParquetbenchCommand {
             .fail();
         }
 
-        let region_id = parse_region_id(&self.region_id)?;
-        let path_type = parse_path_type(&self.path_type)?;
-        let file_id = FileId::parse_str(&self.file_id).map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid file_id '{}': {}", self.file_id, e),
-            }
-            .build()
-        })?;
-        let region_file_id = RegionFileId::new(region_id, file_id);
-        let file_path = sst_file_path(&self.table_dir, region_file_id, path_type);
+        let input = self.resolve_input()?;
+        let mut source = build_source(input).await?;
 
-        let (store_cfg, _mito_config, _wal_config) = parse_config(&self.config)?;
-        let object_store = build_object_store(&store_cfg).await?;
-
-        let file_size = object_store
-            .stat(&file_path)
+        let file_size = source
+            .object_store
+            .stat(&source.file_path)
             .await
             .map_err(|e| {
                 error::IllegalConfigSnafu {
-                    msg: format!("stat failed for {}: {}", file_path, e),
+                    msg: format!("stat failed for {}: {}", source.display_path, e),
                 }
                 .build()
             })?
             .content_length();
         let mut metadata_metrics = MetadataCacheMetrics::default();
-        let parquet_meta = MetadataLoader::new(object_store.clone(), &file_path, file_size)
-            .load(&mut metadata_metrics)
-            .await
-            .map_err(|e| {
-                error::IllegalConfigSnafu {
-                    msg: format!("read parquet metadata failed for {}: {:?}", file_path, e),
-                }
-                .build()
-            })?;
-        let region_meta = extract_region_metadata(&file_path, &parquet_meta)?;
+        let parquet_meta =
+            MetadataLoader::new(source.object_store.clone(), &source.file_path, file_size)
+                .load(&mut metadata_metrics)
+                .await
+                .map_err(|e| {
+                    error::IllegalConfigSnafu {
+                        msg: format!(
+                            "read parquet metadata failed for {}: {:?}",
+                            source.display_path, e
+                        ),
+                    }
+                    .build()
+                })?;
+        let region_meta = extract_region_metadata(&source.display_path, &parquet_meta)?;
+        if source.table_dir.is_none() {
+            source.region_id = region_meta.region_id;
+            source.region_id_label = source.region_id.as_u64().to_string();
+            source.region_file_id = RegionFileId::new(source.region_id, source.file_id);
+        }
         let scan_config = self.load_scan_config().await?;
         let projection = if self.reader == ReaderMode::Direct {
             resolve_projection_names(&scan_config, &region_meta)?
@@ -216,10 +245,10 @@ impl ParquetbenchCommand {
         println!(
             "{} Region ID: {} (u64: {})",
             "✓".green(),
-            self.region_id,
-            region_id.as_u64()
+            source.region_id_label,
+            source.region_id.as_u64()
         );
-        println!("{} File path: {}", "✓".green(), file_path.cyan());
+        println!("{} File path: {}", "✓".green(), source.display_path.cyan());
         println!(
             "{} Columns: {}",
             "✓".green(),
@@ -307,8 +336,8 @@ impl ParquetbenchCommand {
         let mut schema_printed = false;
         let file_handle = FileHandle::new(
             FileMeta {
-                region_id,
-                file_id,
+                region_id: source.region_id,
+                file_id: source.file_id,
                 time_range: Default::default(),
                 level: 0,
                 file_size,
@@ -332,9 +361,9 @@ impl ParquetbenchCommand {
             let stats = match self.reader {
                 ReaderMode::Direct => {
                     run_direct_iteration(
-                        object_store.clone(),
-                        file_path.clone(),
-                        region_file_id,
+                        source.object_store.clone(),
+                        source.file_path.clone(),
+                        source.region_file_id,
                         parquet_meta.clone(),
                         projection.clone(),
                         row_groups.clone(),
@@ -345,9 +374,19 @@ impl ParquetbenchCommand {
                 }
                 ReaderMode::FlatPrune => {
                     run_flat_prune_iteration(
-                        object_store.clone(),
-                        self.table_dir.clone(),
-                        path_type,
+                        source.object_store.clone(),
+                        source.table_dir.clone().ok_or_else(|| {
+                            error::IllegalConfigSnafu {
+                                msg: "flat-prune reader requires --table-dir".to_string(),
+                            }
+                            .build()
+                        })?,
+                        source.path_type.ok_or_else(|| {
+                            error::IllegalConfigSnafu {
+                                msg: "flat-prune reader requires --path-type".to_string(),
+                            }
+                            .build()
+                        })?,
                         file_handle.clone(),
                         region_meta.clone(),
                         projection_column_ids.clone(),
@@ -450,6 +489,65 @@ impl ParquetbenchCommand {
         Ok(())
     }
 
+    fn resolve_input(&self) -> error::Result<ParquetbenchInput> {
+        let has_region_args = self.config.is_some()
+            || self.region_id.is_some()
+            || self.table_dir.is_some()
+            || self.file_id.is_some();
+
+        if let Some(file_path) = &self.file_path {
+            if self.reader == ReaderMode::FlatPrune {
+                return Err(error::IllegalConfigSnafu {
+                    msg: "--file-path currently supports only --reader direct".to_string(),
+                }
+                .build());
+            }
+            if has_region_args {
+                return Err(error::IllegalConfigSnafu {
+                    msg: "--file-path cannot be used with --config, --region-id, --table-dir, or --file-id".to_string(),
+                }
+                .build());
+            }
+            return Ok(ParquetbenchInput::LocalFile {
+                file_path: file_path.clone(),
+            });
+        }
+
+        let config = self.config.clone().ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: "missing --config unless --file-path is specified".to_string(),
+            }
+            .build()
+        })?;
+        let region_id = self.region_id.clone().ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: "missing --region-id unless --file-path is specified".to_string(),
+            }
+            .build()
+        })?;
+        let table_dir = self.table_dir.clone().ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: "missing --table-dir unless --file-path is specified".to_string(),
+            }
+            .build()
+        })?;
+        let file_id = self.file_id.clone().ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: "missing --file-id unless --file-path is specified".to_string(),
+            }
+            .build()
+        })?;
+        let path_type = parse_path_type(&self.path_type)?;
+
+        Ok(ParquetbenchInput::Region {
+            config,
+            region_id,
+            table_dir,
+            file_id,
+            path_type,
+        })
+    }
+
     async fn load_scan_config(&self) -> error::Result<ParquetScanConfig> {
         if let Some(path) = &self.scan_config {
             let content = tokio::fs::read_to_string(path)
@@ -460,6 +558,122 @@ impl ParquetbenchCommand {
             Ok(ParquetScanConfig::default())
         }
     }
+}
+
+async fn build_source(input: ParquetbenchInput) -> error::Result<ParquetbenchSource> {
+    match input {
+        ParquetbenchInput::LocalFile { file_path } => build_local_file_source(&file_path),
+        ParquetbenchInput::Region {
+            config,
+            region_id,
+            table_dir,
+            file_id,
+            path_type,
+        } => build_region_source(&config, &region_id, table_dir, &file_id, path_type).await,
+    }
+}
+
+fn build_local_file_source(file_path: &Path) -> error::Result<ParquetbenchSource> {
+    let file_path = std::fs::canonicalize(file_path).map_err(|e| {
+        error::IllegalConfigSnafu {
+            msg: format!("invalid --file-path {}: {e}", file_path.display()),
+        }
+        .build()
+    })?;
+    if !file_path.is_file() {
+        return Err(error::IllegalConfigSnafu {
+            msg: format!("--file-path {} is not a file", file_path.display()),
+        }
+        .build());
+    }
+    let parent = file_path.parent().ok_or_else(|| {
+        error::IllegalConfigSnafu {
+            msg: format!(
+                "--file-path {} has no parent directory",
+                file_path.display()
+            ),
+        }
+        .build()
+    })?;
+    let file_name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: format!("invalid UTF-8 file name in {}", file_path.display()),
+            }
+            .build()
+        })?
+        .to_string();
+    let object_store = object_store::ObjectStore::new(object_store::services::Fs::default().root(
+        parent.to_str().ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: format!("invalid UTF-8 parent directory in {}", file_path.display()),
+            }
+            .build()
+        })?,
+    ))
+    .map_err(|e| {
+        error::IllegalConfigSnafu {
+            msg: format!("failed to build local file object store: {e:?}"),
+        }
+        .build()
+    })?
+    .finish();
+
+    let file_id = file_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| FileId::parse_str(stem).ok())
+        .unwrap_or_else(FileId::random);
+    let region_id = RegionId::new(0, 0);
+    let region_file_id = RegionFileId::new(region_id, file_id);
+    let display_path = file_path.display().to_string();
+
+    Ok(ParquetbenchSource {
+        object_store,
+        file_path: file_name,
+        display_path,
+        region_id_label: region_id.as_u64().to_string(),
+        region_id,
+        file_id,
+        region_file_id,
+        path_type: None,
+        table_dir: None,
+    })
+}
+
+async fn build_region_source(
+    config: &PathBuf,
+    region_id: &str,
+    table_dir: String,
+    file_id: &str,
+    path_type: PathType,
+) -> error::Result<ParquetbenchSource> {
+    let region = parse_region_id(region_id)?;
+    let file_id = FileId::parse_str(file_id).map_err(|e| {
+        error::IllegalConfigSnafu {
+            msg: format!("invalid file_id '{}': {}", file_id, e),
+        }
+        .build()
+    })?;
+    let region_file_id = RegionFileId::new(region, file_id);
+    let file_path = sst_file_path(&table_dir, region_file_id, path_type);
+
+    let (store_cfg, _mito_config, _wal_config) = parse_config(config)?;
+    let object_store = build_object_store(&store_cfg).await?;
+
+    Ok(ParquetbenchSource {
+        object_store,
+        display_path: file_path.clone(),
+        file_path,
+        region_id_label: region_id.to_string(),
+        region_id: region,
+        file_id,
+        region_file_id,
+        path_type: Some(path_type),
+        table_dir: Some(table_dir),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -851,6 +1065,25 @@ mod tests {
 
     use super::*;
 
+    fn test_command() -> ParquetbenchCommand {
+        ParquetbenchCommand {
+            config: None,
+            region_id: None,
+            table_dir: None,
+            file_id: None,
+            file_path: None,
+            scan_config: None,
+            iterations: 1,
+            batch_size: DEFAULT_READ_BATCH_SIZE,
+            path_type: "bare".to_string(),
+            verbose: false,
+            pprof_file: None,
+            pprof_after_warmup: false,
+            pk_as_binary: false,
+            reader: ReaderMode::Direct,
+        }
+    }
+
     fn new_test_metadata() -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 0));
         builder
@@ -895,6 +1128,79 @@ mod tests {
         assert_eq!(parse_path_type("bare").unwrap(), PathType::Bare);
         assert_eq!(parse_path_type("data").unwrap(), PathType::Data);
         assert_eq!(parse_path_type("metadata").unwrap(), PathType::Metadata);
+    }
+
+    #[test]
+    fn test_resolve_input_accepts_direct_file_for_direct_reader() {
+        let mut command = test_command();
+        command.file_path = Some(PathBuf::from("/tmp/source.parquet"));
+
+        let input = command.resolve_input().unwrap();
+        match input {
+            ParquetbenchInput::LocalFile { file_path } => {
+                assert_eq!(file_path, PathBuf::from("/tmp/source.parquet"));
+            }
+            ParquetbenchInput::Region { .. } => panic!("expected local file input"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_input_accepts_legacy_args_for_direct_reader() {
+        let mut command = test_command();
+        command.config = Some(PathBuf::from("config.toml"));
+        command.region_id = Some("1024:0".to_string());
+        command.table_dir = Some("data/greptime/public/1024".to_string());
+        command.file_id = Some("00020380-009c-426d-953e-b4e34c15af34".to_string());
+        command.reader = ReaderMode::Direct;
+
+        let input = command.resolve_input().unwrap();
+        match input {
+            ParquetbenchInput::Region {
+                config,
+                region_id,
+                table_dir,
+                file_id,
+                path_type,
+            } => {
+                assert_eq!(config, PathBuf::from("config.toml"));
+                assert_eq!(region_id, "1024:0");
+                assert_eq!(table_dir, "data/greptime/public/1024");
+                assert_eq!(file_id, "00020380-009c-426d-953e-b4e34c15af34");
+                assert_eq!(path_type, PathType::Bare);
+            }
+            ParquetbenchInput::LocalFile { .. } => panic!("expected region input"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_input_rejects_file_path_for_flat_prune_reader() {
+        let mut command = test_command();
+        command.file_path = Some(PathBuf::from("/tmp/source.parquet"));
+        command.reader = ReaderMode::FlatPrune;
+
+        let err = command.resolve_input().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--file-path currently supports only --reader direct")
+        );
+    }
+
+    #[test]
+    fn test_resolve_input_rejects_mixed_input_modes() {
+        let mut command = test_command();
+        command.file_path = Some(PathBuf::from("/tmp/source.parquet"));
+        command.config = Some(PathBuf::from("config.toml"));
+
+        let err = command.resolve_input().unwrap_err();
+        assert!(err.to_string().contains("--file-path cannot be used with"));
+    }
+
+    #[test]
+    fn test_resolve_input_requires_legacy_args_without_file_path() {
+        let command = test_command();
+
+        let err = command.resolve_input().unwrap_err();
+        assert!(err.to_string().contains("missing --config"));
     }
 
     #[test]
