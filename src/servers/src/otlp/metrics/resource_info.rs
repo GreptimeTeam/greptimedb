@@ -30,7 +30,9 @@ use otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue;
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{ResourceMetrics, metric};
 
 use crate::error::Result;
-use crate::otlp::metrics::{INSTANCE_KEY, JOB_KEY, scalar_value_string, service_identity};
+use crate::otlp::metrics::{
+    INSTANCE_KEY, JOB_KEY, ServiceIdentity, scalar_value_string, service_identity,
+};
 use crate::otlp::trace::{
     KEY_CONTAINER_ID, KEY_CONTAINER_NAME, KEY_HOST_ID, KEY_HOST_NAME, KEY_K8S_NAMESPACE_NAME,
     KEY_K8S_POD_NAME, KEY_K8S_POD_UID, KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE,
@@ -83,7 +85,7 @@ impl ResourceInfoData {
     /// the times of the data points this resource actually writes.
     pub fn observe(&mut self, raw_attrs: &[KeyValue], resource: &ResourceMetrics) {
         let mut tags = Vec::with_capacity(MAX_PROJECTED_TAGS);
-        let (job, instance) = service_identity(raw_attrs);
+        let ServiceIdentity { job, instance } = service_identity(raw_attrs);
         if let Some(job) = job {
             tags.push((JOB_KEY.to_string(), job));
         }

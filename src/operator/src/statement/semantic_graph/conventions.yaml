@@ -2,6 +2,10 @@
 # versioned with the binary (include_str!), not an operator-editable surface;
 # non-standard deployments override per table with explicit
 # greptime.semantic.entity.* declarations, which always win.
+#
+# Every `id` list is ordered broad to narrow, and that order is part of the
+# identity: the id renders as the values joined in this order, so all
+# declarations of one entity type must agree on it or they name two entities.
 
 co_declared_edges:
   - { src: service.instance, dst: host, rel: runs_on }

@@ -303,7 +303,14 @@ fn scalar_value_string(value: Option<&AnyValue>) -> Option<String> {
 /// Prometheus-style `(job, instance)` identity. Per the OTel Prometheus
 /// compatibility spec `job` folds in `service.namespace` when present; a
 /// resource without `service.name` gets no job rather than a fabricated one.
-pub(crate) fn service_identity(attrs: &[KeyValue]) -> (Option<String>, Option<String>) {
+/// Both fields are optional strings, so a named type keeps a swapped
+/// destructuring from type-checking at the call sites.
+pub(crate) struct ServiceIdentity {
+    pub job: Option<String>,
+    pub instance: Option<String>,
+}
+
+pub(crate) fn service_identity(attrs: &[KeyValue]) -> ServiceIdentity {
     let mut name = None;
     let mut namespace = None;
     let mut instance = None;
@@ -319,7 +326,7 @@ pub(crate) fn service_identity(attrs: &[KeyValue]) -> (Option<String>, Option<St
         Some(ns) if !ns.is_empty() => format!("{ns}/{name}"),
         _ => name,
     });
-    (job, instance)
+    ServiceIdentity { job, instance }
 }
 
 fn string_key_value(key: &str, value: String) -> KeyValue {
@@ -337,7 +344,7 @@ fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx)
     }
 
     // remap the service identity attributes to job and instance
-    let (job, instance) = service_identity(attrs);
+    let ServiceIdentity { job, instance } = service_identity(attrs);
 
     // if promote all, then exclude the list, else, include the list
     if metric_ctx.promote_all_resource_attrs {

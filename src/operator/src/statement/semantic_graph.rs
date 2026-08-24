@@ -61,7 +61,7 @@ use datafusion::dataframe::DataFrame;
 use datafusion::functions::{core as core_fns, datetime as datetime_fns, string as string_fns};
 use datafusion::functions_nested::expr_fn::make_array;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
-use datafusion_expr::{Expr, LogicalPlan, ScalarUDF, cast, ident, lit, when};
+use datafusion_expr::{Case, Expr, LogicalPlan, ScalarUDF, cast, ident, lit};
 pub use relationships::{
     CallsSource, CoDeclaredSource, DeclaredSource, RelationshipSources, build_relationships_plan,
 };
@@ -496,13 +496,20 @@ fn qualified_id_expr(qualifier: &str, value: Expr, col: &dyn Fn(&str) -> Expr) -
     let qualifier = escaped_id_value(
         core_fns::coalesce().call(vec![cast(col(qualifier), DataType::Utf8), lit("")]),
     );
-    when(qualifier.clone().eq(lit("")), value.clone())
-        .otherwise(concat_expr(vec![
+    // Built through `Case` rather than the `when().otherwise()` builder, whose
+    // fallible return would need an `expect` on a non-test path.
+    Expr::Case(Case::new(
+        None,
+        vec![(
+            Box::new(qualifier.clone().eq(lit(""))),
+            Box::new(value.clone()),
+        )],
+        Some(Box::new(concat_expr(vec![
             qualifier,
             lit(ID_QUALIFIER_SEPARATOR),
             value,
-        ]))
-        .expect("CASE with a single WHEN and an ELSE is well-formed")
+        ]))),
+    ))
 }
 
 /// The `parse_json` UDF, shared by all derivation plans. Resolved from the
