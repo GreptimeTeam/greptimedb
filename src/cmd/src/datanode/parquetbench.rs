@@ -647,7 +647,7 @@ fn build_local_file_source(file_path: &Path) -> error::Result<ParquetbenchSource
 }
 
 async fn build_region_source(
-    config: &PathBuf,
+    config: &Path,
     region_id: &str,
     table_dir: String,
     file_id: &str,

@@ -310,7 +310,7 @@ fn decode_parquet_metadata(
     let mut footer = [0; FOOTER_SIZE];
     footer.copy_from_slice(&data[footer_start..]);
     let footer = FooterTail::try_new(&footer)?;
-    let metadata_len = footer.metadata_length() as usize;
+    let metadata_len = footer.metadata_length();
     if footer_start < metadata_len {
         return Err("invalid footer/metadata length".into());
     }
