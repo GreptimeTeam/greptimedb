@@ -204,6 +204,8 @@ enable = true
 [otlp]
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
+## Experimental: enable cumulative OTLP exponential histogram ingestion.
+experimental_enable_exponential_histogram = false
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
 

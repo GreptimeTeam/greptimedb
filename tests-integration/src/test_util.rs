@@ -490,7 +490,7 @@ pub async fn setup_test_http_app_with_frontend_and_slow_query_threshold(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone(), true)
+        .with_otlp_handler(instance.fe_instance().clone(), true, false)
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap())
         .build();
@@ -510,6 +510,18 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
         user_provider,
         None,
         None,
+        false,
+    )
+    .await
+}
+
+pub async fn setup_test_http_app_with_otlp_exponential_histogram(
+    store_type: StorageType,
+    name: &str,
+    enabled: bool,
+) -> (Router, TestGuard) {
+    setup_test_http_app_with_frontend_and_custom_options(
+        store_type, name, None, None, None, enabled,
     )
     .await
 }
@@ -520,6 +532,7 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
     user_provider: Option<UserProviderRef>,
     http_opts: Option<HttpOptions>,
     memory_limiter: Option<ServerMemoryLimiter>,
+    experimental_enable_exponential_histogram: bool,
 ) -> (Router, TestGuard) {
     let plugins = Plugins::new();
     if let Some(user_provider) = user_provider.clone() {
@@ -541,7 +554,12 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone(), true)
+        .with_otlp_handler(
+            instance.fe_instance().clone(),
+            true,
+            experimental_enable_exponential_histogram,
+        )
+        .with_prometheus_handler(instance.fe_instance().clone())
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_dashboard_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());

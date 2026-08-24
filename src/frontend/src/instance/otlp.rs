@@ -27,7 +27,7 @@ use client::Output;
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
-use common_telemetry::tracing;
+use common_telemetry::{tracing, warn};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -38,7 +38,7 @@ use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtoc
 use servers::otlp;
 use servers::otlp::trace::span::TraceSpanGroup;
 use servers::query_handler::{
-    OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
+    MetricsIngestOutcome, OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -90,7 +90,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> ServerResult<Output> {
+    ) -> ServerResult<MetricsIngestOutcome> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -120,8 +120,19 @@ impl OpenTelemetryProtocolHandler for Instance {
             .unwrap_or_default();
         metric_ctx.is_legacy = is_legacy;
 
-        let (requests, rows, semantic_index) =
+        let (requests, rows, semantic_index, mut outcome) =
             otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
+        if outcome.rejected_data_points > 0 {
+            warn!(
+                "Rejected {} OTLP exponential histogram data points: {}",
+                outcome.rejected_data_points,
+                outcome.error_message.as_deref().unwrap_or_default()
+            );
+        }
+        if outcome.accepted_data_points == 0 {
+            return Ok(outcome);
+        }
+
         self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
@@ -143,9 +154,9 @@ impl OpenTelemetryProtocolHandler for Instance {
             Arc::new(c)
         };
 
-        // If the user uses the legacy path, it is by default without metric engine.
-        if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
-            self.handle_row_inserts(requests, ctx, false, false)
+        // OTLP tables have one sample field in both the legacy and physical paths.
+        let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+            self.handle_row_inserts(requests, ctx, false, true)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
@@ -154,11 +165,13 @@ impl OpenTelemetryProtocolHandler for Instance {
                 .extension(PHYSICAL_TABLE_PARAM)
                 .unwrap_or(GREPTIME_PHYSICAL_TABLE)
                 .to_string();
-            self.handle_metric_row_inserts(requests, ctx, physical_table.clone())
+            self.handle_metric_row_inserts(requests, ctx, physical_table)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
-        }
+        }?;
+        outcome.write_cost = output.meta.cost;
+        Ok(outcome)
     }
 
     #[tracing::instrument(skip_all)]

@@ -724,11 +724,16 @@ impl HttpServerBuilder {
         self,
         handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
+        experimental_enable_exponential_histogram: bool,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                HttpServer::route_otlp(handler, with_metric_engine),
+                HttpServer::route_otlp(
+                    handler,
+                    with_metric_engine,
+                    experimental_enable_exponential_histogram,
+                ),
             ),
             ..self
         }
@@ -1386,6 +1391,7 @@ impl HttpServer {
     fn route_otlp<S>(
         otlp_handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
+        experimental_enable_exponential_histogram: bool,
     ) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
@@ -1397,6 +1403,7 @@ impl HttpServer {
             )
             .with_state(OtlpState {
                 with_metric_engine,
+                experimental_enable_exponential_histogram,
                 handler: otlp_handler,
             })
     }
