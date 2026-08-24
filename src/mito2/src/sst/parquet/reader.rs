@@ -81,7 +81,7 @@ use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
-use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
+use crate::sst::parquet::format::INTERNAL_COLUMN_NUM;
 use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
@@ -471,10 +471,7 @@ impl ParquetReaderBuilder {
             &file_path,
             skip_auto_convert,
         )?;
-        if need_override_sequence(&parquet_meta) {
-            read_format
-                .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
-        }
+        read_format.set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
 
         // Computes the projection mask.
         let parquet_read_cols = read_format.parquet_read_columns();

@@ -825,39 +825,6 @@ pub(crate) fn parquet_row_group_time_range(
     Some((Timestamp::new(min, unit), Timestamp::new(max, unit)))
 }
 
-/// Checks if sequence override is needed based on all row groups' statistics.
-/// Returns true if ALL row groups have sequence min-max values of 0.
-pub(crate) fn need_override_sequence(parquet_meta: &ParquetMetaData) -> bool {
-    let num_columns = parquet_meta.file_metadata().schema_descr().num_columns();
-    if num_columns < FIXED_POS_COLUMN_NUM {
-        return false;
-    }
-
-    // The sequence column is the second-to-last column (before op_type)
-    let sequence_pos = num_columns - 2;
-
-    // Check all row groups - all must have sequence min-max of 0
-    for row_group in parquet_meta.row_groups() {
-        if let Some(Statistics::Int64(value_stats)) = row_group.column(sequence_pos).statistics() {
-            if let (Some(min_val), Some(max_val)) = (value_stats.min_opt(), value_stats.max_opt()) {
-                // If any row group doesn't have min=0 and max=0, return false
-                if *min_val != 0 || *max_val != 0 {
-                    return false;
-                }
-            } else {
-                // If any row group doesn't have statistics, return false
-                return false;
-            }
-        } else {
-            // If any row group doesn't have Int64 statistics, return false
-            return false;
-        }
-    }
-
-    // All row groups have sequence min-max of 0, or there are no row groups
-    !parquet_meta.row_groups().is_empty()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
