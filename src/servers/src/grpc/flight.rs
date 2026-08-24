@@ -53,7 +53,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error::{InvalidParameterSnafu, Result, ToJsonSnafu};
-pub use crate::grpc::flight::stream::FlightRecordBatchStream;
+pub use crate::grpc::flight::stream::{FlightRecordBatchSource, FlightRecordBatchStream};
 use crate::grpc::greptime_handler::{
     GreptimeRequestHandler, create_query_context, get_request_type,
 };
@@ -583,7 +583,7 @@ fn to_flight_data_stream(
     match output.data {
         OutputData::Stream(stream) => {
             let stream = FlightRecordBatchStream::new(
-                stream,
+                FlightRecordBatchSource::RecordBatches(stream),
                 tracing_context,
                 flight_compression,
                 query_ctx,
@@ -592,7 +592,7 @@ fn to_flight_data_stream(
         }
         OutputData::RecordBatches(x) => {
             let stream = FlightRecordBatchStream::new(
-                x.as_stream(),
+                FlightRecordBatchSource::RecordBatches(x.as_stream()),
                 tracing_context,
                 flight_compression,
                 query_ctx,

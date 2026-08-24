@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::region::RegionResponse;
 use api::v1::ResponseHeader;
@@ -48,6 +49,8 @@ use crate::error::{
 };
 use crate::flight::decode_flight_data;
 use crate::{Client, metrics};
+
+const FLIGHT_DO_GET_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub struct RegionRequester {
@@ -109,9 +112,12 @@ impl RegionRequester {
         let mut flight_client = self
             .client
             .make_flight_client(self.send_compression, self.accept_compression)?;
+        // Limit Flight establishment without limiting query stream execution.
+        let mut request = tonic::Request::new(ticket);
+        request.set_timeout(FLIGHT_DO_GET_TIMEOUT);
         let response = flight_client
             .mut_inner()
-            .do_get(ticket)
+            .do_get(request)
             .await
             .or_else(|e| {
                 let tonic_code = e.code();
