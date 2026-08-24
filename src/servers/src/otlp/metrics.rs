@@ -472,7 +472,7 @@ fn add_accepted_data_points(outcome: &mut MetricsIngestOutcome, count: usize) ->
 fn reject_data_points(
     outcome: &mut MetricsIngestOutcome,
     count: usize,
-    reason: &str,
+    reason: impl FnOnce() -> String,
 ) -> Result<()> {
     if count == 0 {
         return Ok(());
@@ -497,7 +497,7 @@ fn reject_data_points(
     Ok(())
 }
 
-fn append_rejection_message(message: &mut Option<String>, reason: &str) {
+fn append_rejection_message(message: &mut Option<String>, reason: impl FnOnce() -> String) {
     let message = message.get_or_insert_with(String::new);
     let separator = if message.is_empty() { "" } else { "; " };
     let Some(available) = MAX_REJECTION_MESSAGE_BYTES.checked_sub(message.len()) else {
@@ -506,11 +506,12 @@ fn append_rejection_message(message: &mut Option<String>, reason: &str) {
     if available <= separator.len() {
         return;
     }
+    let reason = reason();
     message.push_str(separator);
 
     let available = MAX_REJECTION_MESSAGE_BYTES - message.len();
     if reason.len() <= available {
-        message.push_str(reason);
+        message.push_str(&reason);
         return;
     }
 
@@ -535,36 +536,30 @@ fn encode_exponential_histogram(
     outcome: &mut MetricsIngestOutcome,
 ) -> Result<bool> {
     if !metric_ctx.experimental_enable_exponential_histogram {
-        reject_data_points(
-            outcome,
-            histogram.data_points.len(),
-            &format!(
+        reject_data_points(outcome, histogram.data_points.len(), || {
+            format!(
                 "metric `{name}` uses OTLP exponential histograms; set otlp.experimental_enable_exponential_histogram = true to enable ingestion"
-            ),
-        )?;
+            )
+        })?;
         return Ok(false);
     }
 
     match AggregationTemporality::try_from(histogram.aggregation_temporality) {
         Ok(AggregationTemporality::Cumulative) => {}
         Ok(AggregationTemporality::Delta) => {
-            reject_data_points(
-                outcome,
-                histogram.data_points.len(),
-                &format!(
+            reject_data_points(outcome, histogram.data_points.len(), || {
+                format!(
                     "metric `{name}` uses delta OTLP exponential histograms; only cumulative temporality is supported"
-                ),
-            )?;
+                )
+            })?;
             return Ok(false);
         }
         _ => {
-            reject_data_points(
-                outcome,
-                histogram.data_points.len(),
-                &format!(
+            reject_data_points(outcome, histogram.data_points.len(), || {
+                format!(
                     "metric `{name}` has unspecified OTLP exponential histogram temporality; cumulative temporality is required"
-                ),
-            )?;
+                )
+            })?;
             return Ok(false);
         }
     }
@@ -580,11 +575,9 @@ fn encode_exponential_histogram(
         let (value, timestamp_nanos) = match exponential_histogram_value(data_point) {
             Ok(value) => value,
             Err(reason) => {
-                reject_data_points(
-                    outcome,
-                    1,
-                    &format!("metric `{name}` data point {index}: {reason}"),
-                )?;
+                reject_data_points(outcome, 1, || {
+                    format!("metric `{name}` data point {index}: {reason}")
+                })?;
                 continue;
             }
         };
@@ -2336,5 +2329,23 @@ mod tests {
 
         assert_eq!(outcome.rejected_data_points, 1);
         assert!(outcome.error_message.unwrap().len() <= MAX_REJECTION_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn test_rejection_message_reason_is_lazy_after_cap() {
+        let mut outcome = MetricsIngestOutcome {
+            error_message: Some("x".repeat(MAX_REJECTION_MESSAGE_BYTES)),
+            ..Default::default()
+        };
+        let mut reason_built = false;
+
+        reject_data_points(&mut outcome, 1, || {
+            reason_built = true;
+            "unused".to_string()
+        })
+        .unwrap();
+
+        assert_eq!(outcome.rejected_data_points, 1);
+        assert!(!reason_built);
     }
 }
