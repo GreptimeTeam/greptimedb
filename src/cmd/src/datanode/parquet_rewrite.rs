@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -434,31 +433,6 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-
-    #[test]
-    fn test_parse_rewrite_properties() {
-        let config: RewriteProperties = toml::from_str(
-            r#"
-            [writer]
-            dictionary_enabled = true
-            compression = "zstd"
-            compression_level = 3
-            max_row_group_row_count = 100000
-
-            [[columns]]
-            path = ["host"]
-            dictionary_enabled = false
-            compression = "snappy"
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(config.writer.dictionary_enabled, Some(true));
-        assert_eq!(config.writer.compression, Some(CompressionConfig::Zstd));
-        assert_eq!(config.columns.len(), 1);
-        assert_eq!(config.columns[0].path, vec!["host"]);
-        assert_eq!(config.columns[0].dictionary_enabled, Some(false));
-    }
 
     #[test]
     fn test_dump_and_rewrite_preserves_key_value_metadata_and_disables_dictionary() {

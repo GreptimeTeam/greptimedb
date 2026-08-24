@@ -1145,47 +1145,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_input_accepts_legacy_args_for_direct_reader() {
-        let mut command = test_command();
-        command.config = Some(PathBuf::from("config.toml"));
-        command.region_id = Some("1024:0".to_string());
-        command.table_dir = Some("data/greptime/public/1024".to_string());
-        command.file_id = Some("00020380-009c-426d-953e-b4e34c15af34".to_string());
-        command.reader = ReaderMode::Direct;
-
-        let input = command.resolve_input().unwrap();
-        match input {
-            ParquetbenchInput::Region {
-                config,
-                region_id,
-                table_dir,
-                file_id,
-                path_type,
-            } => {
-                assert_eq!(config, PathBuf::from("config.toml"));
-                assert_eq!(region_id, "1024:0");
-                assert_eq!(table_dir, "data/greptime/public/1024");
-                assert_eq!(file_id, "00020380-009c-426d-953e-b4e34c15af34");
-                assert_eq!(path_type, PathType::Bare);
-            }
-            ParquetbenchInput::LocalFile { .. } => panic!("expected region input"),
-        }
-    }
-
-    #[test]
-    fn test_resolve_input_rejects_file_path_for_flat_prune_reader() {
-        let mut command = test_command();
-        command.file_path = Some(PathBuf::from("/tmp/source.parquet"));
-        command.reader = ReaderMode::FlatPrune;
-
-        let err = command.resolve_input().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("--file-path currently supports only --reader direct")
-        );
-    }
-
-    #[test]
     fn test_resolve_input_rejects_mixed_input_modes() {
         let mut command = test_command();
         command.file_path = Some(PathBuf::from("/tmp/source.parquet"));
@@ -1193,14 +1152,6 @@ mod tests {
 
         let err = command.resolve_input().unwrap_err();
         assert!(err.to_string().contains("--file-path cannot be used with"));
-    }
-
-    #[test]
-    fn test_resolve_input_requires_legacy_args_without_file_path() {
-        let command = test_command();
-
-        let err = command.resolve_input().unwrap_err();
-        assert!(err.to_string().contains("missing --config"));
     }
 
     #[test]

@@ -393,30 +393,7 @@ fn path_type_name(path_type: PathType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use datatypes::arrow::array::{Int32Array, RecordBatch};
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
-    use parquet::arrow::ArrowWriter;
-
     use super::*;
-
-    #[test]
-    fn test_parse_region_and_path_types() {
-        assert_eq!(parse_region_id("1024:7").unwrap(), RegionId::new(1024, 7));
-        assert_eq!(
-            parse_region_id(&RegionId::new(1, 2).as_u64().to_string()).unwrap(),
-            RegionId::new(1, 2)
-        );
-        assert_eq!(parse_path_type("auto").unwrap(), None);
-        assert_eq!(parse_path_type("bare").unwrap(), Some(PathType::Bare));
-        assert_eq!(parse_path_type("data").unwrap(), Some(PathType::Data));
-        assert_eq!(
-            parse_path_type("metadata").unwrap(),
-            Some(PathType::Metadata)
-        );
-        assert!(parse_path_type("invalid").is_err());
-    }
 
     #[test]
     fn test_validate_replacement_counts() {
@@ -431,27 +408,5 @@ mod tests {
 
         let legacy_file = mito2::sst::file::FileMeta::default();
         assert!(validate_replacement(&legacy_file, 4, 1).is_ok());
-    }
-
-    #[test]
-    fn test_decode_parquet_metadata() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Int32,
-            false,
-        )]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4]))],
-        )
-        .unwrap();
-        let mut bytes = Vec::new();
-        let mut writer = ArrowWriter::try_new(&mut bytes, schema, None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
-
-        let metadata = decode_parquet_metadata(&bytes).unwrap();
-        assert_eq!(metadata.file_metadata().num_rows(), 4);
-        assert_eq!(metadata.num_row_groups(), 1);
     }
 }

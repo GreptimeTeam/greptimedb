@@ -88,8 +88,7 @@ struct ColumnChunkMetaView {
     bloom_filter_length: Option<i32>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy)]
 enum CompressionConfig {
     Uncompressed,
     Snappy,
@@ -271,14 +270,6 @@ fn print_meta_text(view: &FileMetaView) {
 
 fn open_file(path: &Path) -> error::Result<File> {
     File::open(path).context(error::FileIoSnafu)
-}
-
-fn create_file(path: &Path) -> error::Result<File> {
-    File::create(path).context(error::FileIoSnafu)
-}
-
-fn illegal_config<T>(msg: String) -> error::Result<T> {
-    error::IllegalConfigSnafu { msg }.fail()
 }
 
 fn parquet_error(
