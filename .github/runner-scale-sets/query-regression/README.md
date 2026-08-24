@@ -139,8 +139,8 @@ benchmark itself runs host-native.
 
 Before builds, the workflow asserts the runner UID/GID (1001 in the ECS image;
 overridable via `QUERY_REGRESSION_RUNNER_UID`/`QUERY_REGRESSION_RUNNER_GID`)
-and exact tool versions: `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.30.0`,
-`Python 3.12.3`, `sccache 0.16.0`, `otelgen` commit
+and exact tool versions: `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.40.4`,
+`Python 3.14.4`, `sccache 0.16.0`, `otelgen` commit
 `863a3f395d062c7322cc1de08a38774b7fdaa6c8`, root-owned `rustup 1.29.0`, and
 the image-baked `nightly-2026-03-21` Rust toolchain. Rustup, Cargo, and Rustc
 must resolve from `/opt/cargo/bin`; the runner cannot write `/opt/rustup` or

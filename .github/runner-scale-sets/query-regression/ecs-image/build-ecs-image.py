@@ -60,7 +60,7 @@ BUILD_TIMEOUT_SECONDS = 60 * 60
 
 # Same apt package contract as the runner Dockerfile; the base
 # actions-runner image is Ubuntu 24.04, so an Ubuntu 24.04 host resolves the
-# same tool versions (protoc 3.21.12, mold 2.30.0, Python 3.12.3).
+# same tool versions (protoc 3.21.12, mold 2.40.4, Python 3.14.4).
 # Docker itself comes from Docker's official repository (docker-ce), not the
 # distribution-packaged docker.io.
 APT_PACKAGES = [

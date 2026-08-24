@@ -461,8 +461,8 @@ jobs:
             record "protoc smoke compile failed"
           fi
           require_match uv "$(capture uv --version)" '^uv[[:space:]]0\.11\.26([[:space:]]|$)'
-          require_match mold "$(capture mold --version)" '^mold[[:space:]]2\.30\.0([[:space:]]|$)'
-          require_eq python3 "$(capture python3 --version)" "Python 3.12.3"
+          require_match mold "$(capture mold --version)" '^mold[[:space:]]2\.40\.4([[:space:]]|$)'
+          require_eq python3 "$(capture python3 --version)" "Python 3.14.4"
           otelgen_path="$(command -v otelgen || true)"
           otelgen_version="<unavailable>"
           if [[ -n "${otelgen_path}" ]]; then
