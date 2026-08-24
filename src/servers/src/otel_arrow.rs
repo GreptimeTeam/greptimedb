@@ -61,6 +61,7 @@ fn batch_status(
         ArrowStatusCode::Ok
     };
     let status_message = match outcome.error_message {
+        // Arrow keeps the feature gate off, so these fail before per-point validation.
         Some(_) if has_exponential_histogram_data_points => {
             EXPONENTIAL_HISTOGRAM_UNSUPPORTED.to_string()
         }
