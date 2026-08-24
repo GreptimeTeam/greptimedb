@@ -403,25 +403,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          fail() {
-            printf 'Verify runner image tools failed: %s\n' "$*" >&2
-            exit 1
+          errors=()
+          record() {
+            printf 'FAIL %s\n' "$*"
+            errors+=("$*")
           }
           require_eq() {
             local name="$1" actual="$2" expected="$3"
             printf 'check %s: %s\n' "${name}" "${actual}"
-            [[ "${actual}" == "${expected}" ]] || fail "${name}: expected '${expected}', got '${actual}'"
+            [[ "${actual}" == "${expected}" ]] || record "${name}: expected '${expected}', got '${actual}'"
           }
           require_match() {
             local name="$1" actual="$2" pattern="$3"
             printf 'check %s: %s\n' "${name}" "${actual}"
-            [[ "${actual}" =~ $pattern ]] || fail "${name}: expected to match ${pattern}, got '${actual}'"
+            [[ "${actual}" =~ $pattern ]] || record "${name}: expected to match ${pattern}, got '${actual}'"
           }
           require() {
             local name="$1"
             shift
             printf 'check %s\n' "${name}"
-            "$@" || fail "${name}"
+            "$@" || record "${name}"
+          }
+          capture() {
+            local out
+            if out="$("$@" 2>&1)"; then
+              printf '%s' "${out}"
+            else
+              printf '<failed to run: %s>' "$*"
+            fi
           }
 
           printf 'uid=%s gid=%s PATH=%s CARGO_HOME=%s\n' "$(id -u)" "$(id -g)" "${PATH}" "${CARGO_HOME}"
@@ -430,7 +439,7 @@ jobs:
           require_eq uid "$(id -u)" "${EXPECTED_RUNNER_UID}"
           require_eq gid "$(id -g)" "${EXPECTED_RUNNER_GID}"
           require_eq UV_CACHE_DIR "${UV_CACHE_DIR}" "/home/runner/.cargo/uv-cache"
-          require_eq protoc "$(protoc --version)" "libprotoc 3.21.12"
+          require_eq protoc "$(capture protoc --version)" "libprotoc 3.21.12"
           temporary_proto_dir="$(mktemp --directory)"
           trap 'rm -rf "${temporary_proto_dir}"' EXIT
           require "readable /usr/include/google/protobuf/any.proto" \
@@ -444,32 +453,35 @@ jobs:
             'import "google/protobuf/empty.proto";' \
             'message Smoke { google.protobuf.Any any = 1; google.protobuf.Empty empty = 2; }' \
             > "${temporary_proto_dir}/smoke.proto"
-          protoc --proto_path="${temporary_proto_dir}" --proto_path=/usr/include \
+          if protoc --proto_path="${temporary_proto_dir}" --proto_path=/usr/include \
             --descriptor_set_out="${temporary_proto_dir}/smoke.pb" \
-            "${temporary_proto_dir}/smoke.proto"
-          require "protoc smoke descriptor is non-empty" test -s "${temporary_proto_dir}/smoke.pb"
-          require_match uv "$(uv --version)" '^uv[[:space:]]0\.11\.26([[:space:]]|$)'
-          require_match mold "$(mold --version)" '^mold[[:space:]]2\.30\.0([[:space:]]|$)'
-          require_eq python3 "$(python3 --version)" "Python 3.12.3"
+            "${temporary_proto_dir}/smoke.proto"; then
+            require "protoc smoke descriptor is non-empty" test -s "${temporary_proto_dir}/smoke.pb"
+          else
+            record "protoc smoke compile failed"
+          fi
+          require_match uv "$(capture uv --version)" '^uv[[:space:]]0\.11\.26([[:space:]]|$)'
+          require_match mold "$(capture mold --version)" '^mold[[:space:]]2\.30\.0([[:space:]]|$)'
+          require_eq python3 "$(capture python3 --version)" "Python 3.12.3"
           otelgen_path="$(command -v otelgen || true)"
           otelgen_version="<unavailable>"
           if [[ -n "${otelgen_path}" ]]; then
-            otelgen_version="$("${otelgen_path}" --version 2>&1 || true)"
+            otelgen_version="$(capture "${otelgen_path}" --version)"
           fi
           require_eq otelgen_path "${otelgen_path}" "/usr/local/bin/otelgen"
           printf 'check otelgen_version: %s\n' "${otelgen_version}"
           [[ "${otelgen_version}" == *"863a3f395d062c7322cc1de08a38774b7fdaa6c8"* ]] \
-            || fail "otelgen_version: expected commit 863a3f395d062c7322cc1de08a38774b7fdaa6c8, got '${otelgen_version}'"
-          require_match sccache "$(sccache --version)" '^sccache[[:space:]]0\.16\.0([[:space:]]|$)'
-          require_eq rustup_path "$(command -v rustup)" "/opt/cargo/bin/rustup"
-          require_eq cargo_path "$(command -v cargo)" "/opt/cargo/bin/cargo"
-          require_eq rustc_path "$(command -v rustc)" "/opt/cargo/bin/rustc"
-          require_match rustup "$(rustup --version)" '^rustup[[:space:]]1\.29\.0([[:space:]]|$)'
-          require_match cargo "$(cargo --version)" \
+            || record "otelgen_version: expected commit 863a3f395d062c7322cc1de08a38774b7fdaa6c8, got '${otelgen_version}'"
+          require_match sccache "$(capture sccache --version)" '^sccache[[:space:]]0\.16\.0([[:space:]]|$)'
+          require_eq rustup_path "$(command -v rustup || true)" "/opt/cargo/bin/rustup"
+          require_eq cargo_path "$(command -v cargo || true)" "/opt/cargo/bin/cargo"
+          require_eq rustc_path "$(command -v rustc || true)" "/opt/cargo/bin/rustc"
+          require_match rustup "$(capture rustup --version)" '^rustup[[:space:]]1\.29\.0([[:space:]]|$)'
+          require_match cargo "$(capture cargo --version)" \
             '^cargo[[:space:]]1\.96\.0-nightly[[:space:]]\(cbb9bb8bd[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
-          require_match rustc "$(rustc --version)" \
+          require_match rustc "$(capture rustc --version)" \
             '^rustc[[:space:]]1\.96\.0-nightly[[:space:]]\(ac7f9ec7d[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
-          require_match active_toolchain "$(rustup show active-toolchain)" \
+          require_match active_toolchain "$(capture rustup show active-toolchain)" \
             '^nightly-2026-03-21-x86_64-unknown-linux-gnu([[:space:]]|$)'
           require_eq RUSTUP_HOME "${RUSTUP_HOME}" "/opt/rustup"
           require_eq RUSTUP_TOOLCHAIN "${RUSTUP_TOOLCHAIN}" "nightly-2026-03-21"
@@ -478,14 +490,23 @@ jobs:
           require "executable /opt/rustup" test -x /opt/rustup
           require "runner cannot write /opt/rustup" test ! -w /opt/rustup
           require "runner cannot write /opt/cargo/bin" test ! -w /opt/cargo/bin
+          cargo_home_dirty=()
           for entry in config config.toml credentials credentials.toml bin .crates.toml .crates2.json .global-cache .package-cache; do
             if [[ -e "${CARGO_HOME}/${entry}" ]]; then
-              printf 'CARGO_HOME contents:\n' >&2
-              ls -la "${CARGO_HOME}" >&2
-              fail "CARGO_HOME must not contain ${entry}"
+              cargo_home_dirty+=("${entry}")
+              record "CARGO_HOME must not contain ${entry}"
             fi
           done
+          if (( ${#cargo_home_dirty[@]} > 0 )); then
+            printf 'CARGO_HOME contents:\n' >&2
+            ls -la "${CARGO_HOME}" >&2 || true
+          fi
           mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
+          if (( ${#errors[@]} > 0 )); then
+            printf '\nVerify runner image tools failed (%d checks):\n' "${#errors[@]}" >&2
+            printf '  - %s\n' "${errors[@]}" >&2
+            exit 1
+          fi
 
       - name: Prepare query regression cache
         shell: bash
