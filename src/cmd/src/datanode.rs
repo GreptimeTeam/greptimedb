@@ -18,6 +18,9 @@ pub(crate) mod objbench;
 #[cfg(feature = "dev-tools")]
 #[allow(clippy::print_stdout)]
 mod parquet_meta;
+#[cfg(feature = "dev-tools")]
+#[allow(clippy::print_stdout)]
+mod parquet_rewrite;
 #[allow(clippy::print_stdout)]
 pub mod parquetbench;
 #[allow(clippy::print_stdout)]
@@ -44,6 +47,8 @@ use crate::datanode::builder::InstanceBuilder;
 use crate::datanode::objbench::ObjbenchCommand;
 #[cfg(feature = "dev-tools")]
 use crate::datanode::parquet_meta::ParquetMetaCommand;
+#[cfg(feature = "dev-tools")]
+use crate::datanode::parquet_rewrite::ParquetRewriteCommand;
 use crate::datanode::parquetbench::ParquetbenchCommand;
 use crate::datanode::scanbench::ScanbenchCommand;
 use crate::error::{
@@ -121,6 +126,8 @@ impl Command {
             SubCommand::Parquetbench(_) => Self::default_bench_options(),
             #[cfg(feature = "dev-tools")]
             SubCommand::ParquetMeta(_) => Self::default_bench_options(),
+            #[cfg(feature = "dev-tools")]
+            SubCommand::ParquetRewrite(_) => Self::default_bench_options(),
         }
     }
 
@@ -149,6 +156,9 @@ pub enum SubCommand {
     /// Display metadata of a parquet file.
     #[cfg(feature = "dev-tools")]
     ParquetMeta(ParquetMetaCommand),
+    /// Rewrite a parquet file with different writer properties.
+    #[cfg(feature = "dev-tools")]
+    ParquetRewrite(ParquetRewriteCommand),
 }
 
 impl SubCommand {
@@ -172,6 +182,11 @@ impl SubCommand {
             }
             #[cfg(feature = "dev-tools")]
             SubCommand::ParquetMeta(cmd) => {
+                cmd.run().await?;
+                std::process::exit(0);
+            }
+            #[cfg(feature = "dev-tools")]
+            SubCommand::ParquetRewrite(cmd) => {
                 cmd.run().await?;
                 std::process::exit(0);
             }
