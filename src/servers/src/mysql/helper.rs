@@ -15,12 +15,11 @@
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use chrono::{LocalResult, NaiveDate, NaiveDateTime};
+use chrono::{NaiveDate, NaiveDateTime};
 use common_query::prelude::ScalarValue;
 use common_sql::convert::sql_value_to_value;
-use common_time::timezone::Timezone;
-use common_time::util::datetime_to_utc;
-use common_time::{Date, Timestamp};
+use common_time::timestamp::TimeUnit;
+use common_time::{Date, Timestamp, Timezone};
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
@@ -241,27 +240,26 @@ pub fn convert_value(
             let date: common_time::Date = NaiveDate::from(param.value).into();
             Ok(ScalarValue::Date32(Some(date.val())))
         }
-        ValueInner::Datetime(_) => {
-            let datetime = to_naive_datetime(param.value).map_err(|e| {
-                error::MysqlValueConversionSnafu {
-                    err_msg: e.to_string(),
-                }
-                .build()
-            })?;
-            let timestamp_millis = datetime_to_timestamp_millis(datetime, timezone)?;
-
-            match t {
-                ConcreteDataType::Timestamp(_) => Ok(ScalarValue::TimestampMillisecond(
+        ValueInner::Datetime(_) => match t {
+            ConcreteDataType::Timestamp(_) => {
+                let datetime = to_naive_datetime(param.value).map_err(|e| {
+                    error::MysqlValueConversionSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?;
+                let timestamp_millis = datetime_to_timestamp_millis(datetime, timezone)?;
+                Ok(ScalarValue::TimestampMillisecond(
                     Some(timestamp_millis),
                     None,
-                )),
-                _ => error::PreparedStmtTypeMismatchSnafu {
-                    expected: t,
-                    actual: param.coltype,
-                }
-                .fail(),
+                ))
             }
-        }
+            _ => error::PreparedStmtTypeMismatchSnafu {
+                expected: t,
+                actual: param.coltype,
+            }
+            .fail(),
+        },
         ValueInner::Time(_) => Ok(ScalarValue::Time64Nanosecond(Some(
             Duration::from(param.value).as_millis() as i64,
         ))),
@@ -322,15 +320,21 @@ pub fn convert_expr_to_scalar_value(
 /// Interprets a timezone-less datetime in the given timezone and returns the
 /// corresponding epoch timestamp in milliseconds.
 fn datetime_to_timestamp_millis(datetime: NaiveDateTime, timezone: &Timezone) -> Result<i64> {
-    match datetime_to_utc(&datetime, timezone) {
-        LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
-            Ok(utc.and_utc().timestamp_millis())
-        }
-        LocalResult::None => error::MysqlValueConversionSnafu {
-            err_msg: format!("{datetime} is not a valid datetime in timezone {timezone}"),
-        }
-        .fail(),
-    }
+    let ts = Timestamp::from_naive_datetime(datetime, timezone)
+        .map_err(|e| {
+            error::MysqlValueConversionSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
+        })?
+        .convert_to(TimeUnit::Millisecond)
+        .ok_or_else(|| {
+            error::MysqlValueConversionSnafu {
+                err_msg: "Overflow when converting datetime to milliseconds".to_string(),
+            }
+            .build()
+        })?;
+    Ok(ts.value())
 }
 
 fn convert_bytes_to_timestamp(
