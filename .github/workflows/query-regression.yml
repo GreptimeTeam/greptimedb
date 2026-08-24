@@ -93,13 +93,10 @@ jobs:
     # Stdlib unittests for the workflow Python (case selection, report
     # helpers, nightly SHA picking, and rendered ECS user-data). They do
     # not talk to Aliyun or the Actions runner process; running them on
-    # ubuntu-latest fails fast before any ECS spend.
-    if: >-
-      ${{ github.event_name != 'pull_request' ||
-           (github.event_name == 'pull_request' &&
-            !github.event.pull_request.draft &&
-            (github.event.label.name == 'query-regression' ||
-             github.event.label.name == 'heavy-regression')) }}
+    # ubuntu-latest fails fast before any ECS spend. Not gated on the
+    # regression labels: those labels boot a VM, these tests should not.
+    # Ordinary PRs also run the same tests from checks.yml, because this
+    # workflow only starts on `labeled` (or dispatch / workflow_call).
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -196,7 +193,7 @@ jobs:
       QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
       RUSTC_WRAPPER: /usr/local/bin/sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
-      # Caps the local sccache on the 40G system disk next to target and cargo.
+      # Caps the local sccache on the system disk next to target and cargo.
       SCCACHE_CACHE_SIZE: 10G
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
@@ -436,6 +433,21 @@ jobs:
           printf 'uid=%s gid=%s PATH=%s CARGO_HOME=%s\n' "$(id -u)" "$(id -g)" "${PATH}" "${CARGO_HOME}"
           ls -la "${CARGO_HOME}" 2>&1 || printf '(CARGO_HOME missing)\n'
 
+          # Image/host hygiene: CARGO_HOME must be empty of config and
+          # install-state before cargo/rustup run. Those tools create
+          # .package-cache / bin on first use, so this cannot come after.
+          cargo_home_dirty=()
+          for entry in config config.toml credentials credentials.toml bin .crates.toml .crates2.json .global-cache .package-cache; do
+            if [[ -e "${CARGO_HOME}/${entry}" ]]; then
+              cargo_home_dirty+=("${entry}")
+              record "CARGO_HOME must not contain ${entry}"
+            fi
+          done
+          if (( ${#cargo_home_dirty[@]} > 0 )); then
+            printf 'CARGO_HOME contents:\n' >&2
+            ls -la "${CARGO_HOME}" >&2 || true
+          fi
+
           require_eq uid "$(id -u)" "${EXPECTED_RUNNER_UID}"
           require_eq gid "$(id -g)" "${EXPECTED_RUNNER_GID}"
           require_eq UV_CACHE_DIR "${UV_CACHE_DIR}" "/home/runner/.cargo/uv-cache"
@@ -490,17 +502,6 @@ jobs:
           require "executable /opt/rustup" test -x /opt/rustup
           require "runner cannot write /opt/rustup" test ! -w /opt/rustup
           require "runner cannot write /opt/cargo/bin" test ! -w /opt/cargo/bin
-          cargo_home_dirty=()
-          for entry in config config.toml credentials credentials.toml bin .crates.toml .crates2.json .global-cache .package-cache; do
-            if [[ -e "${CARGO_HOME}/${entry}" ]]; then
-              cargo_home_dirty+=("${entry}")
-              record "CARGO_HOME must not contain ${entry}"
-            fi
-          done
-          if (( ${#cargo_home_dirty[@]} > 0 )); then
-            printf 'CARGO_HOME contents:\n' >&2
-            ls -la "${CARGO_HOME}" >&2 || true
-          fi
           mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
           if (( ${#errors[@]} > 0 )); then
             printf '\nVerify runner image tools failed (%d checks):\n' "${#errors[@]}" >&2
@@ -659,7 +660,7 @@ jobs:
 
           report_cache_usage
 
-          # Every run starts from a fresh 40G system disk, so size/free-space
+          # Every run starts from a fresh system disk, so size/free-space
           # watermarks from the retired retained-disk era are not restored.
           # A run that overflows the disk fails the build outright, which the
           # telemetry step makes diagnosable.

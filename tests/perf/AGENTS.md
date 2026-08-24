@@ -34,7 +34,9 @@
   files and thresholds, not in Rust generator logic.
 - Before pushing perf harness changes, run at least:
   - the Python tests in the `test-tooling` job of
-    `.github/workflows/query-regression.yml` (ubuntu-latest, not the ECS runner)
+    `.github/workflows/query-regression.yml` (ubuntu-latest, not the ECS runner).
+    The Checks workflow runs the same tests on ordinary PRs so they are not
+    gated on the `query-regression` / `heavy-regression` labels.
   - `cargo fmt --all -- --check`
   - `cargo build -p cmd --bin query_perf_fixture --features dev-tools`
   - `cargo build -p cmd --bin query_regression_runner --features dev-tools`
