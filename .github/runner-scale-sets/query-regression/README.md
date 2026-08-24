@@ -8,12 +8,10 @@ label. A `teardown` job (`if: always()`) deletes the instance;
 `query-regression-janitor.yml` sweeps tagged leftovers older than 4 hours
 daily.
 
-Build caches live on the instance's system disk by default, so **every run
-compiles cold**; only the within-run reuse (base build warms the candidate
-build through the shared target dir and sccache) applies. Setting
-`QUERY_REGRESSION_CACHE_DISK_ID` to a retained ESSD disk re-enables warm
-cross-run caches — the provision script then attaches the disk and
-bind-mounts its subdirectories over the runner cache paths.
+Build caches live on the instance's system disk, so **every run compiles
+cold**; only the within-run reuse (base build warms the candidate build
+through the shared target dir and sccache) applies. There is no retained
+data disk.
 
 Dispatching with any other `runner` value uses it as a literal self-hosted
 runner label, which is how a manually prepared host (see
@@ -28,33 +26,34 @@ and the `query-regression-build-cache` PVC) is a manual operator action
 outside this repository. This directory keeps its historical
 `runner-scale-sets` name for path stability.
 
+## Nightly vs previous nightly
+
+`query-regression-nightly.yml` runs after a successful `GreptimeDB Nightly
+Build` (`workflow_run`). It resolves that run's `head_sha` as the candidate
+and the previous successful nightly (same branch, typically Friday when
+Monday's nightly fires) as the base, then calls `query-regression.yml` with
+those immutable SHAs. Both binaries are still compiled on the ECS runner;
+this is not an artifact-download path. `workflow_dispatch` can pass explicit
+`base_ref` / `candidate_ref` or a nightly run id. If there is no previous
+nightly, or both nightlies built the same commit, the comparison is skipped.
+
 ## Aliyun ECS path
 
 Configuration lives in repository variables/secrets:
 
 | Kind | Name | Purpose |
 | --- | --- | --- |
-| secret | `ALICLOUD_ECS_ACCESS_KEY_ID` / `ALICLOUD_ECS_ACCESS_KEY_SECRET` | RAM user scoped to ECS RunInstances/DeleteInstances/AttachDisk/Describe*/CreateImage/RunCommand. Used only by provision/teardown jobs on `ubuntu-latest`; never reaches the ECS instance. |
+| secret | `ALICLOUD_ECS_ACCESS_KEY_ID` / `ALICLOUD_ECS_ACCESS_KEY_SECRET` | RAM user scoped to ECS RunInstances/DeleteInstances/Describe*/CreateImage/RunCommand. Used only by provision/teardown jobs on `ubuntu-latest`; never reaches the ECS instance. |
 | secret | `GH_PERSONAL_ACCESS_TOKEN` | Creates the short-lived runner registration token (shared with the jsonbench EC2 path). |
-| vars | `ALIYUN_ECS_REGION_ID` / `ALIYUN_ECS_VSWITCH_ID` / `ALIYUN_ECS_SECURITY_GROUP_ID` | Network placement. The security group should allow egress only; no inbound rules are needed. The vSwitch pins the zone, which must match the cache disk's zone. |
+| vars | `ALIYUN_ECS_REGION_ID` / `ALIYUN_ECS_VSWITCH_ID` / `ALIYUN_ECS_SECURITY_GROUP_ID` | Network placement. The security group should allow egress only; no inbound rules are needed. The vSwitch pins the zone. |
 | vars | `ALIYUN_ECS_INSTANCE_TYPE` | Dedicated (non-burstable, non-shared) instance family. Prefer 32 GiB (e.g. `ecs.g8i.2xlarge`); `ecs.c9i.2xlarge` is 8c16g and nightly thin-LTO of greptime peaks above that. Both base and candidate clusters run on the same machine, so noisy neighbors break thresholds. |
 | vars | `QUERY_REGRESSION_ECS_IMAGE_ID` | Custom image built by `ecs-image/build-ecs-image.py`. |
-| vars | `QUERY_REGRESSION_CACHE_DISK_ID` | Optional. Unset/empty: no retained disk, caches are cold every run. Set to a retained ESSD disk id (~40Gi is enough from observed usage) for warm cross-run caches. ESSD cannot be shrunk, only recreated — update this variable with the new disk id afterwards. |
 
-When a cache disk is configured, it holds top-level directories
-`cargo-registry-v1`, `cargo-git-v1`, `query-regression-target-v1`, `meta-v1`,
-and `sccache-v1`, which cloud-init bind-mounts to the `/home/runner/...`
-paths the workflow uses; without a disk those paths are plain directories on
-the system disk. The instance is created with `DeleteWithInstance=false` for
-the data disk, so deleting the instance detaches and retains it. To rebuild
-the cache from scratch, delete or reformat the disk; the next provision
-formats an unformatted disk automatically.
-
-The system disk is 40 GiB, which covers the image, a 16 GiB swapfile, and
-the checkout. With no cache disk attached, build caches (target dir, cargo
-registry, sccache) share this disk too. ENOSPC stops the runner itself from
-writing logs, which GitHub reports as `The operation was canceled` with no
-telemetry, indistinguishable from a platform-side cancellation.
+The system disk is 40 GiB, which covers the image, a 16 GiB swapfile, the
+checkout, and cold build caches (target dir, cargo registry, sccache). ENOSPC
+stops the runner itself from writing logs, which GitHub reports as `The
+operation was canceled` with no telemetry, indistinguishable from a
+platform-side cancellation.
 cloud-init masks `systemd-oomd`, disables `unattended-upgrades` /
 `apt-daily-upgrade`, creates `/swapfile`, and sets `OOMPolicy=continue`
 on the runner unit. Ubuntu 24.04 defaults to `DefaultOOMPolicy=stop`,
@@ -103,19 +102,12 @@ image id; set it as `QUERY_REGRESSION_ECS_IMAGE_ID`, and bump
 cache invalidates. Builder sentinel polling requires the Cloud Assistant
 agent, which Aliyun public Ubuntu images include.
 
-### Cache disk recovery
-
-The cache is disposable. For disk loss or corruption, create a fresh ESSD disk
-in the same zone, update `QUERY_REGRESSION_CACHE_DISK_ID`, and let the next
-run cold-fill it (expect the first build to take the full cold-build time).
-
 ## Trust admission for PR runs
 
 A maintainer applying the `query-regression` or `heavy-regression` label is
 **trust admission for that exact PR revision**. `query-regression` runs the
 six routine default cases; `heavy-regression` runs only the high-cardinality
-`prom_remote_write_7913` remote-write case. The admitted job may use the
-dedicated, writable persistent cache. `pull_request: labeled` is the only PR
+`prom_remote_write_7913` remote-write case. `pull_request: labeled` is the only PR
 trigger: the label event snapshots its merge, head, and base SHAs. A queued
 job fetches that immutable event merge SHA directly, verifies it is a
 two-parent merge whose parents include the snapshotted head exactly once, and
@@ -161,75 +153,29 @@ automatic Rustup installation, and performs no runtime toolchain downloads.
 
 The workflow no longer uses GitHub `rust-cache`, `setup-protoc`, `setup-uv`,
 or runtime Rust setup: the image establishes immutable executable state and
-the cache disk supplies only reusable Cargo data. Do not reintroduce those
-actions unless the corresponding cache or image contract changes.
+each instance's system disk holds only that run's Cargo data. Do not
+reintroduce those actions unless the image contract changes.
 
-## Capacity and persistent cache
+## Capacity
 
-The job uses group `query-regression-persistent-cache-v1`, `queue: max`, and
-`cancel-in-progress: false`; admitted jobs queue rather than replacing older
-pending jobs. The cache disk layout is:
-
-| Persistent state | Disk directory | Runner mount |
-| --- | --- | --- |
-| Ephemeral Cargo home | system disk | `/home/runner/.cargo` |
-| Cargo registry data | `cargo-registry-v1` | `/home/runner/.cargo/registry` |
-| Cargo Git data | `cargo-git-v1` | `/home/runner/.cargo/git` |
-| Cargo target | `query-regression-target-v1` | `/home/runner/query-regression-target` |
-| Cache metadata | `meta-v1` | `/home/runner/query-regression-cache-meta` |
-| sccache local disk cache | `sccache-v1` | `/home/runner/.cache/sccache` |
-| Immutable Rust toolchain | image-owned | `/opt/rustup`, `/opt/cargo/bin` |
-
-`CARGO_HOME` lives on the per-instance system disk; only its nested `registry`
-and `git` mounts are persistent. `RUSTUP_HOME=/opt/rustup` and
-`/opt/cargo/bin` are image-owned immutable paths, while `CARGO_TARGET_DIR`,
-cache metadata, and `SCCACHE_DIR` are persistent absolute paths. The runner
+Each run provisions its own ECS instance, so overlapping dispatches proceed
+in parallel. There is no workflow `concurrency` group. All Cargo state
+(`CARGO_HOME` including registry/git, `CARGO_TARGET_DIR`, sccache, cache
+metadata) lives on the 40 GiB system disk and is discarded with the VM.
+`RUSTUP_HOME=/opt/rustup` and `/opt/cargo/bin` are image-owned. The runner
 sets `RUSTC_WRAPPER=/usr/local/bin/sccache`,
 `SCCACHE_DIR=/home/runner/.cache/sccache`, `SCCACHE_CACHE_SIZE=10G`, and
-`CARGO_INCREMENTAL=0`. sccache uses its local disk backend and self-evicts at
-10G; do not add runtime downloads, object storage, or a shared backend. The
-sccache cap must fit on the retained cache disk together with the target dir
-and cargo registry — keep them in proportion when resizing the disk.
+`CARGO_INCREMENTAL=0`. sccache uses its local disk backend and self-evicts
+at 10G. Base and candidate builds share the target on that disk; Cargo
+fingerprints invalidate source and dependency changes.
 
-The repository's `.cargo/config.toml` remains a trusted per-revision build
-input. In contrast, `$CARGO_HOME/config*`, credentials, installed bins, and
-Cargo metadata outside the persistent `registry` and `git` data mounts are
-ephemeral and cannot survive to another instance.
-
-The local disk backend has a one-server constraint. The single cache disk and
-the unchanged `query-regression-persistent-cache-v1` workflow concurrency
-group serialize runs; do not provision parallel runners or relax that
-serialization while this backend is in use. Base and candidate builds share
-the target; Cargo fingerprints invalidate source and dependency changes. The
-workflow records the sccache version and relevant environment in the target
-ABI marker, starts and zeros sccache after cache and toolchain checks, shows
-initial/base/candidate statistics, and resets statistics between base and
-candidate builds.
-
-### Disk cleanup contract
-
-The workflow reports `du`, `df -P`, human-readable free space, and inode
-availability before builds and in an always-run report. Its cleanup is narrow
-and non-destructive:
-
-- warn at target size 400GiB; at 450GiB clear only the complete target root;
-- warn at Cargo registry-plus-Git data size 60GiB; at 80GiB remove only
-  `registry/src` and `git/checkouts`, then abort if that persistent data
-  remains at least 80GiB;
-- below 300GiB backing free space, clear the complete target root first,
-  remeasure, then remove only those Cargo extracted trees and checkouts; abort
-  if free space is still below 300GiB;
-- never automatically remove Cargo registry cache/index, Git database, the
-  image-owned Cargo bin or Rustup toolchain, cache metadata, the self-evicting
-  sccache directory, or the cache disk.
-
-The target clear uses fixed absolute roots and removes all entries, including
-dotfiles.
+The workflow reports `du` / `df` in telemetry. It does not try to reclaim
+space across runs: a cold 40 GiB disk that fills up fails the build.
 
 ## Future optional phases
 
 The current phase uses a materialized runner toolchain with sccache 0.16.0 and
 no shared cache service. Optional follow-ups are an image additionally seeded
 with `cargo fetch --locked` results, or an internal read/write sccache
-backend or Cargo/Git mirror. Evaluate them only if persistent disk reuse is
-insufficient.
+backend or Cargo/Git mirror. Evaluate them only if cold compile time on the
+system disk becomes the bottleneck.

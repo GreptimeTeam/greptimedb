@@ -28,13 +28,14 @@
 
 """Provision an ephemeral Aliyun ECS query-regression runner.
 
-Creates one pay-as-you-go ECS instance from the query-regression custom image,
-attaches the retained build-cache disk, and waits until the instance registers
-itself as an ephemeral GitHub Actions runner with a per-run label. Instance
-id is written to job outputs as soon as the VM exists so the teardown job
-is the single DeleteInstance caller (a timeout here used to delete and then
-teardown deleted again). On runner online timeout the console is dumped and
-the job fails; teardown releases the instance.
+Creates one pay-as-you-go ECS instance from the query-regression custom image
+and waits until the instance registers itself as an ephemeral GitHub Actions
+runner with a per-run label. Build caches live on the instance system disk
+and disappear with the VM. The instance id is written to job outputs as soon
+as the VM exists so the teardown job is the single DeleteInstance caller (a
+timeout here used to delete and then teardown deleted again). On runner
+online timeout the console is dumped and the job fails; teardown releases
+the instance.
 
 The Aliyun credentials are used only in this control-plane job (ubuntu-latest)
 and are never passed to the ECS instance; the instance receives only a
@@ -58,18 +59,16 @@ MANAGED_BY_TAG_KEY = "managed-by"
 MANAGED_BY_TAG_VALUE = "query-regression-ci"
 RUN_TAG_KEY = "query-regression-run-id"
 
-CACHE_MOUNT = "/mnt/query-regression-cache"
-# Disk subdirectories bind-mount to the runner paths the workflow's cache
-# contract expects; the layout mirrors the retired ARC PVC subPaths.
-CACHE_SUBDIRS = {
-    "cargo-registry-v1": "/home/runner/.cargo/registry",
-    "cargo-git-v1": "/home/runner/.cargo/git",
-    "query-regression-target-v1": "/home/runner/query-regression-target",
-    "meta-v1": "/home/runner/query-regression-cache-meta",
-    "sccache-v1": "/home/runner/.cache/sccache",
-}
+# Runner cache paths on the instance system disk. They are created empty
+# every provision and deleted with the VM.
+CACHE_PATHS = (
+    "/home/runner/.cargo/registry",
+    "/home/runner/.cargo/git",
+    "/home/runner/query-regression-target",
+    "/home/runner/query-regression-cache-meta",
+    "/home/runner/.cache/sccache",
+)
 
-DISK_WAIT_TIMEOUT_SECONDS = 20 * 60
 RUNNER_ONLINE_TIMEOUT_SECONDS = 10 * 60
 POLL_INTERVAL_SECONDS = 5
 
@@ -77,8 +76,8 @@ POLL_INTERVAL_SECONDS = 5
 # file plus masking systemd-oomd lets the kernel reclaim rustc pages instead
 # of SIGTERM-ing the runner service cgroup (GitHub then reports the step as
 # "The operation was canceled"). Sized to match that 16 GiB instance; a
-# 32 GiB type still benefits as a safety net. Lives on the system disk so it
-# does not contend with the retained cache disk's cargo target.
+# 32 GiB type still benefits as a safety net. Lives on the system disk next
+# to the cold build caches.
 SWAP_FILE = "/swapfile"
 SWAP_SIZE_GIB = 16
 
@@ -93,9 +92,6 @@ class ProvisionConfig:
     repo: str
     run_id: str
     github_token: str
-    # Optional retained cache disk; without it caches live on the system disk
-    # and every run compiles cold.
-    cache_disk_id: str | None = None
     # Optional resource group; required when the RAM grant is scoped to one.
     resource_group_id: str | None = None
     # Runner identity inside the image; the workflow asserts the same values.
@@ -112,7 +108,6 @@ def runner_label_for_run(run_id: str) -> str:
 
 
 def render_user_data(
-    cache_disk_id: str | None,
     runner_name: str,
     runner_label: str,
     runner_token: str,
@@ -120,67 +115,11 @@ def render_user_data(
     runner_uid: str = "1001",
     runner_gid: str = "1001",
 ) -> str:
-    """Render the cloud-init shell script for the runner instance.
-
-    With a cache disk id, waits for the retained disk, mounts it, and
-    bind-mounts its subdirectories over the runner cache paths. Without one,
-    the cache paths are plain directories on the system disk and every run
-    compiles cold.
-    """
-    if cache_disk_id is not None:
-        bind_mounts = "\n".join(
-            f'bind_mount "{CACHE_MOUNT}/{sub}" "{dst}"' for sub, dst in CACHE_SUBDIRS.items()
-        )
-        mkdirs = " ".join(f'"{CACHE_MOUNT}/{sub}"' for sub in CACHE_SUBDIRS)
-        cache_setup = f"""DISK_SERIAL="{cache_disk_id.replace("-", "")}"
-
-# Wait for the attached cache disk. The guest-visible serial derives from
-# the disk id without dashes, but the derivation differs by disk interface:
-# virtio keeps the first 20 characters (ids are longer than the 20-char
-# serial limit), NVMe drops the leading "d". A SUBSTRING match against the
-# full disk serial covers both, and lsblk covers both virtio-blk (/dev/vdX)
-# and NVMe (/dev/nvmeXn1) attachments.
-device=""
-echo "Waiting for cache disk with serial ${{DISK_SERIAL}} (guest serial may be truncated/derived)"
-for i in $(seq 1 150); do
-  device="$(lsblk -dpno NAME,SERIAL | awk -v serial="${{DISK_SERIAL}}" \\
-    'length($2) > 0 && index(serial, $2) > 0 {{ print $1; exit }}')"
-  [[ -n "${{device}}" ]] && break
-  if (( i % 15 == 1 )); then
-    echo "Still waiting for cache disk; block devices seen so far:"
-    lsblk -dpno NAME,SERIAL | sed 's/^/  /'
-  fi
-  sleep 2
-done
-if [[ -z "${{device}}" ]]; then
-  echo "query-regression cache disk did not appear; final block device list:" >&2
-  lsblk -dpno NAME,SERIAL >&2
-  exit 1
-fi
-echo "Cache disk device: ${{device}}"
-
-# Format only on first use; a filesystem signature means the disk holds cache.
-if ! blkid "${{device}}" >/dev/null 2>&1; then
-  mkfs.ext4 -L query-regression-cache "${{device}}"
-fi
-mkdir -p "{CACHE_MOUNT}"
-mount "${{device}}" "{CACHE_MOUNT}"
-
-mkdir -p {mkdirs}
-chown -R {runner_uid}:{runner_gid} "{CACHE_MOUNT}"
-mkdir -p /home/runner/.cargo /home/runner/.cache
-
-bind_mount() {{
-  local src="$1" dst="$2"
-  mkdir -p "${{dst}}"
-  mount --bind "${{src}}" "${{dst}}"
-}}
-{bind_mounts}
-chown -R {runner_uid}:{runner_gid} /home/runner"""
-    else:
-        destinations = " ".join(f'"{dst}"' for dst in CACHE_SUBDIRS.values())
-        cache_setup = f"""# No retained cache disk configured: caches live on the system disk, are
-# deleted with the instance, and every run compiles cold.
+    """Render the cloud-init shell script for the runner instance."""
+    destinations = " ".join(f'"{dst}"' for dst in CACHE_PATHS)
+    cache_setup = f"""# Caches live on the system disk, are deleted with the instance, and every
+# run compiles cold. Within-run reuse (base warming candidate via the shared
+# target dir and sccache) still applies.
 mkdir -p {destinations}
 chown -R {runner_uid}:{runner_gid} /home/runner"""
     swap_setup = f"""# Mask systemd-oomd before enabling swap: Ubuntu 24.04 kills the whole
@@ -337,27 +276,6 @@ def make_ecs_client(config: ProvisionConfig):
     )
 
 
-def wait_for_disk_available(client, region_id: str, disk_id: str, deadline: float) -> None:
-    from alibabacloud_ecs20140526 import models as ecs_models
-
-    while time.monotonic() < deadline:
-        response = client.describe_disks(
-            ecs_models.DescribeDisksRequest(region_id=region_id, disk_ids=json.dumps([disk_id]))
-        )
-        disks = response.body.disks.disk
-        if not disks:
-            raise RuntimeError(f"Cache disk {disk_id} not found")
-        status = disks[0].status
-        print(f"Cache disk {disk_id} status: {status}", flush=True)
-        if status == "Available":
-            return
-        # "In_use" normally means a previous instance is still being deleted;
-        # keep waiting. Never force-detach: detaching a mounted disk risks
-        # cache corruption.
-        time.sleep(POLL_INTERVAL_SECONDS)
-    raise TimeoutError(f"Cache disk {disk_id} did not become Available in time")
-
-
 def wait_for_instance_status(client, region_id: str, instance_id: str, wanted: str, deadline: float) -> None:
     from alibabacloud_ecs20140526 import models as ecs_models
 
@@ -449,9 +367,9 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         spot_strategy="NoSpot",
         internet_charge_type="PayByTraffic",
         internet_max_bandwidth_out=100,
-        # Holds the image (~12G), the 16G swapfile, the source checkout, and
-        # the base+candidate cluster data homes. With no retained cache disk,
-        # build caches share this disk too. Deleted with the instance.
+        # Holds the image (~12G), the 16G swapfile, the source checkout, the
+        # base+candidate cluster data homes, and cold build caches. Deleted
+        # with the instance.
         system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="40"),
         user_data=user_data,
         tag=[
@@ -465,28 +383,13 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
 
 
 def provision(config: ProvisionConfig) -> int:
-    from alibabacloud_ecs20140526 import models as ecs_models
-
     client = make_ecs_client(config)
     runner_name = runner_name_for_run(config.run_id)
     runner_label = runner_label_for_run(config.run_id)
 
-    if config.cache_disk_id is not None:
-        print("::group::Wait for cache disk", flush=True)
-        wait_for_disk_available(
-            client,
-            config.region_id,
-            config.cache_disk_id,
-            time.monotonic() + DISK_WAIT_TIMEOUT_SECONDS,
-        )
-        print("::endgroup::", flush=True)
-    else:
-        print("No cache disk configured; caches are cold on the system disk", flush=True)
-
     registration_token = create_registration_token(config.github_token, config.repo)
     user_data = encode_user_data(
         render_user_data(
-            config.cache_disk_id,
             runner_name,
             runner_label,
             registration_token,
@@ -500,17 +403,11 @@ def provision(config: ProvisionConfig) -> int:
     instance_id = run_instance(client, config, user_data)
     print(f"Instance id: {instance_id}", flush=True)
     # Teardown is the only DeleteInstance caller. Write outputs immediately
-    # so a later attach/status/online failure still releases this VM.
+    # so a later status/online failure still releases this VM.
     append_github_output("label", runner_label)
     append_github_output("instance_id", instance_id)
     append_github_output("runner_name", runner_name)
     wait_for_instance_status(client, config.region_id, instance_id, "Running", time.monotonic() + 5 * 60)
-    if config.cache_disk_id is not None:
-        client.attach_disk(
-            ecs_models.AttachDiskRequest(
-                instance_id=instance_id, disk_id=config.cache_disk_id, delete_with_instance=False
-            )
-        )
     print("::endgroup::", flush=True)
 
     print("::group::Wait for runner online", flush=True)
@@ -550,7 +447,6 @@ def main() -> int:
     parser.add_argument("--security-group-id", default=os.environ.get("ALIYUN_ECS_SECURITY_GROUP_ID"))
     parser.add_argument("--image-id", default=os.environ.get("QUERY_REGRESSION_ECS_IMAGE_ID"))
     parser.add_argument("--instance-type", default=os.environ.get("ALIYUN_ECS_INSTANCE_TYPE"))
-    parser.add_argument("--cache-disk-id", default=os.environ.get("QUERY_REGRESSION_CACHE_DISK_ID"))
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--github-token", default=os.environ.get("GH_PERSONAL_ACCESS_TOKEN"))
@@ -562,7 +458,7 @@ def main() -> int:
     missing = [
         name
         for name, value in vars(args).items()
-        if name not in ("resource_group_id", "cache_disk_id")
+        if name not in ("resource_group_id",)
         and (value is None or (isinstance(value, str) and not value))
     ]
     if missing:
@@ -579,7 +475,6 @@ def main() -> int:
         run_id=args.run_id,
         github_token=args.github_token,
         resource_group_id=args.resource_group_id or None,
-        cache_disk_id=args.cache_disk_id or None,
         runner_uid=args.runner_uid,
         runner_gid=args.runner_gid,
     )

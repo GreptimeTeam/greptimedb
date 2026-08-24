@@ -48,25 +48,19 @@ class ProvisionNamingTest(unittest.TestCase):
 class ProvisionUserDataTest(unittest.TestCase):
     def render(self) -> str:
         return provision.render_user_data(
-            cache_disk_id="d-bp1abc-def",
             runner_name="qreg-ecs-12345",
             runner_label="query-regression-ecs-12345",
             runner_token="TOKEN",
             repo="GreptimeTeam/greptimedb",
         )
 
-    def test_user_data_strips_dashes_from_disk_serial(self) -> None:
-        self.assertIn('DISK_SERIAL="dbp1abcdef"', self.render())
-
-    def test_user_data_binds_every_cache_subdir(self) -> None:
+    def test_user_data_creates_cache_paths_on_the_system_disk(self) -> None:
         script = self.render()
-        for subdir, destination in provision.CACHE_SUBDIRS.items():
-            self.assertIn(f'bind_mount "{provision.CACHE_MOUNT}/{subdir}" "{destination}"', script)
-
-    def test_user_data_formats_only_an_unformatted_disk(self) -> None:
-        script = self.render()
-        self.assertIn("if ! blkid", script)
-        self.assertIn("mkfs.ext4 -L query-regression-cache", script)
+        self.assertNotIn("DISK_SERIAL", script)
+        self.assertNotIn("mount --bind", script)
+        self.assertNotIn("mkfs.ext4", script)
+        for destination in provision.CACHE_PATHS:
+            self.assertIn(f'"{destination}"', script)
 
     def test_user_data_wires_runner_registration(self) -> None:
         script = self.render()
@@ -83,39 +77,17 @@ class ProvisionUserDataTest(unittest.TestCase):
             base64.b64decode(provision.encode_user_data(script)).decode("utf-8"), script
         )
 
-    def test_user_data_without_cache_disk_uses_plain_directories(self) -> None:
-        script = provision.render_user_data(
-            cache_disk_id=None,
-            runner_name="qreg-ecs-12345",
-            runner_label="query-regression-ecs-12345",
-            runner_token="TOKEN",
-            repo="GreptimeTeam/greptimedb",
-        )
-        self.assertNotIn("DISK_SERIAL", script)
-        self.assertNotIn("mount --bind", script)
-        for destination in provision.CACHE_SUBDIRS.values():
-            self.assertIn(f'"{destination}"', script)
-        self.assertIn("systemctl restart --no-block ephemeral-github-runner.service", script)
-
     def test_user_data_enables_swap_and_masks_oomd(self) -> None:
-        for cache_disk_id in ("d-bp1abc-def", None):
-            script = provision.render_user_data(
-                cache_disk_id=cache_disk_id,
-                runner_name="qreg-ecs-12345",
-                runner_label="query-regression-ecs-12345",
-                runner_token="TOKEN",
-                repo="GreptimeTeam/greptimedb",
-            )
-            with self.subTest(cache_disk_id=cache_disk_id):
-                self.assertIn("systemctl mask systemd-oomd.socket systemd-oomd.service", script)
-                self.assertIn("systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer", script)
-                self.assertIn('APT::Periodic::Unattended-Upgrade "0"', script)
-                self.assertIn(f'fallocate --length {provision.SWAP_SIZE_GIB}G "{provision.SWAP_FILE}"', script)
-                self.assertIn(f'swapon "{provision.SWAP_FILE}"', script)
-                self.assertIn("sysctl --write vm.swappiness=10", script)
-                self.assertIn("OOMPolicy=continue", script)
-                self.assertNotIn("OOMScoreAdjust", script)
-                self.assertLess(script.index("swapon"), script.index("systemctl restart --no-block ephemeral-github-runner.service"))
+        script = self.render()
+        self.assertIn("systemctl mask systemd-oomd.socket systemd-oomd.service", script)
+        self.assertIn("systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer", script)
+        self.assertIn('APT::Periodic::Unattended-Upgrade "0"', script)
+        self.assertIn(f'fallocate --length {provision.SWAP_SIZE_GIB}G "{provision.SWAP_FILE}"', script)
+        self.assertIn(f'swapon "{provision.SWAP_FILE}"', script)
+        self.assertIn("sysctl --write vm.swappiness=10", script)
+        self.assertIn("OOMPolicy=continue", script)
+        self.assertNotIn("OOMScoreAdjust", script)
+        self.assertLess(script.index("swapon"), script.index("systemctl restart --no-block ephemeral-github-runner.service"))
 
 
 class TeardownExpiryTest(unittest.TestCase):
