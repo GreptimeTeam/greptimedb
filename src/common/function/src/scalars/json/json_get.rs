@@ -272,6 +272,26 @@ fn jsonb_get(
     Ok(())
 }
 
+fn jsonb_project(jsons: &BinaryViewArray, path: &str, with_type: &DataType) -> Result<ArrayRef> {
+    let mut builder = BinaryViewBuilder::with_capacity(jsons.len());
+    for i in 0..jsons.len() {
+        let json = jsons.is_valid(i).then(|| jsons.value(i));
+        let result = json.and_then(|json| get_json_by_path(json, path));
+        builder.append_option(result);
+    }
+
+    let array = Arc::new(builder.finish()) as ArrayRef;
+    JsonArray::from(&array)
+        .project_to(with_type)
+        .map_err(|e| exec_datafusion_err!("{e:?}"))
+}
+
+fn json_project(array: &ArrayRef, with_type: &DataType) -> Result<ArrayRef> {
+    JsonArray::from(array)
+        .project_to(with_type)
+        .map_err(|e| exec_datafusion_err!("{e:?}"))
+}
+
 fn json_struct_get(array: &ArrayRef, path: &str, with_type: &DataType) -> Result<ArrayRef> {
     let segments = path
         .trim_start_matches("$")
@@ -404,16 +424,20 @@ impl Function for JsonGetWithType {
         let result = match arg0.data_type() {
             DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                 let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+                let jsons = arg0.as_binary_view();
 
-                if args.arg_fields.first().is_some_and(is_json2_extension_type) {
+                if args.arg_fields.first().is_some_and(|field| {
+                    is_json2_extension_type(field) && field.data_type().is_binary()
+                }) {
+                    jsonb_project(jsons, path, &with_type)
+                        .or_else(|_| json_project(&arg0, &with_type))?
+                } else if args.arg_fields.first().is_some_and(is_json2_extension_type) {
                     // Query concretization projects nested JSON2 paths as Struct arrays. A binary
-                    // JSON2 argument is therefore an already-selected scalar or root value that
-                    // only needs conversion from its JSONB representation to the requested type.
-                    JsonArray::from(&arg0)
-                        .project_to(&with_type)
-                        .map_err(|e| exec_datafusion_err!("{e:?}"))?
+                    // JSON2 argument with a non-binary logical field is therefore an
+                    // already-selected scalar or subtree that only needs conversion from its JSONB
+                    // representation to the requested type.
+                    json_project(&arg0, &with_type)?
                 } else {
-                    let jsons = arg0.as_binary_view();
                     let mut builder = result_builder(len, &with_type)?;
                     jsonb_get(jsons, path, builder.as_mut())?;
                     builder.build()
@@ -511,6 +535,7 @@ mod tests {
     use datafusion_common::ScalarValue;
     use datafusion_common::arrow::array::{BinaryArray, BinaryViewArray, StringArray};
     use datafusion_common::arrow::datatypes::{Float64Type, Int64Type};
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::types::parse_string_to_jsonb;
     use serde_json::json;
 
@@ -1113,5 +1138,63 @@ mod tests {
             let actual = result.is_valid(0).then(|| result.value(0));
             assert_eq!(actual, *expect);
         }
+    }
+
+    #[test]
+    fn test_json_get_with_json2_variant_root() {
+        let json_get_with_type = JsonGetWithType::default();
+        let json = parse_string_to_jsonb(r#"{"a":{"b":1},"c":"kept"}"#).unwrap();
+        let json_array = Arc::new(BinaryArray::from_iter_values([json])) as ArrayRef;
+        let json2_root_field = Field::new("j", DataType::Binary, true)
+            .with_extension_type(Json2ExtensionType::default());
+
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(json_array),
+                ColumnarValue::Scalar("a.b".into()),
+                ColumnarValue::Scalar(ScalarValue::Int64(None)),
+            ],
+            arg_fields: vec![Arc::new(json2_root_field)],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Int64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+
+        let result = json_get_with_type
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(1))
+            .unwrap();
+        let result = result.as_primitive::<Int64Type>();
+
+        assert_eq!(1, result.len());
+        assert_eq!(Some(1), result.is_valid(0).then(|| result.value(0)));
+
+        let json = parse_string_to_jsonb(r#"{"a":{"b":1},"c":"kept"}"#).unwrap();
+        let json_array = Arc::new(BinaryArray::from_iter_values([json])) as ArrayRef;
+        let json2_root_field = Field::new("j", DataType::Binary, true)
+            .with_extension_type(Json2ExtensionType::default());
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(json_array),
+                ColumnarValue::Scalar("a".into()),
+                ColumnarValue::Scalar(ScalarValue::Utf8View(None)),
+            ],
+            arg_fields: vec![Arc::new(json2_root_field)],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+
+        let result = json_get_with_type
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(1))
+            .unwrap();
+        let result = result.as_string_view();
+
+        assert_eq!(1, result.len());
+        assert_eq!(
+            Some(r#"{"b":1}"#),
+            result.is_valid(0).then(|| result.value(0))
+        );
     }
 }

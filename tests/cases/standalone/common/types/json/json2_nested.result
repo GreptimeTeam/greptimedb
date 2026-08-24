@@ -57,6 +57,125 @@ DROP TABLE json2_nested_fallback;
 
 Affected Rows: 0
 
+-- Whole JSON2 root and nested paths in the same query.
+CREATE TABLE json2_nested_whole_and_path_read (
+    ts timestamp time index,
+    j json2
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_nested_whole_and_path_read
+VALUES
+    (1, '{"a": {"b": 1}}'),
+    (2, '{"a": {"b": 2}}');
+
+Affected Rows: 2
+
+-- JSON2 field projection remains supported in an intermediate plan node.
+SELECT json_get(j, 'a.b'), count(*)
+FROM json2_nested_whole_and_path_read
+GROUP BY json_get(j, 'a.b')
+ORDER BY json_get(j, 'a.b');
+
++----------------------------------------------------------+----------+
+| json_get(json2_nested_whole_and_path_read.j,Utf8("a.b")) | count(*) |
++----------------------------------------------------------+----------+
+| 1                                                        | 1        |
+| 2                                                        | 1        |
++----------------------------------------------------------+----------+
+
+SELECT j, j.a FROM json2_nested_whole_and_path_read;
+
++---------------+--------------------------------------------------------+
+| j             | json_get(json2_nested_whole_and_path_read.j,Utf8("a")) |
++---------------+--------------------------------------------------------+
+| {"a":{"b":1}} | {"b":1}                                                |
+| {"a":{"b":2}} | {"b":2}                                                |
++---------------+--------------------------------------------------------+
+
+SELECT j FROM json2_nested_whole_and_path_read WHERE j.a.b = 1;
+
++---------------+
+| j             |
++---------------+
+| {"a":{"b":1}} |
++---------------+
+
+DROP TABLE json2_nested_whole_and_path_read;
+
+Affected Rows: 0
+
+-- JSON2 hints must not mix same-named columns from different join inputs.
+CREATE TABLE json2_nested_join_same_name_left (
+    ts timestamp time index,
+    k string,
+    j json2
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+CREATE TABLE json2_nested_join_same_name_right (
+    ts timestamp time index,
+    k string,
+    j json2
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_nested_join_same_name_left
+VALUES
+    (1, 'a', '{"a": 1, "left_only": "kept"}');
+
+Affected Rows: 1
+
+INSERT INTO json2_nested_join_same_name_right
+VALUES
+    (1, 'a', '{"a": "right", "right_only": "should be kept"}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_nested_join_same_name_left');
+
++-------------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_nested_join_same_name_left') |
++-------------------------------------------------------+
+| 0                                                     |
++-------------------------------------------------------+
+
+ADMIN FLUSH_TABLE('json2_nested_join_same_name_right');
+
++--------------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_nested_join_same_name_right') |
++--------------------------------------------------------+
+| 0                                                      |
++--------------------------------------------------------+
+
+SELECT json_get(r.j, 'a')::string, json_get(l.j, 'a')::int64
+FROM json2_nested_join_same_name_left l
+JOIN json2_nested_join_same_name_right r
+ON l.k = r.k;
+
++-------------------------+---------------------------------------------------+
+| json_get(r.j,Utf8("a")) | arrow_cast(json_get(l.j,Utf8("a")),Utf8("Int64")) |
++-------------------------+---------------------------------------------------+
+| right                   | 1                                                 |
++-------------------------+---------------------------------------------------+
+
+DROP TABLE json2_nested_join_same_name_left;
+
+Affected Rows: 0
+
+DROP TABLE json2_nested_join_same_name_right;
+
+Affected Rows: 0
+
 -- Multiple roots and nested paths with mixed exact and fallback reads.
 CREATE TABLE json2_nested_fallback_multi (
     ts timestamp time index,

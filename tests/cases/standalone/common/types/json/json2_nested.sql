@@ -25,6 +25,69 @@ SELECT j.a, j.a.b FROM json2_nested_fallback ORDER BY ts;
 
 DROP TABLE json2_nested_fallback;
 
+-- Whole JSON2 root and nested paths in the same query.
+CREATE TABLE json2_nested_whole_and_path_read (
+    ts timestamp time index,
+    j json2
+) WITH (
+    'append_mode' = 'true'
+);
+
+INSERT INTO json2_nested_whole_and_path_read
+VALUES
+    (1, '{"a": {"b": 1}}'),
+    (2, '{"a": {"b": 2}}');
+
+-- JSON2 field projection remains supported in an intermediate plan node.
+SELECT json_get(j, 'a.b'), count(*)
+FROM json2_nested_whole_and_path_read
+GROUP BY json_get(j, 'a.b')
+ORDER BY json_get(j, 'a.b');
+
+SELECT j, j.a FROM json2_nested_whole_and_path_read;
+
+SELECT j FROM json2_nested_whole_and_path_read WHERE j.a.b = 1;
+
+DROP TABLE json2_nested_whole_and_path_read;
+
+-- JSON2 hints must not mix same-named columns from different join inputs.
+CREATE TABLE json2_nested_join_same_name_left (
+    ts timestamp time index,
+    k string,
+    j json2
+) WITH (
+    'append_mode' = 'true'
+);
+
+CREATE TABLE json2_nested_join_same_name_right (
+    ts timestamp time index,
+    k string,
+    j json2
+) WITH (
+    'append_mode' = 'true'
+);
+
+INSERT INTO json2_nested_join_same_name_left
+VALUES
+    (1, 'a', '{"a": 1, "left_only": "kept"}');
+
+INSERT INTO json2_nested_join_same_name_right
+VALUES
+    (1, 'a', '{"a": "right", "right_only": "should be kept"}');
+
+ADMIN FLUSH_TABLE('json2_nested_join_same_name_left');
+
+ADMIN FLUSH_TABLE('json2_nested_join_same_name_right');
+
+SELECT json_get(r.j, 'a')::string, json_get(l.j, 'a')::int64
+FROM json2_nested_join_same_name_left l
+JOIN json2_nested_join_same_name_right r
+ON l.k = r.k;
+
+DROP TABLE json2_nested_join_same_name_left;
+
+DROP TABLE json2_nested_join_same_name_right;
+
 -- Multiple roots and nested paths with mixed exact and fallback reads.
 CREATE TABLE json2_nested_fallback_multi (
     ts timestamp time index,

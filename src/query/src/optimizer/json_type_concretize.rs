@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use arrow_schema::DataType;
 use common_function::scalars::json::json_get::JsonGetWithType;
@@ -110,9 +110,11 @@ fn apply_json_type_hint(
 
 fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
     let mut json_types = HashMap::<String, JsonNativeType>::new();
+    let mut root_columns = HashSet::<String>::new();
 
     plan.apply(|plan| {
         for expr in plan.expressions() {
+            collect_root_column_reads(&expr, &mut root_columns)?;
             expr.apply(|expr| {
                 if let Some((column, json_type)) = deduce_json_type(expr)? {
                     json_types.entry(column).or_default().merge(&json_type);
@@ -122,7 +124,44 @@ fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeTyp
         }
         Ok(TreeNodeRecursion::Continue)
     })?;
+
+    for idx in 0..plan.schema().fields().len() {
+        let (_, field) = plan.schema().qualified_field(idx);
+        if is_json2_extension_type(field) {
+            root_columns.insert(field.name().clone());
+        }
+    }
+
+    for column in root_columns {
+        json_types
+            .entry(column)
+            .or_default()
+            .merge(&JsonNativeType::Variant);
+    }
     Ok(json_types)
+}
+
+fn collect_root_column_reads(expr: &Expr, root_columns: &mut HashSet<String>) -> Result<()> {
+    expr.apply(|expr| {
+        if is_json_get(expr) {
+            return Ok(TreeNodeRecursion::Jump);
+        }
+
+        if let Expr::Column(column) = expr {
+            root_columns.insert(column.name.clone());
+        }
+
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+
+    Ok(())
+}
+
+fn is_json_get(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::ScalarFunction(f) if f.name().eq_ignore_ascii_case(JsonGetWithType::NAME)
+    )
 }
 
 fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
@@ -397,6 +436,41 @@ mod tests {
                 "a".to_string(),
                 JsonNativeType::i64(),
             )]))),
+            provider.scan_request().json_type_hint.get("j")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_json2_root_projection_upgrades_hint_to_variant() -> Result<()> {
+        let expr = json_get_expr(col("j"), path_expr("a"), None)?;
+        let (provider, plan) = build_json2_plan(vec![col("j"), expr])?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonNativeType::Variant),
+            provider.scan_request().json_type_hint.get("j")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_json2_root_projection_with_filter_upgrades_hint_to_variant() -> Result<()> {
+        let filter = json_get_expr(col("j"), path_expr("a.b"), Some(DataType::Int64))?.eq(lit(1));
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan.filter(filter)?.project(vec![col("j")])?.build()?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonNativeType::Variant),
             provider.scan_request().json_type_hint.get("j")
         );
         Ok(())
