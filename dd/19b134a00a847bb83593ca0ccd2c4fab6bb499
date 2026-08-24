@@ -1,0 +1,22 @@
+src/client/src/region.rs
+  h_623774b620da8e 16,53-54,115-117,120
+src/datanode/src/region_server.rs
+  h_623774b620da8e 69-71,981-990,993
+src/servers/src/grpc/flight.rs
+  h_623774b620da8e 56,586,595
+src/servers/src/grpc/flight/stream.rs
+  h_623774b620da8e 16,44-67,164,176-212,488,522-538,557,612,666,709,748
+tests-integration/src/grpc/flight.rs
+  h_623774b620da8e 20,25-26,30,35-36,41,44-47,51-53,60-145
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "dd19b134a00a847bb83593ca0ccd2c4fab6bb499",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
