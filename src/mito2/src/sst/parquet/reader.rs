@@ -488,9 +488,18 @@ impl ParquetReaderBuilder {
                 expected_region_id,
             );
         }
-        if is_foreign || need_override_sequence(&parquet_meta) {
-            read_format
-                .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
+        let file_meta = self.file_handle.meta_ref();
+        let override_sequence = if is_foreign {
+            file_meta.sequence.map(|sequence| sequence.get())
+        } else if file_meta.preserve_row_sequence {
+            None
+        } else if need_override_sequence(&parquet_meta) {
+            file_meta.sequence.map(|sequence| sequence.get())
+        } else {
+            None
+        };
+        if let Some(sequence) = override_sequence {
+            read_format.set_override_sequence(Some(sequence));
         }
 
         // Computes the projection mask.

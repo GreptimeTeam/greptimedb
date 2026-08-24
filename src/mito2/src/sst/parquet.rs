@@ -1687,8 +1687,20 @@ mod tests {
             }
         }
 
-        let custom_sequence = 12345u64;
+        fn handle_with_meta(
+            handle: &FileHandle,
+            sequence: Option<u64>,
+            preserve_row_sequence: bool,
+        ) -> FileHandle {
+            let mut file_meta = handle.meta_ref().clone();
+            file_meta.sequence = sequence.and_then(std::num::NonZeroU64::new);
+            file_meta.preserve_row_sequence = preserve_row_sequence;
+            FileHandle::new(file_meta, Arc::new(NoopFilePurger))
+        }
+
+        let custom_sequence = 12345;
         let local_zero_handle = sst_file_handle(0, 1000);
+        let local_nonzero_handle = sst_file_handle(0, 1000);
         write_sst(
             object_store.clone(),
             metadata.clone(),
@@ -1697,8 +1709,15 @@ mod tests {
             0,
         )
         .await;
+        write_sst(
+            object_store.clone(),
+            metadata.clone(),
+            local_nonzero_handle.clone(),
+            flat_format,
+            7,
+        )
+        .await;
 
-        // Local all-zero SSTs retain the compatibility override.
         let local_zero_none = read_sequences(
             ParquetReaderBuilder::new(
                 FILE_DIR.to_string(),
@@ -1711,17 +1730,12 @@ mod tests {
         .await;
         assert!(local_zero_none.iter().all(|sequence| *sequence == 0));
 
-        let mut local_zero_meta = local_zero_handle.meta_ref().clone();
-        local_zero_meta.sequence = Some(std::num::NonZeroU64::new(custom_sequence).unwrap());
-        let local_zero_override_handle = FileHandle::new(
-            local_zero_meta,
-            Arc::new(crate::sst::file_purger::NoopFilePurger),
-        );
+        // Legacy local all-zero files use the FileMeta sequence compatibility override.
         let local_zero_override = read_sequences(
             ParquetReaderBuilder::new(
                 FILE_DIR.to_string(),
                 PathType::Bare,
-                local_zero_override_handle,
+                handle_with_meta(&local_zero_handle, Some(custom_sequence), false),
                 object_store.clone(),
             )
             .expected_metadata(Some(metadata.clone())),
@@ -1733,28 +1747,12 @@ mod tests {
                 .all(|sequence| *sequence == custom_sequence)
         );
 
-        let local_nonzero_handle = sst_file_handle(0, 1000);
-        write_sst(
-            object_store.clone(),
-            metadata.clone(),
-            local_nonzero_handle.clone(),
-            flat_format,
-            7,
-        )
-        .await;
-
-        // Local nonzero SSTs retain physical per-row sequences, even with FileMeta.sequence.
-        let mut local_nonzero_meta = local_nonzero_handle.meta_ref().clone();
-        local_nonzero_meta.sequence = Some(std::num::NonZeroU64::new(custom_sequence).unwrap());
-        let local_nonzero_override_handle = FileHandle::new(
-            local_nonzero_meta,
-            Arc::new(crate::sst::file_purger::NoopFilePurger),
-        );
+        // Local nonzero physical sequences must not be replaced by a legacy barrier.
         let local_nonzero_override = read_sequences(
             ParquetReaderBuilder::new(
                 FILE_DIR.to_string(),
                 PathType::Bare,
-                local_nonzero_override_handle,
+                handle_with_meta(&local_nonzero_handle, Some(custom_sequence), false),
                 object_store.clone(),
             )
             .expected_metadata(Some(metadata.clone())),
@@ -1762,7 +1760,6 @@ mod tests {
         .await;
         assert!(local_nonzero_override.iter().all(|sequence| *sequence == 7));
 
-        // None never overrides a local nonzero physical sequence.
         let local_nonzero_none = read_sequences(
             ParquetReaderBuilder::new(
                 FILE_DIR.to_string(),
@@ -1775,28 +1772,80 @@ mod tests {
         .await;
         assert!(local_nonzero_none.iter().all(|sequence| *sequence == 7));
 
-        // A source-owned handle is foreign when read against target metadata, so the
-        // target-local manifest barrier is applied even for nonzero physical sequences.
-        let mut target_metadata = (*metadata).clone();
-        target_metadata.region_id = RegionId::new(0, 1);
-        let target_metadata = Arc::new(target_metadata);
-        let mut foreign_meta = local_nonzero_handle.meta_ref().clone();
-        foreign_meta.sequence = Some(std::num::NonZeroU64::new(custom_sequence).unwrap());
-        let foreign_handle = FileHandle::new(
-            foreign_meta,
-            Arc::new(crate::sst::file_purger::NoopFilePurger),
-        );
-        let foreign = read_sequences(
+        // The trusted marker preserves physical sequences, including explicit all-zero data.
+        let local_trusted_nonzero = read_sequences(
             ParquetReaderBuilder::new(
                 FILE_DIR.to_string(),
                 PathType::Bare,
-                foreign_handle,
+                handle_with_meta(&local_nonzero_handle, Some(custom_sequence), true),
+                object_store.clone(),
+            )
+            .expected_metadata(Some(metadata.clone())),
+        )
+        .await;
+        assert!(local_trusted_nonzero.iter().all(|sequence| *sequence == 7));
+
+        let local_trusted_zero = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                handle_with_meta(&local_zero_handle, Some(custom_sequence), true),
+                object_store.clone(),
+            )
+            .expected_metadata(Some(metadata.clone())),
+        )
+        .await;
+        assert!(local_trusted_zero.iter().all(|sequence| *sequence == 0));
+
+        let mut target_metadata = (*metadata).clone();
+        target_metadata.region_id = RegionId::new(0, 1);
+        let target_metadata = Arc::new(target_metadata);
+
+        // A foreign file always uses the target-local barrier, regardless of its marker.
+        let foreign_marked = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                handle_with_meta(&local_nonzero_handle, Some(custom_sequence), true),
+                object_store.clone(),
+            )
+            .expected_metadata(Some(target_metadata.clone())),
+        )
+        .await;
+        assert!(
+            foreign_marked
+                .iter()
+                .all(|sequence| *sequence == custom_sequence)
+        );
+
+        let foreign_unmarked = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                handle_with_meta(&local_nonzero_handle, Some(custom_sequence), false),
+                object_store.clone(),
+            )
+            .expected_metadata(Some(target_metadata.clone())),
+        )
+        .await;
+        assert!(
+            foreign_unmarked
+                .iter()
+                .all(|sequence| *sequence == custom_sequence)
+        );
+
+        // A foreign handle without a barrier leaves physical sequences untouched.
+        let foreign_none = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                handle_with_meta(&local_nonzero_handle, None, false),
                 object_store,
             )
             .expected_metadata(Some(target_metadata)),
         )
         .await;
-        assert!(foreign.iter().all(|sequence| *sequence == custom_sequence));
+        assert!(foreign_none.iter().all(|sequence| *sequence == 7));
     }
 
     #[tokio::test]
