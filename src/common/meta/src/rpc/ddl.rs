@@ -1877,8 +1877,10 @@ mod tests {
 
     #[test]
     fn test_legacy_event_context_fallback_uses_reason_and_typed_channel() {
-        let mut query_context = QueryContext::default();
-        query_context.channel = 4;
+        let mut query_context = QueryContext {
+            channel: 4,
+            ..Default::default()
+        };
         query_context.extensions.insert(
             TRIGGER_REASON_EXTENSION_KEY.to_string(),
             "auto_create".to_string(),
