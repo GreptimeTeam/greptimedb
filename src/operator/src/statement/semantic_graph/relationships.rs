@@ -368,9 +368,11 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
                 .is_not_null()
                 .alias("paired"),
             qcol("server", SPAN_STATUS_CODE_COLUMN).alias("server_status"),
-            qcol("server", DURATION_NANO_COLUMN).alias("server_duration_nano"),
+            cast(qcol("server", DURATION_NANO_COLUMN), DataType::Int64)
+                .alias("server_duration_nano"),
             qcol("client", SPAN_STATUS_CODE_COLUMN).alias("client_status"),
-            qcol("client", DURATION_NANO_COLUMN).alias("client_duration_nano"),
+            cast(qcol("client", DURATION_NANO_COLUMN), DataType::Int64)
+                .alias("client_duration_nano"),
             qcol("client", "virtual_conn").alias("virtual_conn"),
         ])?
         // No destination means no edge; a self-call is not an edge between
@@ -501,6 +503,13 @@ fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict
 }
 
 /// One trace table's client spans, normalized to
+/// A trace table's `duration_nano` is UInt64 on tables created before the
+/// signed-integer ingest change and Int64 after it. The per-table selects are
+/// unioned, and those two have no common integer type.
+fn duration_nano_expr() -> Expr {
+    cast(ident(DURATION_NANO_COLUMN), DataType::Int64).alias(DURATION_NANO_COLUMN)
+}
+
 /// `(timestamp, trace_id, span_id, src_id, status_code, duration_nano,
 /// virtual_dst, virtual_conn)`. `src_id` is built from the table's `service`
 /// declaration, so edges land on exactly the entity ids the registry emits (a
@@ -558,7 +567,7 @@ fn client_spans(
             })
             .alias(SRC_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
-            ident(DURATION_NANO_COLUMN),
+            duration_nano_expr(),
             virtual_dst.alias("virtual_dst"),
             virtual_conn.alias("virtual_conn"),
         ])
@@ -586,7 +595,7 @@ fn server_spans(
             })
             .alias(DST_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
-            ident(DURATION_NANO_COLUMN),
+            duration_nano_expr(),
         ])
 }
 
@@ -633,7 +642,7 @@ fn agent_calls_branch(
                 })
                 .alias(DST_ID_COLUMN),
                 ident(SPAN_STATUS_CODE_COLUMN),
-                ident(DURATION_NANO_COLUMN),
+                duration_nano_expr(),
             ])?;
         parents = union_all(parents, parent)?;
         children = union_all(children, child)?;
@@ -745,6 +754,16 @@ mod tests {
         extra: &[(&str, &[Option<&str>])],
         spans: &[Span<'_>],
     ) {
+        register_typed_trace_table(ctx, name, extra, spans, DataType::UInt64)
+    }
+
+    fn register_typed_trace_table(
+        ctx: &SessionContext,
+        name: &str,
+        extra: &[(&str, &[Option<&str>])],
+        spans: &[Span<'_>],
+        duration_type: DataType,
+    ) {
         let mut fields = vec![
             Field::new(
                 TRACE_TIMESTAMP_COLUMN,
@@ -757,7 +776,7 @@ mod tests {
             Field::new(SPAN_KIND_COLUMN, DataType::Utf8, false),
             Field::new(SPAN_STATUS_CODE_COLUMN, DataType::Utf8, false),
             Field::new(SERVICE_NAME_COLUMN, DataType::Utf8, false),
-            Field::new(DURATION_NANO_COLUMN, DataType::UInt64, false),
+            Field::new(DURATION_NANO_COLUMN, duration_type.clone(), false),
         ];
         for (column, _) in extra {
             fields.push(Field::new(*column, DataType::Utf8, true));
@@ -786,9 +805,14 @@ mod tests {
             Arc::new(StringArray::from(
                 spans.iter().map(|s| s.6).collect::<Vec<_>>(),
             )),
-            Arc::new(UInt64Array::from(
-                spans.iter().map(|s| s.7).collect::<Vec<_>>(),
-            )),
+            match duration_type {
+                DataType::Int64 => Arc::new(Int64Array::from(
+                    spans.iter().map(|s| s.7 as i64).collect::<Vec<_>>(),
+                )) as ArrayRef,
+                _ => Arc::new(UInt64Array::from(
+                    spans.iter().map(|s| s.7).collect::<Vec<_>>(),
+                )),
+            },
         ];
         for (_, values) in extra {
             columns.push(Arc::new(StringArray::from(values.to_vec())));
@@ -985,7 +1009,7 @@ mod tests {
                 ),
             ],
         );
-        register_trace_table(
+        register_typed_trace_table(
             &ctx,
             "trace_b",
             &[],
@@ -1002,6 +1026,7 @@ mod tests {
                     1_500_000_000,
                 ),
             ],
+            DataType::Int64,
         );
         let a = ctx.table("trace_a").await.unwrap();
         let b = ctx.table("trace_b").await.unwrap();
