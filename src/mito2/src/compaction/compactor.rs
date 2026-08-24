@@ -404,13 +404,10 @@ pub trait SstMerger: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct DefaultSstMerger;
 
-/// Computes the maximum sequence bound of the output of merging `inputs`.
-///
-/// Returns `None` for empty inputs or if any input's sequence bound is unknown:
-/// a partial max over the known inputs would launder the unknown file's rows into a
-/// trusted sequence bound, letting exact sequence-range scans silently skip or
-/// wrongly filter rows from that file. Only when every input bound is known is
-/// the `max` computed.
+/// Computes the maximum target-domain sequence bound of the output of merging
+/// `inputs`. Foreign files are described by their target-local barrier; local
+/// trusted files use their physical sequence bound. Unknown bounds never become
+/// trusted through a partial maximum.
 fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
     let mut max: Option<NonZeroU64> = None;
     for input in inputs {
@@ -456,18 +453,14 @@ impl SstMerger for DefaultSstMerger {
             .map(|f| f.file_id().to_string())
             .join(",");
         let input_max_sequence = known_max_input_sequence(&output.inputs);
-        // The compaction output can only preserve per-row sequences when the
-        // region option is enabled AND every input file carries the
-        // preserved-sequence marker. Otherwise, rewrite the untrusted input as
-        // a sequence-less file. `committed_sequence + 1` is the region-local
-        // admission barrier for this compacted SST: once Flow's cursor reaches
-        // it, the input rows (which were all flushed in this snapshot) have
-        // already been consumed.
+        // The output is trusted only when every input is trusted in the target
+        // domain. Foreign marker values describe the source and are ignored;
+        // their present FileMeta.sequence is the target-local barrier.
         let output_preserves_sequence = compaction_region.region_options.preserve_row_sequence
             && output
                 .inputs
                 .iter()
-                .all(|f| f.meta_ref().preserve_row_sequence);
+                .all(|f| f.is_effective_target_sequence_trusted(region_id));
         let output_sequence = if output_preserves_sequence {
             input_max_sequence
         } else {
@@ -488,16 +481,11 @@ impl SstMerger for DefaultSstMerger {
                     + 1,
             )
         };
-        // The flat/primary-key parquet formats require their three internal
-        // columns. For a sequence-less output, write the sequence column as
-        // zero instead of its file barrier. The reader recognizes all-zero
-        // sequence columns and overrides them from FileMeta for legacy reads;
-        // exact reads skip this file at file level before row filtering.
-        let write_max_sequence = if output_preserves_sequence {
-            input_max_sequence.map(NonZeroU64::get)
-        } else {
-            Some(0)
-        };
+        // For untrusted output, keep the physical sequence override compatible
+        // with the main write path: use the known maximum sequence of the
+        // inputs. The FileMeta sequence remains the admission barrier, but it
+        // must not be written into the rows (or replaced with zero).
+        let write_max_sequence = input_max_sequence.map(NonZeroU64::get);
         let builder = CompactionSstReaderBuilder {
             metadata: compaction_region.region_metadata.clone(),
             sst_layer: compaction_region.access_layer.clone(),
@@ -844,6 +832,36 @@ mod tests {
 
     fn new_file_handle(meta: FileMeta) -> FileHandle {
         FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    #[test]
+    fn test_effective_target_trust_and_max_sequence() {
+        let target = RegionId::new(1, 1);
+        let local_trusted = new_file_handle(FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(3),
+            preserve_row_sequence: true,
+            ..dummy_file_meta()
+        });
+        let foreign_untrusted_marker = new_file_handle(FileMeta {
+            region_id: RegionId::new(1, 2),
+            sequence: NonZeroU64::new(9),
+            preserve_row_sequence: false,
+            ..dummy_file_meta()
+        });
+        let local_untrusted = new_file_handle(FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(11),
+            preserve_row_sequence: false,
+            ..dummy_file_meta()
+        });
+        assert!(local_trusted.is_effective_target_sequence_trusted(target));
+        assert!(foreign_untrusted_marker.is_effective_target_sequence_trusted(target));
+        assert!(!local_untrusted.is_effective_target_sequence_trusted(target));
+        assert_eq!(
+            NonZeroU64::new(9),
+            known_max_input_sequence(&[local_trusted, foreign_untrusted_marker])
+        );
     }
 
     #[test]

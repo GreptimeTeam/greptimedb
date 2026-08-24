@@ -1061,15 +1061,35 @@ impl EngineInner {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
         }
 
-        // Only exact requests need the capability check and its selected file
-        // list. Other requests keep the regular scan pruning path unchanged.
-        let selected_files = (request.exact_sequence_range && !request.skip_sst_files)
-            .then(|| exact_sequence_range_files(&request, &version));
-        let exact_sequence_range = exact_sequence_range(
-            &request,
-            &version,
-            selected_files.as_deref().unwrap_or_default(),
-        )?;
+        // Select the files and decide the exact capability from the same version
+        // snapshot. Keep them together so the reader cannot recompute either
+        // side from a different file set.
+        let exact_selection = if request.exact_sequence_range {
+            let files = if request.skip_sst_files {
+                Vec::new()
+            } else {
+                exact_sequence_range_files(&request, &version)
+            };
+            let selected_files = files.len();
+            match exact_sequence_range(&request, &version, &files) {
+                Ok(sequence_range) => Some((files, sequence_range)),
+                Err(err) => {
+                    debug!(
+                        "Scan region {} exact sequence range denied: min={:?}, max={:?}, selected_files={}, denial_reason=foreign_file_missing_barrier",
+                        region_id,
+                        request.memtable_min_sequence,
+                        request.memtable_max_sequence,
+                        selected_files,
+                    );
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
+        let exact_sequence_range = exact_selection
+            .as_ref()
+            .and_then(|(_, sequence_range)| *sequence_range);
 
         // An extension range provider may contribute ranges on a follower
         // region, and extension streams are returned without a row-level
@@ -1088,13 +1108,36 @@ impl EngineInner {
         } else {
             exact_sequence_range
         };
+        let exact_selection = exact_selection.map(|(files, _)| (files, exact_sequence_range));
+        let exact_denial_reason = if !request.exact_sequence_range {
+            "not_requested"
+        } else if request.skip_sst_files {
+            "sst_files_skipped"
+        } else if request.memtable_min_sequence.is_none() {
+            "missing_lower_bound"
+        } else if request.memtable_max_sequence.is_none() {
+            "missing_upper_bound"
+        } else if !version.options.preserve_row_sequence {
+            "preserve_row_sequence_disabled"
+        } else if extension_provider_blocks_exact {
+            "extension_provider"
+        } else if exact_sequence_range.is_none() {
+            "selected_file_barrier_not_admitted"
+        } else {
+            "none"
+        };
 
         debug!(
-            "Scan region {} exact sequence range: requested={}, available={}, selected_files={}",
+            "Scan region {} exact sequence range: requested={}, min={:?}, max={:?}, committed={}, flushed={}, available={}, selected_files={}, denial_reason={}",
             region_id,
             request.exact_sequence_range,
+            request.memtable_min_sequence,
+            request.memtable_max_sequence,
+            version_data.committed_sequence,
+            version.flushed_sequence,
             exact_sequence_range.is_some(),
-            selected_files.as_ref().map_or(0, Vec::len),
+            exact_selection.as_ref().map_or(0, |(files, _)| files.len()),
+            exact_denial_reason,
         );
         validate_sequence_fences(
             &request,
@@ -1121,8 +1164,8 @@ impl EngineInner {
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start);
-        let scan_region = if let Some(files) = selected_files {
-            scan_region.with_selected_files(files)
+        let scan_region = if let Some(selection) = exact_selection {
+            scan_region.with_exact_selection(selection)
         } else {
             scan_region
         };
