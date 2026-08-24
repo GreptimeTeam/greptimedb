@@ -91,7 +91,10 @@ The `[writer]` table also accepts `compression_level`,
 `data_page_size_limit`, `data_page_row_count_limit`, and
 `dictionary_page_size_limit`. A `[[columns]]` entry overrides dictionary,
 compression, compression level, or encoding for its column path. Unknown TOML
-fields are rejected.
+fields are rejected. Compression levels are supported for `gzip`, `brotli`, and
+`zstd`. A column-level `compression_level` without `compression` inherits the
+writer compression codec; it is rejected when there is no writer codec to
+inherit.
 
 Rewrite the data using the edited properties:
 
@@ -103,7 +106,10 @@ $GREPTIME datanode parquet-rewrite \
 ```
 
 Use `--batch-size <ROWS>` to control reader batch size. Output and dumped
-properties files are not replaced unless `--overwrite` is passed.
+properties files are not replaced unless `--overwrite` is passed. The output or
+dump path must not be exactly the same path as the input, even with
+`--overwrite`. This check does not resolve symbolic links, hard links, or other
+spellings of the same path.
 
 The rewrite decodes and writes the Arrow record batches and copies the Parquet
 key-value metadata, but it creates a new physical Parquet layout. Inspect and

@@ -127,6 +127,7 @@ impl ParquetRewriteCommand {
     }
 
     fn dump_properties(&self, path: &Path) -> error::Result<()> {
+        ensure_distinct_paths(&self.input, path)?;
         ensure_can_write(path, self.overwrite)?;
         let metadata = load_local_parquet_metadata(&self.input)?;
         let properties = infer_rewrite_properties(&metadata);
@@ -142,6 +143,7 @@ impl ParquetRewriteCommand {
     }
 
     fn rewrite(&self, output: &Path, properties: &Path) -> error::Result<()> {
+        ensure_distinct_paths(&self.input, output)?;
         ensure_can_write(output, self.overwrite)?;
 
         let props = load_rewrite_properties(properties)?;
@@ -252,14 +254,20 @@ fn build_writer_properties(
     key_value_metadata: Option<Vec<parquet::file::metadata::KeyValue>>,
 ) -> error::Result<WriterProperties> {
     let mut builder = WriterProperties::builder().set_key_value_metadata(key_value_metadata);
+    let writer_compression = config.writer.compression;
     if let Some(dictionary_enabled) = config.writer.dictionary_enabled {
         builder = builder.set_dictionary_enabled(dictionary_enabled);
     }
-    if let Some(compression) = config.writer.compression {
-        builder = builder.set_compression(to_parquet_compression(
-            compression,
-            config.writer.compression_level,
-        )?);
+    match (writer_compression, config.writer.compression_level) {
+        (Some(compression), level) => {
+            builder = builder.set_compression(to_parquet_compression(compression, level)?);
+        }
+        (None, Some(_)) => {
+            return illegal_config(
+                "writer compression_level requires writer compression".to_string(),
+            );
+        }
+        (None, None) => {}
     }
     if let Some(encoding) = config.writer.encoding {
         builder = builder.set_encoding(to_parquet_encoding(encoding));
@@ -288,7 +296,13 @@ fn build_writer_properties(
         if let Some(dictionary_enabled) = column.dictionary_enabled {
             builder = builder.set_column_dictionary_enabled(path.clone(), dictionary_enabled);
         }
-        if let Some(compression) = column.compression {
+        if column.compression.is_some() || column.compression_level.is_some() {
+            let Some(compression) = column.compression.or(writer_compression) else {
+                return illegal_config(format!(
+                    "compression_level for column {} requires column or writer compression",
+                    path.string()
+                ));
+            };
             builder = builder.set_column_compression(
                 path.clone(),
                 to_parquet_compression(compression, column.compression_level)?,
@@ -300,6 +314,16 @@ fn build_writer_properties(
     }
 
     Ok(builder.build())
+}
+
+fn ensure_distinct_paths(input: &Path, output: &Path) -> error::Result<()> {
+    if input == output {
+        return illegal_config(format!(
+            "input and output paths must be different: {}",
+            input.display()
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_can_write(path: &Path, overwrite: bool) -> error::Result<()> {
@@ -339,6 +363,18 @@ fn to_parquet_compression(
     compression: CompressionConfig,
     level: Option<u32>,
 ) -> error::Result<Compression> {
+    if level.is_some()
+        && !matches!(
+            compression,
+            CompressionConfig::Gzip | CompressionConfig::Brotli | CompressionConfig::Zstd
+        )
+    {
+        return illegal_config(format!(
+            "compression level is not supported for {}",
+            compression.name()
+        ));
+    }
+
     Ok(match compression {
         CompressionConfig::Uncompressed => Compression::UNCOMPRESSED,
         CompressionConfig::Snappy => Compression::SNAPPY,
@@ -363,16 +399,39 @@ fn to_parquet_compression(
         }),
         CompressionConfig::Lz4 => Compression::LZ4,
         CompressionConfig::Zstd => Compression::ZSTD(match level {
-            Some(level) => ZstdLevel::try_new(level as i32).map_err(|e| {
-                error::IllegalConfigSnafu {
-                    msg: format!("invalid zstd compression level {level}: {e}"),
-                }
-                .build()
-            })?,
+            Some(level) => {
+                let converted_level = i32::try_from(level).map_err(|e| {
+                    error::IllegalConfigSnafu {
+                        msg: format!("invalid zstd compression level {level}: {e}"),
+                    }
+                    .build()
+                })?;
+                ZstdLevel::try_new(converted_level).map_err(|e| {
+                    error::IllegalConfigSnafu {
+                        msg: format!("invalid zstd compression level {level}: {e}"),
+                    }
+                    .build()
+                })?
+            }
             None => ZstdLevel::default(),
         }),
         CompressionConfig::Lz4Raw => Compression::LZ4_RAW,
     })
+}
+
+impl CompressionConfig {
+    fn name(self) -> &'static str {
+        match self {
+            CompressionConfig::Uncompressed => "uncompressed",
+            CompressionConfig::Snappy => "snappy",
+            CompressionConfig::Gzip => "gzip",
+            CompressionConfig::Lzo => "lzo",
+            CompressionConfig::Brotli => "brotli",
+            CompressionConfig::Lz4 => "lz4",
+            CompressionConfig::Zstd => "zstd",
+            CompressionConfig::Lz4Raw => "lz4-raw",
+        }
+    }
 }
 
 fn to_parquet_encoding(encoding: EncodingConfig) -> Encoding {
@@ -466,6 +525,29 @@ mod tests {
                 .row_groups()
                 .iter()
                 .all(|row_group| row_group.column(1).dictionary_page_offset().is_none())
+        );
+    }
+
+    #[test]
+    fn test_column_compression_level_inherits_writer_compression() {
+        let path = ColumnPath::new(vec!["host".to_string()]);
+        let config = RewriteProperties {
+            writer: WriterConfig {
+                compression: Some(CompressionConfig::Zstd),
+                compression_level: Some(1),
+                ..Default::default()
+            },
+            columns: vec![ColumnConfig {
+                path: vec!["host".to_string()],
+                compression_level: Some(3),
+                ..Default::default()
+            }],
+        };
+
+        let properties = build_writer_properties(config, None).unwrap();
+        assert_eq!(
+            properties.compression(&path),
+            Compression::ZSTD(ZstdLevel::try_new(3).unwrap())
         );
     }
 
