@@ -68,7 +68,7 @@ def parse_creation_time(value: str) -> datetime:
             return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-    raise ValueError(f"Unparseable ECS creation time: {value}")
+    raise ValueError(f"Unparsable ECS creation time: {value}")
 
 
 def expired_instance_names(
