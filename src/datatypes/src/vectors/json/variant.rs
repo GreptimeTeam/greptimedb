@@ -15,10 +15,7 @@
 use std::sync::Arc;
 
 use arrow_array::ArrayRef;
-#[cfg(test)]
-use arrow_schema::ArrowError;
-use arrow_schema::{DataType, Field};
-#[cfg(test)]
+use arrow_schema::{ArrowError, DataType, Field};
 use parquet_variant::{ObjectFieldBuilder, Variant, VariantBuilderExt, VariantDecimal16};
 #[cfg(test)]
 use parquet_variant_compute::VariantArrayBuilder;
@@ -27,8 +24,7 @@ use parquet_variant_json::VariantToJson;
 use snafu::ResultExt;
 
 use crate::error::{ArrowComputeSnafu, Result};
-#[cfg(test)]
-use crate::json::value::{JsonNumber, JsonVariant, decode_json_variant};
+use crate::json::value::{JsonNumber, JsonVariant, JsonVariantRef, decode_json_variant};
 
 /// Returns the canonical Arrow field for an unshredded Parquet Variant array.
 pub fn variant_field(name: impl Into<String>, nullable: bool) -> Field {
@@ -68,8 +64,7 @@ fn json_variants_to_variant(values: &[Option<JsonVariant>]) -> Result<ArrayRef> 
     Ok(ArrayRef::from(builder.build()))
 }
 
-#[cfg(test)]
-fn append_json_variant(
+pub(super) fn append_json_variant(
     builder: &mut impl VariantBuilderExt,
     value: &JsonVariant,
 ) -> std::result::Result<(), ArrowError> {
@@ -115,7 +110,52 @@ fn append_json_variant(
     Ok(())
 }
 
-#[cfg(test)]
+pub(super) fn append_json_variant_ref(
+    builder: &mut impl VariantBuilderExt,
+    value: &JsonVariantRef<'_>,
+) -> std::result::Result<(), ArrowError> {
+    match value {
+        JsonVariantRef::Null => builder.append_value(Variant::Null),
+        JsonVariantRef::Bool(value) => builder.append_value(*value),
+        JsonVariantRef::Number(JsonNumber::PosInt(value)) => {
+            if let Ok(value) = i64::try_from(*value) {
+                builder.append_value(value);
+            } else {
+                append_large_u64(builder, *value)?;
+            }
+        }
+        JsonVariantRef::Number(JsonNumber::NegInt(value)) => builder.append_value(*value),
+        JsonVariantRef::Number(JsonNumber::Float(value)) => {
+            if value.0.is_finite() {
+                builder.append_value(value.0)
+            } else {
+                builder.append_value("NaN")
+            }
+        }
+        JsonVariantRef::String(value) => builder.append_value(*value),
+        JsonVariantRef::Array(values) => {
+            let mut list = builder.try_new_list()?;
+            for value in values {
+                append_json_variant_ref(&mut list, value)?;
+            }
+            list.finish();
+        }
+        JsonVariantRef::Object(values) => {
+            let mut object = builder.try_new_object()?;
+            for (name, value) in values {
+                append_json_variant_ref(&mut ObjectFieldBuilder::new(name, &mut object), value)?;
+            }
+            object.finish();
+        }
+        JsonVariantRef::Variant(value) => {
+            let value = decode_json_variant(value)
+                .map_err(|e| ArrowError::JsonError(format!("Failed to decode JSONB: {e}")))?;
+            append_json_value(builder, &value)?;
+        }
+    }
+    Ok(())
+}
+
 fn append_json_value(
     builder: &mut impl VariantBuilderExt,
     value: &serde_json::Value,
@@ -157,7 +197,6 @@ fn append_json_value(
 
 /// Parquet Variant has no unsigned integer primitive. Treat u64 as i64 first, then use Decimal16
 /// to represent large (larger than i64::MAX) u64.
-#[cfg(test)]
 fn append_large_u64(
     builder: &mut impl VariantBuilderExt,
     value: u64,
