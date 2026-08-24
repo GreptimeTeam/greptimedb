@@ -33,12 +33,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::kernels::take::take;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::Json2ExtensionType;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::RowGroupMetaData;
@@ -49,9 +53,10 @@ use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
-    NewRecordBatchSnafu, Result,
+    NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
-use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
+use crate::read::flat_projection::flat_projected_columns;
+use crate::read::read_columns::{JsonReadTarget, JsonReadTargets, ReadColumns};
 use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
     PrimaryKeyReadFormat, StatValues, column_null_counts, column_values,
@@ -306,19 +311,34 @@ impl FlatReadFormat {
             .project(projection)
             .context(ComputeArrowSnafu)?;
         let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
-        for (column_id, target_type) in self.json_target_types().iter() {
+        for (column_id, target) in self.json_read_targets().iter() {
             let Some(index) = self.parquet_projected_index_by_id(*column_id) else {
                 continue;
             };
             let Some(field) = schema.fields().get(index) else {
                 continue;
             };
-            fields[index] = Arc::new(
-                field
-                    .as_ref()
-                    .clone()
-                    .with_data_type(ConcreteDataType::json2(target_type.clone()).as_arrow_type()),
-            );
+            let mut field = field.as_ref().clone();
+            match target {
+                JsonReadTarget::Projection(target) => {
+                    field.set_data_type(ConcreteDataType::json2(target.clone()).as_arrow_type())
+                }
+                JsonReadTarget::Rewrite(layout) => {
+                    field.set_data_type(layout.data_type.clone());
+
+                    let mut metadata = field.metadata().clone();
+                    metadata.insert(
+                        EXTENSION_TYPE_NAME_KEY.to_string(),
+                        Json2ExtensionType::NAME.to_string(),
+                    );
+                    metadata.insert(
+                        EXTENSION_TYPE_METADATA_KEY.to_string(),
+                        layout.extension_metadata.clone(),
+                    );
+                    field.set_metadata(metadata);
+                }
+            };
+            fields[index] = Arc::new(field);
         }
         schema.fields = fields.into();
         Ok(Arc::new(schema))
@@ -359,9 +379,34 @@ impl FlatReadFormat {
         }
     }
 
-    /// Gets JSON2 target types keyed by column id.
-    pub(crate) fn json_target_types(&self) -> &JsonTargetTypes {
-        self.read_cols.json_target_types()
+    /// Gets JSON2 read targets.
+    pub(crate) fn json_read_targets(&self) -> &JsonReadTargets {
+        self.read_cols.json_read_targets()
+    }
+
+    /// Returns the logical schema produced after Parquet-level JSON2 alignment.
+    pub(crate) fn output_logical_schema(
+        &self,
+        expected_metadata: &RegionMetadata,
+    ) -> Result<Vec<(ColumnId, ConcreteDataType)>> {
+        let mut schema = flat_projected_columns(self.metadata(), self.format_projection());
+        for (column_id, target) in self.json_read_targets().iter() {
+            let Some((_, data_type)) = schema.iter_mut().find(|(id, _)| id == column_id) else {
+                continue;
+            };
+            *data_type = match target {
+                JsonReadTarget::Projection(target) => ConcreteDataType::json2(target.clone()),
+                JsonReadTarget::Rewrite(_) => expected_metadata
+                    .column_by_id(*column_id)
+                    .with_context(|| UnexpectedSnafu {
+                        reason: format!("JSON2 rewrite column id {column_id} does not exist"),
+                    })?
+                    .column_schema
+                    .data_type
+                    .clone(),
+            };
+        }
+        Ok(schema)
     }
 
     /// Gets the projection in the flat format.

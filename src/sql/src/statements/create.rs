@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
 use common_sql::default_constraint::parse_column_default_constraint;
-use datatypes::json::JsonSettings;
+use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
     ColumnDefaultConstraint, FulltextOptions, SkippingIndexOptions, VectorDistanceMetric,
@@ -369,7 +369,12 @@ impl ColumnExtensions {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let settings = JsonSettings::try_new(type_hints, options.max_auto_expanded_paths)?;
+        let settings = JsonSettings::try_new(
+            type_hints,
+            options
+                .max_auto_expanded_paths
+                .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS)),
+        )?;
         Ok(Some(settings))
     }
 
@@ -1015,6 +1020,31 @@ ENGINE=mito
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_parse_json2_max_auto_expanded_paths_option() -> Result<()> {
+        let sql = r#"CREATE TABLE traces (
+            log_json_data JSON2 (
+                status_code INT64 NOT NULL,
+                max_auto_expanded_paths = 1
+            ),
+            ts TIMESTAMP TIME INDEX
+        )"#;
+        let result = ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )?;
+        let Statement::CreateTable(create_table) = &result[0] else {
+            unreachable!()
+        };
+        let settings = create_table.columns[0]
+            .extensions
+            .build_json_settings()?
+            .unwrap();
+        assert_eq!(settings.max_auto_expanded_paths(), Some(1));
+        Ok(())
     }
 
     #[test]

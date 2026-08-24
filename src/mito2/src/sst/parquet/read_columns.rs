@@ -280,7 +280,6 @@ fn build_parquet_leaves_indices(
             if !remainder_leaves.is_empty() {
                 matched_leaves.extend(remainder_leaves);
                 matched_roots.insert(col.root_index);
-                continue;
             }
         }
 
@@ -552,6 +551,25 @@ mod tests {
     }
 
     #[test]
+    fn test_v2_variant_parent_path_reads_remainder_and_parent() -> Result<(), ParquetError> {
+        let parquet = build_test_v2_schema()?;
+        let projection =
+            ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
+                vec![vec![
+                    "j".to_string(),
+                    "opaque".to_string(),
+                    "leaf".to_string(),
+                ]],
+            )]);
+
+        let plan = build_projection_plan(&projection, &parquet);
+
+        assert_eq!(vec![true], plan.projected_root_presence);
+        assert_eq!(ProjectionMask::leaves(&parquet, [0, 1, 4]), plan.mask);
+        Ok(())
+    }
+
+    #[test]
     fn test_merges_mixed_paths() {
         let parquet_schema_desc = build_test_nested_parquet_schema();
 
@@ -819,10 +837,15 @@ mod tests {
                 .with_repetition(Repetition::OPTIONAL)
                 .build()?,
         );
+        let opaque = Arc::new(
+            Type::primitive_type_builder("opaque", parquet::basic::Type::BYTE_ARRAY)
+                .with_repetition(Repetition::OPTIONAL)
+                .build()?,
+        );
         let root = Arc::new(
             Type::group_type_builder("j")
                 .with_repetition(Repetition::OPTIONAL)
-                .with_fields(vec![remainder, commit, hot])
+                .with_fields(vec![remainder, commit, hot, opaque])
                 .build()?,
         );
         Ok(SchemaDescriptor::new(Arc::new(

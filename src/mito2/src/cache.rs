@@ -65,7 +65,7 @@ use crate::memtable::record_batch_estimated_size;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::read::range_cache::{RangeScanCacheKey, RangeScanCacheValue};
-use crate::read::read_columns::JsonTargetTypes;
+use crate::read::read_columns::{JsonReadTarget, JsonReadTargets};
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 use crate::sst::parquet::read_columns::ParquetReadColumns;
@@ -2026,11 +2026,11 @@ pub struct SelectorResultValue {
     pub result: SelectorResult,
     /// The read columns of rows.
     pub read_cols: ParquetReadColumns,
-    /// JSON2 target types used by flat-format reads.
+    /// JSON2 read targets used by flat-format reads.
     ///
     /// JSON2 projection is query-driven; the same parquet columns can produce
     /// different cached batches under different type hints.
-    pub json_target_types: JsonTargetTypes,
+    pub json_read_targets: JsonReadTargets,
 }
 
 impl SelectorResultValue {
@@ -2039,7 +2039,7 @@ impl SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::PrimaryKey(result),
             read_cols,
-            json_target_types: Arc::default(),
+            json_read_targets: Arc::default(),
         }
     }
 
@@ -2047,12 +2047,12 @@ impl SelectorResultValue {
     pub fn new_flat(
         result: Vec<RecordBatch>,
         read_cols: ParquetReadColumns,
-        json_target_types: JsonTargetTypes,
+        json_read_targets: JsonReadTargets,
     ) -> SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::Flat(result),
             read_cols,
-            json_target_types,
+            json_read_targets,
         }
     }
 
@@ -2065,8 +2065,7 @@ impl SelectorResultValue {
             SelectorResult::Flat(batches) => batches.iter().map(record_batch_estimated_size).sum(),
         };
         result_size
-            + self.json_target_types.len()
-                * (mem::size_of::<ColumnId>() + mem::size_of::<ConcreteDataType>())
+            + self.json_read_targets.len() * (size_of::<ColumnId>() + size_of::<JsonReadTarget>())
     }
 }
 

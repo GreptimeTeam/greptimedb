@@ -31,6 +31,9 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error};
 use common_time::TimeToLive;
 use common_time::range::TimestampRange;
+pub(crate) use reader::{
+    Json2RewritePlans, collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema,
+};
 pub use scheduler::CompactionRequest;
 pub(crate) use scheduler::{
     CompactionExecution, CompactionPickFinished, CompactionScheduler, CompactionTransition,

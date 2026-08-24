@@ -41,7 +41,7 @@ use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
     NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
-use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
+use crate::read::flat_projection::FlatProjectionMapper;
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, PrimaryKeyArray};
 use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
@@ -95,16 +95,7 @@ impl FlatCompatBatch {
         compaction: bool,
     ) -> Result<Option<Self>> {
         let actual = read_format.metadata();
-        let format_projection = read_format.format_projection();
-        let mut actual_schema = flat_projected_columns(actual, format_projection);
-        for (column_id, target_type) in read_format.json_target_types().iter() {
-            if let Some(i) = actual_schema
-                .iter()
-                .position(|(actual_column_id, _)| actual_column_id == column_id)
-            {
-                actual_schema[i].1 = ConcreteDataType::json2(target_type.clone());
-            }
-        }
+        let actual_schema = read_format.output_logical_schema(mapper.metadata())?;
 
         let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema
@@ -118,7 +109,7 @@ impl FlatCompatBatch {
 
         if actual.primary_key_encoding == PrimaryKeyEncoding::Sparse && compaction {
             // Special handling for sparse encoding in compaction.
-            return FlatCompatBatch::try_new_compact_sparse(mapper, actual);
+            return FlatCompatBatch::try_new_compact_sparse(mapper, &actual_schema);
         }
 
         let (index_or_defaults, fields) =
@@ -176,7 +167,19 @@ impl FlatCompatBatch {
 
                 // Same column different type.
                 if expect_data_type != *actual_data_type {
-                    cast_type = Some(expect_data_type.clone())
+                    ensure!(
+                        !expect_data_type.is_json2() && !actual_data_type.is_json2(),
+                        CompatReaderSnafu {
+                            region_id: expect_metadata.region_id,
+                            reason: format!(
+                                "JSON2 column '{}' must be aligned before FlatCompatBatch, actual: {}, expected: {}",
+                                expect_column.column_schema.name,
+                                actual_data_type,
+                                expect_data_type,
+                            ),
+                        }
+                    );
+                    cast_type = Some(expect_data_type.clone());
                 }
                 // Source has this column.
                 index_or_defaults.push(IndexOrDefault::Index {
@@ -212,7 +215,7 @@ impl FlatCompatBatch {
 
     fn try_new_compact_sparse(
         mapper: &FlatProjectionMapper,
-        actual: &RegionMetadataRef,
+        actual_schema: &[(ColumnId, ConcreteDataType)],
     ) -> Result<Option<Self>> {
         // Currently, we don't support converting sparse encoding back to dense encoding in
         // flat format.
@@ -225,11 +228,6 @@ impl FlatCompatBatch {
 
         // For sparse encoding, we don't need to check the primary keys.
         // Since this is for compaction, we always read all columns.
-        let actual_schema: Vec<_> = actual
-            .field_columns()
-            .chain([actual.time_index_column()])
-            .map(|col| (col.column_id, col.column_schema.data_type.clone()))
-            .collect();
         let expect_schema: Vec<_> = mapper
             .metadata()
             .field_columns()
@@ -238,7 +236,7 @@ impl FlatCompatBatch {
             .collect();
 
         let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, &expect_schema, mapper.metadata())?;
+            Self::compute_index_and_fields(actual_schema, &expect_schema, mapper.metadata())?;
 
         let compat_pk = FlatCompatPrimaryKey::default();
 
@@ -634,6 +632,7 @@ impl FlatCompatPrimaryKey {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::{OpType, SemanticType};
@@ -645,6 +644,7 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonNativeType;
     use datatypes::value::ValueRef;
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
@@ -812,6 +812,57 @@ mod tests {
         let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
 
         assert_eq!(expected_batch, result);
+    }
+
+    #[test]
+    fn test_flat_compat_batch_uses_projected_json2_type() -> Result<()> {
+        let json2 = ConcreteDataType::json2(JsonNativeType::object());
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Field, json2.clone()),
+            ],
+            &[],
+        ));
+        let expected_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Field, json2),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[],
+        ));
+        let read_columns = ReadColumns::new([0, 1, 2])
+            .with_json_target_types(BTreeMap::from([(1, JsonNativeType::Variant)]));
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &expected_metadata,
+            vec![0, 1, 2],
+            read_columns.clone(),
+        )?;
+        let read_format = FlatReadFormat::new(actual_metadata, read_columns, None, "test", false)?;
+
+        let compat = FlatCompatBatch::try_new(&mapper, &read_format, false)?.unwrap();
+        let json_index = mapper
+            .batch_schema()
+            .iter()
+            .position(|(id, _)| *id == 1)
+            .unwrap();
+        assert!(matches!(
+            &compat.index_or_defaults[json_index],
+            IndexOrDefault::Index {
+                cast_type: None,
+                ..
+            }
+        ));
+        Ok(())
     }
 
     #[test]

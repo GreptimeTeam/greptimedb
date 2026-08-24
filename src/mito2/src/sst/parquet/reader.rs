@@ -16,7 +16,7 @@
 
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -63,7 +63,7 @@ use crate::metrics::{
 };
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
-use crate::read::read_columns::ReadColumns;
+use crate::read::read_columns::{Json2TargetLayout, JsonReadTarget, ReadColumns};
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
@@ -586,6 +586,25 @@ impl ParquetReaderBuilder {
                 .context(ReadDataPartSnafu)?;
 
         let output_schema = read_format.output_arrow_schema()?;
+        let json2_rewrite_targets = read_format
+            .json_read_targets()
+            .iter()
+            .filter_map(|(column_id, target)| {
+                if let JsonReadTarget::Rewrite(layout) = target {
+                    Some((column_id, layout))
+                } else {
+                    None
+                }
+            })
+            .map(|(column_id, layout)| {
+                let column = region_meta
+                    .column_by_id(*column_id)
+                    .context(UnexpectedSnafu {
+                        reason: format!("JSON2 target column by id {column_id} does not exist"),
+                    })?;
+                Ok((column.column_schema.name.clone(), layout.clone()))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
@@ -594,6 +613,7 @@ impl ParquetReaderBuilder {
             parquet_metadata_size,
             arrow_metadata,
             output_schema,
+            json2_rewrite_targets,
             object_store: self.object_store.clone(),
             projection: projection_plan,
             has_nested_projection,
@@ -1814,6 +1834,8 @@ pub(crate) struct RowGroupReaderBuilder {
     arrow_metadata: ArrowReaderMetadata,
     /// Projected output schema aligned with `projection.projected_root_presence`.
     output_schema: SchemaRef,
+    /// JSON2 columns that must be semantically rewritten into the projected target layout.
+    json2_rewrite_targets: HashMap<String, Json2TargetLayout>,
     /// Object store as an Operator.
     object_store: ObjectStore,
     /// Projection mask.
@@ -1975,7 +1997,7 @@ impl RowGroupReaderBuilder {
         &self,
         stream: ProjectedRecordBatchStream,
     ) -> Result<ProjectedRecordBatchStream> {
-        if !self.has_nested_projection {
+        if !self.has_nested_projection && self.json2_rewrite_targets.is_empty() {
             return Ok(stream);
         }
 
@@ -1984,6 +2006,7 @@ impl RowGroupReaderBuilder {
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
         )?
+        .with_json2_rewrite_targets(&self.json2_rewrite_targets)?
         .boxed())
     }
 

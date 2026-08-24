@@ -80,7 +80,7 @@ impl JsonNativeType {
         Self::Number(JsonNumberType::F64)
     }
 
-    fn object() -> Self {
+    pub fn object() -> Self {
         Self::Object(JsonObjectType::new())
     }
 
@@ -142,6 +142,14 @@ impl JsonNativeType {
             }
             JsonNativeType::Variant => ArrowDataType::Binary,
         }
+    }
+
+    /// Returns whether this type is a boolean, number, or string scalar.
+    pub fn is_primitive(&self) -> bool {
+        matches!(
+            self,
+            JsonNativeType::Bool | JsonNativeType::Number(_) | JsonNativeType::String
+        )
     }
 }
 
@@ -360,6 +368,7 @@ impl DataType for JsonType {
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         match &self.format {
             JsonFormat::Jsonb => Box::new(BinaryVectorBuilder::with_capacity(capacity)),
+            // TODO(LFC): Carry JsonSettings in JsonFormat::Json2 and use with_settings here.
             JsonFormat::Json2(x) => Box::new(JsonVectorBuilder::new(x.as_ref().clone(), capacity)),
         }
     }

@@ -33,9 +33,12 @@ use crate::error::{
     AlignJsonArraySnafu, ArrowComputeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result,
 };
 use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, json2_remainder_field};
+use crate::json::JsonSettings;
 use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
 use crate::prelude::{DataType as _, Value as GreptimeValue};
 use crate::value::{ListValue, StructValue};
+use crate::vectors::MutableVector;
+use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::json::variant::variant_to_json_values;
 
 pub struct JsonArray<'a> {
@@ -115,6 +118,32 @@ impl JsonArray<'_> {
         }
     }
 
+    /// Rewrites a physical JSON2 array directly into a fixed v2 layout.
+    pub fn rewrite_to_v2(
+        &self,
+        field: &Field,
+        logical_settings: &JsonSettings,
+        target_layout: &JsonSettings,
+    ) -> Result<ArrayRef> {
+        let values = if json2_remainder_field(field)?.is_some() {
+            self.json2_values()?
+        } else {
+            (0..self.inner.len())
+                .map(|i| self.try_get_value(i))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let mut builder = JsonVectorBuilder::with_settings(target_layout, values.len());
+        for value in values {
+            if value.is_null() {
+                builder.push_null();
+            } else {
+                let value = logical_settings.encode(value)?;
+                builder.try_push_value_ref(&value.as_value_ref())?;
+            }
+        }
+        Ok(builder.to_vector().to_arrow_array())
+    }
+
     fn json2_values(&self) -> Result<Vec<Value>> {
         let structs = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
             reason: "JSON2 layout v2 root array must be a struct",
@@ -149,7 +178,11 @@ impl JsonArray<'_> {
                 if child.name() == JSON2_REMAINDER_FIELD_NAME {
                     continue;
                 }
-                let value = JsonArray::from(column).try_get_value(i)?;
+                let mut value = JsonArray::from(column).try_get_value(i)?;
+                remove_null_object_fields(&mut value);
+                if value.is_null() {
+                    continue;
+                }
                 merge_explicit_value(&mut object, child.name().clone(), value, &mut path)?;
             }
             values.push(Value::Object(object));
@@ -420,6 +453,16 @@ fn merge_explicit_value(
     Ok(())
 }
 
+fn remove_null_object_fields(value: &mut Value) {
+    let Value::Object(object) = value else {
+        return;
+    };
+    object.retain(|_, value| {
+        remove_null_object_fields(value);
+        !value.is_null()
+    });
+}
+
 /// Returns whether Arrow can cast between the types without JSON-aware projection.
 /// Binary and nested types require JSONB decoding or recursive projection.
 fn can_fast_cast_types(from_type: &DataType, to_type: &DataType) -> bool {
@@ -545,6 +588,8 @@ impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use arrow_array::types::Int64Type;
     use arrow_array::{
         BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
@@ -1049,7 +1094,7 @@ mod test {
             None,
         ));
         let field = Field::new("data", DataType::Struct(fields), true).with_extension_type(
-            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default()))),
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::default()))),
         );
 
         assert_eq!(
@@ -1063,12 +1108,10 @@ mod test {
         assert_eq!(
             json!({
                 "!__remainder__!": "user value",
-                "count": null,
-                "nested": {"left": null}
+                "nested": {}
             }),
             JsonArray::from(&array).json2_values()?[1]
         );
-
         let target = DataType::Struct(
             vec![
                 Arc::new(Field::new("cold", DataType::UInt64, true)),
@@ -1097,7 +1140,7 @@ mod test {
             None,
         ));
         let field = Field::new("data", DataType::Struct(fields), true).with_extension_type(
-            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default()))),
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::default()))),
         );
 
         let projected = JsonArray::from(&array).project_to_v2(&field, field.data_type())?;
@@ -1123,6 +1166,18 @@ mod test {
                 "cannot merge 'count' in explicit fields and remainder: not both objects"
             )
         );
+
+        let Value::Object(mut remainder) = json!({"count": 1}) else {
+            unreachable!();
+        };
+        let error = merge_explicit_value(
+            &mut remainder,
+            "count".to_string(),
+            json!(1),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot merge 'count'"));
 
         let Value::Object(mut remainder) = json!({"nested": {"count": 1}}) else {
             unreachable!();

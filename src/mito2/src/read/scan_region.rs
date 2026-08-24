@@ -1705,7 +1705,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanFingerprin
             .column_ids_iter()
             .map(|id| {
                 read_columns
-                    .json_target_type(id)
+                    .json_projection_type(id)
                     .cloned()
                     .map(ConcreteDataType::json2)
                     .or_else(|| {
