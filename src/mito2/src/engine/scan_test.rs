@@ -1572,12 +1572,14 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
     assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
 
-/// Exact sequence-range reads reject an SST from another region as a broken
-/// sequence domain instead of falling back to an unsupported scan.
+/// Region edit assigns a target-local barrier to an imported foreign SST, so
+/// exact sequence-range capability can admit it without trusting its source
+/// region marker.
 #[tokio::test]
-async fn test_exact_sequence_range_rejects_foreign_region_file() {
+async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
     let mut env =
-        TestEnv::with_prefix("test_exact_sequence_range_rejects_foreign_region_file").await;
+        TestEnv::with_prefix("test_exact_sequence_range_accepts_foreign_file_with_target_barrier")
+            .await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -1639,7 +1641,20 @@ async fn test_exact_sequence_range_rejects_foreign_region_file() {
         .await
         .unwrap();
 
-    let err = engine
+    let version = engine.get_region(region_id).unwrap().version();
+    let foreign_file = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .find(|file| file.region_id() != region_id)
+        .expect("foreign file should remain source-owned");
+    assert!(
+        foreign_file.meta_ref().sequence.is_some(),
+        "region edit must assign a target-local barrier"
+    );
+
+    engine
         .scanner(
             region_id,
             ScanRequest {
@@ -1650,10 +1665,7 @@ async fn test_exact_sequence_range_rejects_foreign_region_file() {
             },
         )
         .await
-        .err()
-        .expect("expected broken sequence domain error");
-    assert!(matches!(err, Error::RegionSequenceDomainBroken { .. }));
-    assert_eq!(err.status_code(), StatusCode::Internal);
+        .expect("foreign file with target barrier should be exact-capable");
 }
 
 /// Exact sequence-range reads only require preserved row sequences in the
@@ -2299,11 +2311,189 @@ async fn test_bulk_write_sequence_not_committed_before_install() {
     }
 }
 
-/// Compaction rewrites a legacy (unmarked) input as a sequence-less output
-/// with the region-local admission barrier. Exact scans skip it once C reaches
-/// that barrier and fail closed while C is below it.
+/// Non-preserving compaction must keep the physical input sequence below the
+/// admission barrier. Otherwise a later row at the barrier can collide with
+/// the compacted row when ordinary reads deduplicate overlapping SSTs.
 #[tokio::test]
-async fn test_compaction_output_not_laundered_from_legacy_input() {
+async fn test_non_preserve_compaction_sequence_collision() {
+    for flat_format in [false, true] {
+        test_non_preserve_compaction_sequence_collision_with_format(flat_format).await;
+    }
+}
+
+async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format: bool) {
+    let mut env = TestEnv::with_prefix("test_non_preserve_compaction_sequence_collision").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    async fn last_row(engine: &crate::engine::MitoEngine, region_id: RegionId) -> String {
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .pretty_print()
+            .unwrap()
+    }
+
+    // SST1 and SST2 contain the same key and timestamp. Their physical/file
+    // sequences are 1 and 2, so ordinary LastRow selects value 2.
+    for value in [1, 2] {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: test_util::build_rows_for_key("a", 0, 1, value),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let before = last_row(&engine, region_id).await;
+    assert!(
+        before.contains("| a     | 2.0"),
+        "before compaction: {before}"
+    );
+
+    // Both current SSTs are compacted through the real picker, merger, writer,
+    // and manifest update. With committed/flushed sequence 2, the untrusted
+    // output's admission barrier is exactly 3.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(1, files.len(), "both input SSTs must be replaced");
+    let compacted = files[0];
+    assert_eq!(1, compacted.meta_ref().level);
+    assert!(!compacted.meta_ref().preserve_row_sequence);
+    assert_eq!(1, compacted.num_rows());
+    assert_eq!(
+        Some(std::num::NonZeroU64::new(3).unwrap()),
+        compacted.meta_ref().sequence,
+        "admission barrier is input max 2 plus one"
+    );
+
+    // Hide FileMeta.sequence so this is a direct physical read, not a reader
+    // admission-barrier override. The output must contain physical sequence 2,
+    // not zero and not the output barrier 3.
+    let mut physical_meta = compacted.meta_ref().clone();
+    physical_meta.sequence = None;
+    let mut reader = region
+        .access_layer
+        .read_sst(FileHandle::new(
+            physical_meta,
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        ))
+        .build()
+        .await
+        .unwrap()
+        .expect("compaction output reader");
+    let batch = reader.next_record_batch().await.unwrap().unwrap();
+    let sequences = batch
+        .column(batch.num_columns() - 2)
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+        .unwrap();
+    assert_eq!(&[2], sequences.values());
+
+    let after_compaction = last_row(&engine, region_id).await;
+    assert!(
+        after_compaction.contains("| a     | 2.0"),
+        "after compaction: {after_compaction}"
+    );
+
+    // The next write receives physical sequence 3, equal to the compacted
+    // output's admission barrier. It must still win because the compacted row
+    // remains physically at sequence 2; an old zero/barrier encoding would
+    // collide here and incorrectly retain value 2.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("a", 0, 1, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(2, files.len(), "compacted L1 plus newest L0 SST");
+    let newest = files
+        .iter()
+        .find(|file| file.meta_ref().level == 0)
+        .expect("newest L0 SST");
+    assert_eq!(1, newest.num_rows());
+    assert_eq!(
+        Some(std::num::NonZeroU64::new(3).unwrap()),
+        newest.meta_ref().sequence
+    );
+    let compacted = files
+        .iter()
+        .find(|file| file.meta_ref().level == 1)
+        .expect("compacted L1 SST");
+    assert_eq!(
+        Some(std::num::NonZeroU64::new(3).unwrap()),
+        compacted.meta_ref().sequence
+    );
+
+    let after_newer_write = last_row(&engine, region_id).await;
+    assert!(
+        after_newer_write.contains("| a     | 3.0"),
+        "after newer sequence-3 write: {after_newer_write}"
+    );
+}
+
+/// Compaction rewrites a legacy (unmarked) input as an untrusted output with
+/// the region-local admission barrier. Its physical rows retain the known
+/// input maximum, while exact scans skip it once C reaches that barrier and
+/// fail closed while C is below it.
+#[tokio::test]
+async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
     let mut env =
         TestEnv::with_prefix("test_compaction_output_not_laundered_from_legacy_input").await;
     // Suppress automatic compactions (flush- and edit-triggered) so the
@@ -2419,18 +2609,18 @@ async fn test_compaction_output_not_laundered_from_legacy_input() {
         .get();
     assert_eq!(8, barrier);
 
-    // The sequence-less parquet is encoded as all zeroes. Its physical column
-    // therefore must not retain a source-domain sequence; legacy reads use the
-    // reader's existing all-zero compatibility override from FileMeta.
-    let mut sequence_less_meta = outputs[0].meta_ref().clone();
-    sequence_less_meta.sequence = None;
-    let sequence_less_handle = FileHandle::new(
-        sequence_less_meta,
+    // Reinstalling the legacy input assigns it sequence 7, so the physical
+    // parquet retains that known input maximum rather than encoding either
+    // zero or the output admission barrier 8. The manifest marker stays false.
+    let mut sequence_meta = outputs[0].meta_ref().clone();
+    sequence_meta.sequence = None;
+    let sequence_handle = FileHandle::new(
+        sequence_meta,
         Arc::new(crate::sst::file_purger::NoopFilePurger),
     );
     let mut reader = region
         .access_layer
-        .read_sst(sequence_less_handle)
+        .read_sst(sequence_handle)
         .build()
         .await
         .unwrap()
@@ -2445,7 +2635,12 @@ async fn test_compaction_output_not_laundered_from_legacy_input() {
         .as_any()
         .downcast_ref::<datatypes::arrow::array::UInt64Array>()
         .expect("sequence column");
-    assert!(sequence.values().iter().all(|sequence| *sequence == 0));
+    assert!(
+        sequence
+            .values()
+            .iter()
+            .all(|sequence| *sequence == barrier - 1)
+    );
 
     // A cursor before the barrier must fail closed.
     let err = engine

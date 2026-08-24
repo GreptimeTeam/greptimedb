@@ -20,7 +20,7 @@ use api::v1::Rows;
 use api::v1::region::{StrictWindow, compact_request};
 use common_function::utils::partition_expr_version;
 use common_recordbatch::RecordBatches;
-use datatypes::arrow::array::AsArray;
+use datatypes::arrow::array::{AsArray, UInt64Array};
 use datatypes::arrow::datatypes::Float64Type;
 use datatypes::value::Value;
 use partition::expr::{PartitionExpr, col};
@@ -54,11 +54,16 @@ fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
 #[tokio::test]
 async fn test_apply_staging_manifest_sequence_domain() {
     common_telemetry::init_default_ut_logging();
-    test_apply_staging_manifest_sequence_domain_with_format(false).await;
-    test_apply_staging_manifest_sequence_domain_with_format(true).await;
+    for flat_format in [false, true] {
+        test_apply_staging_manifest_sequence_domain_with_format(flat_format, false).await;
+        test_apply_staging_manifest_sequence_domain_with_format(flat_format, true).await;
+    }
 }
 
-async fn test_apply_staging_manifest_sequence_domain_with_format(flat_format: bool) {
+async fn test_apply_staging_manifest_sequence_domain_with_format(
+    flat_format: bool,
+    preserve_row_sequence: bool,
+) {
     let mut env = TestEnv::with_prefix("apply-staging-sequence-domain").await;
     let engine = env
         .create_engine(MitoConfig {
@@ -68,23 +73,41 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(flat_format: bo
         .await;
     let source = RegionId::new(1, 1);
     let target = RegionId::new(1, 2);
-    let request = CreateRequestBuilder::new().build();
+    let mut request_builder = CreateRequestBuilder::new();
+    if preserve_row_sequence {
+        request_builder = request_builder
+            .insert_option("append_mode", "true")
+            .insert_option("preserve_row_sequence", "true");
+    }
+    let request = request_builder.build();
     let schema = rows_schema(&request);
 
     engine
         .handle_request(source, RegionRequest::Create(request.clone()))
         .await
         .unwrap();
-    for value in 0..3 {
+    if preserve_row_sequence {
         put_rows(
             &engine,
             source,
             Rows {
                 schema: schema.clone(),
-                rows: build_rows_for_key("0", 0, 1, value),
+                rows: build_rows_for_key("0", 0, 3, 0),
             },
         )
         .await;
+    } else {
+        for value in 0..3 {
+            put_rows(
+                &engine,
+                source,
+                Rows {
+                    schema: schema.clone(),
+                    rows: build_rows_for_key("0", 0, 1, value),
+                },
+            )
+            .await;
+        }
     }
     engine
         .handle_request(source, RegionRequest::Flush(RegionFlushRequest::default()))
@@ -165,11 +188,18 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(flat_format: bo
         target,
         Rows {
             schema: schema.clone(),
-            rows: build_rows_for_key("0", 0, 1, 99),
+            rows: build_rows_for_key(
+                if preserve_row_sequence { "1" } else { "0" },
+                if preserve_row_sequence { 3 } else { 0 },
+                if preserve_row_sequence { 4 } else { 1 },
+                99,
+            ),
         },
     )
     .await;
-    assert_target_value(&engine, target, 99.0).await;
+    if !preserve_row_sequence {
+        assert_target_value(&engine, target, 99.0).await;
+    }
 
     engine
         .handle_request(target, RegionRequest::Flush(RegionFlushRequest::default()))
@@ -216,7 +246,73 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(flat_format: bo
         input_ids.iter().all(|id| !output_ids.contains(id)),
         "real compaction must replace both input SSTs"
     );
-    assert_target_value(&engine, target, 99.0).await;
+    if !preserve_row_sequence {
+        assert_target_value(&engine, target, 99.0).await;
+    }
+
+    if preserve_row_sequence {
+        let output = output_files
+            .iter()
+            .find(|file| output_ids.contains(&file.meta_ref().file_id))
+            .expect("target-owned compaction output");
+        assert!(output.meta_ref().preserve_row_sequence);
+        // The imported rows are virtualized at target barrier 1 and the local
+        // row has physical sequence 2, so the output frontier is 2.
+        assert_eq!(
+            Some(std::num::NonZeroU64::new(2).unwrap()),
+            output.meta_ref().sequence
+        );
+
+        let mut reader = engine
+            .get_region(target)
+            .unwrap()
+            .access_layer
+            .read_sst((**output).clone())
+            .build()
+            .await
+            .unwrap()
+            .expect("compaction output reader");
+        let batch = reader
+            .next_record_batch()
+            .await
+            .unwrap()
+            .expect("output batch");
+        let sequences = batch
+            .column(batch.num_columns() - 2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("sequence column");
+        // The target partition excludes source field_0 = 0, leaving two
+        // imported rows at barrier 1 and the local row at sequence 2.
+        assert_eq!(
+            2,
+            sequences.values().iter().filter(|&&seq| seq == 1).count()
+        );
+        assert_eq!(
+            1,
+            sequences.values().iter().filter(|&&seq| seq == 2).count()
+        );
+
+        for (min, max, expected_rows) in [(0, 1, 2), (1, 2, 1)] {
+            let stream = engine
+                .scan_to_stream(
+                    target,
+                    ScanRequest {
+                        exact_sequence_range: true,
+                        memtable_min_sequence: Some(min),
+                        memtable_max_sequence: Some(max),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            assert_eq!(
+                expected_rows,
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+            );
+        }
+    }
 }
 
 fn current_file_ids(engine: &crate::engine::MitoEngine, region_id: RegionId) -> HashSet<FileId> {

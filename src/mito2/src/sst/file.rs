@@ -515,6 +515,18 @@ impl FileHandle {
         self.inner.meta.region_id
     }
 
+    /// Returns whether this file's row sequences are trusted in the target region.
+    ///
+    /// Foreign files use their target-local sequence barrier; local files require
+    /// the preserve marker because their physical sequences belong to this region.
+    pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
+        if self.region_id() != target_region_id {
+            self.meta_ref().sequence.is_some()
+        } else {
+            self.meta_ref().preserve_row_sequence
+        }
+    }
+
     /// Returns the cross-region file id.
     pub fn file_id(&self) -> RegionFileId {
         RegionFileId::new(self.inner.meta.region_id, self.inner.meta.file_id)

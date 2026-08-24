@@ -32,7 +32,7 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, SequenceRange};
 
-use crate::error::{ComputeArrowSnafu, RegionSequenceDomainBrokenSnafu, Result};
+use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
@@ -1509,30 +1509,24 @@ pub(crate) async fn scan_flat_file_ranges(
 /// (`__primary_key`, `__sequence`, `__op_type`), so it must be applied before any
 /// projection/compat conversion that drops internal columns.
 ///
-/// `file_preserves_sequence` is the per-file `preserve_row_sequence` marker:
-/// only marked files may be row-level sequence filtered. Without it, rows pass
-/// through untouched to keep main's file-level semantics. An active range also
-/// rejects files from another region instead of passing them through.
+/// `file_preserves_sequence` is the local per-file marker. Foreign reader
+/// batches have already been virtualized to the target-local file barrier, so
+/// they are always filtered using the effective batch sequence. Local
+/// untrusted files pass through because exact capability excludes them before
+/// row filtering.
 fn filter_flat_batch_by_sequence(
     record_batch: RecordBatch,
     sequence_range: Option<SequenceRange>,
     file_preserves_sequence: bool,
     region_id: RegionId,
     file_region_id: RegionId,
-    file_id: store_api::storage::FileId,
+    _file_id: store_api::storage::FileId,
 ) -> Result<Option<RecordBatch>> {
     let Some(sequence) = sequence_range else {
         return Ok(Some(record_batch));
     };
-    if file_region_id != region_id {
-        return RegionSequenceDomainBrokenSnafu {
-            region_id,
-            file_region_id,
-            file_id,
-        }
-        .fail();
-    };
-    if !file_preserves_sequence {
+    let foreign = file_region_id != region_id;
+    if !foreign && !file_preserves_sequence {
         return Ok(Some(record_batch));
     }
 
@@ -2234,18 +2228,17 @@ mod sequence_filter_tests {
         .unwrap();
         assert_eq!(out.unwrap().num_rows(), 0);
 
-        let err = filter_flat_batch_by_sequence(
-            b,
-            Some(SequenceRange::GtLtEq { min: 0, max: 10 }),
-            true,
+        // Foreign batches are already virtualized by the reader. Their source
+        // marker is irrelevant, and filtering uses the effective batch values.
+        let out = filter_flat_batch_by_sequence(
+            batch(&[1, 5, 9]),
+            Some(SequenceRange::GtLtEq { min: 2, max: 8 }),
+            false,
             region_id,
             RegionId::new(1, 2),
             file_id,
         )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::Error::RegionSequenceDomainBroken { .. }
-        ));
+        .unwrap();
+        assert_eq!(remaining_tags(&out.unwrap()), vec!["1"]);
     }
 }
