@@ -74,6 +74,14 @@ on:
         required: true
         type: string
         default: aliyun-ecs
+      keep_instance:
+        description: >-
+          Debug: keep the ECS instance after the run (skip teardown) so its
+          runner _diag logs, journal, and telemetry can be inspected; the
+          janitor still sweeps it after the TTL
+        required: false
+        type: boolean
+        default: false
   pull_request:
     types: [labeled]
 
@@ -783,8 +791,10 @@ jobs:
   teardown:
     # Releases the dynamically provisioned ECS runner. Runs even when the
     # benchmark job fails or is cancelled; skipped when a literal runner label
-    # was selected because the provision outputs are empty.
-    if: ${{ always() && needs.provision.outputs.instance_id != '' }}
+    # was selected because the provision outputs are empty, or when the
+    # dispatch set keep_instance to preserve the machine for post-mortem
+    # debugging (the janitor sweep still reclaims it after the TTL).
+    if: ${{ always() && needs.provision.outputs.instance_id != '' && !inputs.keep_instance }}
     needs: [provision, query-regression]
     runs-on: ubuntu-latest
     timeout-minutes: 15

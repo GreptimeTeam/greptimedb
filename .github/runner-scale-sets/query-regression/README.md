@@ -63,6 +63,17 @@ OOM-killed and GitHub reports `The operation was canceled` with no
 telemetry. Swap is a safety net for 16 GiB types, not a substitute for
 32 GiB; linking on swap is slow.
 
+When a run dies with an unexplained `The operation was canceled` (no
+"Canceled by" banner, healthy machine), re-dispatch with `keep_instance`
+checked: the teardown job is skipped and the instance survives for
+post-mortem inspection. The security group is egress-only, so inspect via
+Cloud Assistant (`RunCommand`) or VNC: the runner's `_diag` logs under the
+runner home record reconnects and worker crashes, `journalctl -u
+ephemeral-github-runner.service` mirrors the console stream, `dmesg -T`
+shows kernel OOM kills, and `machine-telemetry.log` in the job workspace
+has the 30 s sampler history. The janitor sweep still deletes the instance
+after its TTL, so finish the inspection within that window.
+
 Trust model on the ECS path: the instance receives only the one-hour runner
 registration token via user data and holds no cloud credentials; the Aliyun
 AK/SK exist only in the control-plane jobs. Instance tags
