@@ -135,6 +135,135 @@ async fn test_table_reconciliation_events() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_logical_table_reconciliation_events() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = GreptimeDbClusterBuilder::new("logical_table_reconciliation_events")
+        .await
+        .with_datanodes(1)
+        .build(true)
+        .await;
+    let frontend = cluster.fe_instance().clone();
+    run_sql(frontend.as_ref(), &format!("CREATE DATABASE {DATABASE}")).await;
+
+    run_sql(
+        frontend.as_ref(),
+        &format!(
+            "CREATE TABLE {DATABASE}.metric_physical \
+             (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric \
+             WITH (\"physical_metric_table\" = \"\")"
+        ),
+    )
+    .await;
+    run_sql(
+        frontend.as_ref(),
+        &format!(
+            "CREATE TABLE {DATABASE}.logical_cpu \
+             (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE=metric \
+             WITH (\"on_physical_table\" = \"metric_physical\")"
+        ),
+    )
+    .await;
+    run_sql(
+        frontend.as_ref(),
+        &format!(
+            "CREATE TABLE {DATABASE}.logical_memory \
+             (ts TIMESTAMP TIME INDEX, val DOUBLE, job STRING PRIMARY KEY) ENGINE=metric \
+             WITH (\"on_physical_table\" = \"metric_physical\")"
+        ),
+    )
+    .await;
+
+    let parent_procedure_id = cluster
+        .metasrv
+        .reconciliation_manager()
+        .reconcile_database(
+            CATALOG.to_string(),
+            DATABASE.to_string(),
+            ResolveStrategy::UseLatest,
+            2,
+        )
+        .await
+        .unwrap();
+    let mut procedure_watcher = cluster
+        .metasrv
+        .procedure_manager()
+        .procedure_watcher(parent_procedure_id)
+        .unwrap();
+    watcher::wait(&mut procedure_watcher).await.unwrap();
+
+    let logical_procedure_id = find_eventually_string(
+        &frontend,
+        &format!(
+            "SELECT procedure_id FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_logical_tables' AND catalog_name = '{CATALOG}' \
+             AND schema_name = '{DATABASE}' AND table_name = 'logical_cpu' \
+             AND json_get_string(procedure_trigger, 'type') = 'Submitted' LIMIT 1"
+        ),
+        "procedure_id",
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) = 2 AND count(DISTINCT table_id) = 2 \
+                 AND count(DISTINCT physical_table_id) = 1 AS matches \
+             FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_logical_tables' \
+             AND procedure_id = '{logical_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Submitted' \
+             AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
+             AND table_name IN ('logical_cpu', 'logical_memory') \
+             AND table_id IS NOT NULL AND physical_table_id IS NOT NULL \
+             AND table_id != physical_table_id \
+             AND json_get_int(payload, 'version') = 1 \
+             AND json_get_int(payload, 'logical_table_count') = 2 \
+             AND json_get_bool(payload, 'is_subprocedure') = true"
+        ),
+        "\
++---------+
+| matches |
++---------+
+| true    |
++---------+",
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) = 2 AND count(DISTINCT table_id) = 2 \
+                 AND count(DISTINCT physical_table_id) = 1 AS matches \
+             FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_logical_tables' \
+             AND procedure_id = '{logical_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Succeeded' \
+             AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
+             AND table_name IN ('logical_cpu', 'logical_memory') \
+             AND json_get_bool(payload, 'complete') = true \
+             AND json_get_int(payload, 'processed_table_count') = 2 \
+             AND json_get_int(payload, 'metadata_consistent_table_count') = 2 \
+             AND json_get_int(payload, 'metadata_inconsistent_table_count') = 0 \
+             AND json_get_int(payload, 'missing_region_table_count') = 0 \
+             AND json_get_int(payload, 'resolved_column_count') = 6 \
+             AND json_get_int(payload, 'scanned_region_count') = 2 \
+             AND json_get_int(payload, 'created_region_table_count') = 0 \
+             AND json_get_int(payload, 'created_region_count') = 0 \
+             AND json_get_int(payload, 'updated_table_info_count') = 0 \
+             AND json_get_string(payload, 'last_completed_phase') = 'update_table_infos'"
+        ),
+        "\
++---------+
+| matches |
++---------+
+| true    |
++---------+",
+    )
+    .await;
+}
+
 async fn run_sql(instance: &Instance, sql: &str) {
     let output = SqlQueryHandler::do_query(instance, sql, QueryContext::arc())
         .await

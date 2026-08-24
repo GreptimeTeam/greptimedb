@@ -142,6 +142,7 @@ impl State for ReconciliationStart {
 
         ctx.persistent_ctx.physical_table_route = Some(physical_table_route);
         ctx.persistent_ctx.logical_table_ids = table_ids;
+        ctx.volatile_ctx.result_summary.mark_start_completed();
         Ok((Box::new(ResolveTableMetadatas), Status::executing(true)))
     }
 

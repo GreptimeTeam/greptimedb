@@ -42,7 +42,13 @@ impl State for ReconcileRegions {
         ctx: &mut ReconcileLogicalTablesContext,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        ctx.volatile_ctx
+            .result_summary
+            .begin_region_reconciliation();
         if ctx.persistent_ctx.create_tables.is_empty() {
+            ctx.volatile_ctx
+                .result_summary
+                .mark_regions_reconciled(0, 0);
             return Ok((Box::new(UpdateTableInfos), Status::executing(false)));
         }
 
@@ -59,6 +65,7 @@ impl State for ReconcileRegions {
             .into_iter()
             .map(|p| (p.id, p))
             .collect::<HashMap<_, _>>();
+        let created_region_table_count = ctx.persistent_ctx.create_tables.len();
         let mut create_table_tasks = Vec::with_capacity(leaders.len());
         for (datanode_id, region_role_set) in region_distribution {
             if region_role_set.leader_regions.is_empty() {
@@ -66,6 +73,8 @@ impl State for ReconcileRegions {
             }
             // Safety: It contains all leaders in the region routes.
             let peer = leaders.get(&datanode_id).unwrap().clone();
+            let created_region_count =
+                region_role_set.leader_regions.len() * created_region_table_count;
             let request = self.make_request(&region_role_set.leader_regions, ctx)?;
             let requester = ctx.node_manager.datanode(&peer).await;
             create_table_tasks.push(async move {
@@ -73,13 +82,19 @@ impl State for ReconcileRegions {
                     .handle(request)
                     .await
                     .map_err(add_peer_context_if_needed(peer))
+                    .map(|_| created_region_count)
             });
         }
 
-        future::join_all(create_table_tasks)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+        let results = future::join_all(create_table_tasks).await;
+        let created_region_count = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .sum();
+        ctx.volatile_ctx
+            .result_summary
+            .record_created_regions(created_region_count);
+        results.into_iter().collect::<Result<Vec<_>>>()?;
         let table_id = ctx.table_id();
         let table_name = ctx.table_name();
         info!(
@@ -92,6 +107,9 @@ impl State for ReconcileRegions {
             table_id,
             table_name
         );
+        ctx.volatile_ctx
+            .result_summary
+            .mark_regions_reconciled(created_region_table_count, created_region_count);
         ctx.persistent_ctx.create_tables.clear();
         return Ok((Box::new(UpdateTableInfos), Status::executing(true)));
     }

@@ -50,6 +50,8 @@ impl State for ResolveTableMetadatas {
             .collect::<Vec<_>>();
         let table_ids = &ctx.persistent_ctx.logical_table_ids;
 
+        ctx.volatile_ctx.result_summary.begin_resolution();
+
         let mut create_tables = vec![];
         let mut update_table_infos = vec![];
 
@@ -80,6 +82,9 @@ impl State for ResolveTableMetadatas {
                     .list(*table_id, region_routes)
                     .await?
             };
+            ctx.volatile_ctx
+                .result_summary
+                .record_scanned_regions(region_metadatas.len());
 
             ensure!(!region_metadatas.is_empty(), {
                 metrics::METRIC_META_RECONCILIATION_STATS
@@ -100,6 +105,9 @@ impl State for ResolveTableMetadatas {
 
             if region_metadatas.iter().any(|r| r.is_none()) {
                 create_tables_count += 1;
+                ctx.volatile_ctx
+                    .result_summary
+                    .record_missing_region_table();
                 create_tables.push((*table_id, table_info_value.table_info.clone()));
                 continue;
             }
@@ -111,11 +119,15 @@ impl State for ResolveTableMetadatas {
                 .collect::<Vec<_>>();
             if let Some(column_metadatas) = check_column_metadatas_consistent(&region_metadatas) {
                 metadata_consistent_count += 1;
+                ctx.volatile_ctx
+                    .result_summary
+                    .record_consistent_table(column_metadatas.len());
                 if need_update_logical_table_info(&table_info_value.table_info, &column_metadatas) {
                     update_table_infos.push((*table_id, column_metadatas));
                 }
             } else {
                 metadata_inconsistent_count += 1;
+                ctx.volatile_ctx.result_summary.record_inconsistent_table();
                 // If the logical regions have inconsistent column metadatas, it won't affect read and write.
                 // It's safe to continue if the column metadatas of the logical table are inconsistent.
                 warn!(
@@ -142,6 +154,7 @@ impl State for ResolveTableMetadatas {
         );
         ctx.persistent_ctx.update_table_infos = update_table_infos;
         ctx.persistent_ctx.create_tables = create_tables;
+        ctx.volatile_ctx.result_summary.mark_resolution_completed();
         // Update metrics.
         let metrics = ctx.mut_metrics();
         metrics.column_metadata_consistent_count = metadata_consistent_count;
