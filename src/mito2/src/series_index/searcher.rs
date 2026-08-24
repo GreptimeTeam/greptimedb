@@ -83,8 +83,7 @@ impl SeriesIndexMetadataProvider {
 pub struct SeriesIndexSearcher {
     range_fetcher: SeriesIndexRangeFetcher,
     metadata_provider: SeriesIndexMetadataProvider,
-    filters: Vec<SimpleFilterEvaluator>,
-    pruning_predicate: Predicate,
+    filters: Vec<(Expr, SimpleFilterEvaluator)>,
     empty_time_range: bool,
 }
 
@@ -107,7 +106,6 @@ impl SeriesIndexSearcher {
             })?;
             filters.push((expr, filter));
         }
-        let (exprs, filters): (Vec<_>, Vec<_>) = filters.into_iter().unzip();
 
         Ok(Self {
             range_fetcher: SeriesIndexRangeFetcher {
@@ -115,7 +113,6 @@ impl SeriesIndexSearcher {
             },
             metadata_provider: SeriesIndexMetadataProvider { object_store },
             filters,
-            pruning_predicate: Predicate::new(exprs),
             empty_time_range,
         })
     }
@@ -134,15 +131,18 @@ impl SeriesIndexSearcher {
                 })?;
         validate_index_schema(arrow_metadata.schema())?;
 
+        // An older index file may not contain tags added by schema evolution.
+        // Ignore filters on those tags to preserve a conservative candidate set.
+        let (pruning_predicate, filters) = self.filters_for_schema(arrow_metadata.schema());
         let row_groups = row_groups_to_read(
             arrow_metadata.metadata().row_groups(),
             arrow_metadata.schema().clone(),
-            &self.pruning_predicate,
+            &pruning_predicate,
         );
         let projection = projection_mask(
             arrow_metadata.parquet_schema(),
             arrow_metadata.schema(),
-            &self.filters,
+            &filters,
         )?;
         let mut decoder = ParquetPushDecoderBuilder::new_with_metadata(arrow_metadata)
             .with_row_groups(row_groups)
@@ -152,7 +152,6 @@ impl SeriesIndexSearcher {
                 path: path.to_string(),
             })?;
         let path = path.to_string();
-        let filters = self.filters.clone();
         let range_fetcher = self.range_fetcher.clone();
 
         Ok(Box::pin(try_stream! {
@@ -220,6 +219,16 @@ impl SeriesIndexSearcher {
             }
         }))
     }
+
+    fn filters_for_schema(&self, schema: &SchemaRef) -> (Predicate, Vec<SimpleFilterEvaluator>) {
+        let (exprs, filters): (Vec<_>, Vec<_>) = self
+            .filters
+            .iter()
+            .filter(|(_, filter)| schema.field_with_name(filter.column_name()).is_ok())
+            .cloned()
+            .unzip();
+        (Predicate::new(exprs), filters)
+    }
 }
 
 fn time_range_filters(
@@ -250,12 +259,16 @@ fn time_range_filters(
             })?;
     let unit = timestamp_type.unit();
     let mut exprs = Vec::with_capacity(2);
+    // A series overlaps [start, end) only if its maximum is at least start.
+    // Round start up so a series ending before an unaligned start is pruned.
     if let Some(start) = time_range
         .start()
         .and_then(|start| start.convert_to_ceil(unit))
     {
         exprs.push(col(MAX_TS_COLUMN).gt_eq(lit(start.value())));
     }
+    // A series overlaps [start, end) only if its minimum is less than end.
+    // Round the exclusive end up to avoid pruning the containing unit interval.
     if let Some(end) = time_range.end().and_then(|end| end.convert_to_ceil(unit)) {
         exprs.push(col(MIN_TS_COLUMN).lt(lit(end.value())));
     }
@@ -273,7 +286,7 @@ fn validate_index_schema(schema: &SchemaRef) -> Result<()> {
         let field = schema
             .field_with_name(name)
             .ok()
-            .context(InvalidRecordBatchSnafu {
+            .with_context(|| InvalidRecordBatchSnafu {
                 reason: format!("series index is missing internal column {name}"),
             })?;
         ensure!(
@@ -299,22 +312,21 @@ fn projection_mask(
         let index = arrow_schema
             .index_of(name)
             .ok()
-            .context(InvalidRecordBatchSnafu {
+            .with_context(|| InvalidRecordBatchSnafu {
                 reason: format!("series index is missing internal column {name}"),
             })?;
         indices.insert(index);
     }
     for filter in filters {
-        let index =
-            arrow_schema
-                .index_of(filter.column_name())
-                .ok()
-                .context(InvalidRecordBatchSnafu {
-                    reason: format!(
-                        "series index is missing predicate column {}",
-                        filter.column_name()
-                    ),
-                })?;
+        let index = arrow_schema
+            .index_of(filter.column_name())
+            .ok()
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!(
+                    "series index is missing predicate column {}",
+                    filter.column_name()
+                ),
+            })?;
         indices.insert(index);
     }
     Ok(ProjectionMask::roots(parquet_schema, indices))
@@ -328,7 +340,7 @@ fn column<'a>(
         .schema()
         .index_of(name)
         .ok()
-        .context(InvalidRecordBatchSnafu {
+        .with_context(|| InvalidRecordBatchSnafu {
             reason: format!("series index batch is missing column {name}"),
         })?;
     Ok(batch.column(index))
@@ -394,9 +406,12 @@ mod tests {
     use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt8Array};
     use datatypes::arrow::datatypes::{Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
     use futures::TryStreamExt;
     use object_store::services::Memory;
     use store_api::codec::PrimaryKeyEncoding;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
     use crate::series_index::{SeriesIndexWriter, SeriesIndexWriterOptions};
@@ -517,6 +532,29 @@ mod tests {
             }]
         );
 
+        // Both bounds fall between millisecond ticks. Rounding the inclusive
+        // start and exclusive end upward leaves only the 30 ms series.
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_microsecond(20_001),
+            common_time::Timestamp::new_microsecond(30_001),
+        )
+        .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(
+            metadata.clone(),
+            object_store.clone(),
+            None,
+            Some(time_range),
+        )
+        .unwrap();
+        let ids = collect_ids(searcher.search(path).await.unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 30
+            }]
+        );
+
         // The stored maximum equal to the query start intersects, while the
         // stored minimum equal to the exclusive query end does not.
         let time_range = TimestampRange::new(
@@ -533,6 +571,58 @@ mod tests {
                 table_id: 1,
                 tsid: 20
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_skips_filters_for_columns_missing_from_older_index() {
+        let old_metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let object_store = object_store();
+        let path = "schema-evolution.parquet";
+        write_index(
+            old_metadata.clone(),
+            object_store.clone(),
+            path,
+            &[
+                (1, 10, "a", "x", 10),
+                (1, 20, "b", "x", 20),
+                (1, 30, "a", "y", 30),
+            ],
+            2,
+        )
+        .await;
+
+        let mut builder = RegionMetadataBuilder::from_existing(old_metadata.as_ref().clone());
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("tag_2", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 4,
+        });
+        let mut primary_key = old_metadata.primary_key.clone();
+        primary_key.push(4);
+        builder.primary_key(primary_key);
+        let current_metadata = Arc::new(builder.build().unwrap());
+
+        let predicate =
+            Predicate::new(vec![col("tag_0").eq(lit("a")), col("tag_2").eq(lit("new"))]);
+        let searcher =
+            SeriesIndexSearcher::try_new(current_metadata, object_store, Some(&predicate), None)
+                .unwrap();
+        let ids = collect_ids(searcher.search(path).await.unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![
+                MetricSeriesId {
+                    table_id: 1,
+                    tsid: 10,
+                },
+                MetricSeriesId {
+                    table_id: 1,
+                    tsid: 30,
+                },
+            ]
         );
     }
 
@@ -613,11 +703,12 @@ mod tests {
         let parquet_metadata = searcher.metadata_provider.load(path).await.unwrap();
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_metadata, ArrowReaderOptions::new()).unwrap();
+        let (pruning_predicate, _) = searcher.filters_for_schema(arrow_metadata.schema());
         assert_eq!(
             row_groups_to_read(
                 arrow_metadata.metadata().row_groups(),
                 arrow_metadata.schema().clone(),
-                &searcher.pruning_predicate,
+                &pruning_predicate,
             ),
             vec![1]
         );
