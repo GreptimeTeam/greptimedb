@@ -282,7 +282,7 @@ api = { path = "src/api" }
 auth = { path = "src/auth" }
 cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
-catio = { git = "https://github.com/GreptimeTeam/catio.git", rev = "dd3c68d6e3db51c28cd35e70d4b7155a3975c5b7" }
+catio = { git = "https://github.com/GreptimeTeam/catio.git", rev = "3531383182dfa2b3d34e362afd956852e60d6502" }
 cli = { path = "src/cli" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd", default-features = false }
