@@ -536,7 +536,7 @@ where
 
     fn exceeds_max_file_size(&self, opts: &WriteOptions) -> bool {
         opts.max_file_size
-            .is_some_and(|max_size| self.bytes_written.load(Ordering::Relaxed) > max_size)
+            .is_some_and(|max_size| self.bytes_written.load(Ordering::Relaxed) >= max_size)
     }
 
     async fn abort_current_indexer(&mut self) {
