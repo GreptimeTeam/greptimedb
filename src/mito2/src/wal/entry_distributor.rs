@@ -236,15 +236,7 @@ mod tests {
     async fn test_delivers_complete_entry_while_channel_is_alive() {
         let provider = Provider::kafka_provider("my_topic".to_string());
         let region_id = RegionId::new(1024, 1);
-        let wal_entry = WalEntry {
-            mutations: vec![Mutation {
-                op_type: OpType::Put as i32,
-                sequence: 1,
-                rows: None,
-                write_hint: None,
-            }],
-            bulk_entries: vec![],
-        };
+        let wal_entry = WalEntry::default();
         let (sender, receiver) = mpsc::channel(1);
         let (arg_sender, arg_receiver) = oneshot::channel();
         let mut receiver = WalEntryReceiver::new(receiver, arg_sender);
@@ -266,7 +258,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry, (1, wal_entry));
-        drop(sender);
     }
 
     #[tokio::test]
