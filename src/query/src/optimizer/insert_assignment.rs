@@ -96,13 +96,7 @@ fn session_timezone(query_ctx: &QueryContextRef) -> Option<SessionTimezone> {
     let parsed = query_ctx.timezone();
 
     // A UTC session already gets UTC semantics from the plain assignment cast.
-    // Only an exact UTC match is skipped: a named zone sitting at +00:00 today
-    // may not have been there for the timestamp being inserted.
-    let is_utc = match &parsed {
-        Timezone::Offset(offset) => offset.local_minus_utc() == 0,
-        Timezone::Named(tz) => tz.name() == "UTC",
-    };
-    if is_utc {
+    if parsed.is_utc() {
         return None;
     }
 
@@ -130,18 +124,18 @@ fn rewrite_assignment(plan: LogicalPlan, timezone: &SessionTimezone) -> Result<L
 
     // The planner types `VALUES` against the target table, so the assignment
     // cast lands inside the `Values` rows instead of on the projection above.
-    let mut input = assignment.input.as_ref().clone();
-    if let LogicalPlan::Values(values) = &input
+    let mut input = assignment.input.clone();
+    if let LogicalPlan::Values(values) = assignment.input.as_ref()
         && let Some(rewritten) = rewrite_values(values, timezone)?
     {
-        input = LogicalPlan::Values(rewritten);
+        input = Arc::new(LogicalPlan::Values(rewritten));
         changed = true;
     }
 
     if !changed {
         return Ok(LogicalPlan::Projection(assignment));
     }
-    Projection::try_new(exprs, Arc::new(input)).map(LogicalPlan::Projection)
+    Projection::try_new(exprs, input).map(LogicalPlan::Projection)
 }
 
 fn rewrite_values(values: &Values, timezone: &SessionTimezone) -> Result<Option<Values>> {
@@ -183,18 +177,18 @@ fn retarget_assignment_cast(
         return Ok(false);
     }
 
-    let source = source.as_ref().clone();
     // Fold literals with the same parser the plain `INSERT ... VALUES` path
     // uses, so a given string means the same thing however it reaches a column.
     // The parsers disagree on ambiguous local times: this one resolves them,
     // arrow rejects them.
-    if let Some(literal) = source_literal(&source, source_plan)
-        && let Some(folded) = convert_literal(&literal, unit, &timezone.parsed)
-    {
+    let folded = source_literal(source.as_ref(), source_plan)
+        .and_then(|literal| convert_literal(&literal, unit, &timezone.parsed));
+    if let Some(folded) = folded {
         *expr = folded;
         return Ok(true);
     }
 
+    let source = source.as_ref().clone();
     *expr = Expr::Cast(Cast::new(
         Box::new(Expr::Cast(Cast::new(
             Box::new(source),
@@ -273,5 +267,41 @@ fn unalias_mut(expr: &mut Expr) -> &mut Expr {
     match expr {
         Expr::Alias(Alias { expr, .. }) => unalias_mut(expr),
         expr => expr,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion_common::DFSchema;
+    use datafusion_expr::expr::Placeholder;
+
+    use super::*;
+
+    fn shanghai() -> SessionTimezone {
+        let parsed = Timezone::from_tz_string("Asia/Shanghai").unwrap();
+        SessionTimezone {
+            name: Arc::from(parsed.to_string()),
+            parsed,
+        }
+    }
+
+    /// A prepared `INSERT ... VALUES (?)` arrives here as a cast over an untyped
+    /// placeholder, which must survive for parameter substitution.
+    #[test]
+    fn test_untyped_placeholder_assignment_is_left_alone() {
+        let schema = Arc::new(DFSchema::empty());
+        let mut expr = Expr::Cast(Cast::new(
+            Box::new(Expr::Placeholder(Placeholder::new_with_field(
+                "$1".to_string(),
+                None,
+            ))),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+        ));
+        let original = expr.clone();
+
+        let changed = retarget_assignment_cast(&mut expr, &schema, None, &shanghai()).unwrap();
+
+        assert!(!changed);
+        assert_eq!(expr, original);
     }
 }
