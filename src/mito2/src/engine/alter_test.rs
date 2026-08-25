@@ -623,12 +623,13 @@ fn ts_us_lit(v: i64) -> datafusion_expr::Expr {
 /// Asserts every `expected` row is present in `actual` (with its exact
 /// value).
 ///
-/// `ScanRequest.filters` are an advisory pushdown: for old-unit SSTs the
-/// SST-level row filter is dropped (column types differ) and the residual
-/// filter is applied by the query layer above the region scan. What the
-/// engine must guarantee is that no file or row group holding matching rows
-/// is wrongly pruned — i.e. matching rows are never lost. Exact filtering
-/// is covered by the sqlness case.
+/// `ScanRequest.filters` are an advisory pushdown for most columns, so this
+/// helper only asserts the engine's pruning guarantee: no file or row group
+/// holding matching rows is wrongly pruned — i.e. matching rows are never
+/// lost. Exact row-level filtering of old-unit SSTs after widening the time
+/// index is asserted by
+/// [`test_alter_time_index_widen_old_sst_filters_rows_exactly`]; other exact
+/// filtering is covered by the sqlness cases.
 fn assert_rows_present(expected: &[(i64, f64)], actual: Vec<(i64, f64)>) {
     for row in expected {
         assert!(
@@ -815,6 +816,150 @@ async fn test_alter_time_index_read_paths_after_widen() {
     assert_rows_present(
         &[(3_000_000, 3.0), (4_000_000, 4.0), (5_500_000, 5.5)],
         scan_ts_and_field(&engine, region_id, vec![col("ts").gt(ts_us_lit(2_500_000))]).await,
+    );
+}
+
+/// Verifies that predicates on the time index filter old-unit (pre-alter)
+/// SST rows **exactly** after widening the time index unit (regression test
+/// for the over-inclusive scans reported in testbed/issue.md: the predicate
+/// used to be dropped for old-unit files, returning every row of each
+/// surviving row group).
+///
+/// The fixture uses two row groups of five rows so exact-count assertions
+/// distinguish all failure modes:
+/// - the exact row set           — correct (row filter applied)
+/// - 5 rows (ts = 5s..9s)       — row-group pruning worked, row filter dropped (the bug)
+/// - 0 rows                     — over-pruning
+/// - 10 rows                    — no pruning at all
+///
+/// Also covers literals that are not representable in the file's (ms) unit
+/// (`ts > 6_500_000us`): the cast filter must strengthen the operator
+/// instead of rounding the literal, and `!=` must keep complementing `=`.
+#[tokio::test]
+async fn test_alter_time_index_widen_old_sst_filters_rows_exactly() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    // Row groups of five rows: after flushing ten rows, the SST holds two
+    // row groups (0s..5s and 5s..9s) so a predicate matching a strict subset
+    // of a surviving row group is observable.
+    let request = CreateRequestBuilder::new()
+        .insert_option("max_row_group_row_count", "5")
+        .build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Ten historical rows in millisecond resolution: ts = 0s..9s.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 10),
+        },
+    )
+    .await;
+    // One SST written in the old (ms) unit, two row groups of five.
+    flush_region(&engine, region_id, None).await;
+
+    // Widen the time index unit to microsecond.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::ModifyColumnTypes {
+                    columns: vec![ModifyColumnType {
+                        column_name: "ts".to_string(),
+                        target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The predicate hits the middle of the second row group. `ScanRequest`
+    // filters must filter exactly: only the matching row may be returned.
+    let actual =
+        scan_ts_and_field(&engine, region_id, vec![col("ts").eq(ts_us_lit(7_000_000))]).await;
+    assert_eq!(
+        vec![(7_000_000, 7.0)],
+        actual,
+        "old-unit SST rows must be filtered exactly after widening the time index unit"
+    );
+
+    // `!=` must complement `=` on the same data (the helper returns rows
+    // sorted by ts).
+    let expected_ne: Vec<(i64, f64)> = (0..10)
+        .filter(|ts| *ts != 7)
+        .map(|ts| (ts * 1_000_000, ts as f64))
+        .collect();
+    let actual_ne = scan_ts_and_field(
+        &engine,
+        region_id,
+        vec![col("ts").not_eq(ts_us_lit(7_000_000))],
+    )
+    .await;
+    assert_eq!(expected_ne, actual_ne);
+
+    // Literals not representable in the file's millisecond unit: the cast
+    // filter must strengthen the operator (>, >=, <, <= around 6.5s) instead
+    // of rounding the literal to a matching boundary row (6s or 7s).
+    let rows_after = |from: i64| -> Vec<(i64, f64)> {
+        (from..10).map(|ts| (ts * 1_000_000, ts as f64)).collect()
+    };
+    let rows_before =
+        |to: i64| -> Vec<(i64, f64)> { (0..to).map(|ts| (ts * 1_000_000, ts as f64)).collect() };
+    assert_eq!(
+        rows_after(7),
+        scan_ts_and_field(&engine, region_id, vec![col("ts").gt(ts_us_lit(6_500_000))]).await
+    );
+    assert_eq!(
+        rows_after(7),
+        scan_ts_and_field(
+            &engine,
+            region_id,
+            vec![col("ts").gt_eq(ts_us_lit(6_500_000))]
+        )
+        .await
+    );
+    assert_eq!(
+        rows_before(7),
+        scan_ts_and_field(&engine, region_id, vec![col("ts").lt(ts_us_lit(6_500_000))]).await
+    );
+    assert_eq!(
+        rows_before(7),
+        scan_ts_and_field(
+            &engine,
+            region_id,
+            vec![col("ts").lt_eq(ts_us_lit(6_500_000))]
+        )
+        .await
+    );
+
+    // A literal that no millisecond row can equal must not match anything.
+    assert!(
+        scan_ts_and_field(&engine, region_id, vec![col("ts").eq(ts_us_lit(7_000_500))],)
+            .await
+            .is_empty()
     );
 }
 

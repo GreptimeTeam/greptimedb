@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
-use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_recordbatch::filter::{SimpleFilterEvaluator, TimestampUnitCast};
 use common_telemetry::{error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -2054,10 +2054,6 @@ impl SimpleFilterContext {
                 match sst_meta.column_by_id(column.column_id) {
                     Some(sst_column) => {
                         debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
-                        // Schema evolution can make field columns with the same id have
-                        // different concrete data types across SSTs. In that case,
-                        // evaluating this simple filter against current SST column may
-                        // raise an invalid cross-type comparison error (e.g. Float64 == Utf8).
                         let maybe_filter = if sst_column.column_schema.data_type
                             == column.column_schema.data_type
                         {
@@ -2066,14 +2062,27 @@ impl SimpleFilterContext {
                             // Schema evolution can make columns with the same id
                             // have different concrete data types across SSTs:
                             // altering a field column's type, or widening the
-                            // time index unit. Evaluating this simple filter
+                            // time index unit. Evaluating the original filter
                             // against such an SST may raise an invalid
                             // cross-type comparison error (e.g. Float64 == Utf8,
-                            // or microsecond literal vs millisecond column), so
-                            // we conservatively skip it for this SST; the
-                            // predicate is still applied to the compat-cast
-                            // batches by the scan pipeline.
-                            return None;
+                            // or a microsecond literal vs a millisecond column).
+                            //
+                            // Timestamp predicates must remain exactly enforced
+                            // here: the scan pipeline does not re-apply them to
+                            // the compat-cast batches of this SST, so cast the
+                            // predicate into the file's timestamp unit instead of
+                            // dropping it. Other mismatched types (altered field
+                            // columns) keep the conservative skip: the query
+                            // layer re-applies those predicates above the region
+                            // scan.
+                            match filter.cast_timestamp_unit(&sst_column.column_schema.data_type) {
+                                Some(TimestampUnitCast::Filter(filter)) => {
+                                    MaybeFilter::Filter(filter)
+                                }
+                                Some(TimestampUnitCast::Pruned) => MaybeFilter::Pruned,
+                                Some(TimestampUnitCast::Matched) => MaybeFilter::Matched,
+                                None => return None,
+                            }
                         };
                         (column, maybe_filter)
                     }
