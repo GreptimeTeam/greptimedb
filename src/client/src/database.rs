@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
@@ -63,6 +65,8 @@ use crate::{Client, Result, error, from_grpc_response};
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
 type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
+
+const HINTS_METADATA_KEY: &str = "x-greptime-hints";
 
 /// Terminal metrics associated with a query output.
 ///
@@ -389,6 +393,42 @@ pub struct Database {
     ctx: FlightContext,
 }
 
+#[derive(Default)]
+struct FlightRequestOptions {
+    hints: Option<String>,
+    flow_extensions: Option<String>,
+    snapshot_seqs: Option<String>,
+    timeout: Option<Duration>,
+}
+
+impl FlightRequestOptions {
+    fn apply_to<T>(self, request: &mut tonic::Request<T>) -> Result<()> {
+        let metadata = request.metadata_mut();
+        if let Some(hints) = self.hints {
+            Database::put_metadata_value(metadata, HINTS_METADATA_KEY, hints)?;
+        }
+        if let Some(flow_extensions) = self.flow_extensions {
+            Database::put_metadata_value(metadata, FLOW_EXTENSIONS_METADATA_KEY, flow_extensions)?;
+        }
+        if let Some(snapshot_seqs) = self.snapshot_seqs {
+            Database::put_metadata_value(metadata, SNAPSHOT_SEQS_METADATA_KEY, snapshot_seqs)?;
+        }
+        if let Some(timeout) = self.timeout {
+            request.set_timeout(timeout);
+        }
+        Ok(())
+    }
+}
+
+/// A single Flight DoGet request to a [`Database`].
+///
+/// The builder carries request-scoped metadata and options. It does not modify
+/// the underlying [`Database`], so its configuration cannot affect later RPCs.
+pub struct DatabaseFlightRequest<'a> {
+    database: &'a Database,
+    options: FlightRequestOptions,
+}
+
 pub struct DatabaseClient {
     pub addr: String,
     pub inner: GreptimeDatabaseClient<Channel>,
@@ -483,6 +523,14 @@ impl Database {
         });
     }
 
+    /// Creates a builder for a single Flight DoGet request.
+    pub fn flight_request(&self) -> DatabaseFlightRequest<'_> {
+        DatabaseFlightRequest {
+            database: self,
+            options: FlightRequestOptions::default(),
+        }
+    }
+
     /// Make an InsertRequests request to the database.
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
         self.handle(Request::Inserts(requests)).await
@@ -538,44 +586,31 @@ impl Database {
     }
 
     fn put_hints(metadata: &mut MetadataMap, hints: &[(&str, &str)]) -> Result<()> {
-        let Some(value) = hints
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .reduce(|a, b| format!("{},{}", a, b))
-        else {
+        let Some(value) = Self::encode_hints(hints) else {
             return Ok(());
         };
 
-        let key = AsciiMetadataKey::from_static("x-greptime-hints");
-        let value = AsciiMetadataValue::from_str(&value).context(InvalidTonicMetadataValueSnafu)?;
-        metadata.insert(key, value);
-        Ok(())
+        Self::put_metadata_value(metadata, HINTS_METADATA_KEY, value)
     }
 
-    fn put_flow_extensions(
-        metadata: &mut MetadataMap,
-        flow_extensions: &[(&str, &str)],
-    ) -> Result<()> {
-        if flow_extensions.is_empty() {
-            return Ok(());
-        }
-
-        let value = serde_json::to_string(&flow_extensions.to_vec())
-            .expect("flow extension pairs should serialize");
-        Self::put_metadata_value(metadata, FLOW_EXTENSIONS_METADATA_KEY, value)
+    fn encode_hints(hints: &[(&str, &str)]) -> Option<String> {
+        hints
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .reduce(|a, b| format!("{},{}", a, b))
     }
 
-    fn put_snapshot_seqs(
-        metadata: &mut MetadataMap,
-        snapshot_seqs: &std::collections::HashMap<u64, u64>,
-    ) -> Result<()> {
-        if snapshot_seqs.is_empty() {
-            return Ok(());
-        }
+    fn encode_flow_extensions(flow_extensions: &[(&str, &str)]) -> Option<String> {
+        (!flow_extensions.is_empty()).then(|| {
+            serde_json::to_string(&flow_extensions.to_vec())
+                .expect("flow extension pairs should serialize")
+        })
+    }
 
-        let value =
-            serde_json::to_string(snapshot_seqs).expect("snapshot sequence map should serialize");
-        Self::put_metadata_value(metadata, SNAPSHOT_SEQS_METADATA_KEY, value)
+    fn encode_snapshot_seqs(snapshot_seqs: &HashMap<u64, u64>) -> Option<String> {
+        (!snapshot_seqs.is_empty()).then(|| {
+            serde_json::to_string(snapshot_seqs).expect("snapshot sequence map should serialize")
+        })
     }
 
     fn put_metadata_value(
@@ -673,7 +708,7 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        self.sql_with_hint(sql, &[]).await
+        self.flight_request().sql(sql).await
     }
 
     /// Executes a SQL query with optional hints for query optimization.
@@ -681,12 +716,7 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        let request = Request::Query(QueryRequest {
-            query: Some(Query::Sql(sql.as_ref().to_string())),
-        });
-        self.do_get(request, hints, &[], &Default::default())
-            .await
-            .map(OutputWithMetrics::into_output)
+        self.flight_request().with_hints(hints).sql(sql).await
     }
 
     /// Executes a SQL query and returns the output with terminal metrics.
@@ -701,29 +731,15 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        self.query_with_terminal_metrics_and_flow_extensions(
-            QueryRequest {
-                query: Some(Query::Sql(sql.as_ref().to_string())),
-            },
-            hints,
-            &[],
-            &Default::default(),
-        )
-        .await
+        self.flight_request()
+            .with_hints(hints)
+            .sql_with_terminal_metrics(sql)
+            .await
     }
 
     /// Executes a logical plan directly without SQL parsing.
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        self.query_with_terminal_metrics_and_flow_extensions(
-            QueryRequest {
-                query: Some(Query::LogicalPlan(logical_plan)),
-            },
-            &[],
-            &[],
-            &Default::default(),
-        )
-        .await
-        .map(OutputWithMetrics::into_output)
+        self.flight_request().logical_plan(logical_plan).await
     }
 
     /// Executes a query and carries flow extensions through Flight metadata.
@@ -737,41 +753,28 @@ impl Database {
         flow_extensions: &[(&str, &str)],
         snapshot_seqs: &std::collections::HashMap<u64, u64>,
     ) -> Result<OutputWithMetrics> {
-        self.do_get(
-            Request::Query(request),
-            hints,
-            flow_extensions,
-            snapshot_seqs,
-        )
-        .await
+        self.flight_request()
+            .with_hints(hints)
+            .with_flow_extensions(flow_extensions)
+            .with_snapshot_seqs(snapshot_seqs)
+            .query_with_terminal_metrics(request)
+            .await
     }
 
     /// Creates a new table using the provided table expression.
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        let request = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::CreateTable(expr)),
-        });
-        self.do_get(request, &[], &[], &Default::default())
-            .await
-            .map(OutputWithMetrics::into_output)
+        self.flight_request().create(expr).await
     }
 
     /// Alters an existing table using the provided alter expression.
     pub async fn alter(&self, expr: AlterTableExpr) -> Result<Output> {
-        let request = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::AlterTable(expr)),
-        });
-        self.do_get(request, &[], &[], &Default::default())
-            .await
-            .map(OutputWithMetrics::into_output)
+        self.flight_request().alter(expr).await
     }
 
     async fn do_get(
         &self,
         request: Request,
-        hints: &[(&str, &str)],
-        flow_extensions: &[(&str, &str)],
-        snapshot_seqs: &std::collections::HashMap<u64, u64>,
+        options: FlightRequestOptions,
     ) -> Result<OutputWithMetrics> {
         let request = self.to_rpc_request(request);
         let request = Ticket {
@@ -779,10 +782,7 @@ impl Database {
         };
 
         let mut request = tonic::Request::new(request);
-        let metadata = request.metadata_mut();
-        Self::put_hints(metadata, hints)?;
-        Self::put_flow_extensions(metadata, flow_extensions)?;
-        Self::put_snapshot_seqs(metadata, snapshot_seqs)?;
+        options.apply_to(&mut request)?;
 
         let mut client = self.client.make_flight_client(false, false)?;
 
@@ -844,6 +844,96 @@ impl Database {
             .and_then(|x| future::ready(DoPutResponse::try_from(x).context(ConvertFlightDataSnafu)))
             .boxed();
         Ok(response)
+    }
+}
+
+impl<'a> DatabaseFlightRequest<'a> {
+    /// Adds query optimization hints to this Flight request.
+    pub fn with_hints(mut self, hints: &[(&str, &str)]) -> Self {
+        self.options.hints = Database::encode_hints(hints);
+        self
+    }
+
+    /// Adds Flow extensions to this Flight request.
+    pub fn with_flow_extensions(mut self, flow_extensions: &[(&str, &str)]) -> Self {
+        self.options.flow_extensions = Database::encode_flow_extensions(flow_extensions);
+        self
+    }
+
+    /// Adds snapshot sequence fences to this Flight request.
+    pub fn with_snapshot_seqs(mut self, snapshot_seqs: &HashMap<u64, u64>) -> Self {
+        self.options.snapshot_seqs = Database::encode_snapshot_seqs(snapshot_seqs);
+        self
+    }
+
+    /// Sets a timeout for this Flight request only.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.options.timeout = Some(timeout);
+        self
+    }
+
+    /// Executes a SQL query.
+    pub async fn sql<S>(self, sql: S) -> Result<Output>
+    where
+        S: AsRef<str>,
+    {
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::Sql(sql.as_ref().to_string())),
+        });
+        self.do_get(request)
+            .await
+            .map(OutputWithMetrics::into_output)
+    }
+
+    /// Executes a SQL query and returns terminal metrics.
+    pub async fn sql_with_terminal_metrics<S>(self, sql: S) -> Result<OutputWithMetrics>
+    where
+        S: AsRef<str>,
+    {
+        self.query_with_terminal_metrics(QueryRequest {
+            query: Some(Query::Sql(sql.as_ref().to_string())),
+        })
+        .await
+    }
+
+    /// Executes a logical plan directly without SQL parsing.
+    pub async fn logical_plan(self, logical_plan: Vec<u8>) -> Result<Output> {
+        self.query_with_terminal_metrics(QueryRequest {
+            query: Some(Query::LogicalPlan(logical_plan)),
+        })
+        .await
+        .map(OutputWithMetrics::into_output)
+    }
+
+    /// Executes a query and returns terminal metrics.
+    pub async fn query_with_terminal_metrics(
+        self,
+        request: QueryRequest,
+    ) -> Result<OutputWithMetrics> {
+        self.do_get(Request::Query(request)).await
+    }
+
+    /// Creates a new table using the provided table expression.
+    pub async fn create(self, expr: CreateTableExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(expr)),
+        }))
+        .await
+        .map(OutputWithMetrics::into_output)
+    }
+
+    /// Alters an existing table using the provided alter expression.
+    pub async fn alter(self, expr: AlterTableExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::AlterTable(expr)),
+        }))
+        .await
+        .map(OutputWithMetrics::into_output)
+    }
+
+    async fn do_get(self, request: Request) -> Result<OutputWithMetrics> {
+        let Self { database, options } = self;
+        database.do_get(request, options).await
     }
 }
 
@@ -934,12 +1024,14 @@ mod tests {
     #[test]
     fn test_put_flow_extensions_preserves_comma_bearing_values() {
         let mut metadata = MetadataMap::new();
-        Database::put_flow_extensions(
+        Database::put_metadata_value(
             &mut metadata,
-            &[
+            FLOW_EXTENSIONS_METADATA_KEY,
+            Database::encode_flow_extensions(&[
                 ("flow.return_region_seq", "true"),
                 ("flow.incremental_after_seqs", r#"{"1":10,"2":20}"#),
-            ],
+            ])
+            .unwrap(),
         )
         .unwrap();
 
@@ -969,7 +1061,12 @@ mod tests {
             (9_007_199_254_740_993_u64, 9_007_199_254_740_995_u64),
         ]);
 
-        Database::put_snapshot_seqs(&mut metadata, &snapshot_seqs).unwrap();
+        Database::put_metadata_value(
+            &mut metadata,
+            SNAPSHOT_SEQS_METADATA_KEY,
+            Database::encode_snapshot_seqs(&snapshot_seqs).unwrap(),
+        )
+        .unwrap();
 
         let value = metadata
             .get(SNAPSHOT_SEQS_METADATA_KEY)
@@ -978,6 +1075,50 @@ mod tests {
             .unwrap();
         let decoded: std::collections::HashMap<u64, u64> = serde_json::from_str(value).unwrap();
         assert_eq!(decoded, snapshot_seqs);
+    }
+
+    #[test]
+    fn test_flight_request_builder_applies_request_options() {
+        let database = Database::new("greptime", "public", Client::default());
+        let snapshot_seqs = HashMap::from([(42, 99)]);
+        let request = database
+            .flight_request()
+            .with_hints(&[("query_parallelism", "1")])
+            .with_flow_extensions(&[("flow.return_region_seq", "true")])
+            .with_snapshot_seqs(&snapshot_seqs)
+            .with_timeout(Duration::from_millis(50));
+        let mut tonic_request = tonic::Request::new(());
+
+        request.options.apply_to(&mut tonic_request).unwrap();
+
+        let metadata = tonic_request.metadata();
+        assert_eq!(
+            metadata.get(HINTS_METADATA_KEY).unwrap(),
+            "query_parallelism=1"
+        );
+        assert_eq!(
+            serde_json::from_str::<Vec<(String, String)>>(
+                metadata
+                    .get(FLOW_EXTENSIONS_METADATA_KEY)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+            vec![("flow.return_region_seq".to_string(), "true".to_string())]
+        );
+        assert_eq!(
+            serde_json::from_str::<HashMap<u64, u64>>(
+                metadata
+                    .get(SNAPSHOT_SEQS_METADATA_KEY)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+            snapshot_seqs
+        );
+        assert!(metadata.get("grpc-timeout").is_some());
     }
 
     #[test]
