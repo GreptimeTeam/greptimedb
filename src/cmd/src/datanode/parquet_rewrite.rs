@@ -77,6 +77,8 @@ struct WriterConfig {
     data_page_size_limit: Option<usize>,
     data_page_row_count_limit: Option<usize>,
     dictionary_page_size_limit: Option<usize>,
+    column_index_truncate_length: Option<usize>,
+    statistics_truncate_length: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -234,6 +236,8 @@ fn infer_rewrite_properties(metadata: &ParquetMetaData) -> RewriteProperties {
             data_page_size_limit: None,
             data_page_row_count_limit: None,
             dictionary_page_size_limit: None,
+            column_index_truncate_length: None,
+            statistics_truncate_length: None,
         },
         columns,
     }
@@ -286,6 +290,16 @@ fn build_writer_properties(
     }
     if let Some(dictionary_page_size_limit) = config.writer.dictionary_page_size_limit {
         builder = builder.set_dictionary_page_size_limit(dictionary_page_size_limit);
+    }
+    if let Some(column_index_truncate_length) = config.writer.column_index_truncate_length {
+        builder = builder.set_column_index_truncate_length(
+            (column_index_truncate_length > 0).then_some(column_index_truncate_length),
+        );
+    }
+    if let Some(statistics_truncate_length) = config.writer.statistics_truncate_length {
+        builder = builder.set_statistics_truncate_length(
+            (statistics_truncate_length > 0).then_some(statistics_truncate_length),
+        );
     }
 
     for column in config.columns {
