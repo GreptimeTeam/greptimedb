@@ -568,7 +568,7 @@ async fn test_region_migration_by_sql_inner(
 
     if simulate_offline_source {
         let mut expected_distribution =
-            find_region_distribution_by_sql(&cluster, TEST_TABLE_NAME).await;
+            find_region_distribution(&table_metadata_manager, table_id).await;
         let (offline_from_peer_id, offline_region_number) = expected_distribution
             .iter()
             .find(|(peer_id, regions)| {
