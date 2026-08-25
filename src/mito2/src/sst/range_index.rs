@@ -16,12 +16,14 @@
 
 mod writer;
 
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
+    DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
+};
 pub use writer::{
     SstRangeIndexWriter, SstRangeIndexWriterMetrics, SstRangeIndexWriterOptions, range_index_schema,
 };
 
 const ROW_GROUP_ID_COLUMN: &str = "row_group_id";
-const TABLE_ID_COLUMN: &str = "__table_id";
-const TSID_COLUMN: &str = "__tsid";
 const START_COLUMN: &str = "start";
 const END_COLUMN: &str = "end";

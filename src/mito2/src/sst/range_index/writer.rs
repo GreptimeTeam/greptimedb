@@ -16,88 +16,30 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, Int64Array, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use futures::future::BoxFuture;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
-use object_store::{ObjectStore, Writer};
-use parquet::arrow::AsyncArrowWriter;
-use parquet::arrow::async_writer::AsyncFileWriter;
-use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::errors::ParquetError;
-use parquet::file::properties::WriterProperties;
+use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 
-use crate::access_layer::TempFileCleaner;
 use crate::error::{
-    DecodeSnafu, InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, OpenDalSnafu,
-    Result, UnexpectedSnafu, WriteParquetSnafu,
+    DecodeSnafu, InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
+    UnexpectedSnafu,
 };
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
+use crate::sst::parquet::index_writer::ParquetIndexWriter;
 use crate::sst::range_index::{
     END_COLUMN, ROW_GROUP_ID_COLUMN, START_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN,
 };
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 const WRITE_BATCH_SIZE: usize = 1024;
-
-type ParquetWriter = AsyncArrowWriter<AsyncWriter>;
-
-/// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`] and tracks
-/// the number of bytes successfully submitted to the object store.
-struct AsyncWriter {
-    inner: Writer,
-    output_bytes: u64,
-}
-
-impl AsyncWriter {
-    fn new(inner: Writer) -> Self {
-        Self {
-            inner,
-            output_bytes: 0,
-        }
-    }
-
-    fn output_bytes(&self) -> u64 {
-        self.output_bytes
-    }
-
-    fn into_inner(self) -> Writer {
-        self.inner
-    }
-}
-
-impl AsyncFileWriter for AsyncWriter {
-    fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
-        Box::pin(async move {
-            let len = bytes.len() as u64;
-            self.inner
-                .write(bytes)
-                .await
-                .map_err(|error| ParquetError::External(Box::new(error)))?;
-            self.output_bytes += len;
-            Ok(())
-        })
-    }
-
-    fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
-        Box::pin(async move {
-            self.inner
-                .close()
-                .await
-                .map(|_| ())
-                .map_err(|error| ParquetError::External(Box::new(error)))
-        })
-    }
-}
 
 /// Options for writing a per-SST range index.
 #[derive(Debug, Clone)]
@@ -169,9 +111,7 @@ struct RangeIndexRow {
 pub struct SstRangeIndexWriter {
     codec: SparsePrimaryKeyCodec,
     schema: SchemaRef,
-    object_store: ObjectStore,
-    file_name: String,
-    writer: Option<ParquetWriter>,
+    writer: ParquetIndexWriter,
     current_row_group_id: Option<u32>,
     current_row_group_offset: i64,
     last_primary_key: Option<Vec<u8>>,
@@ -201,31 +141,20 @@ impl SstRangeIndexWriter {
         );
         validate_metadata(&metadata)?;
         let schema = range_index_schema();
-        let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
-        let output = object_store
-            .writer_with(path)
-            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-            .concurrent(DEFAULT_WRITE_CONCURRENCY)
-            .await
-            .context(OpenDalSnafu)?;
-        let properties = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_encoding(Encoding::PLAIN)
-            .set_max_row_group_row_count(Some(options.index_row_group_size))
-            .set_column_index_truncate_length(None)
-            .set_statistics_truncate_length(None)
-            .build();
-        let writer =
-            AsyncArrowWriter::try_new(AsyncWriter::new(output), schema.clone(), Some(properties))
-                .context(WriteParquetSnafu)?;
+        let writer = ParquetIndexWriter::try_new(
+            "range index",
+            object_store,
+            path,
+            &schema,
+            options.index_row_group_size,
+        )
+        .await?;
         let codec = SparsePrimaryKeyCodec::new(&metadata);
 
         Ok(Self {
             codec,
             schema,
-            object_store,
-            file_name,
-            writer: Some(writer),
+            writer,
             current_row_group_id: None,
             current_row_group_offset: 0,
             last_primary_key: None,
@@ -500,15 +429,7 @@ impl SstRangeIndexWriter {
         }
         let batch = rows_to_batch(&self.schema, &self.buffered_rows)?;
         let start = Instant::now();
-        let result = self
-            .writer
-            .as_mut()
-            .context(UnexpectedSnafu {
-                reason: "range index Parquet writer is closed",
-            })?
-            .write(&batch)
-            .await
-            .context(WriteParquetSnafu);
+        let result = self.writer.write(&batch).await;
         self.metrics.write_elapsed += start.elapsed();
         result?;
         self.buffered_rows.clear();
@@ -524,34 +445,17 @@ impl SstRangeIndexWriter {
         self.metrics.aggregate_elapsed += aggregate_start.elapsed().saturating_sub(write_cost);
 
         let finish_start = Instant::now();
-        self.writer
-            .as_mut()
-            .context(UnexpectedSnafu {
-                reason: "range index Parquet writer is closed",
-            })?
-            .finish()
-            .await
-            .context(WriteParquetSnafu)?;
-        let writer = self.writer.take().context(UnexpectedSnafu {
-            reason: "range index Parquet writer is closed",
-        })?;
-        self.metrics.output_bytes = writer.into_inner().output_bytes();
+        self.metrics.output_bytes = self.writer.finish().await?;
         self.metrics.finish_elapsed += finish_start.elapsed();
         Ok(())
     }
 
     async fn cleanup(&mut self) {
         let start = Instant::now();
-        if let Some(writer) = self.writer.take() {
-            let mut writer = writer.into_inner().into_inner();
-            if let Err(error) = writer.abort().await {
-                common_telemetry::warn!(error; "Failed to abort range index writer");
-            }
-        }
+        self.writer.abort().await;
         self.current_row = None;
         self.buffered_rows.clear();
 
-        TempFileCleaner::clean_atomic_dir_files(&self.object_store, &[&self.file_name]).await;
         self.metrics.output_bytes = 0;
         self.metrics.cleanup_elapsed += start.elapsed();
     }
