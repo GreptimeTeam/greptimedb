@@ -1,0 +1,510 @@
+CREATE TABLE json_empty_no_type_hints (
+    ts TIMESTAMP TIME INDEX,
+    app_name STRING,
+    log_level STRING,
+    log_message STRING,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json_empty_no_type_hints
+VALUES
+    (1, 'checkout', 'INFO', 'request completed', '{}');
+
+Affected Rows: 1
+
+SELECT *
+FROM json_empty_no_type_hints
+ORDER BY ts;
+
++-------------------------+----------+-----------+-------------------+-------+
+| ts                      | app_name | log_level | log_message       | attrs |
++-------------------------+----------+-----------+-------------------+-------+
+| 1970-01-01T00:00:00.001 | checkout | INFO      | request completed |       |
++-------------------------+----------+-----------+-------------------+-------+
+
+INSERT INTO json_empty_no_type_hints
+VALUES
+    (2, 'checkout', 'INFO', 'request completed', '{"a": 1}');
+
+Affected Rows: 1
+
+SELECT
+    ts,
+    app_name,
+    log_level,
+    log_message,
+    json_get(attrs, 'a')::int64
+FROM json_empty_no_type_hints
+ORDER BY ts;
+
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+| ts                      | app_name | log_level | log_message       | arrow_cast(json_get(json_empty_no_type_hints.attrs,Utf8("a")),Utf8("Int64")) |
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | checkout | INFO      | request completed |                                                                              |
+| 1970-01-01T00:00:00.002 | checkout | INFO      | request completed | 1                                                                            |
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+
+SELECT *
+FROM json_empty_no_type_hints
+ORDER BY ts;
+
++-------------------------+----------+-----------+-------------------+---------+
+| ts                      | app_name | log_level | log_message       | attrs   |
++-------------------------+----------+-----------+-------------------+---------+
+| 1970-01-01T00:00:00.001 | checkout | INFO      | request completed |         |
+| 1970-01-01T00:00:00.002 | checkout | INFO      | request completed | {"a":1} |
++-------------------------+----------+-----------+-------------------+---------+
+
+ADMIN FLUSH_TABLE('json_empty_no_type_hints');
+
++-----------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_no_type_hints') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+SELECT
+    ts,
+    app_name,
+    log_level,
+    log_message,
+    json_get(attrs, 'a')::int64
+FROM json_empty_no_type_hints
+ORDER BY ts;
+
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+| ts                      | app_name | log_level | log_message       | arrow_cast(json_get(json_empty_no_type_hints.attrs,Utf8("a")),Utf8("Int64")) |
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | checkout | INFO      | request completed |                                                                              |
+| 1970-01-01T00:00:00.002 | checkout | INFO      | request completed | 1                                                                            |
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+
+INSERT INTO json_empty_no_type_hints
+VALUES
+    (3, 'checkout', 'INFO', 'request completed', '{"a": 2}');
+
+Affected Rows: 1
+
+SELECT
+    ts,
+    app_name,
+    log_level,
+    log_message,
+    json_get(attrs, 'a')::int64
+FROM json_empty_no_type_hints
+ORDER BY ts;
+
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+| ts                      | app_name | log_level | log_message       | arrow_cast(json_get(json_empty_no_type_hints.attrs,Utf8("a")),Utf8("Int64")) |
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | checkout | INFO      | request completed |                                                                              |
+| 1970-01-01T00:00:00.002 | checkout | INFO      | request completed | 1                                                                            |
+| 1970-01-01T00:00:00.003 | checkout | INFO      | request completed | 2                                                                            |
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+
+ADMIN FLUSH_TABLE('json_empty_no_type_hints');
+
++-----------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_no_type_hints') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+ADMIN COMPACT_TABLE('json_empty_no_type_hints', 'swcs', '86400');
+
++------------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json_empty_no_type_hints', 'swcs', '86400') |
++------------------------------------------------------------------+
+| 0                                                                |
++------------------------------------------------------------------+
+
+SELECT
+    ts,
+    app_name,
+    log_level,
+    log_message,
+    json_get(attrs, 'a')::int64
+FROM json_empty_no_type_hints
+ORDER BY ts;
+
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+| ts                      | app_name | log_level | log_message       | arrow_cast(json_get(json_empty_no_type_hints.attrs,Utf8("a")),Utf8("Int64")) |
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | checkout | INFO      | request completed |                                                                              |
+| 1970-01-01T00:00:00.002 | checkout | INFO      | request completed | 1                                                                            |
+| 1970-01-01T00:00:00.003 | checkout | INFO      | request completed | 2                                                                            |
++-------------------------+----------+-----------+-------------------+------------------------------------------------------------------------------+
+
+CREATE TABLE json_empty_after_object (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json_empty_after_object
+VALUES
+    (1, '{"a": 1}'),
+    (2, '{}');
+
+Affected Rows: 2
+
+SELECT ts, json_get(attrs, 'a')::int64
+FROM json_empty_after_object
+ORDER BY ts;
+
++-------------------------+-----------------------------------------------------------------------------+
+| ts                      | arrow_cast(json_get(json_empty_after_object.attrs,Utf8("a")),Utf8("Int64")) |
++-------------------------+-----------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | 1                                                                           |
+| 1970-01-01T00:00:00.002 |                                                                             |
++-------------------------+-----------------------------------------------------------------------------+
+
+SELECT *
+FROM json_empty_after_object
+ORDER BY ts;
+
++-------------------------+---------+
+| ts                      | attrs   |
++-------------------------+---------+
+| 1970-01-01T00:00:00.001 | {"a":1} |
+| 1970-01-01T00:00:00.002 |         |
++-------------------------+---------+
+
+ADMIN FLUSH_TABLE('json_empty_after_object');
+
++----------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_after_object') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+SELECT ts, json_get(attrs, 'a')::int64
+FROM json_empty_after_object
+ORDER BY ts;
+
++-------------------------+-----------------------------------------------------------------------------+
+| ts                      | arrow_cast(json_get(json_empty_after_object.attrs,Utf8("a")),Utf8("Int64")) |
++-------------------------+-----------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | 1                                                                           |
+| 1970-01-01T00:00:00.002 |                                                                             |
++-------------------------+-----------------------------------------------------------------------------+
+
+INSERT INTO json_empty_after_object
+VALUES (3, '{}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json_empty_after_object');
+
++----------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_after_object') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+ADMIN COMPACT_TABLE('json_empty_after_object', 'swcs', '86400');
+
++-----------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json_empty_after_object', 'swcs', '86400') |
++-----------------------------------------------------------------+
+| 0                                                               |
++-----------------------------------------------------------------+
+
+SELECT ts, json_get(attrs, 'a')::int64
+FROM json_empty_after_object
+ORDER BY ts;
+
++-------------------------+-----------------------------------------------------------------------------+
+| ts                      | arrow_cast(json_get(json_empty_after_object.attrs,Utf8("a")),Utf8("Int64")) |
++-------------------------+-----------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | 1                                                                           |
+| 1970-01-01T00:00:00.002 |                                                                             |
+| 1970-01-01T00:00:00.003 |                                                                             |
++-------------------------+-----------------------------------------------------------------------------+
+
+SELECT *
+FROM json_empty_after_object
+ORDER BY ts;
+
++-------------------------+---------+
+| ts                      | attrs   |
++-------------------------+---------+
+| 1970-01-01T00:00:00.001 | {"a":1} |
+| 1970-01-01T00:00:00.002 |         |
+| 1970-01-01T00:00:00.003 |         |
++-------------------------+---------+
+
+CREATE TABLE json_empty_only_sst (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json_empty_only_sst
+VALUES (1, '{}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json_empty_only_sst');
+
++------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_only_sst') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+SELECT *
+FROM json_empty_only_sst
+ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | attrs |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 |       |
++-------------------------+-------+
+
+ADMIN COMPACT_TABLE('json_empty_only_sst', 'swcs', '86400');
+
++-------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json_empty_only_sst', 'swcs', '86400') |
++-------------------------------------------------------------+
+| 0                                                           |
++-------------------------------------------------------------+
+
+SELECT *
+FROM json_empty_only_sst
+ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | attrs |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 |       |
++-------------------------+-------+
+
+CREATE TABLE json_empty_conflict (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json_empty_conflict
+VALUES
+    (1, '{}'),
+    (2, '{"a": 1}');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('json_empty_conflict');
+
++------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_conflict') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+INSERT INTO json_empty_conflict
+VALUES (3, '{"a": "x"}');
+
+Affected Rows: 1
+
+SELECT ts, json_get(attrs, 'a')
+FROM json_empty_conflict
+ORDER BY ts;
+
++-------------------------+-----------------------------------------------+
+| ts                      | json_get(json_empty_conflict.attrs,Utf8("a")) |
++-------------------------+-----------------------------------------------+
+| 1970-01-01T00:00:00.001 |                                               |
+| 1970-01-01T00:00:00.002 | 1                                             |
+| 1970-01-01T00:00:00.003 | x                                             |
++-------------------------+-----------------------------------------------+
+
+SELECT *
+FROM json_empty_conflict
+ORDER BY ts;
+
++-------------------------+-----------+
+| ts                      | attrs     |
++-------------------------+-----------+
+| 1970-01-01T00:00:00.001 |           |
+| 1970-01-01T00:00:00.002 | {"a":1}   |
+| 1970-01-01T00:00:00.003 | {"a":"x"} |
++-------------------------+-----------+
+
+ADMIN FLUSH_TABLE('json_empty_conflict');
+
++------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_conflict') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+ADMIN COMPACT_TABLE('json_empty_conflict', 'swcs', '86400');
+
++-------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json_empty_conflict', 'swcs', '86400') |
++-------------------------------------------------------------+
+| 0                                                           |
++-------------------------------------------------------------+
+
+SELECT ts, json_get(attrs, 'a')
+FROM json_empty_conflict
+ORDER BY ts;
+
++-------------------------+-----------------------------------------------+
+| ts                      | json_get(json_empty_conflict.attrs,Utf8("a")) |
++-------------------------+-----------------------------------------------+
+| 1970-01-01T00:00:00.001 |                                               |
+| 1970-01-01T00:00:00.002 | 1                                             |
+| 1970-01-01T00:00:00.003 | x                                             |
++-------------------------+-----------------------------------------------+
+
+SELECT *
+FROM json_empty_conflict
+ORDER BY ts;
+
++-------------------------+-----------+
+| ts                      | attrs     |
++-------------------------+-----------+
+| 1970-01-01T00:00:00.001 |           |
+| 1970-01-01T00:00:00.002 | {"a":1}   |
+| 1970-01-01T00:00:00.003 | {"a":"x"} |
++-------------------------+-----------+
+
+CREATE TABLE json_empty_type_hints_nullable (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        user.age BIGINT NULL
+    )
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json_empty_type_hints_nullable
+VALUES (1, '{}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json_empty_type_hints_nullable');
+
++-----------------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_type_hints_nullable') |
++-----------------------------------------------------+
+| 0                                                   |
++-----------------------------------------------------+
+
+INSERT INTO json_empty_type_hints_nullable
+VALUES (2, '{}');
+
+Affected Rows: 1
+
+SELECT j.user.age
+FROM json_empty_type_hints_nullable
+ORDER BY ts;
+
++-------------------------------------------------------------+
+| json_get(json_empty_type_hints_nullable.j,Utf8("user.age")) |
++-------------------------------------------------------------+
+|                                                             |
+|                                                             |
++-------------------------------------------------------------+
+
+CREATE TABLE json_empty_type_hints_default (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        user.age BIGINT NULL DEFAULT 18
+    )
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json_empty_type_hints_default
+VALUES (1, '{}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json_empty_type_hints_default');
+
++----------------------------------------------------+
+| ADMIN FLUSH_TABLE('json_empty_type_hints_default') |
++----------------------------------------------------+
+| 0                                                  |
++----------------------------------------------------+
+
+INSERT INTO json_empty_type_hints_default
+VALUES (2, '{}');
+
+Affected Rows: 1
+
+SELECT j.user.age
+FROM json_empty_type_hints_default
+ORDER BY ts;
+
++------------------------------------------------------------+
+| json_get(json_empty_type_hints_default.j,Utf8("user.age")) |
++------------------------------------------------------------+
+| 18                                                         |
+| 18                                                         |
++------------------------------------------------------------+
+
+CREATE TABLE json_empty_type_hints_required (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        user.age BIGINT NOT NULL
+    )
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json_empty_type_hints_required
+VALUES (1, '{}');
+
+Error: 1004(InvalidArguments), Invalid JSON: missing non-null JSON2 type hint path user.age
+
+DROP TABLE json_empty_no_type_hints;
+
+Affected Rows: 0
+
+DROP TABLE json_empty_after_object;
+
+Affected Rows: 0
+
+DROP TABLE json_empty_only_sst;
+
+Affected Rows: 0
+
+DROP TABLE json_empty_conflict;
+
+Affected Rows: 0
+
+DROP TABLE json_empty_type_hints_nullable;
+
+Affected Rows: 0
+
+DROP TABLE json_empty_type_hints_default;
+
+Affected Rows: 0
+
+DROP TABLE json_empty_type_hints_required;
+
+Affected Rows: 0
+

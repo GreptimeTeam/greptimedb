@@ -268,6 +268,12 @@ impl JsonVectorBuilder {
 }
 
 fn build_legacy(values: &mut Vec<JsonVariant>, merged_type: &JsonNativeType) -> Result<VectorRef> {
+    if matches!(merged_type, JsonNativeType::Null) {
+        let len = values.len();
+        values.clear();
+        return Ok(Arc::new(NullVector::new(len)));
+    }
+
     build_explicit(values, merged_type, false, |value| match value {
         JsonVariant::Null => Ok(None),
         JsonVariant::Object(value) => Ok(Some(value)),
@@ -872,7 +878,7 @@ mod tests {
     use crate::data_type::ConcreteDataType;
     use crate::extension::json::{Json2ExtensionType, JsonMetadata};
     use crate::json::JsonTypeHint;
-    use crate::json::value::decode_json_variant;
+    use crate::json::value::{JsonValueRef, decode_json_variant};
     use crate::types::StructField;
     use crate::types::json_type::JsonObjectType;
     use crate::value::{ListValue, StructValue, Value, ValueRef};
@@ -991,6 +997,15 @@ mod tests {
             .try_push_value_ref(&ValueRef::Boolean(true))
             .unwrap_err();
         assert!(err.to_string().contains("expected JSON value"));
+
+        let mut null_builder = JsonVectorBuilder::new(JsonNativeType::Null, 2);
+        null_builder.try_push_value_ref(&ValueRef::Json(Box::new(JsonValueRef::null())))?;
+        null_builder.try_push_value_ref(&ValueRef::Json(Box::new(JsonValueRef::null())))?;
+
+        let vector = null_builder.to_vector();
+        assert_eq!(2, vector.len());
+        assert_eq!(Value::Null, vector.get(0));
+        assert_eq!(Value::Null, vector.get(1));
 
         Ok(())
     }
