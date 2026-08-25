@@ -43,7 +43,7 @@ mod test {
     use servers::grpc::builder::GrpcServerBuilder;
     use servers::grpc::flight::{
         FlightCraft, FlightCraftWrapper, FlightRecordBatchSource, FlightRecordBatchStream,
-        TonicStream,
+        FlightRecordBatchStreamInput, TonicStream,
     };
     use servers::grpc::greptime_handler::GreptimeRequestHandler;
     use servers::grpc::{FlightCompression, GrpcServerConfig};
@@ -83,9 +83,11 @@ mod test {
             _: tonic::Request<Ticket>,
         ) -> std::result::Result<Response<TonicStream<FlightData>>, tonic::Status> {
             let stream = FlightRecordBatchStream::new(
-                FlightRecordBatchSource::initializer(async {
+                FlightRecordBatchStreamInput::initializer(async {
                     tokio::time::sleep(Duration::from_secs(2)).await;
-                    Ok(slow_recordbatch_stream())
+                    Ok(FlightRecordBatchSource::RecordBatches(
+                        slow_recordbatch_stream(),
+                    ))
                 }),
                 TracingContext::default(),
                 FlightCompression::default(),

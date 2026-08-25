@@ -15,11 +15,13 @@
 //! Handler for Greptime Database service. It's implemented by frontend.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::helper::request_type;
+use api::v1::greptime_request::Request as QueryRequest;
 use api::v1::{GreptimeRequest, RequestHeader};
 use auth::UserProviderRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -79,30 +81,42 @@ impl GreptimeRequestHandler {
     ) -> Result<Output> {
         let header = request.header.as_ref();
         let query_ctx = create_query_context(Channel::Grpc, header, hints, HashMap::new())?;
-        self.handle_request_with_query_ctx(request, query_ctx).await
+        let query = self
+            .authenticate_request_with_query_ctx(&request, &query_ctx)
+            .await?;
+        self.handle_request_with_query_ctx(query, query_ctx).await
     }
 
-    pub(crate) async fn handle_request_with_query_ctx(
+    pub(crate) async fn authenticate_request_with_query_ctx(
         &self,
-        request: GreptimeRequest,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let query = request.request.context(InvalidQuerySnafu {
+        request: &GreptimeRequest,
+        query_ctx: &QueryContextRef,
+    ) -> Result<QueryRequest> {
+        let query = request.request.clone().context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
         let header = request.header.as_ref();
-        let user_info = context_auth::auth(self.user_provider.clone(), header, &query_ctx).await?;
+        let user_info = context_auth::auth(self.user_provider.clone(), header, query_ctx).await?;
         query_ctx.set_current_user(user_info);
+        Ok(query)
+    }
 
+    pub(crate) fn handle_request_with_query_ctx(
+        &self,
+        query: QueryRequest,
+        query_ctx: QueryContextRef,
+    ) -> impl Future<Output = Result<Output>> + Send + 'static {
         let handler = self.handler.clone();
+        let runtime = self.runtime.clone();
         let request_type = request_type(&query).to_string();
         let db = query_ctx.get_db_string();
         let timer = RequestTimer::new(db.clone(), request_type);
         let tracing_context = TracingContext::from_current_span();
 
-        let result_future = async move {
-            handler
+        async move {
+            let result_future = async move {
+                handler
                 .do_query(query, query_ctx)
                 .trace(tracing_context.attach(tracing::info_span!(
                     "GreptimeRequestHandler::handle_request_runtime"
@@ -118,26 +132,27 @@ impl GreptimeRequestHandler {
                     }
                     e
                 })
-        };
+            };
 
-        match &self.runtime {
-            Some(runtime) => {
-                // Executes requests in another runtime to
-                // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
-                //   - Refer to our blog for the rational behind it:
-                //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
-                //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
-                //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
-                // 2. avoid the handler blocks the gRPC runtime incidentally.
-                runtime
-                    .spawn(result_future)
-                    .await
-                    .context(JoinTaskSnafu)
-                    .inspect_err(|e| {
-                        timer.record(e.status_code());
-                    })?
+            match runtime {
+                Some(runtime) => {
+                    // Executes requests in another runtime to
+                    // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
+                    //   - Refer to our blog for the rational behind it:
+                    //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
+                    //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
+                    //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
+                    // 2. avoid the handler blocks the gRPC runtime incidentally.
+                    runtime
+                        .spawn(result_future)
+                        .await
+                        .context(JoinTaskSnafu)
+                        .inspect_err(|e| {
+                            timer.record(e.status_code());
+                        })?
+                }
+                None => result_future.await,
             }
-            None => result_future.await,
         }
     }
 

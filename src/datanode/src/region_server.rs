@@ -67,7 +67,8 @@ use servers::error::{
 };
 use servers::grpc::FlightCompression;
 use servers::grpc::flight::{
-    FlightCraft, FlightRecordBatchSource, FlightRecordBatchStream, TonicStream,
+    FlightCraft, FlightRecordBatchSource, FlightRecordBatchStream, FlightRecordBatchStreamInput,
+    TonicStream,
 };
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{
@@ -990,7 +991,11 @@ impl FlightCraft for RegionServer {
         };
 
         let stream = Box::pin(FlightRecordBatchStream::new(
-            FlightRecordBatchSource::initializer(initializer),
+            FlightRecordBatchStreamInput::initializer(async move {
+                initializer
+                    .await
+                    .map(FlightRecordBatchSource::RecordBatches)
+            }),
             tracing_context,
             self.flight_compression,
             query_ctx,
