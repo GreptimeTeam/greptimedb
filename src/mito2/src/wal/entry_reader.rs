@@ -96,17 +96,14 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
 #[cfg(test)]
 mod tests {
 
-    use std::sync::Mutex;
     use std::time::Duration;
 
     use api::v1::{Mutation, OpType, WalEntry};
-    use futures::{StreamExt, TryStreamExt};
+    use futures::{StreamExt, TryStreamExt, stream};
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader};
     use store_api::logstore::provider::Provider;
     use store_api::storage::RegionId;
-    use tokio::sync::mpsc;
-    use tokio_stream::wrappers::ReceiverStream;
 
     use crate::error::Result;
     use crate::test_util::wal_util::MockRawEntryStream;
@@ -115,40 +112,27 @@ mod tests {
     use crate::wal::raw_entry_reader::{EntryStream, RawEntryReader};
 
     struct LiveRawEntryReader {
-        receiver: Mutex<Option<mpsc::Receiver<Entry>>>,
+        entry: Entry,
     }
 
     impl RawEntryReader for LiveRawEntryReader {
         fn read(&self, _ns: &Provider, _start_id: EntryId) -> Result<EntryStream<'static>> {
-            let receiver = self.receiver.lock().unwrap().take().unwrap();
-            Ok(Box::pin(ReceiverStream::new(receiver).map(Ok)))
+            let stream = stream::iter([Ok(self.entry.clone())]).chain(stream::pending());
+            Ok(stream.boxed())
         }
     }
 
     #[tokio::test]
     async fn test_delivers_complete_entry_while_stream_is_alive() {
         let provider = Provider::kafka_provider("my_topic".to_string());
-        let wal_entry = WalEntry {
-            mutations: vec![Mutation {
-                op_type: OpType::Put as i32,
-                sequence: 1,
-                rows: None,
-                write_hint: None,
-            }],
-            bulk_entries: vec![],
-        };
-        let (sender, receiver) = mpsc::channel(1);
-        sender
-            .send(Entry::Naive(store_api::logstore::entry::NaiveEntry {
+        let wal_entry = WalEntry::default();
+        let raw_entry_reader = LiveRawEntryReader {
+            entry: Entry::Naive(store_api::logstore::entry::NaiveEntry {
                 provider: provider.clone(),
                 region_id: RegionId::new(1, 1),
                 entry_id: 1,
                 data: wal_entry.encode_to_vec(),
-            }))
-            .await
-            .unwrap();
-        let raw_entry_reader = LiveRawEntryReader {
-            receiver: Mutex::new(Some(receiver)),
+            }),
         };
         let mut reader = LogStoreEntryReader::new(raw_entry_reader);
         let mut entries = reader.read(&provider, 0).unwrap();
@@ -159,7 +143,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry, (1, wal_entry));
-        drop(sender);
     }
 
     #[tokio::test]
