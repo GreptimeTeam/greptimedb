@@ -46,7 +46,15 @@ pub const TRACE_STATE_COLUMN: &str = "trace_state";
 
 // const keys
 pub const KEY_SERVICE_NAME: &str = "service.name";
+pub const KEY_SERVICE_NAMESPACE: &str = "service.namespace";
 pub const KEY_SERVICE_INSTANCE_ID: &str = "service.instance.id";
+pub const KEY_HOST_ID: &str = "host.id";
+pub const KEY_HOST_NAME: &str = "host.name";
+pub const KEY_CONTAINER_ID: &str = "container.id";
+pub const KEY_CONTAINER_NAME: &str = "container.name";
+pub const KEY_K8S_POD_UID: &str = "k8s.pod.uid";
+pub const KEY_K8S_POD_NAME: &str = "k8s.pod.name";
+pub const KEY_K8S_NAMESPACE_NAME: &str = "k8s.namespace.name";
 pub const KEY_SPAN_KIND: &str = "span.kind";
 
 // jaeger const keys, not sure if they are general

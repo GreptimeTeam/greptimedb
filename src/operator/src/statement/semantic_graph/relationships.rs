@@ -200,9 +200,9 @@ fn co_declared_branch(
                     bin.clone() + bin_interval(),
                     bin.clone() + bin_interval(),
                     lit(src.entity_type.as_str()),
-                    entity_id_expr(&src.id_columns, &|c| ident(c)),
+                    entity_id_expr(&src.id_columns, src.id_qualifier.as_deref(), &|c| ident(c)),
                     lit(dst.entity_type.as_str()),
-                    entity_id_expr(&dst.id_columns, &|c| ident(c)),
+                    entity_id_expr(&dst.id_columns, dst.id_qualifier.as_deref(), &|c| ident(c)),
                     lit(*rel_type),
                     lit(*provenance),
                     lit(1.0_f64),
@@ -501,6 +501,13 @@ fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict
 }
 
 /// One trace table's client spans, normalized to
+/// A trace table's `duration_nano` is UInt64 on tables created before the
+/// signed-integer ingest change and Int64 after it. The per-table selects are
+/// unioned, and those two have no common integer type.
+fn duration_nano_expr() -> Expr {
+    cast(ident(DURATION_NANO_COLUMN), DataType::Int64).alias(DURATION_NANO_COLUMN)
+}
+
 /// `(timestamp, trace_id, span_id, src_id, status_code, duration_nano,
 /// virtual_dst, virtual_conn)`. `src_id` is built from the table's `service`
 /// declaration, so edges land on exactly the entity ids the registry emits (a
@@ -553,9 +560,12 @@ fn client_spans(
             ident(SPAN_ID_COLUMN),
             // The cast inside entity_id_expr also normalizes tag columns, which
             // come out of the storage engine dictionary-encoded.
-            entity_id_expr(&service.id_columns, &|c| ident(c)).alias(SRC_ID_COLUMN),
+            entity_id_expr(&service.id_columns, service.id_qualifier.as_deref(), &|c| {
+                ident(c)
+            })
+            .alias(SRC_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
-            ident(DURATION_NANO_COLUMN),
+            duration_nano_expr(),
             virtual_dst.alias("virtual_dst"),
             virtual_conn.alias("virtual_conn"),
         ])
@@ -578,9 +588,12 @@ fn server_spans(
             ident(TRACE_TIMESTAMP_COLUMN),
             ident(TRACE_ID_COLUMN),
             ident(PARENT_SPAN_ID_COLUMN),
-            entity_id_expr(&service.id_columns, &|c| ident(c)).alias(DST_ID_COLUMN),
+            entity_id_expr(&service.id_columns, service.id_qualifier.as_deref(), &|c| {
+                ident(c)
+            })
+            .alias(DST_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
-            ident(DURATION_NANO_COLUMN),
+            duration_nano_expr(),
         ])
 }
 
@@ -609,7 +622,10 @@ fn agent_calls_branch(
                 ident(TRACE_TIMESTAMP_COLUMN),
                 ident(TRACE_ID_COLUMN),
                 ident(SPAN_ID_COLUMN),
-                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias(SRC_ID_COLUMN),
+                entity_id_expr(&agent.id_columns, agent.id_qualifier.as_deref(), &|c| {
+                    ident(c)
+                })
+                .alias(SRC_ID_COLUMN),
             ])?;
         let child = trace
             .scan
@@ -619,9 +635,12 @@ fn agent_calls_branch(
                 ident(TRACE_TIMESTAMP_COLUMN),
                 ident(TRACE_ID_COLUMN),
                 ident(PARENT_SPAN_ID_COLUMN),
-                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias(DST_ID_COLUMN),
+                entity_id_expr(&agent.id_columns, agent.id_qualifier.as_deref(), &|c| {
+                    ident(c)
+                })
+                .alias(DST_ID_COLUMN),
                 ident(SPAN_STATUS_CODE_COLUMN),
-                ident(DURATION_NANO_COLUMN),
+                duration_nano_expr(),
             ])?;
         parents = union_all(parents, parent)?;
         children = union_all(children, child)?;
@@ -733,6 +752,16 @@ mod tests {
         extra: &[(&str, &[Option<&str>])],
         spans: &[Span<'_>],
     ) {
+        register_typed_trace_table(ctx, name, extra, spans, DataType::UInt64)
+    }
+
+    fn register_typed_trace_table(
+        ctx: &SessionContext,
+        name: &str,
+        extra: &[(&str, &[Option<&str>])],
+        spans: &[Span<'_>],
+        duration_type: DataType,
+    ) {
         let mut fields = vec![
             Field::new(
                 TRACE_TIMESTAMP_COLUMN,
@@ -745,7 +774,7 @@ mod tests {
             Field::new(SPAN_KIND_COLUMN, DataType::Utf8, false),
             Field::new(SPAN_STATUS_CODE_COLUMN, DataType::Utf8, false),
             Field::new(SERVICE_NAME_COLUMN, DataType::Utf8, false),
-            Field::new(DURATION_NANO_COLUMN, DataType::UInt64, false),
+            Field::new(DURATION_NANO_COLUMN, duration_type.clone(), false),
         ];
         for (column, _) in extra {
             fields.push(Field::new(*column, DataType::Utf8, true));
@@ -774,9 +803,14 @@ mod tests {
             Arc::new(StringArray::from(
                 spans.iter().map(|s| s.6).collect::<Vec<_>>(),
             )),
-            Arc::new(UInt64Array::from(
-                spans.iter().map(|s| s.7).collect::<Vec<_>>(),
-            )),
+            match duration_type {
+                DataType::Int64 => Arc::new(Int64Array::from(
+                    spans.iter().map(|s| s.7 as i64).collect::<Vec<_>>(),
+                )) as ArrayRef,
+                _ => Arc::new(UInt64Array::from(
+                    spans.iter().map(|s| s.7).collect::<Vec<_>>(),
+                )),
+            },
         ];
         for (_, values) in extra {
             columns.push(Arc::new(StringArray::from(values.to_vec())));
@@ -843,6 +877,7 @@ mod tests {
             time_index: TRACE_TIMESTAMP_COLUMN.to_string(),
             entity_type: "service".to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
+            id_qualifier: None,
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -972,7 +1007,7 @@ mod tests {
                 ),
             ],
         );
-        register_trace_table(
+        register_typed_trace_table(
             &ctx,
             "trace_b",
             &[],
@@ -989,6 +1024,7 @@ mod tests {
                     1_500_000_000,
                 ),
             ],
+            DataType::Int64,
         );
         let a = ctx.table("trace_a").await.unwrap();
         let b = ctx.table("trace_b").await.unwrap();
@@ -1294,6 +1330,7 @@ mod tests {
             time_index: "ts".to_string(),
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
+            id_qualifier: None,
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -1544,16 +1581,10 @@ mod tests {
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 1);
         let batch = &batches[0];
-        // Composite service identity renders the same sorted `k=v` form the
-        // registry emits, so edges land on registry entity ids.
-        assert_eq!(
-            strings(batch, 5),
-            vec!["service_name=frontend,service_namespace=ns1"]
-        );
-        assert_eq!(
-            strings(batch, 7),
-            vec!["service_name=cart,service_namespace=ns1"]
-        );
+        // Composite service identity renders exactly as the registry emits it,
+        // so edges land on registry entity ids.
+        assert_eq!(strings(batch, 5), vec!["frontend,ns1"]);
+        assert_eq!(strings(batch, 7), vec!["cart,ns1"]);
     }
 
     fn build_relationships_plan_for_test(
