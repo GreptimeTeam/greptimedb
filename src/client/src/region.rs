@@ -112,7 +112,8 @@ impl RegionRequester {
         let mut flight_client = self
             .client
             .make_flight_client(self.send_compression, self.accept_compression)?;
-        // Limit Flight establishment without limiting query stream execution.
+        // Limit Flight DoGet response time without limiting query stream execution.
+        let addr = flight_client.addr().to_string();
         let mut request = tonic::Request::new(ticket);
         request.set_timeout(FLIGHT_DO_GET_TIMEOUT);
         let response = flight_client
@@ -124,11 +125,11 @@ impl RegionRequester {
                 let e: error::Error = e.into();
                 error!(
                     e; "Failed to do Flight get, addr: {}, code: {}",
-                    flight_client.addr(),
+                    addr,
                     tonic_code
                 );
                 Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
-                    addr: flight_client.addr().to_string(),
+                    addr: addr.clone(),
                     tonic_code,
                 })
             })?;
@@ -139,7 +140,7 @@ impl RegionRequester {
         let flight_message_stream = flight_data_stream
             .filter_map(move |flight_data| decode_flight_data(&mut decoder, flight_data));
 
-        recordbatches_from_flight_message_stream(flight_message_stream).await
+        recordbatches_from_flight_message_stream(addr, flight_message_stream).await
     }
 
     async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponse> {
@@ -201,6 +202,7 @@ impl RegionRequester {
 }
 
 async fn recordbatches_from_flight_message_stream<S>(
+    addr: String,
     mut flight_message_stream: S,
 ) -> Result<SendableRecordBatchStream>
 where
@@ -212,7 +214,9 @@ where
         }
         .fail();
     };
-    let FlightMessage::Schema(schema) = first_flight_message? else {
+    let FlightMessage::Schema(schema) =
+        first_flight_message.map_err(|e| flight_stream_error(&addr, e))?
+    else {
         return IllegalFlightMessagesSnafu {
             reason: "Expect schema to be the first flight message",
         }
@@ -227,6 +231,7 @@ where
     let schema =
         Arc::new(datatypes::schema::Schema::try_from(schema).context(error::ConvertSchemaSnafu)?);
     let schema_cloned = schema.clone();
+    let stream_addr = addr.clone();
     let stream = Box::pin(stream!({
         let _span = tracing_context.attach(common_telemetry::tracing::info_span!(
             "poll_flight_data_stream"
@@ -246,7 +251,8 @@ where
             let flight_message = match flight_message_item {
                 Some(Ok(message)) => message,
                 Some(Err(e)) => {
-                    yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                    yield Err(BoxedError::new(flight_stream_error(&stream_addr, e)))
+                        .context(ExternalSnafu);
                     break;
                 }
                 None => break,
@@ -279,7 +285,8 @@ where
                                 break;
                             }
                             Err(e) => {
-                                yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                                yield Err(BoxedError::new(flight_stream_error(&stream_addr, e)))
+                                    .context(ExternalSnafu);
                                 break;
                             }
                         }
@@ -318,6 +325,21 @@ where
     Ok(Box::pin(record_batch_stream))
 }
 
+fn flight_stream_error(addr: &str, error: error::Error) -> error::Error {
+    let tonic_code = error.tonic_code().unwrap_or(tonic::Code::Unknown);
+    error!(
+        error; "Failed to receive Flight data, addr: {}, code: {}",
+        addr,
+        tonic_code
+    );
+
+    error::Error::FlightGet {
+        addr: addr.to_string(),
+        tonic_code,
+        source: BoxedError::new(error),
+    }
+}
+
 pub fn build_remote_dyn_filter_update_request(
     query_id: impl Into<String>,
     update: RemoteDynFilterUpdate,
@@ -326,6 +348,28 @@ pub fn build_remote_dyn_filter_update_request(
         query_id.into(),
         remote_dyn_filter_request::Action::Update(update),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_flight_stream_error_preserves_peer_address() {
+        let error = flight_stream_error(
+            "127.0.0.1:4001",
+            tonic::Status::unavailable("datanode unavailable").into(),
+        );
+
+        assert!(matches!(
+            error,
+            error::Error::FlightGet {
+                addr,
+                tonic_code: tonic::Code::Unavailable,
+                ..
+            } if addr == "127.0.0.1:4001"
+        ));
+    }
 }
 
 pub fn build_remote_dyn_filter_unregister_request(
@@ -515,11 +559,14 @@ mod test {
         )
         .unwrap();
 
-        let mut recordbatches = recordbatches_from_flight_message_stream(stream::iter(vec![
-            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
-            Ok(FlightMessage::Metrics(test_metrics_json())),
-            Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
-        ]))
+        let mut recordbatches = recordbatches_from_flight_message_stream(
+            "test-peer".to_string(),
+            stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::Metrics(test_metrics_json())),
+                Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+            ]),
+        )
         .await
         .unwrap();
 
@@ -534,11 +581,14 @@ mod test {
     #[tokio::test]
     async fn test_record_batch_stream_exposes_error_after_pre_batch_metrics() {
         let schema = test_schema();
-        let mut recordbatches = recordbatches_from_flight_message_stream(stream::iter(vec![
-            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
-            Ok(FlightMessage::Metrics(test_metrics_json())),
-            Err(Error::from(Status::internal("boom after metrics"))),
-        ]))
+        let mut recordbatches = recordbatches_from_flight_message_stream(
+            "test-peer".to_string(),
+            stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::Metrics(test_metrics_json())),
+                Err(Error::from(Status::internal("boom after metrics"))),
+            ]),
+        )
         .await
         .unwrap();
 
