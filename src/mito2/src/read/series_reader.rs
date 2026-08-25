@@ -40,7 +40,8 @@ use crate::read::scan_util::{
     should_split_flat_batches_for_merge,
 };
 use crate::read::seq_scan::SeqScan;
-use crate::read::series_candidate::{MetricSeriesId, validate_metric_metadata};
+use crate::read::series_candidate::validate_metric_metadata;
+use crate::series_index::MetricSeriesId;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::prefilter::prefilter_flat_batch_by_primary_key;

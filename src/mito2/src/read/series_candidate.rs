@@ -30,7 +30,6 @@ use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use mito_codec::row_converter::{PrimaryKeyFilter, SparsePrimaryKeyCodec};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -51,6 +50,7 @@ use crate::read::range_cache::{
 };
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
+use crate::series_index::{METRIC_SERIES_ID_BATCH_SIZE, MetricSeriesId, MetricSeriesIdStream};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::prefilter::{
@@ -58,17 +58,6 @@ use crate::sst::parquet::prefilter::{
 };
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
-
-const CANDIDATE_SERIES_BATCH_SIZE: usize = 500;
-
-/// Identifies one series in a physical metric region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct MetricSeriesId {
-    pub(crate) table_id: u32,
-    pub(crate) tsid: u64,
-}
-
-pub(crate) type MetricSeriesIdStream = BoxStream<'static, Result<Vec<MetricSeriesId>>>;
 
 /// Builds candidate metric series from the ranges assigned to a [`SeriesScan`](super::series_scan::SeriesScan).
 pub(crate) struct SeriesCandidateScanner {
@@ -537,7 +526,7 @@ fn decode_metric_series(
     let codec = SparsePrimaryKeyCodec::new(&metadata);
     Ok(Box::pin(try_stream! {
         let mut last_series = None;
-        let mut output = Vec::with_capacity(CANDIDATE_SERIES_BATCH_SIZE);
+        let mut output = Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE);
         while let Some(batch) = input.try_next().await? {
             let array = batch
                 .column(0)
@@ -556,10 +545,10 @@ fn decode_metric_series(
                 }
                 last_series = Some(series);
                 output.push(series);
-                if output.len() == CANDIDATE_SERIES_BATCH_SIZE {
+                if output.len() == METRIC_SERIES_ID_BATCH_SIZE {
                     yield std::mem::replace(
                         &mut output,
-                        Vec::with_capacity(CANDIDATE_SERIES_BATCH_SIZE),
+                        Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE),
                     );
                 }
             }
