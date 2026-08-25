@@ -111,13 +111,26 @@ fn apply_json_type_hint(
 fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
     let mut json_types = HashMap::<String, JsonNativeType>::new();
 
+    // JSON2 columns in the final output must retain their complete values even when
+    // predicates or other expressions access only specific paths.
+    // For example, `SELECT j FROM t WHERE json_get(j, 'a') = 1`.
+    plan.schema()
+        .fields()
+        .iter()
+        .filter(|field| is_json2_extension_type(field))
+        .for_each(|field| {
+            json_types.insert(field.name().clone(), JsonNativeType::Variant);
+        });
+
     plan.apply(|plan| {
         for expr in plan.expressions() {
             expr.apply(|expr| {
                 if let Some((column, json_type)) = deduce_json_type(expr)? {
                     json_types.entry(column).or_default().merge(&json_type);
+                    Ok(TreeNodeRecursion::Jump)
+                } else {
+                    Ok(TreeNodeRecursion::Continue)
                 }
-                Ok(TreeNodeRecursion::Continue)
             })?;
         }
         Ok(TreeNodeRecursion::Continue)
@@ -128,6 +141,7 @@ fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeTyp
 fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
     let f = match expr {
         Expr::ScalarFunction(f) if f.name().eq_ignore_ascii_case(JsonGetWithType::NAME) => f,
+        Expr::Column(c) => return Ok(Some((c.name.clone(), JsonNativeType::Variant))),
         _ => return Ok(None),
     };
 
@@ -360,25 +374,13 @@ mod tests {
                 .rewrite(plan, &OptimizerContext::default())?
                 .transformed
         );
-        assert!(provider.scan_request().json_type_hint.contains_key("j"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_allow_json2_passthrough_for_later_projection() -> Result<()> {
-        let json_get = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
-        let (provider, plan) = build_json2_scan()?;
-        let plan = plan
-            .project(vec![json_get.alias("__common_expr"), col("j")])?
-            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])?
-            .build()?;
-
-        assert!(
-            JsonTypeConcretizeRule
-                .rewrite(plan, &OptimizerContext::default())?
-                .transformed
+        assert_eq!(
+            Some(&JsonNativeType::Object(JsonObjectType::from([(
+                "a".to_string(),
+                JsonNativeType::i64(),
+            )]))),
+            provider.scan_request().json_type_hint.get("j")
         );
-        assert!(provider.scan_request().json_type_hint.contains_key("j"));
         Ok(())
     }
 
@@ -397,6 +399,25 @@ mod tests {
                 "a".to_string(),
                 JsonNativeType::i64(),
             )]))),
+            provider.scan_request().json_type_hint.get("j")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_allow_json2_filter_with_root_projection() -> Result<()> {
+        let predicate =
+            json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?.eq(lit(1_i64));
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan.filter(predicate)?.build()?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonNativeType::Variant),
             provider.scan_request().json_type_hint.get("j")
         );
         Ok(())

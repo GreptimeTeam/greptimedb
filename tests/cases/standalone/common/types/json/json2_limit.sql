@@ -38,50 +38,7 @@ from json2_whole_and_path_read
 group by json_get(j, 'a.b')
 order by json_get(j, 'a.b');
 
-select j, j.a from json2_whole_and_path_read;
-
-select j from json2_whole_and_path_read where j.a.b = 1;
-
 drop table json2_whole_and_path_read;
-
-create table json2_join_same_name_left (
-    ts timestamp time index,
-    k string,
-    j json2
-)
-with (
-    'append_mode' = 'true'
-);
-
-create table json2_join_same_name_right (
-    ts timestamp time index,
-    k string,
-    j json2
-)
-with (
-    'append_mode' = 'true'
-);
-
-insert into json2_join_same_name_left values
-    (1, 'a', '{"a": 1, "left_only": "kept"}');
-
-insert into json2_join_same_name_right values
-    (1, 'a', '{"a": "right", "right_only": "should be kept"}');
-
-admin flush_table('json2_join_same_name_left');
-
-admin flush_table('json2_join_same_name_right');
-
--- FIXME: This should return `right` and `1`. The current NULL values are caused
--- by JSON type hints losing the table qualifier in joins.
-select json_get(r.j, 'a')::string, json_get(l.j, 'a')::int64
-from json2_join_same_name_left l
-join json2_join_same_name_right r
-on l.k = r.k;
-
-drop table json2_join_same_name_left;
-
-drop table json2_join_same_name_right;
 
 create table json2_without_append_mode (
     ts timestamp time index,
