@@ -25,7 +25,7 @@ use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
@@ -212,7 +212,8 @@ where
         return IllegalFlightMessagesSnafu {
             reason: "Expect the response not to be empty",
         }
-        .fail();
+        .fail()
+        .map_err(|error| flight_stream_error(&addr, error));
     };
     let FlightMessage::Schema(schema) =
         first_flight_message.map_err(|e| flight_stream_error(&addr, e))?
@@ -220,7 +221,8 @@ where
         return IllegalFlightMessagesSnafu {
             reason: "Expect schema to be the first flight message",
         }
-        .fail();
+        .fail()
+        .map_err(|error| flight_stream_error(&addr, error));
     };
 
     let metrics = Arc::new(ArcSwapOption::from(None));
@@ -327,11 +329,13 @@ where
 
 fn flight_stream_error(addr: &str, error: error::Error) -> error::Error {
     let tonic_code = error.tonic_code().unwrap_or(tonic::Code::Unknown);
-    error!(
-        error; "Failed to receive Flight data, addr: {}, code: {}",
-        addr,
-        tonic_code
-    );
+    if error.status_code().should_log_error() {
+        error!(
+            error; "Failed to receive Flight data, addr: {}, code: {}",
+            addr,
+            tonic_code
+        );
+    }
 
     error::Error::FlightGet {
         addr: addr.to_string(),
@@ -348,28 +352,6 @@ pub fn build_remote_dyn_filter_update_request(
         query_id.into(),
         remote_dyn_filter_request::Action::Update(update),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_flight_stream_error_preserves_peer_address() {
-        let error = flight_stream_error(
-            "127.0.0.1:4001",
-            tonic::Status::unavailable("datanode unavailable").into(),
-        );
-
-        assert!(matches!(
-            error,
-            error::Error::FlightGet {
-                addr,
-                tonic_code: tonic::Code::Unavailable,
-                ..
-            } if addr == "127.0.0.1:4001"
-        ));
-    }
 }
 
 pub fn build_remote_dyn_filter_unregister_request(
@@ -438,6 +420,44 @@ mod test {
 
     use super::*;
     use crate::Error::{self, IllegalDatabaseResponse, Server};
+
+    #[test]
+    fn test_flight_stream_error_preserves_peer_address() {
+        let error = flight_stream_error(
+            "127.0.0.1:4001",
+            tonic::Status::unavailable("datanode unavailable").into(),
+        );
+
+        assert!(matches!(
+            error,
+            error::Error::FlightGet {
+                addr,
+                tonic_code: tonic::Code::Unavailable,
+                ..
+            } if addr == "127.0.0.1:4001"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_empty_flight_stream_preserves_peer_address() {
+        let Err(error) = recordbatches_from_flight_message_stream(
+            "127.0.0.1:4001".to_string(),
+            stream::empty::<Result<FlightMessage>>(),
+        )
+        .await
+        else {
+            panic!("expected empty Flight stream to fail");
+        };
+
+        assert!(matches!(
+            error,
+            error::Error::FlightGet {
+                addr,
+                tonic_code: tonic::Code::Unknown,
+                ..
+            } if addr == "127.0.0.1:4001"
+        ));
+    }
 
     fn test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![ColumnSchema::new(
