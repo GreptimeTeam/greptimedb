@@ -20,7 +20,9 @@ use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram as Pr
 use api::v1::value::ValueData;
 use api::v1::{RowInsertRequests, SemanticType, Value};
 use common_grpc::precision::Precision;
-use common_query::native_histogram::native_histogram_value_type;
+use common_query::native_histogram::{
+    encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
+};
 use common_query::prelude::{GREPTIME_COUNT, greptime_timestamp, greptime_value};
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use lazy_static::lazy_static;
@@ -34,7 +36,6 @@ use table::requests::{
 };
 
 use crate::error::{self, Result};
-use crate::native_histogram::{encode_native_histogram, native_histogram_column_schema};
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
 use crate::query_handler::MetricsIngestOutcome;
 use crate::row_writer::{self, MultiTableData, TableData};

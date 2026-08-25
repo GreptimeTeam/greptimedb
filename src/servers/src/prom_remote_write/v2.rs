@@ -30,9 +30,11 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequest, Rows, SemanticType, Value};
 use bytes::{Buf, Bytes};
 use common_grpc::precision::Precision;
-use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
 #[cfg(test)]
 use common_query::native_histogram::*;
+use common_query::native_histogram::{
+    NATIVE_HISTOGRAM_FIELD, encode_native_histogram, native_histogram_column_schema,
+};
 use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::encoding::{
@@ -46,7 +48,6 @@ use table::requests::{
 };
 
 use crate::error::{self, Result};
-use crate::native_histogram::{encode_native_histogram, native_histogram_column_schema};
 use crate::prom_remote_write::row_builder::PromCtx;
 use crate::prom_remote_write::validation::validate_label_name;
 use crate::prom_remote_write::{REMOTE_WRITE_V2_VERSION, try_decompress};
