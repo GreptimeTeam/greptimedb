@@ -37,6 +37,7 @@ pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
     "query.enable_remote_dynamic_filter_pushdown";
 
 pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
+pub const FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE: &str = "sequence_range";
 
 /// Query engine config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +71,7 @@ impl Default for QueryOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowIncrementalMode {
     MemtableOnly,
+    SequenceRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -106,6 +108,9 @@ impl FlowQueryExtensions {
                 v if v.eq_ignore_ascii_case(FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY) => {
                     Ok(FlowIncrementalMode::MemtableOnly)
                 }
+                v if v.eq_ignore_ascii_case(FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE) => {
+                    Ok(FlowIncrementalMode::SequenceRange)
+                }
                 _ => Err(invalid_query_context_extension(format!(
                     "Invalid value for {}: {}",
                     FLOW_INCREMENTAL_MODE, value
@@ -136,21 +141,21 @@ impl FlowQueryExtensions {
             })
             .transpose()?;
 
-        if matches!(incremental_mode, Some(FlowIncrementalMode::MemtableOnly)) {
+        if let Some(mode) = incremental_mode {
+            let mode_label = match mode {
+                FlowIncrementalMode::MemtableOnly => FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+                FlowIncrementalMode::SequenceRange => FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
+            };
             let after_seqs = incremental_after_seqs.as_ref().ok_or_else(|| {
                 invalid_query_context_extension(format!(
                     "{} is required when {}={}.",
-                    FLOW_INCREMENTAL_AFTER_SEQS,
-                    FLOW_INCREMENTAL_MODE,
-                    FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, mode_label
                 ))
             })?;
             if after_seqs.is_empty() {
                 return Err(invalid_query_context_extension(format!(
                     "{} must not be empty when {}={}.",
-                    FLOW_INCREMENTAL_AFTER_SEQS,
-                    FLOW_INCREMENTAL_MODE,
-                    FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, mode_label
                 )));
             }
         }
@@ -168,21 +173,25 @@ impl FlowQueryExtensions {
             return Ok(false);
         }
 
-        if matches!(
-            self.incremental_mode,
-            Some(FlowIncrementalMode::MemtableOnly)
-        ) {
+        if let Some(mode) = self.incremental_mode {
+            let mode_label = match mode {
+                FlowIncrementalMode::MemtableOnly => FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+                FlowIncrementalMode::SequenceRange => FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
+            };
             let after_seqs = self.incremental_after_seqs.as_ref().ok_or_else(|| {
                 invalid_query_context_extension(format!(
-                    "{} is required when {}=memtable_only.",
-                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
+                    "{} is required when {}={}.",
+                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, mode_label
                 ))
             })?;
 
             if !after_seqs.contains_key(&source_region_id.as_u64()) {
                 return Err(invalid_query_context_extension(format!(
-                    "Missing region {} in {} when {}=memtable_only.",
-                    source_region_id, FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
+                    "Missing region {} in {} when {}={}.",
+                    source_region_id,
+                    FLOW_INCREMENTAL_AFTER_SEQS,
+                    FLOW_INCREMENTAL_MODE,
+                    mode_label
                 )));
             }
         }
@@ -540,6 +549,32 @@ mod flow_extension_tests {
             .unwrap();
         let err = parsed.validate_for_scan(source_region_id).unwrap_err();
         assert!(format!("{err}").contains("Missing region"));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_sequence_range_success() {
+        let exts = HashMap::from([
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                r#"{"1":10}"#.to_string(),
+            ),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.incremental_mode,
+            Some(FlowIncrementalMode::SequenceRange)
+        );
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([(1, 10)]))
+        );
     }
 
     #[test]

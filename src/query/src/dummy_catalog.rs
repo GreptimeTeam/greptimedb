@@ -371,6 +371,10 @@ struct FlowScanDecision {
     memtable_max_sequence: Option<u64>,
     /// Whether to skip SST files for memtable-only incremental source scans.
     skip_sst_files: bool,
+    /// Whether to request an exact row-level `(min, max]` sequence-range scan.
+    /// Only set for `sequence_range` incremental source scans; the engine
+    /// enforces the range row-level across memtables and SSTs or fails closed.
+    exact_sequence_range: bool,
 }
 
 impl FlowScanDecision {
@@ -381,6 +385,7 @@ impl FlowScanDecision {
             memtable_min_sequence: None,
             memtable_max_sequence: None,
             skip_sst_files: false,
+            exact_sequence_range: false,
         }
     }
 }
@@ -395,6 +400,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             memtable_min_sequence: None,
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
             skip_sst_files: false,
+            exact_sequence_range: false,
         });
     };
 
@@ -430,6 +436,15 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         && memtable_min_sequence.is_some()
         && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
 
+    // `sequence_range` asks the engine for an exact row-level `(min, max]`
+    // delta across memtables and SSTs. SSTs must stay in the scan; the engine
+    // enforces the exact range when the region preserves per-row sequences and
+    // fails closed otherwise. It is never set for the historical
+    // `memtable_only` mode.
+    let exact_sequence_range = apply_incremental
+        && memtable_min_sequence.is_some()
+        && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange);
+
     Ok(FlowScanDecision {
         is_sink_scan: false,
         snapshot_on_scan: memtable_max_sequence.is_none()
@@ -437,6 +452,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         memtable_min_sequence,
         memtable_max_sequence,
         skip_sst_files,
+        exact_sequence_range,
     })
 }
 
@@ -456,6 +472,7 @@ fn build_scan_request(
         snapshot_on_scan: decision.snapshot_on_scan,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
+        exact_sequence_range: decision.exact_sequence_range,
         ..Default::default()
     }
 }
@@ -880,6 +897,7 @@ mod tests {
         assert_eq!(request.memtable_min_sequence, Some(55));
         assert_eq!(request.sst_min_sequence, None);
         assert!(request.skip_sst_files);
+        assert!(!request.exact_sequence_range);
     }
 
     #[test]
@@ -916,6 +934,7 @@ mod tests {
         assert_eq!(request.sst_min_sequence, None);
         assert!(!request.skip_sst_files);
         assert!(!request.snapshot_on_scan);
+        assert!(!request.exact_sequence_range);
     }
 
     #[test]
@@ -951,6 +970,28 @@ mod tests {
         let err = scan_request_from_query_context(region_id, &query_ctx).unwrap_err();
         assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_sequence_range_source_scan() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    "sequence_range".to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":55}}"#, region_id.as_u64()),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+        assert_eq!(request.memtable_min_sequence, Some(55));
+        assert!(request.exact_sequence_range);
+        assert!(!request.skip_sst_files);
     }
 
     #[test]

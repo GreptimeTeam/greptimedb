@@ -19,6 +19,7 @@ catalog.workspace = true
 chrono.workspace = true
 client.workspace = true
 common-base.workspace = true
+common-catalog.workspace = true
 common-config.workspace = true
 common-datasource.workspace = true
 common-decimal.workspace = true
@@ -81,7 +82,6 @@ tonic.workspace = true
 [dev-dependencies]
 arrow-flight.workspace = true
 catalog = { workspace = true, features = ["testing"] }
-common-catalog.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 pretty_assertions.workspace = true
 prost.workspace = true

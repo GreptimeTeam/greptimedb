@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
+use catalog::{DeregisterTableRequest, RegisterTableRequest};
 use client::OutputWithMetrics;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
@@ -29,14 +29,18 @@ use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{
     TimestampMillisecondVector, TimestampNanosecondVector, UInt32Vector, VectorRef,
 };
+use futures::FutureExt;
 use pretty_assertions::assert_eq;
 use query::options::{
-    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, FLOW_SCHEDULED_TIME_MILLIS,
-    QueryOptions,
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_SCHEDULED_TIME_MILLIS, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
+use store_api::mito_engine_options::PRESERVE_ROW_SEQUENCE;
+use table::metadata::FilterPushDownType;
 use table::test_util::MemTable;
+use table::{Table, TableRef};
 
 use super::*;
 use crate::batching_mode::checkpoint::{
@@ -1653,6 +1657,116 @@ fn test_checkpoint_decision_labels_are_stable() {
     assert_eq!(
         FlowQueryFallbackReason::QueryFailure.as_label(),
         "query_failure"
+    );
+}
+
+/// Re-registers the shared `numbers_with_ts` test source table with the
+/// `preserve_row_sequence` mito table option set, optionally overriding the
+/// declared engine name.
+fn set_numbers_with_ts_preserve_row_sequence(query_engine: &QueryEngineRef, engine: Option<&str>) {
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let table = catalog_manager
+        .table(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            "numbers_with_ts",
+            None,
+        )
+        .now_or_never()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let mut table_info = (*table.table_info()).clone();
+    table_info
+        .meta
+        .options
+        .extra_options
+        .insert(PRESERVE_ROW_SEQUENCE.to_string(), "true".to_string());
+    if let Some(engine) = engine {
+        table_info.meta.engine = engine.to_string();
+    }
+    // `numbers_with_ts` is a `MemTable` with `FilterPushDownType::Unsupported`.
+    let new_table: TableRef = Arc::new(Table::new(
+        Arc::new(table_info),
+        FilterPushDownType::Unsupported,
+        table.data_source(),
+    ));
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .expect("test catalog manager must be a MemoryCatalogManager");
+    memory_catalog
+        .deregister_table_sync(DeregisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers_with_ts".to_string(),
+        })
+        .unwrap();
+    memory_catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers_with_ts".to_string(),
+            table_id: 1024,
+            table: new_table,
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_build_flow_query_extensions_sequence_range_with_preserve_capability() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+    )
+    .await;
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+
+    set_numbers_with_ts_preserve_row_sequence(&query_engine, None);
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+    assert!(extensions.contains(&(
+        FLOW_INCREMENTAL_MODE,
+        FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string()
+    )));
+    assert!(extensions.contains(&(
+        FLOW_INCREMENTAL_AFTER_SEQS,
+        serde_json::json!({"1": 10, "2": 20}).to_string(),
+    )));
+}
+
+/// A non-mito source table must never activate `sequence_range`, even when it
+/// (meaninglessly) carries the `preserve_row_sequence` option key.
+#[tokio::test]
+async fn test_build_flow_query_extensions_memtable_only_for_non_mito_source() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+    )
+    .await;
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+
+    set_numbers_with_ts_preserve_row_sequence(&query_engine, Some("file"));
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+    assert!(extensions.contains(&(
+        FLOW_INCREMENTAL_MODE,
+        FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string()
+    )));
+    assert!(
+        extensions
+            .iter()
+            .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
     );
 }
 
