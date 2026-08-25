@@ -14,8 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use arrow_schema::{DataType, Schema};
-use datatypes::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2PhysicalLayout};
+use datatypes::extension::json::JSON2_REMAINDER_FIELD_NAME;
 use parquet::arrow::ProjectionMask;
 use parquet::basic::{ConvertedType, Type as PhysicalType};
 use parquet::schema::types::{ColumnDescriptor, SchemaDescriptor};
@@ -174,9 +173,6 @@ pub struct ProjectionMaskPlan {
 /// file. It is used to resolve requested nested paths to actual leaf
 /// column indices.
 ///
-/// `arrow_schema` supplies extension metadata used to distinguish JSON2
-/// physical layouts from ordinary Arrow fields.
-///
 /// See [`ProjectionMaskPlan`] for the returned value.
 ///
 /// For example, if the query requests `j.a` and `k`, but the current
@@ -187,7 +183,6 @@ pub struct ProjectionMaskPlan {
 pub(crate) fn build_projection_plan(
     parquet_read_cols: &ParquetReadColumns,
     parquet_schema_desc: &SchemaDescriptor,
-    arrow_schema: &Schema,
 ) -> ProjectionMaskPlan {
     if !parquet_read_cols.has_nested() {
         let mask =
@@ -199,7 +194,7 @@ pub(crate) fn build_projection_plan(
     }
 
     let (matched_leaves, matched_roots) =
-        build_parquet_leaves_indices(parquet_schema_desc, parquet_read_cols, arrow_schema);
+        build_parquet_leaves_indices(parquet_schema_desc, parquet_read_cols);
 
     let projected_root_presence = parquet_read_cols
         .columns()
@@ -216,16 +211,12 @@ pub(crate) fn build_projection_plan(
 
 /// Builds parquet leaf-column indices for reading a parquet file.
 ///
-/// `arrow_schema` identifies JSON2 layouts when a requested path needs
-/// to fall back to a Variant parent or the v2 remainder field.
-///
 /// Returns `(matched_leaves, matched_roots)`:
 /// - `matched_leaves`: matched leaf-column indices in the current parquet file schema.
 /// - `matched_roots`: root-field indices read from the current parquet file schema.
 fn build_parquet_leaves_indices(
     parquet_schema_desc: &SchemaDescriptor,
     projection: &ParquetReadColumns,
-    arrow_schema: &Schema,
 ) -> (Vec<usize>, HashSet<usize>) {
     let mut map = HashMap::with_capacity(projection.cols.len());
     for col in &projection.cols {
@@ -271,7 +262,7 @@ fn build_parquet_leaves_indices(
         }
     }
 
-    // Then fallback prefix misses to their nearest variant parent.
+    // Then include v2 remainder leaves or fallback prefix misses to their nearest variant parent.
     // TODO(fys): Gate fallback planning on the root being JSON2. A raw Binary
     // leaf is a JSONB variant only under a JSON2 root; plain struct Binary
     // children should not enter this fallback path.
@@ -282,11 +273,10 @@ fn build_parquet_leaves_indices(
             .iter()
             .zip(path_matches)
             .any(|(path, matched)| {
-                !*matched || path_points_to_struct(arrow_schema, col.root_index, path)
+                !*matched || path_points_to_struct(parquet_schema_desc, col.root_index, path)
             });
         if needs_remainder {
-            let remainder_leaves =
-                find_v2_remainder_leaves(parquet_schema_desc, arrow_schema, col.root_index);
+            let remainder_leaves = find_remainder_leaves(parquet_schema_desc, col.root_index);
             if !remainder_leaves.is_empty() {
                 matched_leaves.extend(remainder_leaves);
                 matched_roots.insert(col.root_index);
@@ -319,20 +309,24 @@ fn build_parquet_leaves_indices(
 ///
 /// JSON2 v2 can split an object's children between its Struct field and the remainder,
 /// so reading the Struct leaves alone may produce an incomplete object.
-fn path_points_to_struct(arrow_schema: &Schema, root_idx: usize, path: &[String]) -> bool {
-    let Some(mut field) = arrow_schema.fields().get(root_idx) else {
+fn path_points_to_struct(
+    parquet_schema_desc: &SchemaDescriptor,
+    root_idx: usize,
+    path: &[String],
+) -> bool {
+    let Some(mut field) = parquet_schema_desc.root_schema().get_fields().get(root_idx) else {
         return false;
     };
     for name in path.iter().skip(1) {
-        let DataType::Struct(fields) = field.data_type() else {
+        if !field.is_group() {
             return false;
-        };
-        let Some(child) = fields.iter().find(|field| field.name() == name) else {
+        }
+        let Some(child) = field.get_fields().iter().find(|field| field.name() == name) else {
             return false;
         };
         field = child;
     }
-    matches!(field.data_type(), DataType::Struct(_))
+    field.is_group()
 }
 
 /// Finds the Parquet leaves backing a JSON2 v2 remainder field.
@@ -340,18 +334,7 @@ fn path_points_to_struct(arrow_schema: &Schema, root_idx: usize, path: &[String]
 /// The remainder is a sibling of explicitly materialized fields, so prefix matching a
 /// requested path cannot find it. These leaves are needed when an explicit path is absent
 /// or an explicitly materialized object may have additional children in the remainder.
-fn find_v2_remainder_leaves(
-    parquet_schema_desc: &SchemaDescriptor,
-    arrow_schema: &Schema,
-    root_idx: usize,
-) -> Vec<usize> {
-    let Some(root) = arrow_schema.fields().get(root_idx) else {
-        return vec![];
-    };
-    if !Json2PhysicalLayout::try_from_root(root).is_ok_and(|x| x.is_version_2()) {
-        return vec![];
-    }
-
+fn find_remainder_leaves(parquet_schema_desc: &SchemaDescriptor, root_idx: usize) -> Vec<usize> {
     parquet_schema_desc
         .columns()
         .iter()
@@ -406,10 +389,6 @@ fn is_variant_leaf(leaf_col: &ColumnDescriptor) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_schema::{DataType, Field};
-    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
-    use datatypes::json::JsonSettings;
-    use datatypes::vectors::json::variant::variant_field;
     use parquet::basic::{ConvertedType, LogicalType, Repetition};
     use parquet::errors::ParquetError;
     use parquet::schema::types::Type;
@@ -421,7 +400,7 @@ mod tests {
         let parquet_schema_desc = build_test_nested_parquet_schema();
         let projection = ParquetReadColumns::from_deduped_root_indices([0, 1]);
 
-        let plan = build_projection_plan(&projection, &parquet_schema_desc, &Schema::empty());
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![true, true], plan.projected_root_presence);
         assert_eq!(
@@ -437,7 +416,7 @@ mod tests {
         let projection = ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0)]);
 
         let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection, &Schema::empty());
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![0, 1, 2], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -453,7 +432,7 @@ mod tests {
         ]);
 
         let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection, &Schema::empty());
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1, 2, 3], matched_leaves);
         assert_eq!(HashSet::from([0, 1]), matched_roots);
     }
@@ -468,7 +447,7 @@ mod tests {
         ]);
 
         let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection, &Schema::empty());
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1, 2], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -485,7 +464,7 @@ mod tests {
         let projection = ParquetReadColumns::from_deduped(vec![read_column]);
 
         let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection, &Schema::empty());
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1, 2], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -500,7 +479,7 @@ mod tests {
             )]);
 
         let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection, &Schema::empty());
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -515,7 +494,7 @@ mod tests {
             ParquetReadColumn::new(1),
         ]);
 
-        let plan = build_projection_plan(&projection, &parquet_schema_desc, &Schema::empty());
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![false, true], plan.projected_root_presence);
         assert_eq!(
@@ -526,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_v2_routes_missing_path_to_remainder() -> Result<(), ParquetError> {
-        let (parquet, arrow) = build_test_v2_schemas()?;
+        let parquet = build_test_v2_schema()?;
         let projection =
             ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
                 vec![
@@ -535,7 +514,7 @@ mod tests {
                 ],
             )]);
 
-        let plan = build_projection_plan(&projection, &parquet, &arrow);
+        let plan = build_projection_plan(&projection, &parquet);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [0, 1]), plan.mask);
@@ -544,13 +523,13 @@ mod tests {
 
     #[test]
     fn test_v2_explicit_path_does_not_read_remainder() -> Result<(), ParquetError> {
-        let (parquet, arrow) = build_test_v2_schemas()?;
+        let parquet = build_test_v2_schema()?;
         let projection = ParquetReadColumns::from_deduped(vec![
             ParquetReadColumn::new(0)
                 .with_nested_paths(vec![vec!["j".to_string(), "hot".to_string()]]),
         ]);
 
-        let plan = build_projection_plan(&projection, &parquet, &arrow);
+        let plan = build_projection_plan(&projection, &parquet);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [3]), plan.mask);
@@ -559,13 +538,13 @@ mod tests {
 
     #[test]
     fn test_v2_container_path_reads_remainder() -> Result<(), ParquetError> {
-        let (parquet, arrow) = build_test_v2_schemas()?;
+        let parquet = build_test_v2_schema()?;
         let projection = ParquetReadColumns::from_deduped(vec![
             ParquetReadColumn::new(0)
                 .with_nested_paths(vec![vec!["j".to_string(), "commit".to_string()]]),
         ]);
 
-        let plan = build_projection_plan(&projection, &parquet, &arrow);
+        let plan = build_projection_plan(&projection, &parquet);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [0, 1, 2]), plan.mask);
@@ -585,7 +564,7 @@ mod tests {
             )]);
 
         let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection, &Schema::empty());
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![0, 2], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -624,11 +603,7 @@ mod tests {
                 vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
             )]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet_schema_desc,
-            &build_test_json2_v1_arrow_schema(),
-        );
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(
@@ -645,11 +620,7 @@ mod tests {
                 vec![vec!["j".to_string(), "b".to_string(), "x".to_string()]],
             )]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet_schema_desc,
-            &build_test_json2_v1_arrow_schema(),
-        );
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(
@@ -669,11 +640,7 @@ mod tests {
             ParquetReadColumn::new(0).with_nested_paths(nested_paths),
         ]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet_schema_desc,
-            &build_test_json2_v1_arrow_schema(),
-        );
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(
@@ -694,11 +661,7 @@ mod tests {
             ParquetReadColumn::new(0).with_nested_paths(nested_paths),
         ]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet_schema_desc,
-            &build_test_json2_v1_arrow_schema(),
-        );
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(
@@ -715,11 +678,7 @@ mod tests {
                 vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
             )]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet_schema_desc,
-            &build_test_json2_v1_arrow_schema(),
-        );
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(
@@ -736,7 +695,7 @@ mod tests {
                 vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
             )]);
 
-        let plan = build_projection_plan(&projection, &parquet_schema_desc, &Schema::empty());
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![false], plan.projected_root_presence);
     }
@@ -749,11 +708,7 @@ mod tests {
                 vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
             )]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet_schema_desc,
-            &build_test_json2_v1_arrow_schema(),
-        );
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![false], plan.projected_root_presence);
     }
@@ -766,11 +721,7 @@ mod tests {
                 .with_nested_paths(vec![vec!["j".to_string(), "a".to_string()]]),
         ]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet_schema_desc,
-            &build_test_json2_v1_arrow_schema(),
-        );
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![false], plan.projected_root_presence);
     }
@@ -832,13 +783,7 @@ mod tests {
         SchemaDescriptor::new(schema)
     }
 
-    fn build_test_json2_v1_arrow_schema() -> Schema {
-        let root = Field::new("j", DataType::Struct(Default::default()), true)
-            .with_extension_type(Json2ExtensionType::default());
-        Schema::new(vec![root])
-    }
-
-    fn build_test_v2_schemas() -> Result<(SchemaDescriptor, Schema), ParquetError> {
+    fn build_test_v2_schema() -> Result<SchemaDescriptor, ParquetError> {
         let metadata = Arc::new(
             Type::primitive_type_builder("metadata", parquet::basic::Type::BYTE_ARRAY)
                 .with_repetition(Repetition::REQUIRED)
@@ -880,34 +825,11 @@ mod tests {
                 .with_fields(vec![remainder, commit, hot])
                 .build()?,
         );
-        let parquet = SchemaDescriptor::new(Arc::new(
+        Ok(SchemaDescriptor::new(Arc::new(
             Type::group_type_builder("schema")
                 .with_fields(vec![root])
                 .build()?,
-        ));
-
-        let extension =
-            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default())));
-        let root = Field::new(
-            "j",
-            DataType::Struct(
-                vec![
-                    Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true)),
-                    Arc::new(Field::new(
-                        "commit",
-                        DataType::Struct(
-                            vec![Arc::new(Field::new("operation", DataType::Int64, true))].into(),
-                        ),
-                        true,
-                    )),
-                    Arc::new(Field::new("hot", DataType::Int64, true)),
-                ]
-                .into(),
-            ),
-            true,
-        )
-        .with_extension_type(extension);
-        Ok((parquet, Schema::new(vec![root])))
+        )))
     }
 
     // Test schema:

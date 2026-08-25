@@ -478,11 +478,7 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_read_cols = read_format.parquet_read_columns();
-        let projection_plan = build_projection_plan(
-            parquet_read_cols,
-            parquet_schema_desc,
-            read_format.arrow_schema(),
-        );
+        let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
         let has_nested_projection = parquet_read_cols.has_nested();
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
@@ -2579,8 +2575,7 @@ mod tests {
             ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
                 vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
             )]);
-        let projection_plan =
-            build_projection_plan(&projection, parquet_schema, batch.schema_ref());
+        let projection_plan = build_projection_plan(&projection, parquet_schema);
         assert_eq!(vec![true], projection_plan.projected_root_presence);
         assert_eq!(
             projection_plan.mask,
