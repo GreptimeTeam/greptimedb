@@ -1,0 +1,21 @@
+tests-integration/src/grpc/flight.rs
+  s_aa353de59809cc::t_517c0a01a9bebe 449-456
+src/flow/src/batching_mode/frontend_client.rs
+  s_aa353de59809cc::t_517c0a01a9bebe 368-373
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "1242ccb904513293d1abe1664b6958318e5d2085",
+  "prompts": {},
+  "sessions": {
+    "s_aa353de59809cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a037e5-dc74-7ce3-b341-3c26620c3721",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
