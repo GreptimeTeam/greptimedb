@@ -208,6 +208,9 @@ enable = true
 experimental_enable_exponential_histogram = false
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
+## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
+## resource attributes, so metrics-only services reach the semantic graph.
+experimental_enable_resource_info = false
 
 ## Prometheus remote storage options
 [prom_store]

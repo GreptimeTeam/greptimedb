@@ -98,6 +98,10 @@ pub const SEMANTIC_ENTITY_SERVICE_ID: &str = "greptime.semantic.entity.service.i
 /// ([`has_stable_string_form`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityRole {
+    /// Identifying columns. Their **order is part of the identity**: the
+    /// entity id is their values joined in the declared order, so two tables
+    /// naming the same entity must list them the same way (broad to narrow)
+    /// or they name two entities.
     Id,
     Descriptive,
     Scope,
