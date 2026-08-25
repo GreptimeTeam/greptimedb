@@ -77,6 +77,8 @@ struct WriterConfig {
     data_page_size_limit: Option<usize>,
     data_page_row_count_limit: Option<usize>,
     dictionary_page_size_limit: Option<usize>,
+    column_index_truncate_length: Option<usize>,
+    statistics_truncate_length: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,6 +191,15 @@ impl ParquetRewriteCommand {
 }
 
 fn infer_rewrite_properties(metadata: &ParquetMetaData) -> RewriteProperties {
+    let is_greptime_sst = metadata
+        .file_metadata()
+        .key_value_metadata()
+        .is_some_and(|key_values| {
+            key_values
+                .iter()
+                .any(|key_value| key_value.key == mito2::sst::parquet::PARQUET_METADATA_KEY)
+        });
+    let truncate_length = is_greptime_sst.then_some(0);
     let first_column = metadata
         .row_groups()
         .first()
@@ -234,6 +245,8 @@ fn infer_rewrite_properties(metadata: &ParquetMetaData) -> RewriteProperties {
             data_page_size_limit: None,
             data_page_row_count_limit: None,
             dictionary_page_size_limit: None,
+            column_index_truncate_length: truncate_length,
+            statistics_truncate_length: truncate_length,
         },
         columns,
     }
@@ -286,6 +299,16 @@ fn build_writer_properties(
     }
     if let Some(dictionary_page_size_limit) = config.writer.dictionary_page_size_limit {
         builder = builder.set_dictionary_page_size_limit(dictionary_page_size_limit);
+    }
+    if let Some(column_index_truncate_length) = config.writer.column_index_truncate_length {
+        builder = builder.set_column_index_truncate_length(
+            (column_index_truncate_length > 0).then_some(column_index_truncate_length),
+        );
+    }
+    if let Some(statistics_truncate_length) = config.writer.statistics_truncate_length {
+        builder = builder.set_statistics_truncate_length(
+            (statistics_truncate_length > 0).then_some(statistics_truncate_length),
+        );
     }
 
     for column in config.columns {
@@ -492,7 +515,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let input = dir.path().join("input.parquet");
         let output = dir.path().join("output.parquet");
-        write_test_parquet(&input, true);
+        write_test_parquet(&input, true, Some("greptime:test"));
 
         let metadata = load_local_parquet_metadata(&input).unwrap();
         let mut properties = infer_rewrite_properties(&metadata);
@@ -529,6 +552,37 @@ mod tests {
     }
 
     #[test]
+    fn test_infer_truncation_settings_for_greptime_sst() {
+        let dir = tempdir().unwrap();
+        let greptime_sst = dir.path().join("greptime.parquet");
+        let generic_parquet = dir.path().join("generic.parquet");
+        write_test_parquet(
+            &greptime_sst,
+            true,
+            Some(mito2::sst::parquet::PARQUET_METADATA_KEY),
+        );
+        write_test_parquet(&generic_parquet, true, None);
+
+        let metadata = load_local_parquet_metadata(&greptime_sst).unwrap();
+        let config = infer_rewrite_properties(&metadata);
+        assert_eq!(Some(0), config.writer.column_index_truncate_length);
+        assert_eq!(Some(0), config.writer.statistics_truncate_length);
+
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("column_index_truncate_length = 0"));
+        assert!(serialized.contains("statistics_truncate_length = 0"));
+
+        let properties = build_writer_properties(config, None).unwrap();
+        assert_eq!(None, properties.column_index_truncate_length());
+        assert_eq!(None, properties.statistics_truncate_length());
+
+        let metadata = load_local_parquet_metadata(&generic_parquet).unwrap();
+        let config = infer_rewrite_properties(&metadata);
+        assert_eq!(None, config.writer.column_index_truncate_length);
+        assert_eq!(None, config.writer.statistics_truncate_length);
+    }
+
+    #[test]
     fn test_column_compression_level_inherits_writer_compression() {
         let path = ColumnPath::new(vec!["host".to_string()]);
         let config = RewriteProperties {
@@ -551,7 +605,7 @@ mod tests {
         );
     }
 
-    fn write_test_parquet(path: &Path, dictionary_enabled: bool) {
+    fn write_test_parquet(path: &Path, dictionary_enabled: bool, metadata_key: Option<&str>) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("host", DataType::Utf8, false),
@@ -564,12 +618,11 @@ mod tests {
             ],
         )
         .unwrap();
+        let key_value_metadata =
+            metadata_key.map(|key| vec![KeyValue::new(key.to_string(), "value".to_string())]);
         let props = WriterProperties::builder()
             .set_dictionary_enabled(dictionary_enabled)
-            .set_key_value_metadata(Some(vec![KeyValue::new(
-                "greptime:test".to_string(),
-                "value".to_string(),
-            )]))
+            .set_key_value_metadata(key_value_metadata)
             .build();
         let mut writer =
             ArrowWriter::try_new(File::create(path).unwrap(), schema, Some(props)).unwrap();

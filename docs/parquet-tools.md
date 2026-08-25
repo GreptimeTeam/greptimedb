@@ -89,7 +89,9 @@ Supported compression names are `uncompressed`, `snappy`, `gzip`, `lzo`,
 
 The `[writer]` table also accepts `compression_level`,
 `data_page_size_limit`, `data_page_row_count_limit`, and
-`dictionary_page_size_limit`. A `[[columns]]` entry overrides dictionary,
+`dictionary_page_size_limit`. It also accepts
+`column_index_truncate_length` and `statistics_truncate_length`; set either to
+zero to disable that truncation. A `[[columns]]` entry overrides dictionary,
 compression, compression level, or encoding for its column path. Unknown TOML
 fields are rejected. Compression levels are supported for `gzip`, `brotli`, and
 `zstd`. A column-level `compression_level` without `compression` inherits the
