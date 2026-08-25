@@ -62,6 +62,38 @@ ALTER TABLE ts_widen MODIFY COLUMN ts STRING;
 
 DROP TABLE ts_widen;
 
+-- Regression: predicates must filter old-unit SST rows exactly after the
+-- widen. The fixture stores ten rows in one row group (one SST, flushed in
+-- the old millisecond unit), so any predicate that matches only a subset of
+-- the rows exposes an over-inclusive scan that returns whole row groups.
+CREATE TABLE ts_widen_multi (host STRING, ts TIMESTAMP TIME INDEX);
+INSERT INTO ts_widen_multi VALUES
+  ("a", "2024-01-01 00:00:00"), ("b", "2024-01-01 00:00:01"),
+  ("c", "2024-01-01 00:00:02"), ("d", "2024-01-01 00:00:03"),
+  ("e", "2024-01-01 00:00:04"), ("f", "2024-01-01 00:00:05"),
+  ("g", "2024-01-01 00:00:06"), ("h", "2024-01-01 00:00:07"),
+  ("i", "2024-01-01 00:00:08"), ("j", "2024-01-01 00:00:09");
+
+-- force the rows into an SST written in the old (millisecond) unit
+ADMIN FLUSH_TABLE('ts_widen_multi');
+
+ALTER TABLE ts_widen_multi MODIFY COLUMN ts TIMESTAMP_US;
+
+-- equality on the widened time index returns exactly one old-unit row
+SELECT * FROM ts_widen_multi WHERE ts = '2024-01-01 00:00:07' ORDER BY ts;
+
+SELECT * FROM ts_widen_multi WHERE ts != '2024-01-01 00:00:07' ORDER BY ts;
+
+-- boundaries strictly between the stored seconds
+SELECT * FROM ts_widen_multi WHERE ts > '2024-01-01 00:00:06.5' ORDER BY ts;
+
+SELECT * FROM ts_widen_multi WHERE ts <= '2024-01-01 00:00:05.0005' ORDER BY ts;
+
+-- an IN-list literal that no millisecond row can equal matches nothing
+SELECT * FROM ts_widen_multi WHERE ts IN ('2024-01-01 00:00:02', '2024-01-01 00:00:05.5', '2024-01-01 00:00:08') ORDER BY ts;
+
+DROP TABLE ts_widen_multi;
+
 CREATE TABLE ts_widen_part (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX)
 PARTITION ON COLUMNS (ts) (
   ts < '2024-01-02 00:00:00',
