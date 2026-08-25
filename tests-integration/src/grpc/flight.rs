@@ -446,16 +446,14 @@ mod test {
         );
 
         let result = client
-            .query_with_terminal_metrics_and_flow_extensions(
-                QueryRequest {
-                    query: Some(Query::Sql(
-                        "select ts, a, `B` from foo order by ts".to_string(),
-                    )),
-                },
-                &[],
-                &[("flow.return_region_seq", "true")],
-                &HashMap::from([(region_id.as_u64(), stale_snapshot_seq)]),
-            )
+            .flight_request()
+            .with_flow_extensions(&[("flow.return_region_seq", "true")])
+            .with_snapshot_seqs(&HashMap::from([(region_id.as_u64(), stale_snapshot_seq)]))
+            .query_with_terminal_metrics(QueryRequest {
+                query: Some(Query::Sql(
+                    "select ts, a, `B` from foo order by ts".to_string(),
+                )),
+            })
             .await
             .unwrap();
 

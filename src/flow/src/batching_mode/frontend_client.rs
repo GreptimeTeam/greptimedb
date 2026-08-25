@@ -365,12 +365,12 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
                 db.database
-                    .query_with_terminal_metrics_and_flow_extensions(
-                        request,
-                        &hints,
-                        extensions,
-                        snapshot_seqs,
-                    )
+                    .flight_request()
+                    .with_hints(&hints)
+                    .with_flow_extensions(extensions)
+                    .with_snapshot_seqs(snapshot_seqs)
+                    .with_timeout(batch_opts.query_timeout)
+                    .query_with_terminal_metrics(request)
                     .await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)

@@ -742,25 +742,6 @@ impl Database {
         self.flight_request().logical_plan(logical_plan).await
     }
 
-    /// Executes a query and carries flow extensions through Flight metadata.
-    ///
-    /// This is the lower-level terminal-metrics API for Flow callers that need
-    /// to pass JSON-bearing flow extensions without going through hint metadata.
-    pub async fn query_with_terminal_metrics_and_flow_extensions(
-        &self,
-        request: QueryRequest,
-        hints: &[(&str, &str)],
-        flow_extensions: &[(&str, &str)],
-        snapshot_seqs: &std::collections::HashMap<u64, u64>,
-    ) -> Result<OutputWithMetrics> {
-        self.flight_request()
-            .with_hints(hints)
-            .with_flow_extensions(flow_extensions)
-            .with_snapshot_seqs(snapshot_seqs)
-            .query_with_terminal_metrics(request)
-            .await
-    }
-
     /// Creates a new table using the provided table expression.
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
         self.flight_request().create(expr).await
