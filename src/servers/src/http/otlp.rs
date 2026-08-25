@@ -46,7 +46,9 @@ use crate::http::extractor::{
 };
 use crate::http::header::{CONTENT_TYPE_PROTOBUF, write_cost_header_map};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
-use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler, TraceIngestOutcome};
+use crate::query_handler::{
+    MetricsIngestOutcome, OpenTelemetryProtocolHandlerRef, PipelineHandler, TraceIngestOutcome,
+};
 
 #[derive(Clone, prost::Message)]
 pub struct GoogleRpcStatus {
@@ -75,6 +77,7 @@ fn content_type_to_string(content_type: Option<&TypedHeader<ContentType>>) -> St
 #[derive(Clone)]
 pub struct OtlpState {
     pub with_metric_engine: bool,
+    pub experimental_enable_exponential_histogram: bool,
     pub handler: OpenTelemetryProtocolHandlerRef,
 }
 
@@ -86,7 +89,7 @@ pub async fn metrics(
     http_opts: OtlpMetricOptions,
     content_type: Option<TypedHeader<ContentType>>,
     bytes: Bytes,
-) -> Result<OtlpResponse<ExportMetricsServiceResponse>> {
+) -> Result<OtlpMetricsResponse> {
     if is_json_content_type(content_type.as_ref().map(|h| &h.0)) {
         return error::UnsupportedJsonContentTypeSnafu {}.fail();
     }
@@ -105,6 +108,7 @@ pub async fn metrics(
 
     let OtlpState {
         with_metric_engine,
+        experimental_enable_exponential_histogram,
         handler,
     } = state;
 
@@ -113,6 +117,7 @@ pub async fn metrics(
         resource_attrs: http_opts.resource_attrs,
         promote_scope_attrs: http_opts.promote_scope_attrs,
         with_metric_engine,
+        experimental_enable_exponential_histogram,
         // set by the frontend from its config
         is_legacy: false,
         resource_info: false,
@@ -121,20 +126,15 @@ pub async fn metrics(
     }));
     let query_ctx = Arc::new(query_ctx);
 
-    handler
-        .metrics(request, query_ctx)
-        .await
-        .map(|o| OtlpResponse {
-            resp_body: ExportMetricsServiceResponse {
-                // rejected_data_points = 0: all metric data was accepted, the
-                // message only carries a derived-write warning.
-                partial_success: o.warning.map(|error_message| ExportMetricsPartialSuccess {
-                    rejected_data_points: 0,
-                    error_message,
-                }),
-            },
-            write_cost: o.output.meta.cost,
-        })
+    handler.metrics(request, query_ctx).await.map(|outcome| {
+        if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
+            OtlpMetricsResponse::Failure(outcome)
+        } else if outcome.rejected_data_points > 0 || outcome.error_message.is_some() {
+            OtlpMetricsResponse::PartialSuccess(outcome)
+        } else {
+            OtlpMetricsResponse::FullSuccess(outcome)
+        }
+    })
 }
 
 #[axum_macros::debug_handler]
@@ -265,6 +265,50 @@ pub async fn logs(
 pub struct OtlpResponse<T: Message> {
     resp_body: T,
     write_cost: usize,
+}
+
+pub enum OtlpMetricsResponse {
+    FullSuccess(MetricsIngestOutcome),
+    PartialSuccess(MetricsIngestOutcome),
+    Failure(MetricsIngestOutcome),
+}
+
+impl IntoResponse for OtlpMetricsResponse {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            OtlpMetricsResponse::FullSuccess(outcome) => {
+                let mut header_map = write_cost_header_map(outcome.write_cost);
+                header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
+                let body = ExportMetricsServiceResponse {
+                    partial_success: None,
+                };
+                (header_map, body.encode_to_vec()).into_response()
+            }
+            OtlpMetricsResponse::PartialSuccess(outcome) => {
+                let mut header_map = write_cost_header_map(outcome.write_cost);
+                header_map.insert(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.clone());
+                let body = ExportMetricsServiceResponse {
+                    partial_success: Some(ExportMetricsPartialSuccess {
+                        rejected_data_points: outcome.rejected_data_points,
+                        error_message: outcome.error_message.unwrap_or_default(),
+                    }),
+                };
+                (header_map, body.encode_to_vec()).into_response()
+            }
+            OtlpMetricsResponse::Failure(outcome) => {
+                let status = GoogleRpcStatus {
+                    code: tonic::Code::InvalidArgument as i32,
+                    message: outcome.error_message.unwrap_or_default(),
+                };
+                (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, CONTENT_TYPE_PROTOBUF.as_ref())],
+                    status.encode_to_vec(),
+                )
+                    .into_response()
+            }
+        }
+    }
 }
 
 impl<T: Message> IntoResponse for OtlpResponse<T> {

@@ -78,7 +78,7 @@ impl SerializerRegistry for ExtensionSerializer {
                     .as_any()
                     .downcast_ref::<HistogramFold>()
                     .expect("Failed to downcast to HistogramFold");
-                Ok(histogram_fold.serialize())
+                histogram_fold.serialize()
             }
             name if name == UnionDistinctOn::name() => {
                 let union_distinct_on = node

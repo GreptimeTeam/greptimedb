@@ -218,7 +218,9 @@ mod tests {
     fn test_toml() {
         let opts = FrontendOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+        assert!(toml_string.contains("experimental_enable_exponential_histogram = false"));
+        let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed.otlp, opts.otlp);
     }
 
     #[test]

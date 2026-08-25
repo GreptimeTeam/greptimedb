@@ -45,15 +45,13 @@ use crate::error::{
     DecodeSnafu, InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, OpenDalSnafu,
     Result, UnexpectedSnafu, WriteParquetSnafu,
 };
+use crate::series_index::{
+    MAX_TS_COLUMN, MIN_TS_COLUMN, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN,
+};
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
-const MIN_TS_COLUMN: &str = "__series_min_ts";
-const MAX_TS_COLUMN: &str = "__series_max_ts";
-const ROW_COUNT_COLUMN: &str = "__series_row_count";
-const TABLE_ID_COLUMN: &str = "__table_id";
-const TSID_COLUMN: &str = "__tsid";
 const WRITE_BATCH_SIZE: usize = 1024;
 
 type ParquetWriter = AsyncArrowWriter<AsyncWriter>;

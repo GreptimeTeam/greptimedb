@@ -780,7 +780,9 @@ mod tests {
             OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc())
                 .await
                 .unwrap();
-        let warning = outcome.warning.expect("denial must surface as a warning");
+        let warning = outcome
+            .error_message
+            .expect("denial must surface as a warning");
         assert!(
             warning.contains("greptime_otel_resource_info"),
             "unexpected warning: {warning}"

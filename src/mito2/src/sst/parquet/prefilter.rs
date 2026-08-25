@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use datafusion_expr::Expr;
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::datatypes::SchemaRef;
@@ -272,15 +273,9 @@ pub(crate) fn build_primary_key_filter(
     expected_metadata: Option<&RegionMetadata>,
     predicate: Option<&Predicate>,
 ) -> Option<CachedPrimaryKeyFilter> {
-    let filters = predicate
+    let filters = simple_tag_filters(sst_metadata, expected_metadata, predicate)
         .into_iter()
-        .flat_map(|predicate| predicate.exprs())
-        .filter_map(|expr| SimpleFilterContext::new_opt(sst_metadata, expected_metadata, expr))
-        .filter_map(|filter_ctx| {
-            (filter_ctx.semantic_type() == SemanticType::Tag)
-                .then(|| filter_ctx.filter().as_filter().cloned())
-                .flatten()
-        })
+        .map(|(_, filter)| filter)
         .collect::<Vec<_>>();
     if filters.is_empty() {
         return None;
@@ -289,6 +284,33 @@ pub(crate) fn build_primary_key_filter(
     let codec = build_primary_key_codec(sst_metadata.as_ref());
     let filter = codec.primary_key_filter(sst_metadata, Arc::new(filters));
     Some(CachedPrimaryKeyFilter::new(filter))
+}
+
+/// Extracts simple tag filters that can be applied to encoded primary keys or series indexes.
+pub(crate) fn simple_tag_filters(
+    sst_metadata: &RegionMetadataRef,
+    expected_metadata: Option<&RegionMetadata>,
+    predicate: Option<&Predicate>,
+) -> Vec<(Expr, SimpleFilterEvaluator)> {
+    predicate
+        .into_iter()
+        .flat_map(|predicate| predicate.exprs())
+        .filter_map(|expr| {
+            SimpleFilterContext::new_opt(sst_metadata, expected_metadata, expr)
+                .map(|filter_ctx| (expr, filter_ctx))
+        })
+        .filter_map(|(expr, filter_ctx)| {
+            (filter_ctx.semantic_type() == SemanticType::Tag)
+                .then(|| {
+                    filter_ctx
+                        .filter()
+                        .as_filter()
+                        .cloned()
+                        .map(|filter| (expr.clone(), filter))
+                })
+                .flatten()
+        })
+        .collect()
 }
 
 /// How the parquet reader should apply each predicate.

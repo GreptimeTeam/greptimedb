@@ -82,7 +82,12 @@ pub struct ResourceInfoData {
 
 impl ResourceInfoData {
     /// Takes the raw attributes, before the promote filter runs on them.
-    pub fn observe(&mut self, raw_attrs: &[KeyValue], resource: &ResourceMetrics) {
+    pub fn observe(
+        &mut self,
+        raw_attrs: &[KeyValue],
+        resource: &ResourceMetrics,
+        exponential_histograms: bool,
+    ) {
         let mut tags = Vec::with_capacity(MAX_PROJECTED_TAGS);
         let ServiceIdentity { job, instance } = service_identity(raw_attrs);
         if let Some(job) = job {
@@ -106,7 +111,7 @@ impl ResourceInfoData {
         tags.sort_unstable();
 
         let mut observed: BTreeMap<i64, i64> = BTreeMap::new();
-        for_each_encoded_time(resource, |ts| {
+        for_each_encoded_time(resource, exponential_histograms, |ts| {
             let window = ts - ts.rem_euclid(SEMANTIC_GRAPH_WINDOW_NANOS);
             observed
                 .entry(window)
@@ -161,10 +166,13 @@ impl ResourceInfoData {
 }
 
 /// Visits the times of the data points the encoder writes rows for, so a
-/// resource is described exactly where it is measured. Exponential histograms
-/// are excluded: [`super::encode_metrics`] drops them, and describing a
-/// resource whose only data was dropped would invent an entity out of nothing.
-fn for_each_encoded_time(resource: &ResourceMetrics, mut visit: impl FnMut(i64)) {
+/// resource is described exactly where it is measured rather than wherever
+/// its request happens to reach.
+fn for_each_encoded_time(
+    resource: &ResourceMetrics,
+    exponential_histograms: bool,
+    mut visit: impl FnMut(i64),
+) {
     let mut visit_all = |points: &mut dyn Iterator<Item = u64>| {
         for ts in points {
             visit(ts as i64);
@@ -184,6 +192,9 @@ fn for_each_encoded_time(resource: &ResourceMetrics, mut visit: impl FnMut(i64))
                 }
                 Some(metric::Data::Summary(s)) => {
                     visit_all(&mut s.data_points.iter().map(|p| p.time_unix_nano))
+                }
+                Some(metric::Data::ExponentialHistogram(h)) if exponential_histograms => {
+                    visit_all(&mut h.data_points.iter().map(|p| p.time_unix_nano))
                 }
                 Some(metric::Data::ExponentialHistogram(_)) | None => {}
             }
@@ -244,7 +255,7 @@ mod tests {
             kv("host.id", "h-1"),
             kv("os.type", "linux"),
         ];
-        data.observe(&attrs, &gauge_at(&[100, 50]));
+        data.observe(&attrs, &gauge_at(&[100, 50]), false);
         assert_eq!(data.rows.len(), 1);
         let (tags, windows) = data.rows.iter().next().unwrap();
         assert_eq!(windows.values().copied().collect::<Vec<_>>(), vec![100]);
@@ -256,11 +267,11 @@ mod tests {
                 .all(|(k, _)| k != "os.type" && k != "service.instance.id")
         );
 
-        data.observe(&[kv("host.id", "h-2")], &gauge_at(&[10]));
+        data.observe(&[kv("host.id", "h-2")], &gauge_at(&[10]), false);
         assert_eq!(data.rows.len(), 2);
 
         let mut empty = ResourceInfoData::default();
-        empty.observe(&[kv("os.type", "linux")], &gauge_at(&[100]));
+        empty.observe(&[kv("os.type", "linux")], &gauge_at(&[100]), false);
         assert!(empty.into_row_insert_requests().unwrap().is_none());
     }
 
@@ -272,6 +283,7 @@ mod tests {
         data.observe(
             &[kv("service.name", "api")],
             &gauge_at(&[window + 1, window + 2, 3 * window + 7]),
+            false,
         );
 
         let windows = data.rows.values().next().unwrap();
@@ -302,7 +314,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        data.observe(&[kv("service.name", "api")], &dropped);
+        data.observe(&[kv("service.name", "api")], &dropped, false);
         assert!(data.into_row_insert_requests().unwrap().is_none());
     }
 
@@ -313,6 +325,7 @@ mod tests {
         data.observe(
             &[kv("service.name", "api"), kv("host.id", "h-1")],
             &gauge_at(&[1_700_000_000_123_456_789]),
+            false,
         );
         let requests = data.into_row_insert_requests().unwrap().unwrap();
         assert_eq!(requests.inserts.len(), 1);

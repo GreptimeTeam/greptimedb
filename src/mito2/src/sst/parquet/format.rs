@@ -36,7 +36,7 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{
     ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, UInt64Array,
 };
-use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::types::json_type::JsonNativeType;
@@ -136,12 +136,22 @@ pub(crate) fn column_values(
     column_index: usize,
     is_min: bool,
 ) -> Option<ArrayRef> {
-    let null_scalar: ScalarValue = column
-        .column_schema
-        .data_type
-        .as_arrow_type()
-        .try_into()
-        .ok()?;
+    column_values_by_type(
+        row_groups,
+        &column.column_schema.data_type.as_arrow_type(),
+        column_index,
+        is_min,
+    )
+}
+
+/// Returns min/max values of a parquet column with the given Arrow data type.
+pub(crate) fn column_values_by_type(
+    row_groups: &[impl Borrow<RowGroupMetaData>],
+    data_type: &ArrowDataType,
+    column_index: usize,
+    is_min: bool,
+) -> Option<ArrayRef> {
+    let null_scalar: ScalarValue = data_type.try_into().ok()?;
     let scalar_values = row_groups
         .iter()
         .map(|meta| {
@@ -152,16 +162,22 @@ pub(crate) fn column_values(
                 } else {
                     *s.max_opt()?
                 }))),
-                Statistics::Int32(s) => Some(ScalarValue::Int32(Some(if is_min {
-                    *s.min_opt()?
-                } else {
-                    *s.max_opt()?
-                }))),
-                Statistics::Int64(s) => Some(ScalarValue::Int64(Some(if is_min {
-                    *s.min_opt()?
-                } else {
-                    *s.max_opt()?
-                }))),
+                Statistics::Int32(s) => {
+                    let value = if is_min { *s.min_opt()? } else { *s.max_opt()? };
+                    if data_type == &ArrowDataType::UInt32 {
+                        Some(ScalarValue::UInt32(Some(value as u32)))
+                    } else {
+                        Some(ScalarValue::Int32(Some(value)))
+                    }
+                }
+                Statistics::Int64(s) => {
+                    let value = if is_min { *s.min_opt()? } else { *s.max_opt()? };
+                    if data_type == &ArrowDataType::UInt64 {
+                        Some(ScalarValue::UInt64(Some(value as u64)))
+                    } else {
+                        Some(ScalarValue::Int64(Some(value)))
+                    }
+                }
                 Statistics::Int96(_) => None,
                 Statistics::Float(s) => Some(ScalarValue::Float32(Some(if is_min {
                     *s.min_opt()?
