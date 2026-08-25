@@ -21,9 +21,8 @@ use std::collections::BinaryHeap;
 use bytes::{Buf, Bytes};
 use common_base::BitVec;
 use common_time::Timestamp;
-use smallvec::{SmallVec, smallvec};
 
-use crate::sst::file::{FileHandle, RegionFileId};
+use crate::sst::file::FileHandle;
 
 /// Trait for any items with specific range (both boundaries are inclusive).
 pub trait Ranged {
@@ -148,71 +147,11 @@ pub trait Item: Ranged + Clone {
     fn size(&self) -> usize;
 }
 
-/// A group of files that are created by the same compaction task.
-#[derive(Debug, Clone)]
-pub struct FileGroup {
-    files: SmallVec<[FileHandle; 2]>,
-    size: usize,
-    num_rows: usize,
-    min_timestamp: Timestamp,
-    max_timestamp: Timestamp,
-    primary_key_range: Option<(Bytes, Bytes)>,
-}
-
-impl FileGroup {
-    pub(crate) fn new_with_file(file: FileHandle) -> Self {
-        let size = file.size() as usize;
-        let (min_timestamp, max_timestamp) = file.time_range();
-        let num_rows = file.num_rows();
-        let primary_key_range = file.primary_key_range();
-        Self {
-            files: smallvec![file],
-            size,
-            num_rows,
-            min_timestamp,
-            max_timestamp,
-            primary_key_range,
-        }
-    }
-
-    pub(crate) fn num_rows(&self) -> usize {
-        self.num_rows
-    }
-
-    pub(crate) fn add_file(&mut self, file: FileHandle) {
-        self.size += file.size() as usize;
-        self.num_rows += file.num_rows();
-        let (min_timestamp, max_timestamp) = file.time_range();
-        self.min_timestamp = self.min_timestamp.min(min_timestamp);
-        self.max_timestamp = self.max_timestamp.max(max_timestamp);
-        self.primary_key_range =
-            merge_primary_key_ranges(self.primary_key_range.take(), file.primary_key_range());
-        self.files.push(file);
-    }
-
-    pub(crate) fn num_files(&self) -> usize {
-        self.files.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn files(&self) -> &[FileHandle] {
-        &self.files[..]
-    }
-
-    pub(crate) fn file_ids(&self) -> SmallVec<[RegionFileId; 2]> {
-        SmallVec::from_iter(self.files.iter().map(|f| f.file_id()))
-    }
-
-    pub(crate) fn into_files(self) -> impl Iterator<Item = FileHandle> {
-        self.files.into_iter()
-    }
-}
-
-impl Ranged for FileGroup {
+impl Ranged for FileHandle {
     type BoundType = Timestamp;
 
     fn range(&self) -> (Self::BoundType, Self::BoundType) {
-        (self.min_timestamp, self.max_timestamp)
+        self.time_range()
     }
 
     fn overlap(&self, other: &Self) -> bool {
@@ -222,7 +161,7 @@ impl Ranged for FileGroup {
             return false;
         }
 
-        match (&self.primary_key_range, &other.primary_key_range) {
+        match (&self.primary_key_range(), &other.primary_key_range()) {
             (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(lhs, rhs),
             _ => true,
         }
@@ -235,16 +174,16 @@ impl Ranged for FileGroup {
             return false;
         }
 
-        match (&self.primary_key_range, &other.primary_key_range) {
+        match (&self.primary_key_range(), &other.primary_key_range()) {
             (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(lhs, rhs),
             _ => true,
         }
     }
 }
 
-impl Item for FileGroup {
+impl Item for FileHandle {
     fn size(&self) -> usize {
-        self.size
+        self.size() as usize
     }
 }
 
@@ -814,27 +753,25 @@ mod tests {
     }
 
     #[test]
-    fn test_file_group_overlap_time_overlap_pk_disjoint() {
-        let lhs =
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                0,
-                100,
-                0,
-                1,
-                10,
-                pk_range(b"a", b"f"),
-            ));
-        let rhs =
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                50,
-                150,
-                0,
-                2,
-                10,
-                pk_range(b"x", b"z"),
-            ));
+    fn test_file_overlap_time_overlap_pk_disjoint() {
+        let lhs = new_file_handle_with_size_sequence_and_primary_key_range(
+            FileId::random(),
+            0,
+            100,
+            0,
+            1,
+            10,
+            pk_range(b"a", b"f"),
+        );
+        let rhs = new_file_handle_with_size_sequence_and_primary_key_range(
+            FileId::random(),
+            50,
+            150,
+            0,
+            2,
+            10,
+            pk_range(b"x", b"z"),
+        );
 
         assert!(!lhs.overlap(&rhs));
     }
@@ -842,7 +779,7 @@ mod tests {
     #[test]
     fn test_find_sorted_runs_collapses_pk_disjoint_files_into_one_run() {
         let mut files = vec![
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
+            new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 0,
                 100,
@@ -850,8 +787,8 @@ mod tests {
                 1,
                 10,
                 pk_range(b"a", b"f"),
-            )),
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 50,
                 150,
@@ -859,7 +796,7 @@ mod tests {
                 2,
                 10,
                 pk_range(b"x", b"z"),
-            )),
+            ),
         ];
 
         let runs = find_sorted_runs(&mut files);
@@ -871,7 +808,7 @@ mod tests {
     #[test]
     fn test_find_sorted_runs_handles_2d_transitivity_break() {
         let mut files = vec![
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
+            new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 0,
                 100,
@@ -879,8 +816,8 @@ mod tests {
                 1,
                 10,
                 pk_range(b"a", b"f"),
-            )),
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 50,
                 150,
@@ -888,8 +825,8 @@ mod tests {
                 2,
                 10,
                 pk_range(b"x", b"z"),
-            )),
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
+            ),
+            new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 50,
                 150,
@@ -897,7 +834,7 @@ mod tests {
                 3,
                 10,
                 pk_range(b"a", b"f"),
-            )),
+            ),
         ];
 
         let runs = find_sorted_runs(&mut files);
@@ -909,7 +846,7 @@ mod tests {
 
     #[test]
     fn test_find_overlapping_items_skips_pk_disjoint_pairs() {
-        let mut left = SortedRun::from(vec![FileGroup::new_with_file(
+        let mut left = SortedRun::from(vec![
             new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 0,
@@ -919,8 +856,8 @@ mod tests {
                 10,
                 pk_range(b"a", b"f"),
             ),
-        )]);
-        let mut right = SortedRun::from(vec![FileGroup::new_with_file(
+        ]);
+        let mut right = SortedRun::from(vec![
             new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 50,
@@ -930,7 +867,7 @@ mod tests {
                 10,
                 pk_range(b"x", b"z"),
             ),
-        )]);
+        ]);
         let mut result = Vec::new();
 
         find_overlapping_items(&mut left, &mut right, &mut result);
@@ -939,27 +876,25 @@ mod tests {
     }
 
     #[test]
-    fn test_file_group_touching_time_boundary_with_same_pk_is_not_overlap() {
-        let lhs =
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                0,
-                100,
-                0,
-                1,
-                10,
-                pk_range(b"a", b"f"),
-            ));
-        let rhs =
-            FileGroup::new_with_file(new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
-                100,
-                150,
-                0,
-                2,
-                10,
-                pk_range(b"a", b"f"),
-            ));
+    fn test_file_touching_time_boundary_with_same_pk_is_not_overlap() {
+        let lhs = new_file_handle_with_size_sequence_and_primary_key_range(
+            FileId::random(),
+            0,
+            100,
+            0,
+            1,
+            10,
+            pk_range(b"a", b"f"),
+        );
+        let rhs = new_file_handle_with_size_sequence_and_primary_key_range(
+            FileId::random(),
+            100,
+            150,
+            0,
+            2,
+            10,
+            pk_range(b"a", b"f"),
+        );
 
         assert!(!lhs.overlap(&rhs));
     }
