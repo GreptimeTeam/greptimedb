@@ -28,10 +28,12 @@ use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue;
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{ResourceMetrics, metric};
+use session::protocol_ctx::OtlpMetricCtx;
 
 use crate::error::Result;
 use crate::otlp::metrics::{
-    INSTANCE_KEY, JOB_KEY, ServiceIdentity, scalar_value_string, service_identity,
+    INSTANCE_KEY, JOB_KEY, ServiceIdentity, exponential_histogram_gate,
+    exponential_histogram_value, scalar_value_string, service_identity,
 };
 use crate::otlp::trace::{
     KEY_CONTAINER_ID, KEY_CONTAINER_NAME, KEY_HOST_ID, KEY_HOST_NAME, KEY_K8S_NAMESPACE_NAME,
@@ -86,7 +88,7 @@ impl ResourceInfoData {
         &mut self,
         raw_attrs: &[KeyValue],
         resource: &ResourceMetrics,
-        exponential_histograms: bool,
+        metric_ctx: &OtlpMetricCtx,
     ) {
         let mut tags = Vec::with_capacity(MAX_PROJECTED_TAGS);
         let ServiceIdentity { job, instance } = service_identity(raw_attrs);
@@ -111,7 +113,7 @@ impl ResourceInfoData {
         tags.sort_unstable();
 
         let mut observed: BTreeMap<i64, i64> = BTreeMap::new();
-        for_each_encoded_time(resource, exponential_histograms, |ts| {
+        for_each_encoded_time(resource, metric_ctx, |ts| {
             let window = ts - ts.rem_euclid(SEMANTIC_GRAPH_WINDOW_NANOS);
             observed
                 .entry(window)
@@ -170,33 +172,40 @@ impl ResourceInfoData {
 /// its request happens to reach.
 fn for_each_encoded_time(
     resource: &ResourceMetrics,
-    exponential_histograms: bool,
+    metric_ctx: &OtlpMetricCtx,
     mut visit: impl FnMut(i64),
 ) {
-    let mut visit_all = |points: &mut dyn Iterator<Item = u64>| {
+    fn visit_all(points: impl Iterator<Item = u64>, visit: &mut impl FnMut(i64)) {
         for ts in points {
             visit(ts as i64);
         }
-    };
+    }
     for scope in &resource.scope_metrics {
         for m in &scope.metrics {
             match &m.data {
                 Some(metric::Data::Gauge(g)) => {
-                    visit_all(&mut g.data_points.iter().map(|p| p.time_unix_nano))
+                    visit_all(g.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
                 }
                 Some(metric::Data::Sum(s)) => {
-                    visit_all(&mut s.data_points.iter().map(|p| p.time_unix_nano))
+                    visit_all(s.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
                 }
                 Some(metric::Data::Histogram(h)) => {
-                    visit_all(&mut h.data_points.iter().map(|p| p.time_unix_nano))
+                    visit_all(h.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
                 }
                 Some(metric::Data::Summary(s)) => {
-                    visit_all(&mut s.data_points.iter().map(|p| p.time_unix_nano))
+                    visit_all(s.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
                 }
-                Some(metric::Data::ExponentialHistogram(h)) if exponential_histograms => {
-                    visit_all(&mut h.data_points.iter().map(|p| p.time_unix_nano))
+                Some(metric::Data::ExponentialHistogram(h))
+                    if exponential_histogram_gate(h, metric_ctx).is_ok() =>
+                {
+                    for point in &h.data_points {
+                        if let Ok((_, ts)) = exponential_histogram_value(point) {
+                            visit(ts);
+                        }
+                    }
                 }
-                Some(metric::Data::ExponentialHistogram(_)) | None => {}
+                Some(metric::Data::ExponentialHistogram(_)) => {}
+                None => {}
             }
         }
     }
@@ -209,8 +218,8 @@ mod tests {
     use common_query::prelude::set_default_prefix;
     use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, any_value};
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
-        ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Metric, NumberDataPoint,
-        ScopeMetrics,
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Metric,
+        NumberDataPoint, ScopeMetrics,
     };
 
     use super::*;
@@ -255,7 +264,7 @@ mod tests {
             kv("host.id", "h-1"),
             kv("os.type", "linux"),
         ];
-        data.observe(&attrs, &gauge_at(&[100, 50]), false);
+        data.observe(&attrs, &gauge_at(&[100, 50]), &OtlpMetricCtx::default());
         assert_eq!(data.rows.len(), 1);
         let (tags, windows) = data.rows.iter().next().unwrap();
         assert_eq!(windows.values().copied().collect::<Vec<_>>(), vec![100]);
@@ -267,11 +276,19 @@ mod tests {
                 .all(|(k, _)| k != "os.type" && k != "service.instance.id")
         );
 
-        data.observe(&[kv("host.id", "h-2")], &gauge_at(&[10]), false);
+        data.observe(
+            &[kv("host.id", "h-2")],
+            &gauge_at(&[10]),
+            &OtlpMetricCtx::default(),
+        );
         assert_eq!(data.rows.len(), 2);
 
         let mut empty = ResourceInfoData::default();
-        empty.observe(&[kv("os.type", "linux")], &gauge_at(&[100]), false);
+        empty.observe(
+            &[kv("os.type", "linux")],
+            &gauge_at(&[100]),
+            &OtlpMetricCtx::default(),
+        );
         assert!(empty.into_row_insert_requests().unwrap().is_none());
     }
 
@@ -283,7 +300,7 @@ mod tests {
         data.observe(
             &[kv("service.name", "api")],
             &gauge_at(&[window + 1, window + 2, 3 * window + 7]),
-            false,
+            &OtlpMetricCtx::default(),
         );
 
         let windows = data.rows.values().next().unwrap();
@@ -297,8 +314,7 @@ mod tests {
     /// entity with no measurements.
     #[test]
     fn observe_ignores_data_the_encoder_drops() {
-        let mut data = ResourceInfoData::default();
-        let dropped = ResourceMetrics {
+        let exponential = |temporality: AggregationTemporality| ResourceMetrics {
             scope_metrics: vec![ScopeMetrics {
                 metrics: vec![Metric {
                     data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
@@ -306,7 +322,7 @@ mod tests {
                             time_unix_nano: 100,
                             ..Default::default()
                         }],
-                        ..Default::default()
+                        aggregation_temporality: temporality as i32,
                     })),
                     ..Default::default()
                 }],
@@ -314,8 +330,22 @@ mod tests {
             }],
             ..Default::default()
         };
-        data.observe(&[kv("service.name", "api")], &dropped, false);
-        assert!(data.into_row_insert_requests().unwrap().is_none());
+        let enabled = OtlpMetricCtx {
+            experimental_enable_exponential_histogram: true,
+            ..Default::default()
+        };
+
+        for (resource, ctx) in [
+            (
+                exponential(AggregationTemporality::Cumulative),
+                OtlpMetricCtx::default(),
+            ),
+            (exponential(AggregationTemporality::Delta), enabled),
+        ] {
+            let mut data = ResourceInfoData::default();
+            data.observe(&[kv("service.name", "api")], &resource, &ctx);
+            assert!(data.into_row_insert_requests().unwrap().is_none());
+        }
     }
 
     #[test]
@@ -325,7 +355,7 @@ mod tests {
         data.observe(
             &[kv("service.name", "api"), kv("host.id", "h-1")],
             &gauge_at(&[1_700_000_000_123_456_789]),
-            false,
+            &OtlpMetricCtx::default(),
         );
         let requests = data.into_row_insert_requests().unwrap().unwrap();
         assert_eq!(requests.inserts.len(), 1);

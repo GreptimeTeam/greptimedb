@@ -134,11 +134,7 @@ pub fn to_grpc_insert_requests(
             && !metric_ctx.is_legacy
             && let Some(r) = resource.resource.as_ref()
         {
-            resource_info.observe(
-                &r.attributes,
-                resource,
-                metric_ctx.experimental_enable_exponential_histogram,
-            );
+            resource_info.observe(&r.attributes, resource, metric_ctx);
         }
 
         let resource_attrs = resource.resource.as_ref().map(|r| {
@@ -633,33 +629,11 @@ fn encode_exponential_histogram(
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
 ) -> Result<bool> {
-    if !metric_ctx.experimental_enable_exponential_histogram {
+    if let Err(rejection) = exponential_histogram_gate(histogram, metric_ctx) {
         reject_data_points(outcome, histogram.data_points.len(), || {
-            format!(
-                "metric `{name}` uses OTLP exponential histograms; set otlp.experimental_enable_exponential_histogram = true to enable ingestion"
-            )
+            rejection.message(name)
         })?;
         return Ok(false);
-    }
-
-    match AggregationTemporality::try_from(histogram.aggregation_temporality) {
-        Ok(AggregationTemporality::Cumulative) => {}
-        Ok(AggregationTemporality::Delta) => {
-            reject_data_points(outcome, histogram.data_points.len(), || {
-                format!(
-                    "metric `{name}` uses delta OTLP exponential histograms; only cumulative temporality is supported"
-                )
-            })?;
-            return Ok(false);
-        }
-        _ => {
-            reject_data_points(outcome, histogram.data_points.len(), || {
-                format!(
-                    "metric `{name}` has unspecified OTLP exponential histogram temporality; cumulative temporality is required"
-                )
-            })?;
-            return Ok(false);
-        }
     }
 
     let column_schema = native_histogram_column_schema().map_err(|error| {
@@ -708,7 +682,46 @@ fn encode_exponential_histogram(
     Ok(emitted)
 }
 
-fn exponential_histogram_value(
+pub(crate) enum ExponentialHistogramRejection {
+    Disabled,
+    DeltaTemporality,
+    UnspecifiedTemporality,
+}
+
+impl ExponentialHistogramRejection {
+    fn message(&self, name: &str) -> String {
+        match self {
+            Self::Disabled => format!(
+                "metric `{name}` uses OTLP exponential histograms; set otlp.experimental_enable_exponential_histogram = true to enable ingestion"
+            ),
+            Self::DeltaTemporality => format!(
+                "metric `{name}` uses delta OTLP exponential histograms; only cumulative temporality is supported"
+            ),
+            Self::UnspecifiedTemporality => format!(
+                "metric `{name}` has unspecified OTLP exponential histogram temporality; cumulative temporality is required"
+            ),
+        }
+    }
+}
+
+/// Whole-metric acceptance, decided once for the encoder and for the resource
+/// descriptor, which must not describe a resource whose data was rejected.
+/// Individual points can still fail [`exponential_histogram_value`].
+pub(crate) fn exponential_histogram_gate(
+    histogram: &ExponentialHistogram,
+    metric_ctx: &OtlpMetricCtx,
+) -> std::result::Result<(), ExponentialHistogramRejection> {
+    if !metric_ctx.experimental_enable_exponential_histogram {
+        return Err(ExponentialHistogramRejection::Disabled);
+    }
+    match AggregationTemporality::try_from(histogram.aggregation_temporality) {
+        Ok(AggregationTemporality::Cumulative) => Ok(()),
+        Ok(AggregationTemporality::Delta) => Err(ExponentialHistogramRejection::DeltaTemporality),
+        _ => Err(ExponentialHistogramRejection::UnspecifiedTemporality),
+    }
+}
+
+pub(crate) fn exponential_histogram_value(
     data_point: &ExponentialHistogramDataPoint,
 ) -> std::result::Result<(ValueData, i64), String> {
     if data_point.start_time_unix_nano > data_point.time_unix_nano {
