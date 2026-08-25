@@ -368,11 +368,9 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
                 .is_not_null()
                 .alias("paired"),
             qcol("server", SPAN_STATUS_CODE_COLUMN).alias("server_status"),
-            cast(qcol("server", DURATION_NANO_COLUMN), DataType::Int64)
-                .alias("server_duration_nano"),
+            qcol("server", DURATION_NANO_COLUMN).alias("server_duration_nano"),
             qcol("client", SPAN_STATUS_CODE_COLUMN).alias("client_status"),
-            cast(qcol("client", DURATION_NANO_COLUMN), DataType::Int64)
-                .alias("client_duration_nano"),
+            qcol("client", DURATION_NANO_COLUMN).alias("client_duration_nano"),
             qcol("client", "virtual_conn").alias("virtual_conn"),
         ])?
         // No destination means no edge; a self-call is not an edge between
