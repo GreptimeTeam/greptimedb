@@ -546,7 +546,6 @@ mod test {
         assert_eq!(due.scheduled_times_secs.len(), 3);
         for t in &due.scheduled_times_secs {
             assert_eq!(t % 60, 0);
-            assert!(*t <= i64::MAX);
         }
         // skipped = total_count - keep_count with total_count =
         // (i64::MAX / 60) + 1 and keep_count = max_runs = 3.
