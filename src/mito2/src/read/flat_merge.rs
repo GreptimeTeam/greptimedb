@@ -709,8 +709,8 @@ pub struct FlatMergeReader {
     metrics: MergeMetrics,
     /// Optional metrics reporter.
     metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
-    /// A node whose cursor advance is deferred until the output batch is consumed.
-    pending_advance: Option<(StreamNode, PendingAdvance)>,
+    /// A node whose batch advance is deferred until the output batch is consumed.
+    pending_batch_advance: Option<StreamNode>,
 }
 
 impl FlatMergeReader {
@@ -747,7 +747,7 @@ impl FlatMergeReader {
             batch_size,
             metrics,
             metrics_reporter,
-            pending_advance: None,
+            pending_batch_advance: None,
         };
         let elapsed = start.elapsed();
         reader.metrics.init_cost += elapsed;
@@ -759,7 +759,7 @@ impl FlatMergeReader {
     /// Fetches next sorted batch.
     pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         let start = Instant::now();
-        self.advance_pending().await?;
+        self.advance_pending_batch().await?;
         while self.algo.has_rows() && self.output_batch.is_none() {
             if self.algo.can_fetch_batch() && !self.in_progress.is_empty() {
                 // Only one batch in the hot heap, but we have pending rows, output the pending rows first.
@@ -786,23 +786,14 @@ impl FlatMergeReader {
         }
     }
 
-    async fn advance_pending(&mut self) -> Result<()> {
-        let Some((mut hottest, pending)) = self.pending_advance.take() else {
+    async fn advance_pending_batch(&mut self) -> Result<()> {
+        let Some(mut hottest) = self.pending_batch_advance.take() else {
             return Ok(());
         };
 
-        let fetch_start = match pending {
-            PendingAdvance::Row if hottest.current_cursor().is_last_row() => Some(Instant::now()),
-            PendingAdvance::Row => None,
-            PendingAdvance::Batch => Some(Instant::now()),
-        };
-        let next = match pending {
-            PendingAdvance::Row => hottest.advance_row().await?,
-            PendingAdvance::Batch => hottest.advance_batch().await?,
-        };
-        if let Some(fetch_start) = fetch_start {
-            self.metrics.fetch_cost += fetch_start.elapsed();
-        }
+        let fetch_start = Instant::now();
+        let next = hottest.advance_batch().await?;
+        self.metrics.fetch_cost += fetch_start.elapsed();
         if let Some(next) = next {
             self.in_progress.push_batch(hottest.node_index, next);
             // The output batch consumed all indices, so the previous batch for this
@@ -837,7 +828,7 @@ impl FlatMergeReader {
             .in_progress
             .take_remaining_rows(hottest.node_index, None);
         Self::maybe_output_batch(batch, &mut self.output_batch);
-        self.pending_advance = Some((hottest, PendingAdvance::Batch));
+        self.pending_batch_advance = Some(hottest);
 
         Ok(())
     }
@@ -855,17 +846,15 @@ impl FlatMergeReader {
             }
         }
 
-        // Only read the clock when advancing will attempt to fetch the next batch.
-        // Check first because `None` means either no fetch or EOF after a fetch attempt.
-        if self.output_batch.is_some() {
-            // Do not fetch the next source batch while the completed output is still
-            // waiting to be returned to the caller.
-            self.pending_advance = Some((hottest, PendingAdvance::Row));
+        // Defer the batch advance only when the selected row completed the output
+        // batch and is the last row of the current source batch.
+        if self.output_batch.is_some() && hottest.current_cursor().is_last_row() {
+            self.pending_batch_advance = Some(hottest);
             return Ok(());
         }
 
-        // Only read the clock when advancing will attempt to fetch the next batch.
-        // Check first because `None` means either no fetch or EOF after a fetch attempt.
+        // Advance within the current batch immediately, or fetch the next batch if
+        // the selected row was its last row without completing an output batch.
         let start = hottest.current_cursor().is_last_row().then(Instant::now);
         let next = hottest.advance_row().await?;
         if let Some(start) = start {
@@ -907,12 +896,6 @@ impl Drop for FlatMergeReader {
 }
 
 /// A sync node in the merge iterator.
-#[derive(Debug, Clone, Copy)]
-enum PendingAdvance {
-    Row,
-    Batch,
-}
-
 struct GenericNode<T> {
     /// Index of the node.
     node_index: usize,
@@ -1179,7 +1162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reader_consumes_multiple_batches_and_releases_previous() {
+    async fn test_reader_completes_after_deferred_advance() {
         let batches = vec![
             create_test_record_batch(&[b"k1"], &[1000], &[21], &[OpType::Put], &[11]),
             create_test_record_batch(&[b"k1"], &[2000], &[20], &[OpType::Put], &[10]),
