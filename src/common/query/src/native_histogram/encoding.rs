@@ -17,23 +17,27 @@ use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, ListValue, SemanticType, Value};
-use common_query::native_histogram::*;
-use common_query::prelude::greptime_native_histogram;
 use snafu::{Snafu, ensure};
 
-const MAX_NATIVE_HISTOGRAM_SCHEMA: i32 = 8;
+use super::{
+    CUSTOM_BUCKETS_SCHEMA, MAX_EXPONENTIAL_SCHEMA, NATIVE_HISTOGRAM_FIELD_NAMES,
+    exponential_overflow_bucket_index, native_histogram_value_type,
+};
+use crate::prelude::greptime_native_histogram;
+
 const MAX_REDUCIBLE_NATIVE_HISTOGRAM_SCHEMA: i32 = 52;
 
+/// Error returned while validating or encoding a native histogram.
 #[derive(Debug, Snafu)]
 #[snafu(display("{message}"))]
-pub(crate) struct NativeHistogramError {
+pub struct NativeHistogramError {
     message: String,
 }
 
 type Result<T> = std::result::Result<T, NativeHistogramError>;
 
 /// Returns the canonical column schema for a native histogram value.
-pub(crate) fn native_histogram_column_schema() -> Result<ColumnSchema> {
+pub fn native_histogram_column_schema() -> Result<ColumnSchema> {
     let (datatype, datatype_extension) =
         ColumnDataTypeWrapper::try_from(native_histogram_value_type().clone())
             .map_err(|error| NativeHistogramError {
@@ -51,7 +55,7 @@ pub(crate) fn native_histogram_column_schema() -> Result<ColumnSchema> {
 }
 
 /// Validates and encodes a Prometheus histogram into the canonical Struct value.
-pub(crate) fn encode_native_histogram(histogram: &Histogram) -> Result<ValueData> {
+pub fn encode_native_histogram(histogram: &Histogram) -> Result<ValueData> {
     let uses_float_counts = native_histogram_uses_float_counts(histogram)?;
     validate_native_histogram(histogram, uses_float_counts)?;
 
@@ -193,7 +197,7 @@ fn validate_native_histogram_schema(schema: i32) -> Result<Option<i32>> {
         return Ok(Some(overflow_index));
     }
 
-    if (MAX_NATIVE_HISTOGRAM_SCHEMA + 1..=MAX_REDUCIBLE_NATIVE_HISTOGRAM_SCHEMA).contains(&schema) {
+    if (MAX_EXPONENTIAL_SCHEMA + 1..=MAX_REDUCIBLE_NATIVE_HISTOGRAM_SCHEMA).contains(&schema) {
         Err(NativeHistogramError {
             message: format!("native histogram schema {schema} must be reduced before ingestion"),
         })
