@@ -1578,7 +1578,7 @@ mod test {
     use axum::routing::{get, post};
     use common_query::{Output, OutputData};
     use common_recordbatch::RecordBatches;
-    use common_runtime::global::RuntimeOptions;
+    use common_runtime::global::{RuntimeOptions, WorkloadSchedulerOptions};
     use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -1784,14 +1784,17 @@ mod test {
         // globals are process-wide and must be initialized before any request
         // reaches a scheduler handler. The exact test command below gives it a
         // fresh test process.
-        let mut runtime_options = RuntimeOptions::default();
-        runtime_options.global_rt_size = 1;
-        runtime_options.compact_rt_size = 1;
-        runtime_options.compact_rt_max_blocking_threads = 1;
-        runtime_options.experimental_workload_scheduler.enable = true;
-        runtime_options
-            .experimental_workload_scheduler
-            .max_concurrent_polls = 2;
+        let runtime_options = RuntimeOptions {
+            global_rt_size: 1,
+            compact_rt_size: 1,
+            compact_rt_max_blocking_threads: 1,
+            experimental_workload_scheduler: WorkloadSchedulerOptions {
+                enable: true,
+                max_concurrent_polls: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         common_runtime::init_global_runtimes(&runtime_options);
 
         let (tx, _rx) = mpsc::channel(100);
