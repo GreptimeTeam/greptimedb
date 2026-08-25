@@ -34,7 +34,6 @@ pub mod interceptor;
 pub mod metrics;
 pub mod metrics_handler;
 pub mod mysql;
-pub(crate) mod native_histogram;
 pub mod opentsdb;
 pub mod otel_arrow;
 pub mod otlp;

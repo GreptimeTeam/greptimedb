@@ -19,6 +19,8 @@
 //! [`NativeHistogram`] is the query-time representation and therefore normalizes
 //! integer and floating-point payloads to absolute `f64` counts.
 
+mod encoding;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -34,6 +36,7 @@ use datafusion::arrow::datatypes::{
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::types::{StructField, StructType};
+pub use encoding::{NativeHistogramError, encode_native_histogram, native_histogram_column_schema};
 use once_cell::sync::Lazy;
 
 use crate::prelude::greptime_native_histogram;

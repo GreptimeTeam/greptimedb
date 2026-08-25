@@ -61,6 +61,13 @@ struct LegacyUddSketchState {
     initial_error: f64,
 }
 
+struct ValidatedLegacyUddSketch {
+    buckets: Vec<(LegacyBucketKey, u64)>,
+    alpha: f64,
+    gamma: f64,
+    count: u64,
+}
+
 pub(crate) fn decode(raw: &[u8]) -> Result<UddSketch, String> {
     match UddSketch::decode(raw) {
         Ok(sketch) => Ok(sketch),
@@ -77,6 +84,19 @@ pub(crate) fn quantile(raw: &[u8], quantile: f64) -> Result<Option<f64>, String>
         Ok(sketch) => sketch.quantile(quantile).map_err(|error| error.to_string()),
         Err(current_error) => decode_legacy_sketch(raw)
             .and_then(|sketch| sketch.quantile(quantile))
+            .map_err(|legacy_error| {
+                format!(
+                    "canonical decode failed: {current_error}; legacy decode failed: {legacy_error}"
+                )
+            }),
+    }
+}
+
+pub(crate) fn rank(raw: &[u8], value: f64) -> Result<Option<f64>, String> {
+    match UddSketchRef::parse(raw) {
+        Ok(sketch) => sketch.rank(value).map_err(|error| error.to_string()),
+        Err(current_error) => decode_legacy_sketch(raw)
+            .and_then(|sketch| sketch.rank(value))
             .map_err(|legacy_error| {
                 format!(
                     "canonical decode failed: {current_error}; legacy decode failed: {legacy_error}"
@@ -185,6 +205,69 @@ impl LegacyUddSketch {
         if !quantile.is_finite() || !(0.0..=1.0).contains(&quantile) {
             return Err("invalid quantile".to_string());
         }
+        let validated = self.validate()?;
+        let count = validated.count;
+        if count == 0 {
+            return Ok(None);
+        }
+
+        let target = if quantile == 1.0 {
+            count
+        } else {
+            ((count as f64 * quantile) as u64)
+                .saturating_add(1)
+                .min(count)
+        };
+        let mut seen = 0_u64;
+        for (key, bucket_count) in validated.buckets {
+            seen += bucket_count;
+            if seen >= target {
+                return Ok(Some(legacy_bucket_value(
+                    validated.alpha,
+                    validated.gamma,
+                    key,
+                )?));
+            }
+        }
+        Err("legacy bucket counts do not cover the quantile rank".to_string())
+    }
+
+    fn rank(self, value: f64) -> Result<Option<f64>, String> {
+        let validated = self.validate()?;
+        let count = validated.count;
+        if count == 0 {
+            return Ok(None);
+        }
+        if value.is_nan() {
+            return Err("invalid rank value".to_string());
+        }
+
+        let index = if value.is_infinite() {
+            i64::MAX
+        } else {
+            value.abs().log(validated.gamma).ceil() as i64
+        };
+        let target = if value == 0.0 {
+            LegacyBucketKey::Zero
+        } else if value.is_sign_negative() {
+            LegacyBucketKey::Negative(index)
+        } else {
+            LegacyBucketKey::Positive(index)
+        };
+        let mut below = 0.0;
+        for (key, bucket_count) in validated.buckets {
+            if key == target {
+                return Ok(Some((below + bucket_count as f64 / 2.0) / count as f64));
+            }
+            if key_lt(target, key) {
+                return Ok(Some(below / count as f64));
+            }
+            below += bucket_count as f64;
+        }
+        Ok(Some(1.0))
+    }
+
+    fn validate(self) -> Result<ValidatedLegacyUddSketch, String> {
         if self.compactions >= 64 {
             return Err("legacy compaction count must be below 64".to_string());
         }
@@ -193,9 +276,6 @@ impl LegacyUddSketch {
             return Err("legacy maximum bucket count is outside supported limits".to_string());
         }
 
-        let count = self.count;
-        let alpha = self.alpha;
-        let gamma = self.gamma;
         let buckets = self.buckets.ordered()?;
         if buckets.len() > self.max_buckets as usize {
             return Err("legacy populated bucket count exceeds its configured limit".to_string());
@@ -210,28 +290,16 @@ impl LegacyUddSketch {
                 .checked_add(*count)
                 .ok_or_else(|| "legacy bucket count sum overflows u64".to_string())
         })?;
-        if decoded_count != count {
+        if decoded_count != self.count {
             return Err("legacy bucket counts do not match the value count".to_string());
         }
-        if count == 0 {
-            return Ok(None);
-        }
 
-        let target = if quantile == 1.0 {
-            count
-        } else {
-            ((count as f64 * quantile) as u64)
-                .saturating_add(1)
-                .min(count)
-        };
-        let mut seen = 0_u64;
-        for (key, bucket_count) in buckets {
-            seen += bucket_count;
-            if seen >= target {
-                return Ok(Some(legacy_bucket_value(alpha, gamma, key)?));
-            }
-        }
-        Err("legacy bucket counts do not cover the quantile rank".to_string())
+        Ok(ValidatedLegacyUddSketch {
+            buckets,
+            alpha: self.alpha,
+            gamma: self.gamma,
+            count: self.count,
+        })
     }
 }
 
@@ -470,6 +538,232 @@ pub(crate) const COMPACTED_LEGACY_SKETCH: &[u8] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_rank_sketch() -> LegacyUddSketch {
+        LegacyUddSketch {
+            buckets: LegacyBucketStore {
+                map: HashMap::from([
+                    (
+                        LegacyBucketKey::Negative(2),
+                        LegacyBucket {
+                            count: 2,
+                            next: LegacyBucketKey::Zero,
+                        },
+                    ),
+                    (
+                        LegacyBucketKey::Zero,
+                        LegacyBucket {
+                            count: 1,
+                            next: LegacyBucketKey::Positive(2),
+                        },
+                    ),
+                    (
+                        LegacyBucketKey::Positive(2),
+                        LegacyBucket {
+                            count: 1,
+                            next: LegacyBucketKey::Invalid,
+                        },
+                    ),
+                ]),
+                head: LegacyBucketKey::Negative(2),
+            },
+            alpha: 0.01,
+            gamma: (1.0 + 0.01) / (1.0 - 0.01),
+            compactions: 0,
+            max_buckets: 128,
+            count: 4,
+            sum: 0.0,
+        }
+    }
+
+    #[test]
+    fn legacy_rank_matches_canonical_rank() {
+        let mut sketch = UddSketch::new(128, 0.01).unwrap();
+        sketch
+            .add_batch(&[-10.0, -1.0, 0.0, 1.0, 10.0, f64::INFINITY])
+            .unwrap();
+        let encoded = sketch.encode().unwrap();
+
+        for value in [
+            f64::NEG_INFINITY,
+            -10.0,
+            -0.0,
+            0.0,
+            1.0,
+            10.0,
+            f64::INFINITY,
+        ] {
+            assert_eq!(rank(&encoded, value).unwrap(), sketch.rank(value).unwrap());
+        }
+    }
+
+    #[test]
+    fn legacy_rank_reads_wrapped_and_bare_legacy_states() {
+        let bare = &LEGACY_STATE[..LEGACY_STATE.len() - std::mem::size_of::<f64>()];
+
+        for value in [f64::NEG_INFINITY, 0.0, 0.99, f64::INFINITY] {
+            assert_eq!(
+                rank(LEGACY_STATE, value).unwrap(),
+                rank(bare, value).unwrap()
+            );
+        }
+        assert_eq!(rank(LEGACY_STATE, f64::NEG_INFINITY).unwrap(), Some(0.0));
+        assert_eq!(rank(LEGACY_STATE, f64::INFINITY).unwrap(), Some(1.0));
+    }
+
+    #[test]
+    fn legacy_rank_reads_compacted_bare_sketch() {
+        assert_eq!(
+            rank(COMPACTED_LEGACY_SKETCH, f64::NEG_INFINITY).unwrap(),
+            Some(0.0)
+        );
+        assert!(rank(COMPACTED_LEGACY_SKETCH, 1.0).unwrap().is_some());
+        assert_eq!(
+            rank(COMPACTED_LEGACY_SKETCH, f64::INFINITY).unwrap(),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn legacy_rank_handles_bucket_boundaries_and_empty_sketch() {
+        let gamma = legacy_rank_sketch().gamma;
+        for (value, expected) in [
+            (f64::NEG_INFINITY, 0.0),
+            (-1.0, 0.5),
+            (-0.0, 0.625),
+            (0.0, 0.625),
+            (1.0, 0.75),
+            (gamma.powi(2), 0.875),
+            (f64::INFINITY, 1.0),
+        ] {
+            assert_eq!(legacy_rank_sketch().rank(value).unwrap(), Some(expected));
+        }
+
+        let mut empty = legacy_rank_sketch();
+        empty.buckets.map.clear();
+        empty.buckets.head = LegacyBucketKey::Invalid;
+        empty.count = 0;
+        assert_eq!(empty.rank(0.0).unwrap(), None);
+    }
+
+    #[test]
+    fn legacy_rank_empty_sketch_returns_none_for_nan() {
+        let mut empty = legacy_rank_sketch();
+        empty.buckets.map.clear();
+        empty.buckets.head = LegacyBucketKey::Invalid;
+        empty.count = 0;
+
+        assert_eq!(empty.rank(f64::NAN).unwrap(), None);
+    }
+
+    #[test]
+    fn legacy_rank_accumulates_large_counts_with_canonical_rounding() {
+        let large_count = 1_u64 << 53;
+        let total_count = large_count + 3;
+        let sketch = LegacyUddSketch {
+            buckets: LegacyBucketStore {
+                map: HashMap::from([
+                    (
+                        LegacyBucketKey::Negative(3),
+                        LegacyBucket {
+                            count: large_count,
+                            next: LegacyBucketKey::Negative(2),
+                        },
+                    ),
+                    (
+                        LegacyBucketKey::Negative(2),
+                        LegacyBucket {
+                            count: 1,
+                            next: LegacyBucketKey::Negative(1),
+                        },
+                    ),
+                    (
+                        LegacyBucketKey::Negative(1),
+                        LegacyBucket {
+                            count: 1,
+                            next: LegacyBucketKey::Zero,
+                        },
+                    ),
+                    (
+                        LegacyBucketKey::Zero,
+                        LegacyBucket {
+                            count: 1,
+                            next: LegacyBucketKey::Invalid,
+                        },
+                    ),
+                ]),
+                head: LegacyBucketKey::Negative(3),
+            },
+            alpha: 0.01,
+            gamma: (1.0 + 0.01) / (1.0 - 0.01),
+            compactions: 0,
+            max_buckets: 128,
+            count: total_count,
+            sum: 0.0,
+        };
+        let mut below = 0.0;
+        for count in [large_count, 1, 1] {
+            below += count as f64;
+        }
+        let expected = (below + 0.5) / total_count as f64;
+
+        assert_eq!(sketch.rank(0.0).unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn legacy_rank_rejects_nan_and_malformed_data() {
+        let bare_len = LEGACY_STATE.len() - std::mem::size_of::<f64>();
+        let bare = &LEGACY_STATE[..bare_len];
+        assert!(rank(bare, f64::NAN).is_err());
+
+        let mut invalid_mapping = bare.to_vec();
+        let alpha_offset = bare_len - 44;
+        invalid_mapping[alpha_offset..alpha_offset + 8].copy_from_slice(&f64::NAN.to_le_bytes());
+        let error = rank(&invalid_mapping, 0.0).unwrap_err();
+        assert!(error.contains("canonical decode failed"));
+        assert!(error.contains("legacy decode failed"));
+
+        let mut invalid_count = legacy_rank_sketch();
+        invalid_count.count += 1;
+        assert!(invalid_count.rank(0.0).is_err());
+
+        let mut invalid_bucket = legacy_rank_sketch();
+        let bucket = invalid_bucket
+            .buckets
+            .map
+            .remove(&LegacyBucketKey::Negative(2))
+            .unwrap();
+        invalid_bucket
+            .buckets
+            .map
+            .insert(LegacyBucketKey::Negative(i64::MIN), bucket);
+        invalid_bucket.buckets.head = LegacyBucketKey::Negative(i64::MIN);
+        assert!(invalid_bucket.rank(0.0).is_err());
+    }
+
+    #[test]
+    fn legacy_rank_accepts_saturated_mapping() {
+        let sketch = LegacyUddSketch {
+            buckets: LegacyBucketStore {
+                map: HashMap::from([(
+                    LegacyBucketKey::Positive(0),
+                    LegacyBucket {
+                        count: 1,
+                        next: LegacyBucketKey::Invalid,
+                    },
+                )]),
+                head: LegacyBucketKey::Positive(0),
+            },
+            alpha: 1.0,
+            gamma: f64::INFINITY,
+            compactions: 63,
+            max_buckets: 7,
+            count: 1,
+            sum: f64::INFINITY,
+        };
+
+        assert_eq!(sketch.rank(1.0).unwrap(), Some(0.5));
+    }
 
     #[test]
     fn current_format_is_decoded_without_legacy_fallback() {

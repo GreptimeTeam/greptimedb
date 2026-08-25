@@ -66,7 +66,9 @@ use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
 };
 use servers::grpc::FlightCompression;
-use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
+use servers::grpc::flight::{
+    FlightCraft, FlightRecordBatchSource, FlightRecordBatchStream, TonicStream,
+};
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContext, QueryContextBuilder, QueryContextRef,
@@ -976,13 +978,19 @@ impl FlightCraft for RegionServer {
             .map(|h| Arc::new(QueryContext::from(h)))
             .unwrap_or(QueryContext::arc());
 
-        let result = self
-            .handle_remote_read(request, query_ctx.clone())
-            .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
-            .await?;
+        let region_server = self.clone();
+        let initializer_query_ctx = query_ctx.clone();
+        let initializer_tracing_context = tracing_context.clone();
+        let initializer = async move {
+            region_server
+                .handle_remote_read(request, initializer_query_ctx)
+                .trace(initializer_tracing_context.attach(info_span!("RegionServer::handle_read")))
+                .await
+                .map_err(Into::into)
+        };
 
         let stream = Box::pin(FlightRecordBatchStream::new(
-            result,
+            FlightRecordBatchSource::initializer(initializer),
             tracing_context,
             self.flight_compression,
             query_ctx,

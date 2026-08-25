@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,6 +32,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr as DfExpr, ExprSchemable, Operat
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, ScalarValue, ToDFSchema};
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::compute;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -60,6 +62,15 @@ use crate::datanode::tool_util::{
     build_object_store, format_bytes, parse_config, parse_path_type, parse_region_id,
 };
 use crate::error;
+
+/// Displays a scanner using DataFusion's verbose explain format.
+struct VerboseScannerDisplay<'a, T: ?Sized>(&'a T);
+
+impl<T: DisplayAs + ?Sized> fmt::Display for VerboseScannerDisplay<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_as(DisplayFormatType::Verbose, f)
+    }
+}
 
 /// Scan benchmark command - benchmarks scanning a region directly from storage.
 #[derive(Debug, Parser)]
@@ -687,6 +698,14 @@ impl ScanbenchCommand {
                 format_bytes(total_array_mem_size),
                 format_bytes(total_estimated_size),
             );
+
+            if self.verbose {
+                println!(
+                    "  {} Scanner explain: {}",
+                    "ℹ".blue(),
+                    VerboseScannerDisplay(scanner.as_ref())
+                );
+            }
 
             // Start profiling after the first iteration (warmup) if pprof_after_warmup is set
             #[cfg(unix)]

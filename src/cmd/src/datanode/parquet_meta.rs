@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
 use parquet::file::metadata::ParquetMetaData;
+use parquet::file::page_index::offset_index::PageLocation;
 use serde::Serialize;
 use snafu::ResultExt;
 
@@ -78,6 +79,7 @@ struct ColumnChunkMetaView {
     dictionary_page_offset: Option<i64>,
     dictionary_page_bytes: Option<i64>,
     data_pages: Option<usize>,
+    max_data_page_row_count: Option<i64>,
     has_statistics: bool,
     column_index_offset: Option<i64>,
     column_index_length: Option<i32>,
@@ -123,10 +125,14 @@ fn build_file_meta_view(path: &Path, metadata: &ParquetMetaData) -> FileMetaView
                 .iter()
                 .enumerate()
                 .map(|(column_idx, column)| {
-                    let data_pages = offset_index
+                    let page_locations = offset_index
                         .and_then(|index| index.get(row_group_idx))
                         .and_then(|columns| columns.get(column_idx))
-                        .map(|index| index.page_locations().len());
+                        .map(|index| index.page_locations());
+                    let data_pages = page_locations.map(|locations| locations.len());
+                    let max_data_page_row_count = page_locations.and_then(|locations| {
+                        max_data_page_row_count(locations, row_group.num_rows())
+                    });
                     let dictionary_page_bytes = dictionary_page_bytes(
                         column.dictionary_page_offset(),
                         column.data_page_offset(),
@@ -149,6 +155,7 @@ fn build_file_meta_view(path: &Path, metadata: &ParquetMetaData) -> FileMetaView
                         dictionary_page_offset: column.dictionary_page_offset(),
                         dictionary_page_bytes,
                         data_pages,
+                        max_data_page_row_count,
                         has_statistics: column.statistics().is_some(),
                         column_index_offset: column.column_index_offset(),
                         column_index_length: column.column_index_length(),
@@ -219,7 +226,7 @@ fn print_meta_text(view: &FileMetaView) {
         );
         for column in &row_group.columns {
             println!(
-                "  column[{}] path={}: type={}, compression={}, encodings=[{}], values={}, uncompressed_size={}, compressed_size={}, compression_ratio={}, data_pages={}, dictionary_page_offset={}, dictionary_page_bytes={}, data_page_offset={}, statistics={}, column_index={}/{}, offset_index={}/{}, bloom_filter={}/{}",
+                "  column[{}] path={}: type={}, compression={}, encodings=[{}], values={}, uncompressed_size={}, compressed_size={}, compression_ratio={}, data_pages={}, max_data_page_row_count={}, dictionary_page_offset={}, dictionary_page_bytes={}, data_page_offset={}, statistics={}, column_index={}/{}, offset_index={}/{}, bloom_filter={}/{}",
                 column.index,
                 column.path,
                 column.physical_type,
@@ -230,6 +237,7 @@ fn print_meta_text(view: &FileMetaView) {
                 column.compressed_size,
                 format_ratio(column.compression_ratio),
                 format_optional_usize(column.data_pages),
+                format_optional_i64(column.max_data_page_row_count),
                 format_optional_i64(column.dictionary_page_offset),
                 column
                     .dictionary_page_bytes
@@ -246,6 +254,33 @@ fn print_meta_text(view: &FileMetaView) {
             );
         }
     }
+}
+
+fn max_data_page_row_count(
+    page_locations: &[PageLocation],
+    row_group_row_count: i64,
+) -> Option<i64> {
+    if page_locations.is_empty() {
+        return Some(0);
+    }
+    if page_locations.first()?.first_row_index != 0 {
+        return None;
+    }
+
+    let mut max_row_count = 0;
+    for locations in page_locations.windows(2) {
+        let row_count = locations[1].first_row_index - locations[0].first_row_index;
+        if row_count < 0 {
+            return None;
+        }
+        max_row_count = max_row_count.max(row_count);
+    }
+
+    let last_page_row_count = row_group_row_count - page_locations.last()?.first_row_index;
+    if last_page_row_count < 0 {
+        return None;
+    }
+    Some(max_row_count.max(last_page_row_count))
 }
 
 fn dictionary_page_bytes(
@@ -301,7 +336,7 @@ mod tests {
     fn test_meta_view_unknown_page_count() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("input.parquet");
-        write_test_parquet(&path);
+        write_test_parquet(&path, None);
 
         let metadata = load_local_parquet_metadata(&path).unwrap();
         let view = build_file_meta_view(&path, &metadata);
@@ -313,7 +348,21 @@ mod tests {
         assert_eq!(view.row_groups[0].columns.len(), 2);
     }
 
-    fn write_test_parquet(path: &Path) {
+    #[test]
+    fn test_meta_view_reports_max_data_page_row_count() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("input.parquet");
+        write_test_parquet(&path, Some(2));
+
+        let metadata = load_local_parquet_metadata(&path).unwrap();
+        let view = build_file_meta_view(&path, &metadata);
+
+        for column in &view.row_groups[0].columns {
+            assert_eq!(Some(2), column.max_data_page_row_count);
+        }
+    }
+
+    fn write_test_parquet(path: &Path, data_page_row_count_limit: Option<usize>) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("host", DataType::Utf8, false),
@@ -326,12 +375,17 @@ mod tests {
             ],
         )
         .unwrap();
-        let props = WriterProperties::builder()
-            .set_key_value_metadata(Some(vec![KeyValue::new(
+        let mut props =
+            WriterProperties::builder().set_key_value_metadata(Some(vec![KeyValue::new(
                 "greptime:test".to_string(),
                 "value".to_string(),
-            )]))
-            .build();
+            )]));
+        if let Some(limit) = data_page_row_count_limit {
+            props = props
+                .set_write_batch_size(limit)
+                .set_data_page_row_count_limit(limit);
+        }
+        let props = props.build();
         let mut writer =
             ArrowWriter::try_new(File::create(path).unwrap(), schema, Some(props)).unwrap();
         writer.write(&batch).unwrap();
