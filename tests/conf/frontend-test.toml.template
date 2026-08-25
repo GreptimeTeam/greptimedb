@@ -2,5 +2,8 @@
 bind_addr = "{addrs.grpc_addr}"
 server_addr = "{addrs.grpc_addr}"
 
+[query]
+parallelism = 4
+
 [event_recorder]
 event_types = []

@@ -11,27 +11,32 @@ Remote write v2 enters through `remote_write_v2` in
 ```mermaid
 flowchart TD
     A["HTTP /v1/prometheus/write"] --> B["remote_write_v2"]
-    B --> C["decode_remote_write_v2_request"]
-    C --> D["into_write_requests"]
+    B --> C["decode_remote_write_v2"]
+    C --> D["borrow symbols and time-series bytes"]
+    D --> E["decode leaf messages and build rows"]
 
-    D --> E["samples ContextReq"]
-    D --> F["histograms ContextReq"]
+    E --> F["samples ContextReq"]
+    E --> G["histograms ContextReq"]
 
-    E --> G["write_prometheus_rows_with_progress"]
-    G --> H["metric engine / pending batcher when enabled"]
+    F --> H["write_prometheus_rows_with_progress"]
+    H --> I["metric engine / pending batcher when enabled"]
 
-    F --> I["histogram ContextOpt"]
-    I --> J["write_prometheus_rows_with_progress"]
-    J --> K["same metric-engine flag as samples, no batcher"]
-    K --> L["table: <metric>"]
+    G --> J["histogram ContextOpt"]
+    J --> K["write_prometheus_rows_with_progress"]
+    K --> L["same metric-engine flag as samples, no batcher"]
+    L --> M["table: <metric>"]
 
-    L --> M["field: configured native-histogram Struct"]
-    M --> N["struct children: counts, spans, buckets, sum, schema"]
-    H --> P["written headers and counters"]
-    K --> P
+    M --> N["field: configured native-histogram Struct"]
+    N --> O["struct children: counts, spans, buckets, sum, schema"]
+    I --> P["written headers and counters"]
+    L --> P
 ```
 
 The conversion step splits one v2 request into two `ContextReq`s:
+
+The `decode` codec metric covers decompression and the borrowed request
+envelope. The `convert` metric covers per-series scans, leaf prost decoding,
+validation, and row construction.
 
 - samples keep the existing sample table name and can use the metric-engine
   physical table path and pending rows batcher;

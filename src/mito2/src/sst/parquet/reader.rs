@@ -451,7 +451,7 @@ impl ParquetReaderBuilder {
         } else {
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
             // Lists all column ids to read, we always use the expected metadata if possible.
-            ReadColumns::from_deduped_column_ids(
+            ReadColumns::new(
                 expected_meta
                     .column_metadatas
                     .iter()
@@ -2488,9 +2488,7 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -2695,7 +2693,7 @@ mod tests {
         let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             region_metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
+            ReadColumns::new(
                 region_metadata
                     .column_metadatas
                     .iter()
@@ -2962,9 +2960,7 @@ mod tests {
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -2986,9 +2982,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,

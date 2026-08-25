@@ -1,0 +1,116 @@
+-- Regression test for issue 6874: a bounded CTE derived from the same table
+-- must become the hash-join build side in both standalone and distributed mode.
+CREATE TABLE cte_join_logs (
+  ts TIMESTAMP TIME INDEX,
+  "db" STRING,
+  val DOUBLE,
+) WITH (append_mode = 'true');
+
+Affected Rows: 0
+
+INSERT INTO cte_join_logs VALUES
+  ('2024-01-01 00:00:00', 'a', 1.0),
+  ('2024-01-01 00:00:01', 'a', 2.0),
+  ('2024-01-01 00:00:02', 'b', 3.0),
+  ('2024-01-01 00:00:03', 'b', 4.0),
+  ('2024-01-01 00:00:04', 'c', 5.0),
+  ('2024-01-01 00:00:05', 'c', 6.0);
+
+Affected Rows: 6
+
+-- Control: the plain Top-N aggregation should remain below MergeScan.
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN SELECT "db", count(*) AS cnt
+FROM cte_join_logs
+GROUP BY "db"
+ORDER BY cnt DESC
+LIMIT 5;
+
++---------------+----------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                               |
++---------------+----------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                    |
+|               | Limit: skip=0, fetch=5                                                                             |
+|               |   Sort: cnt DESC NULLS FIRST                                                                       |
+|               |     Projection: cte_join_logs.db, count(Int64(1)) AS count(*) AS cnt                               |
+|               |       Aggregate: groupBy=[[cte_join_logs.db]], aggr=[[count(cte_join_logs.ts) AS count(Int64(1))]] |
+|               |         TableScan: cte_join_logs                                                                   |
+|               | ]]                                                                                                 |
+| physical_plan | CooperativeExec                                                                                    |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                    |
++---------------+----------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH top_dbs AS (
+  SELECT "db", count(*) AS cnt FROM cte_join_logs
+  GROUP BY "db" ORDER BY cnt DESC LIMIT 5
+)
+SELECT t."db", count(*) AS c
+FROM cte_join_logs AS t
+JOIN top_dbs td ON t."db" = td."db"
+GROUP BY t."db" ORDER BY c DESC, t."db";
+
++---------------+----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                     |
++---------------+----------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: c DESC NULLS FIRST, t.db ASC NULLS LAST                                                            |
+|               |   Projection: t.db, count(Int64(1)) AS count(*) AS c                                                     |
+|               |     Aggregate: groupBy=[[t.db]], aggr=[[count(Int64(1))]]                                                |
+|               |       Projection: t.db                                                                                   |
+|               |         Inner Join: t.db = td.db                                                                         |
+|               |           Projection: t.db                                                                               |
+|               |             MergeScan [is_placeholder=false, remote_input=[                                              |
+|               | SubqueryAlias: t                                                                                         |
+|               |   Filter: cte_join_logs.db IS NOT NULL                                                                   |
+|               |     TableScan: cte_join_logs, partial_filters=[cte_join_logs.db IS NOT NULL]                             |
+|               | ]]                                                                                                       |
+|               |           Projection: td.db                                                                              |
+|               |             MergeScan [is_placeholder=false, remote_input=[                                              |
+|               | SubqueryAlias: td                                                                                        |
+|               |   SubqueryAlias: top_dbs                                                                                 |
+|               |     Filter: cte_join_logs.db IS NOT NULL                                                                 |
+|               |       Limit: skip=0, fetch=5                                                                             |
+|               |         Sort: cnt DESC NULLS FIRST                                                                       |
+|               |           Projection: cte_join_logs.db, count(Int64(1)) AS count(*) AS cnt                               |
+|               |             Aggregate: groupBy=[[cte_join_logs.db]], aggr=[[count(cte_join_logs.ts) AS count(Int64(1))]] |
+|               |               TableScan: cte_join_logs                                                                   |
+|               | ]]                                                                                                       |
+| physical_plan | SortPreservingMergeExec: [c@1 DESC, db@0 ASC NULLS LAST]                                                 |
+|               |   SortExec: expr=[c@1 DESC, db@0 ASC NULLS LAST], preserve_REDACTED
+|               |     ProjectionExec: expr=[db@0 as db, count(Int64(1))@1 as c]                                            |
+|               |       AggregateExec: mode=FinalPartitioned, gby=[db@0 as db], aggr=[count(Int64(1))]                     |
+|               |         RepartitionExec: REDACTED
+|               |           AggregateExec: mode=Partial, gby=[db@0 as db], aggr=[count(Int64(1))]                          |
+|               |             HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(db@0, db@0)], projection=[db@1]        |
+|               |               ProjectionExec: expr=[db@0 as db]                                                          |
+|               |                 MergeScanExec: REDACTED
+|               |               RepartitionExec: REDACTED
+|               |                 ProjectionExec: expr=[db@1 as db]                                                        |
+|               |                   MergeScanExec: REDACTED
+|               |                                                                                                          |
++---------------+----------------------------------------------------------------------------------------------------------+
+
+WITH top_dbs AS (
+  SELECT "db", count(*) AS cnt FROM cte_join_logs
+  GROUP BY "db" ORDER BY cnt DESC LIMIT 5
+)
+SELECT t."db", count(*) AS c
+FROM cte_join_logs AS t
+JOIN top_dbs td ON t."db" = td."db"
+GROUP BY t."db" ORDER BY c DESC, t."db";
+
++----+---+
+| db | c |
++----+---+
+| a  | 2 |
+| b  | 2 |
+| c  | 2 |
++----+---+
+
+DROP TABLE cte_join_logs;
+
+Affected Rows: 0
+

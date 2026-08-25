@@ -188,6 +188,9 @@ pub struct MitoConfig {
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
     pub default_flat_format: bool,
 
+    /// Whether to enable the experimental two-phase mode for eligible metric series scans.
+    pub experimental_series_scan_v2: bool,
+
     pub gc: GcConfig,
 }
 
@@ -239,6 +242,7 @@ impl Default for MitoConfig {
             min_compaction_interval: Duration::from_secs(0),
             schedule_compaction_after_edit: true,
             default_flat_format: true,
+            experimental_series_scan_v2: true,
             gc: GcConfig::default(),
         };
 
@@ -388,6 +392,14 @@ mod tests {
         config.adjust_buffer_and_cache_size(ReadableSize::gb(64));
         assert_eq!(ReadableSize::mb(512), config.sst_meta_cache_size);
         assert_eq!(ReadableSize::mb(128), config.prefilter_result_cache_size);
+    }
+
+    #[test]
+    fn test_experimental_series_scan_v2_config() {
+        assert!(MitoConfig::default().experimental_series_scan_v2);
+
+        let config: MitoConfig = toml::from_str("experimental_series_scan_v2 = false").unwrap();
+        assert!(!config.experimental_series_scan_v2);
     }
 }
 

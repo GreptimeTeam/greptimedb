@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod insert_assignment;
+
+use std::sync::Arc;
+
 use common_time::Timezone;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
@@ -19,7 +23,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
 use datafusion_expr::expr::InList;
 use datafusion_expr::{
-    Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan,
+    Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan, WriteOp,
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::DataType;
@@ -27,12 +31,13 @@ use session::context::QueryContextRef;
 
 use crate::QueryEngineContext;
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::optimizer::type_conversion::insert_assignment::rewrite_insert_assignments;
 use crate::plan::ExtractExpr;
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
 /// to data type of corresponding columns.
 /// Specifically:
-/// - string literal of timestamp is converted to `Expr::Literal(ScalarValue::TimestampMillis)`
+/// - string literal of timestamp is converted to the target timestamp type
 /// - string literal of boolean is converted to `Expr::Literal(ScalarValue::Boolean)`
 pub struct TypeConversionRule;
 
@@ -45,10 +50,8 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
     ) -> Result<LogicalPlan> {
         plan.transform_up_with_subqueries(|plan| match plan {
             LogicalPlan::Filter(filter) => {
-                let mut converter = TypeConverter {
-                    schema: filter.input.schema().clone(),
-                    query_ctx: ctx.query_ctx(),
-                };
+                let mut converter =
+                    TypeConverter::new(filter.input.schema().clone(), ctx.query_ctx());
                 let rewritten = filter.predicate.clone().rewrite(&mut converter)?.data;
                 Ok(Transformed::yes(LogicalPlan::Filter(Filter::try_new(
                     rewritten,
@@ -63,10 +66,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 filters,
                 fetch,
             }) => {
-                let mut converter = TypeConverter {
-                    schema: projected_schema.clone(),
-                    query_ctx: ctx.query_ctx(),
-                };
+                let mut converter = TypeConverter::new(projected_schema.clone(), ctx.query_ctx());
                 let rewrite_filters = filters
                     .into_iter()
                     .map(|e| e.rewrite(&mut converter).map(|x| x.data))
@@ -80,8 +80,18 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                     fetch,
                 })))
             }
-            LogicalPlan::Projection { .. }
-            | LogicalPlan::Window { .. }
+            LogicalPlan::Projection { .. } => {
+                let mut converter = TypeConverter::new(plan.schema().clone(), ctx.query_ctx());
+                let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
+                let expr = plan
+                    .expressions_consider_join()
+                    .into_iter()
+                    .map(|e| e.rewrite(&mut converter).map(|x| x.data))
+                    .collect::<Result<Vec<_>>>()?;
+
+                plan.with_new_exprs(expr, inputs).map(Transformed::yes)
+            }
+            LogicalPlan::Window { .. }
             | LogicalPlan::Aggregate { .. }
             | LogicalPlan::Repartition { .. }
             | LogicalPlan::Extension { .. }
@@ -89,10 +99,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::Union { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::Analyze { .. } => {
-                let mut converter = TypeConverter {
-                    schema: plan.schema().clone(),
-                    query_ctx: ctx.query_ctx(),
-                };
+                let mut converter = TypeConverter::new(plan.schema().clone(), ctx.query_ctx());
                 let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
                 let expr = plan
                     .expressions_consider_join()
@@ -107,10 +114,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 let Ok(schema) = join.left.schema().join(join.right.schema()) else {
                     return Ok(Transformed::no(LogicalPlan::Join(join)));
                 };
-                let mut converter = TypeConverter {
-                    schema: std::sync::Arc::new(schema),
-                    query_ctx: ctx.query_ctx(),
-                };
+                let mut converter = TypeConverter::new(Arc::new(schema), ctx.query_ctx());
                 let plan = LogicalPlan::Join(join);
                 let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
                 let expr = plan
@@ -120,6 +124,14 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                     .collect::<Result<Vec<_>>>()?;
 
                 plan.with_new_exprs(expr, inputs).map(Transformed::yes)
+            }
+
+            LogicalPlan::Dml(mut dml) if matches!(dml.op, WriteOp::Insert(_)) => {
+                dml.input = Arc::new(rewrite_insert_assignments(
+                    dml.input.as_ref().clone(),
+                    ctx.query_ctx(),
+                )?);
+                Ok(Transformed::yes(LogicalPlan::Dml(dml)))
             }
 
             LogicalPlan::Distinct { .. }
@@ -146,6 +158,10 @@ struct TypeConverter {
 }
 
 impl TypeConverter {
+    fn new(schema: DFSchemaRef, query_ctx: QueryContextRef) -> Self {
+        Self { query_ctx, schema }
+    }
+
     fn column_type(&self, expr: &Expr) -> Option<DataType> {
         if let Expr::Column(_) = expr
             && let Ok(v) = expr.get_type(&self.schema)
@@ -162,7 +178,7 @@ impl TypeConverter {
     ) -> Result<ScalarValue> {
         match (target_type, value) {
             (DataType::Timestamp(_, _), ScalarValue::Utf8(Some(v))) => {
-                string_to_timestamp_ms(v, Some(&self.query_ctx.timezone()))
+                parse_string_to_timestamp(v, Some(&self.query_ctx.timezone()))
             }
             (DataType::Boolean, ScalarValue::Utf8(Some(v))) => match v.to_lowercase().as_str() {
                 "true" => Ok(ScalarValue::Boolean(Some(true))),
@@ -308,18 +324,34 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
     )
 }
 
-fn string_to_timestamp_ms(string: &str, timezone: Option<&Timezone>) -> Result<ScalarValue> {
+fn cast_string_to_timestamp(
+    string: &str,
+    target_type: &DataType,
+    timezone: Option<&Timezone>,
+) -> Result<ScalarValue> {
+    let parsed = parse_string_to_timestamp(string, timezone)?;
+    cast_timestamp(parsed, target_type)
+}
+
+fn parse_string_to_timestamp(string: &str, timezone: Option<&Timezone>) -> Result<ScalarValue> {
     let ts = Timestamp::from_str(string, timezone)
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
     let value = Some(ts.value());
-    let scalar = match ts.unit() {
+    Ok(match ts.unit() {
         TimeUnit::Second => ScalarValue::TimestampSecond(value, None),
         TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(value, None),
         TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(value, None),
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(value, None),
-    };
-    Ok(scalar)
+    })
+}
+
+fn cast_timestamp(parsed: ScalarValue, target_type: &DataType) -> Result<ScalarValue> {
+    let parsed = parsed.to_array()?;
+    let casted = compute::cast(&parsed, target_type)
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+
+    ScalarValue::try_from_array(&casted, 0)
 }
 
 #[cfg(test)]
@@ -329,7 +361,7 @@ mod tests {
 
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{Column, DFSchema, NullEquality};
-    use datafusion_expr::expr::Exists;
+    use datafusion_expr::expr::{Cast, Exists};
     use datafusion_expr::{Join, JoinConstraint, JoinType, Literal, LogicalPlanBuilder, Subquery};
     use datafusion_sql::TableReference;
     use session::context::QueryContext;
@@ -337,19 +369,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_string_to_timestamp_ms() {
+    fn test_cast_string_to_timestamp() {
+        use datafusion_common::arrow::datatypes::TimeUnit as ArrowTimeUnit;
+
+        let target_type = DataType::Timestamp(ArrowTimeUnit::Second, None);
         assert_eq!(
-            string_to_timestamp_ms("2022-02-02 19:00:00+08:00", None).unwrap(),
+            cast_string_to_timestamp("2022-02-02 19:00:00+08:00", &target_type, None).unwrap(),
             ScalarValue::TimestampSecond(Some(1643799600), None)
         );
         assert_eq!(
-            string_to_timestamp_ms("2009-02-13 23:31:30Z", None).unwrap(),
+            cast_string_to_timestamp("2009-02-13 23:31:30Z", &target_type, None).unwrap(),
             ScalarValue::TimestampSecond(Some(1234567890), None)
         );
 
         assert_eq!(
-            string_to_timestamp_ms(
+            cast_string_to_timestamp(
                 "2009-02-13 23:31:30",
+                &target_type,
                 Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
             )
             .unwrap(),
@@ -357,12 +393,23 @@ mod tests {
         );
 
         assert_eq!(
-            string_to_timestamp_ms(
+            cast_string_to_timestamp(
                 "2009-02-13 23:31:30",
+                &target_type,
                 Some(&Timezone::from_tz_string("-8:00").unwrap())
             )
             .unwrap(),
             ScalarValue::TimestampSecond(Some(1234567890 + 8 * 3600), None)
+        );
+
+        assert_eq!(
+            cast_string_to_timestamp(
+                "2009-02-13 23:31:30.123456789Z",
+                &DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                None,
+            )
+            .unwrap(),
+            ScalarValue::TimestampNanosecond(Some(1_234_567_890_123_456_789), None)
         );
     }
 
@@ -421,14 +468,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut converter = TypeConverter {
-            schema,
-            query_ctx: QueryContext::arc(),
-        };
+        let mut converter = TypeConverter::new(schema, QueryContext::arc());
 
         assert_eq!(
             Expr::Column(Column::from_name("ts")).gt(ScalarValue::TimestampSecond(
-                Some(1599514949),
+                Some(1_599_514_949),
                 None
             )
             .lit()),
@@ -437,6 +481,19 @@ mod tests {
                 .unwrap()
                 .data
         );
+    }
+
+    #[test]
+    fn test_type_converter_leaves_explicit_timestamp_cast_unchanged() {
+        use datafusion_common::arrow::datatypes::TimeUnit as ArrowTimeUnit;
+
+        let mut converter = TypeConverter::new(Arc::new(DFSchema::empty()), QueryContext::arc());
+        let expr = Expr::Cast(Cast {
+            expr: Box::new("2009-02-13 23:31:30".lit()),
+            data_type: DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+        });
+
+        assert_eq!(converter.f_up(expr.clone()).unwrap().data, expr);
     }
 
     #[test]
@@ -452,10 +509,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut converter = TypeConverter {
-            schema,
-            query_ctx: QueryContext::arc(),
-        };
+        let mut converter = TypeConverter::new(schema, QueryContext::arc());
 
         assert_eq!(
             Expr::Column(Column::from_name(col_name)).eq(true.lit()),

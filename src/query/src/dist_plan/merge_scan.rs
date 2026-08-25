@@ -42,8 +42,9 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
-use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_common::stats::Precision;
+use datafusion_common::{Column as ColumnExpr, DataFusionError, Result, Statistics};
+use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
 use datatypes::extension::json::{
@@ -82,6 +83,51 @@ use crate::region_query::RegionQueryHandlerRef;
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
+}
+
+/// Returns a deterministic upper bound on rows emitted by the remote plan for
+/// one region.
+///
+/// Only explicit caps and row-non-increasing wrappers are followed. Nodes that
+/// may multiply rows fail open, so the result remains a sound upper bound.
+fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
+    match plan {
+        LogicalPlan::Limit(limit) => {
+            let input_bound = remote_plan_row_bound(&limit.input);
+            match limit.get_fetch_type() {
+                Ok(FetchType::Literal(Some(fetch))) => {
+                    Some(input_bound.map_or(fetch, |bound| bound.min(fetch)))
+                }
+                _ => input_bound,
+            }
+        }
+        LogicalPlan::Sort(sort) => {
+            let input_bound = remote_plan_row_bound(&sort.input);
+            sort.fetch
+                .map(|fetch| input_bound.map_or(fetch, |bound| bound.min(fetch)))
+                .or(input_bound)
+        }
+        LogicalPlan::Projection(projection) => remote_plan_row_bound(&projection.input),
+        LogicalPlan::Filter(filter) => remote_plan_row_bound(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => remote_plan_row_bound(&alias.input),
+        LogicalPlan::Window(window) => remote_plan_row_bound(&window.input),
+        LogicalPlan::Repartition(repartition) => remote_plan_row_bound(&repartition.input),
+        LogicalPlan::Distinct(distinct) => remote_plan_row_bound(distinct.input()),
+        LogicalPlan::Aggregate(aggregate) => {
+            if aggregate
+                .group_expr
+                .iter()
+                .any(|expr| matches!(expr, Expr::GroupingSet(_)))
+            {
+                None
+            } else if aggregate.group_expr.is_empty() {
+                Some(1)
+            } else {
+                remote_plan_row_bound(&aggregate.input)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
@@ -429,6 +475,7 @@ impl MergeScanExec {
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
         let arrow_schema = maybe_amend_json2_field(arrow_schema);
+        let output_partition_count = Self::output_partition_count(regions.len(), target_partition);
 
         // States the output ordering of the plan.
         //
@@ -438,7 +485,7 @@ impl MergeScanExec {
         //
         // Otherwise, we need to use the default ordering.
         let eq_properties = if let LogicalPlan::Sort(sort) = &plan
-            && target_partition >= regions.len()
+            && output_partition_count >= regions.len()
         {
             let lex_ordering = sort
                 .expr
@@ -477,7 +524,7 @@ impl MergeScanExec {
                 }
             })
             .collect();
-        let partitioning = Partitioning::Hash(partition_exprs, target_partition);
+        let partitioning = Partitioning::Hash(partition_exprs, output_partition_count);
 
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
@@ -504,6 +551,28 @@ impl MergeScanExec {
         })
     }
 
+    /// Conservative row-count upper bound for all selected regions.
+    ///
+    /// This is not an expected cardinality: DataFusion receives it as an
+    /// inexact estimate only because `Statistics` has no upper-bound precision.
+    fn estimated_num_rows(&self) -> Precision<usize> {
+        if self.regions.is_empty() {
+            return Precision::Inexact(0);
+        }
+
+        let Some(rows_per_region) = remote_plan_row_bound(&self.plan) else {
+            return Precision::Absent;
+        };
+        rows_per_region
+            .checked_mul(self.regions.len())
+            .map_or(Precision::Absent, Precision::Inexact)
+    }
+
+    /// Number of partitions populated by the region striping in [`Self::to_stream`].
+    fn output_partition_count(num_regions: usize, target_partition: usize) -> usize {
+        num_regions.max(1).min(target_partition.max(1))
+    }
+
     pub fn to_stream(
         &self,
         context: Arc<TaskContext>,
@@ -518,7 +587,8 @@ impl MergeScanExec {
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
-        let target_partition = self.target_partition;
+        let target_partition =
+            Self::output_partition_count(self.regions.len(), self.target_partition);
         let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
         let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
             self.captured_remote_dyn_filters()
@@ -855,7 +925,7 @@ impl MergeScanExec {
             metric: self.metric.clone(),
             properties: Arc::new(PlanProperties::new(
                 self.properties.eq_properties.clone(),
-                Partitioning::Hash(overlaps, self.target_partition),
+                Partitioning::Hash(overlaps, self.partition_count()),
                 self.properties.emission_type,
                 self.properties.boundedness,
             )),
@@ -906,7 +976,7 @@ impl MergeScanExec {
     }
 
     pub fn partition_count(&self) -> usize {
-        self.target_partition
+        Self::output_partition_count(self.regions.len(), self.target_partition)
     }
 
     pub fn region_count(&self) -> usize {
@@ -1174,6 +1244,16 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+        if partition.is_some() {
+            return Ok(Statistics::new_unknown(&self.arrow_schema));
+        }
+
+        let mut statistics = Statistics::new_unknown(&self.arrow_schema);
+        statistics.num_rows = self.estimated_num_rows();
+        Ok(statistics)
+    }
+
     fn name(&self) -> &str {
         "MergeScanExec"
     }
@@ -1404,7 +1484,6 @@ mod tests {
         region_count: u64,
         target_partition: usize,
     ) -> MergeScanExec {
-        let session_state = SessionStateBuilder::new().build();
         let plan = LogicalPlanBuilder::empty(true)
             .project(vec![lit(1i64).alias("ts")])
             .unwrap()
@@ -1412,10 +1491,20 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let schema = plan.schema().as_arrow().clone();
         let regions = (0..region_count)
             .map(|region_number| RegionId::new(1024, region_number as u32))
             .collect();
+
+        merge_scan_exec_with_plan(regions, plan, target_partition)
+    }
+
+    fn merge_scan_exec_with_plan(
+        regions: Vec<RegionId>,
+        plan: LogicalPlan,
+        target_partition: usize,
+    ) -> MergeScanExec {
+        let session_state = SessionStateBuilder::new().build();
+        let schema = plan.schema().as_arrow().clone();
 
         MergeScanExec::new(
             &session_state,
@@ -1553,6 +1642,118 @@ mod tests {
         let exec = merge_scan_exec_with_sorted_input(3, 4);
 
         assert!(exec.properties().output_ordering().is_some());
+    }
+
+    #[test]
+    fn merge_scan_reports_populated_partition_count() {
+        let cases = [(0, 10, 1), (1, 10, 1), (3, 2, 2), (5, 10, 5), (3, 0, 1)];
+
+        for (region_count, target, expected) in cases {
+            let exec = merge_scan_exec_with_sorted_input(region_count, target);
+            assert_eq!(exec.partition_count(), expected);
+            assert_eq!(
+                exec.properties().output_partitioning().partition_count(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn merge_scan_reports_only_deterministic_plan_bounds() {
+        use datafusion::functions_aggregate::expr_fn::count;
+        use datafusion_expr::GroupingSet;
+
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let limited = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), limited, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(100)
+        );
+
+        let large_bound = i32::MAX as usize + 1;
+        let large_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(large_bound))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(vec![RegionId::new(1024, 1)], large_limit, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(large_bound)
+        );
+
+        let uncapped = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), uncapped.clone(), 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
+        assert_eq!(
+            merge_scan_exec_with_plan(Vec::new(), uncapped, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(0)
+        );
+
+        let global_aggregate = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(0))
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), global_aggregate, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(2)
+        );
+
+        let grouping_sets = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .aggregate(
+                vec![Expr::GroupingSet(GroupingSet::GroupingSets(vec![
+                    vec![],
+                    vec![col("col")],
+                ]))],
+                Vec::<Expr>::new(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions, grouping_sets, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
     }
 
     #[test]

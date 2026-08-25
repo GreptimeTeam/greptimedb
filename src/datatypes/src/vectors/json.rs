@@ -14,3 +14,4 @@
 
 pub mod array;
 pub(crate) mod builder;
+pub mod variant;

@@ -38,8 +38,10 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY,
-    SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption,
+    AddColumnRequest, AlterKind, AnnotationContext, AnnotationFamily, AnnotationValidationError,
+    ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption,
+    TableOptions, UnsetIndexOption, has_stable_string_form, parse_entity_columns,
+    parse_entity_option_key, validate_and_normalize_annotation,
 };
 use crate::table_reference::TableReference;
 
@@ -332,10 +334,12 @@ impl TableMeta {
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
             AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
-            AlterKind::SetRepartitionColumnHint { column_name } => {
-                self.set_repartition_column_hint(table_name, column_name)
+            AlterKind::SetAnnotations { family, options } => {
+                self.set_annotations(table_name, *family, options)
             }
-            AlterKind::UnsetRepartitionColumnHint => self.unset_repartition_column_hint(),
+            AlterKind::UnsetAnnotations { family, keys } => {
+                self.unset_annotations(table_name, *family, keys)
+            }
             AlterKind::SetIndexes { options } => self.set_indexes(table_name, options),
             AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
@@ -423,67 +427,92 @@ impl TableMeta {
         self.set_table_options(&requests)
     }
 
-    fn set_repartition_column_hint(
+    /// Applies an annotation SET. Validation lives here, on the mutation
+    /// path, so it runs both at frontend verification and again inside the
+    /// alter procedure's prepare step — under the table lock, against fresh
+    /// metadata.
+    fn set_annotations(
         &self,
         table_name: &str,
-        column_name: &str,
+        family: AnnotationFamily,
+        options: &[(String, String)],
     ) -> Result<TableMetaBuilder> {
-        let column_name = column_name.trim();
         ensure!(
-            !column_name.is_empty() && !column_name.contains(','),
+            !family.requires_single_key() || options.len() == 1,
             error::InvalidAlterRequestSnafu {
                 table: table_name,
-                err: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
+                err: family.mixed_batch_error(),
             }
         );
-
-        ensure!(
-            self.partition_key_indices.is_empty(),
-            error::InvalidAlterRequestSnafu {
-                table: table_name,
-                err: format!(
-                    "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
-                ),
-            }
-        );
-
-        let column_index = self
-            .schema
-            .column_index_by_name(column_name)
-            .with_context(|| error::ColumnNotExistsSnafu {
-                column_name,
-                table_name,
-            })?;
-
-        if let Some(time_index) = self.schema.timestamp_index() {
+        let cx = AnnotationContext {
+            schema: &self.schema,
+            partition_key_indices: &self.partition_key_indices,
+        };
+        let mut new_options = self.options.clone();
+        for (key, value) in options {
             ensure!(
-                column_index != time_index,
+                AnnotationFamily::of_key(key) == Some(family),
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
                     err: format!(
-                        "cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"
+                        "`{key}` is outside the `{}` annotation namespace",
+                        family.namespace()
                     ),
                 }
             );
+            let checked = validate_and_normalize_annotation(family, &cx, key, value).map_err(
+                |e| match e {
+                    AnnotationValidationError::ColumnNotFound { column } => {
+                        error::ColumnNotExistsSnafu {
+                            column_name: column,
+                            table_name,
+                        }
+                        .build()
+                    }
+                    other => error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: other.to_string(),
+                    }
+                    .build(),
+                },
+            )?;
+            new_options.extra_options.insert(key.clone(), checked);
         }
-
-        let mut new_options = self.options.clone();
-        new_options.extra_options.insert(
-            REPARTITION_COLUMN_HINT_KEY.to_string(),
-            column_name.to_string(),
-        );
-
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
         Ok(builder)
     }
 
-    fn unset_repartition_column_hint(&self) -> Result<TableMetaBuilder> {
+    /// Applies an annotation UNSET. Deliberately lenient inside the family's
+    /// namespace: keys this version does not recognise may still be removed,
+    /// so options left behind by other versions can be cleaned up.
+    fn unset_annotations(
+        &self,
+        table_name: &str,
+        family: AnnotationFamily,
+        keys: &[String],
+    ) -> Result<TableMetaBuilder> {
+        ensure!(
+            !family.requires_single_key() || keys.len() == 1,
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: family.mixed_batch_error(),
+            }
+        );
         let mut new_options = self.options.clone();
-        new_options
-            .extra_options
-            .remove(REPARTITION_COLUMN_HINT_KEY);
-
+        for key in keys {
+            ensure!(
+                AnnotationFamily::of_key(key) == Some(family),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "`{key}` is outside the `{}` annotation namespace",
+                        family.namespace()
+                    ),
+                }
+            );
+            new_options.extra_options.remove(key);
+        }
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
         Ok(builder)
@@ -774,6 +803,24 @@ impl TableMeta {
                     },
                 );
 
+                // A dropped column may leave a stale entity declaration behind;
+                // re-adding it must not hand the declaration a type without a
+                // stable string form.
+                if !has_stable_string_form(&col_to_add.column_schema.data_type)
+                    && let Some(key) =
+                        entity_option_referencing(&self.options, &col_to_add.column_schema.name)
+                {
+                    return error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column `{}` is referenced by entity option `{key}` and must \
+                             keep a type that renders as a string, got `{}`",
+                            col_to_add.column_schema.name, col_to_add.column_schema.data_type
+                        ),
+                    }
+                    .fail();
+                }
+
                 new_columns.push(col_to_add.clone());
             }
         }
@@ -966,6 +1013,25 @@ impl TableMeta {
                     column_name: change_column_name,
                     table_name,
                 })?;
+
+            // A column referenced by an entity declaration may be dropped (the
+            // read-time derivation skips the stale declaration), but must not
+            // change to a type without a stable string form. Checked after the
+            // existence lookup so a missing column keeps reporting
+            // `ColumnNotExists` regardless of stale declarations.
+            if !has_stable_string_form(&col_to_change.target_type)
+                && let Some(key) = entity_option_referencing(&self.options, change_column_name)
+            {
+                return error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "column `{change_column_name}` is referenced by entity option \
+                         `{key}` and must keep a type that renders as a string, got `{}`",
+                        col_to_change.target_type
+                    ),
+                }
+                .fail();
+            }
 
             let column = &table_schema.column_schemas()[index];
 
@@ -1415,6 +1481,14 @@ impl TableInfo {
     }
 }
 
+fn entity_option_referencing<'a>(options: &'a TableOptions, column: &str) -> Option<&'a str> {
+    options.extra_options.iter().find_map(|(key, value)| {
+        (parse_entity_option_key(key).is_some()
+            && parse_entity_columns(value).iter().any(|c| c == column))
+        .then_some(key.as_str())
+    })
+}
+
 /// Set column fulltext options if it passed the validation.
 ///
 /// Options allowed to modify:
@@ -1821,8 +1895,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: " col1 ".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                " col1 ".to_string(),
+            )],
         };
         let new_meta = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1850,8 +1928,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: " ".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), " ".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1874,8 +1953,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "col1,col2".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                "col1,col2".to_string(),
+            )],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1898,8 +1981,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "missing".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                "missing".to_string(),
+            )],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1919,8 +2006,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "ts".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), "ts".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1944,8 +2032,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "col1".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1974,7 +2063,13 @@ mod tests {
             .unwrap();
 
         let new_meta = meta
-            .builder_with_alter_kind("my_table", &AlterKind::UnsetRepartitionColumnHint)
+            .builder_with_alter_kind(
+                "my_table",
+                &AlterKind::UnsetAnnotations {
+                    family: AnnotationFamily::RepartitionHint,
+                    keys: vec![REPARTITION_COLUMN_HINT_KEY.to_string()],
+                },
+            )
             .unwrap()
             .build()
             .unwrap();
@@ -2709,5 +2804,306 @@ mod tests {
             table_type: TableType::Base,
         };
         assert_eq!(actual, expected);
+    }
+
+    use crate::requests::{SEMANTIC_METRIC_UNIT, SEMANTIC_SIGNAL_TYPE};
+
+    /// `host` is a tag, `service` and `note` are string fields, `payload` is a
+    /// binary field.
+    fn semantic_test_meta() -> TableMeta {
+        let column_schemas = vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("payload", ConcreteDataType::binary_datatype(), true),
+            ColumnSchema::new("service", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(5)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_set_semantic_annotations() {
+        let meta = semantic_test_meta();
+        // `service` is a plain field: entity columns may be tags or fields.
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::Semantic,
+            options: vec![
+                (SEMANTIC_SIGNAL_TYPE.to_string(), "trace".to_string()),
+                (
+                    "greptime.semantic.entity.service.id".to_string(),
+                    "service".to_string(),
+                ),
+            ],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            new_meta.options.extra_options.get(SEMANTIC_SIGNAL_TYPE),
+            Some(&"trace".to_string())
+        );
+        assert_eq!(
+            new_meta
+                .options
+                .extra_options
+                .get("greptime.semantic.entity.service.id"),
+            Some(&"service".to_string())
+        );
+    }
+
+    #[test]
+    fn test_repartition_hint_batch_must_be_single_key() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Direct gRPC can hand the mutation layer a duplicated batch the
+        // converter never saw; last-write-wins must not silently apply.
+        let dup_set = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![
+                (REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string()),
+                (REPARTITION_COLUMN_HINT_KEY.to_string(), "col2".to_string()),
+            ],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &dup_set)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("must be altered separately"),
+            "{err}"
+        );
+
+        let dup_unset = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            keys: vec![
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+            ],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &dup_unset)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("must be altered separately"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_set_semantic_annotations_rejects_invalid() {
+        let meta = semantic_test_meta();
+        let cases = [
+            (
+                "greptime.semantic.unknown_key",
+                "x",
+                "unknown semantic option",
+            ),
+            (SEMANTIC_SIGNAL_TYPE, "garbage", "invalid value"),
+            (
+                "greptime.semantic.entity.host.id",
+                "no_such_column",
+                "no_such_column",
+            ),
+            (
+                "greptime.semantic.entity.host.id",
+                "payload",
+                "cannot render as a string",
+            ),
+        ];
+        for (key, value, needle) in cases {
+            let alter_kind = AlterKind::SetAnnotations {
+                family: AnnotationFamily::Semantic,
+                options: vec![(key.to_string(), value.to_string())],
+            };
+            let err = meta
+                .builder_with_alter_kind("my_table", &alter_kind)
+                .err()
+                .unwrap();
+            assert!(
+                err.to_string().contains(needle),
+                "key `{key}`: unexpected error `{err}`"
+            );
+        }
+
+        // ALTER keeps missing columns on the 4002 contract (pinned by sqlness);
+        // the shared validator must not collapse it into InvalidArguments.
+        let missing = meta
+            .builder_with_alter_kind(
+                "my_table",
+                &AlterKind::SetAnnotations {
+                    family: AnnotationFamily::Semantic,
+                    options: vec![(
+                        "greptime.semantic.entity.host.id".to_string(),
+                        "no_such_column".to_string(),
+                    )],
+                },
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            common_error::status_code::StatusCode::TableColumnNotFound,
+            common_error::ext::ErrorExt::status_code(&missing)
+        );
+    }
+
+    #[test]
+    fn test_unset_semantic_annotations() {
+        let mut meta = semantic_test_meta();
+        meta.options
+            .extra_options
+            .insert(SEMANTIC_SIGNAL_TYPE.to_string(), "trace".to_string());
+        // A key this version does not recognise, still inside the namespace.
+        meta.options
+            .extra_options
+            .insert("greptime.semantic.future_key".to_string(), "x".to_string());
+
+        let alter_kind = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::Semantic,
+            keys: vec![
+                SEMANTIC_SIGNAL_TYPE.to_string(),
+                "greptime.semantic.future_key".to_string(),
+                // Absent key: removal is a no-op, not an error.
+                SEMANTIC_METRIC_UNIT.to_string(),
+            ],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key(SEMANTIC_SIGNAL_TYPE)
+        );
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key("greptime.semantic.future_key")
+        );
+
+        let outside = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::Semantic,
+            keys: vec!["ttl".to_string()],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &outside)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("annotation namespace"), "{err}");
+    }
+
+    #[test]
+    fn test_modify_entity_column_type_keeps_string_form() {
+        let mut meta = semantic_test_meta();
+        meta.options.extra_options.insert(
+            "greptime.semantic.entity.service.id".to_string(),
+            "service".to_string(),
+        );
+
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "service".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("must keep a type that renders as a string"),
+            "{err}"
+        );
+
+        // An unreferenced column may still change to a non-string form.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "note".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        meta.builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_stale_entity_declaration_guards_readd_and_reports_missing_column() {
+        // A stale declaration: `gone` was dropped after being declared.
+        let mut meta = semantic_test_meta();
+        meta.options.extra_options.insert(
+            "greptime.semantic.entity.service.id".to_string(),
+            "gone".to_string(),
+        );
+
+        // MODIFY on the missing column keeps the ColumnNotExists contract
+        // (4002), stale declaration or not.
+        let modify = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "gone".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &modify)
+            .err()
+            .unwrap();
+        assert_eq!(
+            common_error::status_code::StatusCode::TableColumnNotFound,
+            common_error::ext::ErrorExt::status_code(&err)
+        );
+
+        // Re-adding the declared column must not hand the declaration a
+        // non-string type...
+        let add = |ty: ConcreteDataType| AlterKind::AddColumns {
+            columns: vec![AddColumnRequest {
+                column_schema: ColumnSchema::new("gone", ty, true),
+                is_key: false,
+                location: None,
+                add_if_not_exists: false,
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &add(ConcreteDataType::binary_datatype()))
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("must keep a type that renders as a string"),
+            "{err}"
+        );
+
+        // ...while a string re-add re-satisfies it.
+        meta.builder_with_alter_kind("my_table", &add(ConcreteDataType::string_datatype()))
+            .unwrap();
     }
 }

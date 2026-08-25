@@ -16,6 +16,7 @@
 
 mod admin_function_event;
 mod database_ddl_event;
+mod dict_groupby_sst;
 mod event_recorder_test_util;
 #[macro_use]
 mod grpc;

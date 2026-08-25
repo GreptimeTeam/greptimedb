@@ -30,11 +30,13 @@ use datafusion_common::pruning::PruningStatistics;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, StringDictionaryBuilder, UInt8Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, StringDictionaryBuilder,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt8Array, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::{SortColumn, SortOptions, concat_batches};
 use datatypes::arrow::datatypes::{
-    DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
+    DataType as ArrowDataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type,
 };
 use datatypes::data_type::DataType;
 use datatypes::extension::json::is_json2_extension_type;
@@ -771,6 +773,147 @@ fn new_primary_key_column_builders(
 
 /// Sorts the record batch with primary key format.
 pub fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+    let indices = if let Some(indices) = try_sort_primary_key_indices(batch)? {
+        indices
+    } else {
+        lexsort_primary_key_indices(batch)?
+    };
+
+    datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)
+}
+
+/// Sorts the known, non-null primary-key layout without comparing encoded keys for every row.
+///
+/// Returns `None` if the batch does not have the exact layout supported by this fast path.
+fn try_sort_primary_key_indices(batch: &RecordBatch) -> Result<Option<UInt32Array>> {
+    let total_columns = batch.num_columns();
+    let timestamp = batch.column(total_columns - 4);
+    let primary_key = batch.column(total_columns - 3);
+    let sequence = batch.column(total_columns - 2);
+
+    let Some(primary_key) = primary_key
+        .as_any()
+        .downcast_ref::<DictionaryArray<UInt32Type>>()
+    else {
+        return Ok(None);
+    };
+    let Some(sequence) = sequence.as_any().downcast_ref::<UInt64Array>() else {
+        return Ok(None);
+    };
+
+    if batch.num_rows() > u32::MAX as usize
+        || primary_key.null_count() != 0
+        || primary_key.values().data_type() != &ArrowDataType::Binary
+        || primary_key.values().null_count() != 0
+        || primary_key.values().len() > batch.num_rows()
+        || timestamp.null_count() != 0
+        || sequence.null_count() != 0
+    {
+        return Ok(None);
+    }
+
+    let indices = match timestamp.data_type() {
+        ArrowDataType::Timestamp(TimeUnit::Second, _) => timestamp
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .map(|timestamp| sort_primary_key_indices(primary_key, timestamp.values(), sequence)),
+        ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => timestamp
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .map(|timestamp| sort_primary_key_indices(primary_key, timestamp.values(), sequence)),
+        ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => timestamp
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .map(|timestamp| sort_primary_key_indices(primary_key, timestamp.values(), sequence)),
+        ArrowDataType::Timestamp(TimeUnit::Nanosecond, _) => timestamp
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .map(|timestamp| sort_primary_key_indices(primary_key, timestamp.values(), sequence)),
+        _ => None,
+    };
+
+    indices.transpose()
+}
+
+/// Computes sorted row indices by ranking dictionary values, scattering rows into primary-key
+/// buckets, and sorting only buckets that are not already ordered by time and sequence.
+fn sort_primary_key_indices(
+    primary_key: &PrimaryKeyArray,
+    timestamps: &[i64],
+    sequences: &UInt64Array,
+) -> Result<UInt32Array> {
+    debug_assert_eq!(primary_key.len(), timestamps.len());
+    debug_assert_eq!(primary_key.len(), sequences.len());
+    debug_assert_eq!(primary_key.null_count(), 0);
+    debug_assert_eq!(primary_key.values().null_count(), 0);
+    debug_assert_eq!(sequences.null_count(), 0);
+
+    // Ranks compare in the same order as the dictionary values. Equal dictionary values receive
+    // the same rank, which is required because Arrow dictionary concatenation only deduplicates
+    // values on a best-effort basis.
+    let value_ranks = datatypes::arrow::compute::rank(
+        primary_key.values().as_ref(),
+        Some(SortOptions {
+            descending: false,
+            nulls_first: true,
+        }),
+    )
+    .context(ComputeArrowSnafu)?;
+
+    // A rank is at most the number of dictionary values. It is not necessarily dense when the
+    // dictionary contains duplicate values, so keep one extra slot and allow empty buckets.
+    let mut counts = vec![0usize; value_ranks.len() + 1];
+    for &key in primary_key.keys().values() {
+        counts[value_ranks[key as usize] as usize] += 1;
+    }
+
+    let mut bucket_offsets = vec![0usize; counts.len()];
+    let mut offset = 0;
+    for (bucket_offset, &count) in bucket_offsets.iter_mut().zip(&counts) {
+        *bucket_offset = offset;
+        offset += count;
+    }
+
+    // Scatter in input order. This preserves already sorted runs within each primary key.
+    let mut next_offsets = bucket_offsets.clone();
+    let mut indices = vec![0u32; primary_key.len()];
+    for (row, &key) in primary_key.keys().values().iter().enumerate() {
+        let rank = value_ranks[key as usize] as usize;
+        indices[next_offsets[rank]] = row as u32;
+        next_offsets[rank] += 1;
+    }
+
+    let sequences = sequences.values();
+    for (&start, count) in bucket_offsets.iter().zip(counts) {
+        let end = start + count;
+        let bucket = &mut indices[start..end];
+        if !bucket.is_sorted_by(|left, right| {
+            compare_time_sequence(timestamps, sequences, *left, *right).is_le()
+        }) {
+            bucket.sort_unstable_by(|left, right| {
+                compare_time_sequence(timestamps, sequences, *left, *right)
+            });
+        }
+    }
+
+    Ok(UInt32Array::from(indices))
+}
+
+#[inline]
+fn compare_time_sequence(
+    timestamps: &[i64],
+    sequences: &[u64],
+    left: u32,
+    right: u32,
+) -> std::cmp::Ordering {
+    let left = left as usize;
+    let right = right as usize;
+    timestamps[left]
+        .cmp(&timestamps[right])
+        .then_with(|| sequences[right].cmp(&sequences[left]))
+}
+
+fn lexsort_primary_key_indices(batch: &RecordBatch) -> Result<UInt32Array> {
     let total_columns = batch.num_columns();
     let sort_columns = vec![
         // Primary key column (ascending)
@@ -799,10 +942,7 @@ pub fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch>
         },
     ];
 
-    let indices = datatypes::arrow::compute::lexsort_to_indices(&sort_columns, None)
-        .context(ComputeArrowSnafu)?;
-
-    datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)
+    datatypes::arrow::compute::lexsort_to_indices(&sort_columns, None).context(ComputeArrowSnafu)
 }
 
 /// Converts a `BulkPart` that is unordered and without encoded primary keys into a `BulkPart`
@@ -1674,6 +1814,8 @@ mod tests {
     use datatypes::prelude::{ConcreteDataType, Value};
     use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::build_primary_key_codec;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
@@ -1690,6 +1832,137 @@ mod tests {
         timestamps: &'a [i64],
         v1: &'a [Option<f64>],
         sequence: u64,
+    }
+
+    #[test]
+    fn test_sort_primary_key_record_batch_with_duplicate_dictionary_values() {
+        // Dictionary keys 1 and 2 both represent "series_a". This can happen after Arrow
+        // concatenates dictionaries because dictionary deduplication is best-effort.
+        let primary_key = DictionaryArray::try_new(
+            UInt32Array::from(vec![0, 1, 0, 2, 2]),
+            Arc::new(BinaryArray::from_vec(vec![
+                b"series_b".as_slice(),
+                b"series_a".as_slice(),
+                b"series_a".as_slice(),
+            ])),
+        )
+        .unwrap();
+        let timestamps = TimestampMillisecondArray::from(vec![20, 30, 10, 30, 10]);
+        let sequences = UInt64Array::from(vec![5, 6, 4, 8, 9]);
+        let row_ids = UInt32Array::from_iter_values(0..5);
+        let op_types = UInt8Array::from_value(OpType::Put as u8, 5);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row_id", ArrowDataType::UInt32, false),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                PRIMARY_KEY_COLUMN_NAME,
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
+                false,
+            ),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(row_ids),
+                Arc::new(timestamps),
+                Arc::new(primary_key),
+                Arc::new(sequences),
+                Arc::new(op_types),
+            ],
+        )
+        .unwrap();
+
+        let expected_indices = lexsort_primary_key_indices(&batch).unwrap();
+        let expected =
+            datatypes::arrow::compute::take_record_batch(&batch, &expected_indices).unwrap();
+        let actual = sort_primary_key_record_batch(&batch).unwrap();
+
+        let expected_row_ids = expected
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let actual_row_ids = actual
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(expected_row_ids, actual_row_ids);
+        assert_eq!(actual_row_ids.values(), &[4, 3, 1, 2, 0]);
+    }
+
+    #[test]
+    fn test_sort_primary_key_record_batch_against_lexsort() {
+        let mut rng = StdRng::seed_from_u64(0x5eed);
+        for _ in 0..100 {
+            let num_rows = rng.random_range(0..128);
+            let keys = UInt32Array::from_iter_values((0..num_rows).map(|_| rng.random_range(0..8)));
+            let primary_key = DictionaryArray::try_new(
+                keys,
+                Arc::new(BinaryArray::from_vec(vec![
+                    b"d".as_slice(),
+                    b"a".as_slice(),
+                    b"c".as_slice(),
+                    b"b".as_slice(),
+                    b"a".as_slice(),
+                    b"d".as_slice(),
+                    b"b".as_slice(),
+                    b"c".as_slice(),
+                ])),
+            )
+            .unwrap();
+            let timestamps = TimestampMillisecondArray::from_iter_values(
+                (0..num_rows).map(|_| rng.random_range(-1000..1000)),
+            );
+            // Unique sequences ensure that the oracle and fast path have no fully equal sort keys.
+            let sequences = UInt64Array::from_iter_values(0..num_rows as u64);
+            let row_ids = UInt32Array::from_iter_values(0..num_rows as u32);
+            let op_types = UInt8Array::from_value(OpType::Put as u8, num_rows);
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("row_id", ArrowDataType::UInt32, false),
+                Field::new(
+                    "ts",
+                    ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new(
+                    PRIMARY_KEY_COLUMN_NAME,
+                    ArrowDataType::Dictionary(
+                        Box::new(ArrowDataType::UInt32),
+                        Box::new(ArrowDataType::Binary),
+                    ),
+                    false,
+                ),
+                Field::new("__sequence", ArrowDataType::UInt64, false),
+                Field::new("__op_type", ArrowDataType::UInt8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(row_ids),
+                    Arc::new(timestamps),
+                    Arc::new(primary_key),
+                    Arc::new(sequences),
+                    Arc::new(op_types),
+                ],
+            )
+            .unwrap();
+
+            let expected_indices = lexsort_primary_key_indices(&batch).unwrap();
+            let expected =
+                datatypes::arrow::compute::take_record_batch(&batch, &expected_indices).unwrap();
+            let actual = sort_primary_key_record_batch(&batch).unwrap();
+            assert_eq!(expected.column(0), actual.column(0));
+        }
     }
 
     #[test]

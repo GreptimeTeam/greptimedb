@@ -152,6 +152,7 @@ mod tests {
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::flat_format::FlatWriteFormat;
+    use crate::sst::parquet::metadata::extract_primary_key_range;
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::row_selection::RowGroupSelection;
     use crate::sst::parquet::writer::ParquetWriter;
@@ -687,12 +688,13 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let metadata = Arc::new(sst_region_metadata());
         let batches = vec![
-            new_record_batch_by_range(&["a", "d"], 0, 1000),
-            new_record_batch_by_range(&["b", "f"], 0, 1000),
-            new_record_batch_by_range(&["c", "g"], 0, 1000),
-            new_record_batch_by_range(&["b", "h"], 100, 200),
-            new_record_batch_by_range(&["b", "h"], 200, 300),
-            new_record_batch_by_range(&["b", "h"], 300, 1000),
+            new_record_batch_by_range(&["a", "a"], 0, 1000),
+            new_record_batch_by_range(&["b", "b"], 0, 1000),
+            new_record_batch_by_range(&["c", "c"], 0, 1000),
+            new_record_batch_by_range(&["d", "d"], 100, 200),
+            new_record_batch_by_range(&["d", "d"], 200, 300),
+            new_record_batch_by_range(&["d", "d"], 300, 1000),
+            new_record_batch_by_range(&["e", "e"], 0, 100),
         ];
         let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
 
@@ -743,6 +745,159 @@ mod tests {
             }
         }
         assert_eq!(total_rows, rows_read);
+    }
+
+    #[tokio::test]
+    async fn test_split_file_at_series_boundary_inside_batch() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let metadata = Arc::new(sst_region_metadata());
+        let first_batch_rows = (0..1000).map(|ts| ("a", "a", ts)).collect::<Vec<_>>();
+        let second_batch_rows = (0..1000).map(|ts| ("b", "b", ts)).collect::<Vec<_>>();
+        let mut third_batch_rows = (1000..2000).map(|ts| ("b", "b", ts)).collect::<Vec<_>>();
+        third_batch_rows.extend((0..1000).map(|ts| ("c", "c", ts)));
+        let batches = vec![
+            new_record_batch_from_rows(&first_batch_rows),
+            new_record_batch_from_rows(&second_batch_rows),
+            new_record_batch_from_rows(&third_batch_rows),
+        ];
+        let total_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let source = new_flat_source_from_record_batches(batches);
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            max_file_size: Some(1),
+            ..Default::default()
+        };
+        let path_provider = RegionFilePathFactory {
+            table_dir: "test_series_boundary".to_string(),
+            path_type: PathType::Bare,
+        };
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            path_provider,
+            &mut metrics,
+        )
+        .await;
+
+        let files = writer
+            .write_all_flat(source, None, &write_opts)
+            .await
+            .unwrap();
+
+        assert!(files.len() > 1);
+        assert_eq!(
+            total_rows,
+            files.iter().map(|file| file.num_rows).sum::<usize>()
+        );
+        let primary_key_ranges = files
+            .iter()
+            .map(|file| {
+                extract_primary_key_range(file.file_metadata.as_ref().unwrap(), metadata.as_ref())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            primary_key_ranges
+                .windows(2)
+                .all(|ranges| ranges[0].1 < ranges[1].0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oversized_single_series_stays_in_one_file() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let metadata = Arc::new(sst_region_metadata());
+        let first_batch_rows = (0..1000).map(|ts| ("a", "a", ts)).collect::<Vec<_>>();
+        let second_batch_rows = (1000..2000).map(|ts| ("a", "a", ts)).collect::<Vec<_>>();
+        let third_batch_rows = (2000..3000).map(|ts| ("a", "a", ts)).collect::<Vec<_>>();
+        let batches = vec![
+            new_record_batch_from_rows(&first_batch_rows),
+            new_record_batch_from_rows(&second_batch_rows),
+            new_record_batch_from_rows(&third_batch_rows),
+        ];
+        let total_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let source = new_flat_source_from_record_batches(batches);
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            max_file_size: Some(1),
+            ..Default::default()
+        };
+        let path_provider = RegionFilePathFactory {
+            table_dir: "test_oversized_series".to_string(),
+            path_type: PathType::Bare,
+        };
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            path_provider,
+            &mut metrics,
+        )
+        .await;
+
+        let files = writer
+            .write_all_flat_as_primary_key(source, None, &write_opts)
+            .await
+            .unwrap();
+
+        assert_eq!(1, files.len());
+        assert_eq!(total_rows, files[0].num_rows);
+        assert!(files[0].file_size > write_opts.max_file_size.unwrap() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_write_multiple_files_without_primary_key() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let metadata = Arc::new(sst_region_metadata_without_primary_key());
+        let batch_rows = 1000;
+        let batches = vec![
+            new_record_batch_without_primary_key(0, batch_rows),
+            new_record_batch_without_primary_key(batch_rows, 2 * batch_rows),
+            new_record_batch_without_primary_key(2 * batch_rows, 3 * batch_rows),
+        ];
+        let total_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let source = new_flat_source_from_record_batches(batches);
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            max_file_size: Some(1),
+            ..Default::default()
+        };
+        let path_provider = RegionFilePathFactory {
+            table_dir: "test_no_primary_key".to_string(),
+            path_type: PathType::Bare,
+        };
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            path_provider,
+            &mut metrics,
+        )
+        .await;
+
+        let files = writer
+            .write_all_flat(source, None, &write_opts)
+            .await
+            .unwrap();
+
+        // Regions without a primary key keep splitting at batch boundaries:
+        // the limit produces multiple files and no batch is sliced.
+        assert!(files.len() > 1);
+        assert!(files.iter().all(|file| file.num_rows % batch_rows == 0));
+        assert_eq!(
+            total_rows,
+            files.iter().map(|file| file.num_rows).sum::<usize>()
+        );
     }
 
     #[tokio::test]
@@ -1143,6 +1298,62 @@ mod tests {
             pretty_format_batches(&actual).unwrap().to_string()
         );
         assert!(reader.next_record_batch().await.unwrap().is_none());
+    }
+
+    /// Creates a new region metadata without primary key for testing SSTs.
+    ///
+    /// Schema: field_0, ts
+    fn sst_region_metadata_without_primary_key() -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(REGION_ID);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_0".to_string(),
+                    ConcreteDataType::uint64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![]);
+        builder.build().unwrap()
+    }
+
+    /// Creates a flat format RecordBatch for regions without a primary key.
+    fn new_record_batch_without_primary_key(start: usize, end: usize) -> RecordBatch {
+        assert!(end >= start);
+        let metadata = Arc::new(sst_region_metadata_without_primary_key());
+        let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
+        let num_rows = end - start;
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        // Regions without a primary key encode it as empty bytes.
+        for _ in 0..num_rows {
+            pk_builder.append([]).unwrap();
+        }
+
+        RecordBatch::try_new(
+            flat_schema,
+            vec![
+                Arc::new(UInt64Array::from_iter_values(start as u64..end as u64)) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    start as i64..end as i64,
+                )) as ArrayRef,
+                Arc::new(pk_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_value(1000, num_rows)) as ArrayRef,
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)) as ArrayRef,
+            ],
+        )
+        .unwrap()
     }
 
     fn new_record_batch_from_rows(rows: &[(&str, &str, i64)]) -> RecordBatch {

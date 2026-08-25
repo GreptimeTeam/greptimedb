@@ -326,11 +326,17 @@ fn record_counter_reset_contradiction_warning(
     );
 }
 
-fn scalar_histogram_udf(
+fn scalar_histogram_udf<F>(
     name: &'static str,
     extra_input_types: Vec<DataType>,
-    calc: fn(&NativeHistogram, &[ColumnarValue], usize, usize, &'static str) -> DfResult<f64>,
-) -> ScalarUDF {
+    calc: F,
+) -> ScalarUDF
+where
+    F: Fn(&NativeHistogram, &[ColumnarValue], usize, usize, &'static str) -> DfResult<f64>
+        + Send
+        + Sync
+        + 'static,
+{
     let mut input_types = vec![native_histogram_arrow_type()];
     input_types.extend(extra_input_types);
     create_udf(
@@ -795,11 +801,28 @@ impl NativeHistogramQuantile {
     }
 
     pub fn scalar_udf() -> ScalarUDF {
+        Self::scalar_udf_with_collector(None)
+    }
+
+    pub fn scalar_udf_with_collector(collector: Option<PromqlAnnotationCollector>) -> ScalarUDF {
         scalar_histogram_udf(
             Self::name(),
             vec![DataType::Float64],
-            |histogram, input, row, len, name| {
-                Ok(histogram.quantile(read_scalar_f64_arg(&input[1], row, len, name)?))
+            move |histogram, input, row, len, name| {
+                let q = read_scalar_f64_arg(&input[1], row, len, name)?;
+                let (value, info) = histogram.quantile_with_info(q);
+                if let Some(info) = info {
+                    let message = match info {
+                        NativeHistogramQuantileInfo::NaNSkew => {
+                            "input to histogram_quantile has NaN observations, result is skewed higher"
+                        }
+                        NativeHistogramQuantileInfo::NaNResult => {
+                            "input to histogram_quantile has NaN observations, result is NaN"
+                        }
+                    };
+                    record_info(&collector, message);
+                }
+                Ok(value)
             },
         )
     }
@@ -813,13 +836,24 @@ impl NativeHistogramFraction {
     }
 
     pub fn scalar_udf() -> ScalarUDF {
+        Self::scalar_udf_with_collector(None)
+    }
+
+    pub fn scalar_udf_with_collector(collector: Option<PromqlAnnotationCollector>) -> ScalarUDF {
         scalar_histogram_udf(
             Self::name(),
             vec![DataType::Float64, DataType::Float64],
-            |histogram, input, row, len, name| {
+            move |histogram, input, row, len, name| {
                 let lower = read_scalar_f64_arg(&input[1], row, len, name)?;
                 let upper = read_scalar_f64_arg(&input[2], row, len, name)?;
-                Ok(histogram.fraction(lower, upper))
+                let (value, excluded_nans) = histogram.fraction_with_info(lower, upper);
+                if excluded_nans {
+                    record_info(
+                        &collector,
+                        "input to histogram_fraction has NaN observations, which are excluded from all fractions",
+                    );
+                }
+                Ok(value)
             },
         )
     }
@@ -3074,6 +3108,60 @@ mod tests {
         let mut infos = Vec::new();
         collector.append_to(&mut Vec::new(), &mut infos);
         infos
+    }
+
+    #[test]
+    fn quantile_and_fraction_report_nan_observations() {
+        let histogram = sample_histogram(10.0, f64::NAN, vec![8.0]);
+        let histogram_arg =
+            || ColumnarValue::Array(build_histogram_array(&[Some(histogram.clone())]));
+
+        let quantile_collector = PromqlAnnotationCollector::default();
+        let skewed = run_scalar_udf(
+            NativeHistogramQuantile::scalar_udf_with_collector(Some(quantile_collector.clone())),
+            vec![
+                histogram_arg(),
+                ColumnarValue::Scalar(ScalarValue::Float64(Some(0.5))),
+            ],
+        );
+        assert!(skewed.is_finite());
+        let nan = run_scalar_udf(
+            NativeHistogramQuantile::scalar_udf_with_collector(Some(quantile_collector.clone())),
+            vec![
+                histogram_arg(),
+                ColumnarValue::Scalar(ScalarValue::Float64(Some(0.9))),
+            ],
+        );
+        assert!(nan.is_nan());
+        let infos = collected_infos(&quantile_collector);
+        assert!(
+            infos
+                .iter()
+                .any(|info| info.ends_with("result is skewed higher"))
+        );
+        assert!(infos.iter().any(|info| info.ends_with("result is NaN")));
+
+        let fraction_collector = PromqlAnnotationCollector::default();
+        assert_eq!(
+            run_scalar_udf(
+                NativeHistogramFraction::scalar_udf_with_collector(Some(
+                    fraction_collector.clone(),
+                )),
+                vec![
+                    histogram_arg(),
+                    ColumnarValue::Scalar(ScalarValue::Float64(Some(f64::NEG_INFINITY))),
+                    ColumnarValue::Scalar(ScalarValue::Float64(Some(f64::INFINITY))),
+                ],
+            ),
+            0.8
+        );
+        assert_eq!(
+            collected_infos(&fraction_collector),
+            vec![
+                "input to histogram_fraction has NaN observations, which are excluded from all fractions"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]

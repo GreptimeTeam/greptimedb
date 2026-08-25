@@ -15,18 +15,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
+use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_event_recorder::event_table::{
-    REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN, REGION_MIGRATION_SRC_NODE_ID_COLUMN,
-    REGION_MIGRATION_TRIGGER_REASON_COLUMN,
+    ACTOR_COLUMN, REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN,
+    REGION_MIGRATION_SRC_NODE_ID_COLUMN, REGION_MIGRATION_TRIGGER_REASON_COLUMN,
 };
 use common_event_recorder::{
     DEFAULT_EVENTS_TABLE_NAME, DEFAULT_FLUSH_INTERVAL_SECONDS, EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
     EVENTS_TABLE_TYPE_COLUMN_NAME, PersistentEventContext, TriggerReason,
 };
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRef};
 use common_meta::peer::Peer;
+use common_meta::rpc::store::BatchDeleteRequest;
 use common_procedure::ProcedureContext;
 use common_procedure::event::{
     EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME, EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
@@ -46,6 +48,7 @@ use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::event::region_migration::REGION_MIGRATION_EVENT_TYPE;
+use meta_srv::key::DatanodeLeaseKey;
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
@@ -58,10 +61,14 @@ use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{PEER_PLACEHOLDER_ADDR, StorageType, get_test_store_config};
+use tests_integration::test_util::{
+    PEER_PLACEHOLDER_ADDR, StorageType, get_test_store_config, setup_authenticated_grpc_database,
+};
 use uuid::Uuid;
 
 const TEST_TABLE_NAME: &str = "migration_target";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 
 #[macro_export]
 macro_rules! region_migration_test {
@@ -98,6 +105,7 @@ macro_rules! region_migration_tests {
 
                 test_region_migration,
                 test_region_migration_by_sql,
+                test_region_migration_with_offline_source_by_sql,
                 test_region_migration_multiple_regions,
                 test_region_migration_all_regions,
                 test_region_migration_incorrect_from_peer,
@@ -263,6 +271,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         region_id.as_u64(),
         from_peer_id,
         to_peer_id,
+        None,
     )
     .await;
 }
@@ -409,12 +418,29 @@ pub async fn test_metric_table_region_migration_by_sql(
         region_id.as_u64(),
         from_peer_id,
         to_peer_id,
+        Some("greptime"),
     )
     .await;
 }
 
-/// A naive region migration test by SQL function
+/// A naive region migration test by SQL function.
 pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Vec<String>) {
+    test_region_migration_by_sql_inner(store_type, endpoints, false).await;
+}
+
+/// A region migration test by SQL function with an offline source datanode.
+pub async fn test_region_migration_with_offline_source_by_sql(
+    store_type: StorageType,
+    endpoints: Vec<String>,
+) {
+    test_region_migration_by_sql_inner(store_type, endpoints, true).await;
+}
+
+async fn test_region_migration_by_sql_inner(
+    store_type: StorageType,
+    endpoints: Vec<String>,
+    simulate_offline_source: bool,
+) {
     let cluster_name = "test_region_migration";
     let peer_factory = |id| Peer {
         id,
@@ -431,7 +457,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         peer_factory(2),
         peer_factory(3),
     ]));
-    let cluster = builder
+    let mut cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
@@ -457,6 +483,13 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         .with_meta_selector(const_selector.clone())
         .build(true)
         .await;
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
+    let (actor_db, _actor_grpc_server) = setup_authenticated_grpc_database(
+        cluster.fe_instance().clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
+    )
+    .await;
     let mut logical_timer = 1685508715000;
 
     // Prepares test table.
@@ -475,7 +508,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     let old_distribution = distribution.clone();
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.metasrv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager().clone();
     let (from_peer_id, from_regions) = distribution.pop_first().unwrap();
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
@@ -490,7 +523,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     let region_id = RegionId::new(table_id, from_regions.leader_regions[0]);
     // Trigger region migration.
     let procedure_id =
-        trigger_migration_by_sql(&cluster, region_id.as_u64(), from_peer_id, to_peer_id).await;
+        trigger_migration_by_grpc(&actor_db, region_id.as_u64(), from_peer_id, to_peer_id).await;
 
     info!("Started region procedure: {}!", procedure_id);
 
@@ -520,6 +553,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         region_id.as_u64(),
         from_peer_id,
         to_peer_id,
+        Some(PROCEDURE_ACTOR),
     )
     .await;
 
@@ -531,6 +565,114 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
 
     // Asserts the writes.
     assert_values(cluster.fe_instance()).await;
+
+    if simulate_offline_source {
+        let mut expected_distribution =
+            find_region_distribution(&table_metadata_manager, table_id).await;
+        let (offline_from_peer_id, offline_region_number) = expected_distribution
+            .iter()
+            .find(|(peer_id, regions)| {
+                **peer_id != from_peer_id
+                    && **peer_id != to_peer_id
+                    && !regions.leader_regions.is_empty()
+            })
+            .map(|(peer_id, regions)| (*peer_id, regions.leader_regions[0]))
+            .unwrap();
+        let offline_region_id = RegionId::new(table_id, offline_region_number);
+
+        // Simulates scale-in: the source datanode stops and its lease disappears.
+        cluster
+            .datanode_instances
+            .get_mut(&offline_from_peer_id)
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+        let source_lease_key: Vec<u8> = DatanodeLeaseKey {
+            node_id: offline_from_peer_id,
+        }
+        .try_into()
+        .unwrap();
+        cluster
+            .metasrv
+            .in_memory()
+            .batch_delete(BatchDeleteRequest {
+                keys: vec![source_lease_key],
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+
+        let offline_procedure_id = trigger_migration_by_sql(
+            &cluster,
+            offline_region_id.as_u64(),
+            offline_from_peer_id,
+            from_peer_id,
+        )
+        .await;
+        let frontend = cluster.fe_instance().clone();
+        let procedure_id_for_closure = offline_procedure_id.clone();
+        wait_condition(
+            default_distributed_time_constants().region_lease + Duration::from_secs(10),
+            Box::pin(async move {
+                loop {
+                    let state = query_procedure_by_sql(&frontend, &procedure_id_for_closure).await;
+                    if state == "{\"status\":\"Done\"}" {
+                        info!("Offline-source migration done: {state}");
+                        break;
+                    }
+                    info!("Offline-source migration not finished: {state}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }),
+        )
+        .await;
+
+        check_region_migration_events_system_table(
+            cluster.fe_instance(),
+            &offline_procedure_id,
+            offline_region_id.as_u64(),
+            offline_from_peer_id,
+            from_peer_id,
+            Some("greptime"),
+        )
+        .await;
+
+        let remove_offline_source = {
+            let source_regions = expected_distribution
+                .get_mut(&offline_from_peer_id)
+                .unwrap();
+            source_regions
+                .leader_regions
+                .retain(|region_number| *region_number != offline_region_number);
+            source_regions.leader_regions.is_empty() && source_regions.follower_regions.is_empty()
+        };
+        if remove_offline_source {
+            expected_distribution.remove(&offline_from_peer_id);
+        }
+        let target_regions = expected_distribution.entry(from_peer_id).or_default();
+        target_regions.add_leader_region(offline_region_number);
+        target_regions.sort();
+
+        let table_metadata_manager = table_metadata_manager.clone();
+        wait_condition(
+            Duration::from_secs(10),
+            Box::pin(async move {
+                loop {
+                    let distribution =
+                        find_region_distribution(&table_metadata_manager, table_id).await;
+                    if distribution == expected_distribution {
+                        break;
+                    }
+                    info!("Offline-source migration has unexpected distribution: {distribution:?}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }),
+        )
+        .await;
+
+        assert_values(cluster.fe_instance()).await;
+    }
 
     // Triggers again.
     let err = region_migration_manager
@@ -702,6 +844,7 @@ pub async fn test_region_migration_multiple_regions(
         region_id.as_u64(),
         from_peer_id,
         to_peer_id,
+        None,
     )
     .await;
 
@@ -855,6 +998,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         region_id.as_u64(),
         from_peer_id,
         to_peer_id,
+        None,
     )
     .await;
 
@@ -1282,6 +1426,33 @@ async fn trigger_migration_by_sql(
     column.value(0).to_string()
 }
 
+/// Triggers region migration through the authenticated public gRPC SQL endpoint.
+async fn trigger_migration_by_grpc(
+    database: &Database,
+    region_id: u64,
+    from_peer_id: u64,
+    to_peer_id: u64,
+) -> String {
+    let output = database
+        .sql(format!(
+            "admin migrate_region({region_id}, {from_peer_id}, {to_peer_id})"
+        ))
+        .await
+        .unwrap();
+    let recordbatches = match output.data {
+        OutputData::RecordBatches(recordbatches) => recordbatches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+
+    let record_batch = &recordbatches.take()[0];
+    record_batch
+        .column(0)
+        .as_string::<i32>()
+        .value(0)
+        .to_string()
+}
+
 /// Query procedure state by SQL.
 async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
     let OutputData::RecordBatches(recordbatches) = run_sql(
@@ -1331,6 +1502,7 @@ async fn run_sql(
 }
 
 enum RegionMigrationEvents {
+    Actor,
     ProcedureId,
     Timestamp,
     ProcedureState,
@@ -1349,6 +1521,7 @@ impl Iden for RegionMigrationEvents {
             s,
             "{}",
             match self {
+                Self::Actor => ACTOR_COLUMN.name(),
                 Self::ProcedureId => EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
                 Self::Timestamp => EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
                 Self::ProcedureState => EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
@@ -1371,6 +1544,7 @@ async fn check_region_migration_events_system_table(
     region_id: u64,
     from_peer_id: u64,
     to_peer_id: u64,
+    actor: Option<&str>,
 ) {
     // Sleep enough time to ensure the event is recorded.
     tokio::time::sleep(DEFAULT_FLUSH_INTERVAL_SECONDS * 2).await;
@@ -1386,7 +1560,8 @@ async fn check_region_migration_events_system_table(
     //       region_migration_src_node_id = ${from_peer_id} AND
     //       region_migration_dst_node_id = ${to_peer_id}
     //       ORDER BY timestamp ASC
-    let query = Query::select()
+    let mut query = Query::select();
+    query
         .column(RegionMigrationEvents::RegionMigrationTriggerReason)
         .column(RegionMigrationEvents::ProcedureState)
         .expr_as(
@@ -1402,7 +1577,13 @@ async fn check_region_migration_events_system_table(
         .and_where(Expr::col(RegionMigrationEvents::ProcedureId).eq(procedure_id))
         .and_where(Expr::col(RegionMigrationEvents::RegionId).eq(region_id))
         .and_where(Expr::col(RegionMigrationEvents::SrcNodeId).eq(from_peer_id))
-        .and_where(Expr::col(RegionMigrationEvents::DstNodeId).eq(to_peer_id))
+        .and_where(Expr::col(RegionMigrationEvents::DstNodeId).eq(to_peer_id));
+    if let Some(actor) = actor {
+        query.and_where(Expr::col(RegionMigrationEvents::Actor).eq(actor));
+    } else {
+        query.and_where(Expr::col(RegionMigrationEvents::Actor).is_null());
+    }
+    let query = query
         .order_by(RegionMigrationEvents::Timestamp, Order::Asc)
         .to_string(PostgresQueryBuilder);
 
@@ -1411,12 +1592,22 @@ async fn check_region_migration_events_system_table(
         .await
         .remove(0);
 
-    let expected = "\
+    let expected = if actor == Some(PROCEDURE_ACTOR) {
+        "\
++---------------------------------+-----------------+-------------------+---------------------------------------+
+| region_migration_trigger_reason | procedure_state | procedure_trigger | event_context                         |
++---------------------------------+-----------------+-------------------+---------------------------------------+
+| Manual                          | Running         | Submitted         | {\"protocol\":\"grpc\",\"reason\":\"manual\"} |
+| Manual                          | Done            | Succeeded         |                                       |
++---------------------------------+-----------------+-------------------+---------------------------------------+"
+    } else {
+        "\
 +---------------------------------+-----------------+-------------------+---------------------+
 | region_migration_trigger_reason | procedure_state | procedure_trigger | event_context       |
 +---------------------------------+-----------------+-------------------+---------------------+
 | Manual                          | Running         | Submitted         | {\"reason\":\"manual\"} |
 | Manual                          | Done            | Succeeded         |                     |
-+---------------------------------+-----------------+-------------------+---------------------+";
++---------------------------------+-----------------+-------------------+---------------------+"
+    };
     check_output_stream(result.unwrap().data, expected).await;
 }

@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 
 use crate::query_regression_runner::model::{Measurement, Query, QueryResult, Scenario, Table};
 use crate::query_regression_runner::plan::{load_plan, normalize_scenario};
-use crate::query_regression_runner::sql::{http_post_sql, sql_ident};
+use crate::query_regression_runner::sql::{http_post_prom_range_query, http_post_sql, sql_ident};
 use crate::query_regression_runner::{MeasureArgs, Result};
 
 pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
@@ -106,6 +106,26 @@ fn target_report(name: &str, http_port: u16, result: QueryResult) -> Value {
     })
 }
 
+/// Routes a configured query to the right endpoint: `prom_http` queries hit
+/// the Prometheus HTTP range API (which exercises the Prometheus JSON response
+/// builder), everything else goes through `/v1/sql` (including `TQL ANALYZE`).
+async fn post_query(client: &Client, port: u16, query: &Query, db: &str) -> Value {
+    if query.kind.as_deref() == Some("prom_http") {
+        http_post_prom_range_query(
+            client,
+            port,
+            &query.query,
+            query.start.as_deref(),
+            query.end.as_deref(),
+            query.step.as_deref(),
+            db,
+        )
+        .await
+    } else {
+        http_post_sql(client, port, &query.query, db).await
+    }
+}
+
 async fn run_target(
     port: u16,
     tables: &[Table],
@@ -118,6 +138,9 @@ async fn run_target(
             name: Some("count_all".to_string()),
             kind: Some("sql".to_string()),
             query: format!("SELECT count(*) FROM {}", sql_ident(&tables[0].name)),
+            start: None,
+            end: None,
+            step: None,
             warmup: 0,
             iterations: 1,
             thresholds: Map::new(),
@@ -147,7 +170,7 @@ async fn run_target(
         }
         validation.push(sample);
     }
-    let first = http_post_sql(client, port, &queries[0].query, db).await;
+    let first = post_query(client, port, &queries[0], db).await;
     if !first["ok"].as_bool().unwrap_or(false) {
         validation_errors.push(json!({
             "sql": queries[0].query,
@@ -160,7 +183,7 @@ async fn run_target(
     let mut measurements = Vec::with_capacity(queries.len());
     for query in &queries {
         for _ in 0..query.warmup {
-            let warmup = http_post_sql(client, port, &query.query, db).await;
+            let warmup = post_query(client, port, query, db).await;
             if !warmup["ok"].as_bool().unwrap_or(false) {
                 validation_errors.push(json!({
                     "sql": query.query,
@@ -173,10 +196,12 @@ async fn run_target(
         let mut samples = Vec::with_capacity(query.iterations);
         let mut good_latencies = Vec::with_capacity(query.iterations);
         for _ in 0..query.iterations {
-            let mut sample = http_post_sql(client, port, &query.query, db).await;
+            let mut sample = post_query(client, port, query, db).await;
             let execution_time = sample
                 .get("response")
-                .and_then(extract_execution_time)
+                .and_then(|response| {
+                    extract_execution_time_for_kind(query.kind.as_deref(), response)
+                })
                 .cloned()
                 .unwrap_or(Value::Null);
             sample
@@ -240,6 +265,14 @@ fn response_text(body: &Value) -> String {
     body.as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| serde_json::to_string(body).unwrap_or_default())
+}
+
+fn extract_execution_time_for_kind<'a>(kind: Option<&str>, body: &'a Value) -> Option<&'a Value> {
+    if kind == Some("prom_http") {
+        None
+    } else {
+        extract_execution_time(body)
+    }
 }
 
 fn extract_execution_time(body: &Value) -> Option<&Value> {
@@ -380,11 +413,32 @@ mod tests {
     }
 
     #[test]
+    fn prom_http_does_not_extract_execution_time_from_response() {
+        let response = json!({
+            "data": {
+                "result": [{"metric": {"job": "api", "elapsed": "label"}}],
+                "elapsed": 42
+            }
+        });
+        assert_eq!(
+            extract_execution_time_for_kind(Some("prom_http"), &response),
+            None
+        );
+        assert_eq!(
+            extract_execution_time_for_kind(Some("sql"), &response),
+            Some(&json!(42))
+        );
+    }
+
+    #[test]
     fn threshold_rejects_unknown_keys_and_zero_base() {
         let query = Query {
             name: Some("q".to_string()),
             kind: None,
             query: "SELECT 1".to_string(),
+            start: None,
+            end: None,
+            step: None,
             warmup: 0,
             iterations: 1,
             thresholds: Map::from_iter([

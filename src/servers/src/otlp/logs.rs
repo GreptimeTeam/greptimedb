@@ -44,7 +44,7 @@ use crate::error::{
     UnsupportedJsonDataTypeForTagSnafu,
 };
 use crate::http::event::PipelineIngestRequest;
-use crate::otlp::coerce::coerce_value_data;
+use crate::otlp::coerce::{coerce_value_data, is_supported_signed_to_unsigned_coercion};
 use crate::otlp::trace::attributes::OtlpAnyValue;
 use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::pipeline::run_pipeline;
@@ -257,7 +257,7 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
         ),
         (
             "trace_flags",
-            ColumnDataType::Uint32,
+            ColumnDataType::Int32,
             SemanticType::Field,
             None,
             None,
@@ -440,7 +440,7 @@ fn build_otlp_build_in_row(
             value_data: Some(ValueData::BinaryValue(log_attr.to_vec())),
         },
         GreptimeValue {
-            value_data: Some(ValueData::U32Value(log.flags)),
+            value_data: Some(ValueData::I32Value(log.flags as i32)),
         },
         GreptimeValue {
             value_data: parse_ctx.scope_name.clone().map(ValueData::StringValue),
@@ -549,14 +549,17 @@ fn decide_column_schema_and_convert_value(
                 key: column_name,
             }
             .fail(),
-            JsonbNumber::UInt64(u) => Ok(Some((
-                GreptimeValue {
-                    value_data: Some(ValueData::U64Value(u)),
-                },
-                ColumnDataType::Uint64,
-                SemanticType::Tag,
-                None,
-            ))),
+            JsonbNumber::UInt64(u) => {
+                let value = jsonb_uint64_to_log_value(u, column_name)?;
+                Ok(Some((
+                    GreptimeValue {
+                        value_data: Some(ValueData::I64Value(value)),
+                    },
+                    ColumnDataType::Int64,
+                    SemanticType::Tag,
+                    None,
+                )))
+            }
         },
         JsonbValue::Bool(b) => Ok(Some((
             GreptimeValue {
@@ -615,6 +618,21 @@ fn decide_existing_column_schema_and_convert_value(
     )))
 }
 
+/// Converts a JSON `UInt64` number into the signed value used by built-in
+/// log columns. `JsonbNumber::UInt64` only arises for values that do not fit
+/// in `i64` (see `decide_column_schema_and_convert_value`), so the conversion
+/// is fallible: wrapping to a negative number would silently corrupt the
+/// value (a counter reading back as negative), so out-of-range values are
+/// rejected instead.
+fn jsonb_uint64_to_log_value(u: u64, column_name: &str) -> Result<i64> {
+    i64::try_from(u).map_err(|_| InvalidParameterSnafu {
+        reason: format!(
+            "uint64 value {u} in column '{column_name}' exceeds the i64 range supported by built-in log columns"
+        ),
+    }
+    .build())
+}
+
 fn jsonb_value_to_log_value_data(
     column_name: &str,
     value: JsonbValue,
@@ -635,7 +653,10 @@ fn jsonb_value_to_log_value_data(
                 key: column_name,
             }
             .fail(),
-            JsonbNumber::UInt64(u) => Ok(Some((ValueData::U64Value(u), ColumnDataType::Uint64))),
+            JsonbNumber::UInt64(u) => Ok(Some((
+                ValueData::I64Value(jsonb_uint64_to_log_value(u, column_name)?),
+                ColumnDataType::Int64,
+            ))),
         },
         JsonbValue::Bool(b) => Ok(Some((ValueData::BoolValue(b), ColumnDataType::Boolean))),
         JsonbValue::Array(_) | JsonbValue::Object(_) => UnsupportedJsonDataTypeForTagSnafu {
@@ -718,6 +739,14 @@ fn coerce_log_value_data(
         return align_timestamp_value(value_data, target_unit, column_name, table_name).map(Some);
     }
 
+    // Lossless signed -> unsigned integer cast for built-in fields moving from
+    // unsigned to signed types (e.g. an existing UInt64/UInt32 log column
+    // receiving new Int64/Int32 ingest). Lets existing tables keep their
+    // unsigned columns without an `ALTER`. In the mutually-exclusive `else` of
+    // the String branch so the move stays local to non-String targets; the
+    // shared predicate keeps the supported pairs identical to the trace path
+    // (the generic String -> numeric coercions keep their pre-existing
+    // rejection on this path).
     if target_type == ColumnDataType::String {
         if let Ok(value_data) =
             coerce_value_data(&Some(value_data.clone()), target_type, request_type)
@@ -727,6 +756,11 @@ fn coerce_log_value_data(
         if let Some(value_data) = stringify_scalar_value(value_data) {
             return Ok(Some(value_data));
         }
+    } else if is_supported_signed_to_unsigned_coercion(request_type, target_type)
+        && let Ok(Some(value_data)) =
+            coerce_value_data(&Some(value_data), target_type, request_type)
+    {
+        return Ok(Some(value_data));
     }
 
     InvalidParameterSnafu {
@@ -1089,6 +1123,16 @@ mod tests {
         ExistingLogSchema::try_from_schema_parts(&columns, primary_key_indices).unwrap()
     }
 
+    fn existing_uint32_trace_flags_schema() -> ExistingLogSchema {
+        existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("trace_flags", ConcreteDataType::uint32_datatype()),
+            ],
+            &[],
+        )
+    }
+
     fn kv(key: &str, value: OtlpValue) -> KeyValue {
         KeyValue {
             key: key.to_string(),
@@ -1098,12 +1142,20 @@ mod tests {
     }
 
     fn request_with_log_attrs(attrs: Vec<KeyValue>) -> ExportLogsServiceRequest {
+        request_with_log_attrs_and_flags(attrs, 0)
+    }
+
+    fn request_with_log_attrs_and_flags(
+        attrs: Vec<KeyValue>,
+        flags: u32,
+    ) -> ExportLogsServiceRequest {
         ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 scope_logs: vec![ScopeLogs {
                     log_records: vec![LogRecord {
                         time_unix_nano: 1_234_000_000,
                         trace_id: vec![1; 16],
+                        flags,
                         attributes: attrs,
                         ..Default::default()
                     }],
@@ -1148,6 +1200,83 @@ mod tests {
         assert_eq!(
             rows.schema[scope_name_idx].semantic_type,
             SemanticType::Tag as i32
+        );
+    }
+
+    #[test]
+    fn test_fresh_table_trace_flags_is_int32() {
+        // Phase 1 of the unsigned -> signed transition: a fresh log table now
+        // creates `trace_flags` as Int32. Existing tables keep UInt32 (covered
+        // by the coercion test above); new tables start signed.
+        let rows = parse_with_select(request_with_log_attrs(vec![]), "", None).unwrap();
+        let idx = column_index(&rows, "trace_flags");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Int32 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::I32Value(0))
+        );
+    }
+
+    #[test]
+    fn test_existing_uint32_trace_flags_keeps_type_and_coerces_int32_request() {
+        // An existing UInt32 `trace_flags` column keeps its type when new
+        // signed (Int32) ingest arrives, without an `ALTER`.
+        let existing = existing_uint32_trace_flags_schema();
+
+        let rows = parse_with_select(request_with_log_attrs(vec![]), "", Some(&existing)).unwrap();
+        let idx = column_index(&rows, "trace_flags");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Uint32 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::U32Value(0))
+        );
+    }
+
+    #[test]
+    fn test_existing_uint32_trace_flags_preserves_nonzero_flags_value() {
+        // A non-zero trace_flags bit pattern (e.g. the W3C sampled flag as sent
+        // by common encoders) round-trips exactly through the Int32 -> UInt32
+        // coercion into an existing unsigned column. Guards that the cast is
+        // bit-preserving for realistic values, not just the default 0.
+        let existing = existing_uint32_trace_flags_schema();
+
+        let rows = parse_with_select(
+            request_with_log_attrs_and_flags(vec![], 256),
+            "",
+            Some(&existing),
+        )
+        .unwrap();
+        let idx = column_index(&rows, "trace_flags");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Uint32 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::U32Value(256))
+        );
+    }
+
+    #[test]
+    fn test_existing_uint32_trace_flags_preserves_high_bit_flags_value() {
+        // The full u32 range round-trips: a value with the sign bit set proves
+        // the Int32 -> UInt32 coercion is bit-exact (`as i32` then `as u32`
+        // preserve the pattern), so no flags value is corrupted on the
+        // unsigned -> signed transition.
+        let existing = existing_uint32_trace_flags_schema();
+
+        let rows = parse_with_select(
+            request_with_log_attrs_and_flags(vec![], 0x8000_0000),
+            "",
+            Some(&existing),
+        )
+        .unwrap();
+        let idx = column_index(&rows, "trace_flags");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Uint32 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::U32Value(0x8000_0000))
         );
     }
 
@@ -1324,6 +1453,84 @@ mod tests {
         assert_eq!(
             rows.schema[scope_name_idx].semantic_type,
             SemanticType::Field as i32
+        );
+    }
+
+    #[test]
+    fn test_existing_uint64_column_keeps_type_and_coerces_int64_request() {
+        // An existing UInt64 column keeps its type when new signed (Int64)
+        // ingest arrives, without an `ALTER`. The built-in models move to
+        // signed while existing unsigned tables stay byte-for-byte unchanged.
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("counter", ConcreteDataType::uint64_datatype()),
+            ],
+            &[],
+        );
+
+        let rows = parse_with_select(
+            request_with_log_attrs(vec![kv("counter", OtlpValue::IntValue(42))]),
+            "counter",
+            Some(&existing),
+        )
+        .unwrap();
+        let idx = column_index(&rows, "counter");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Uint64 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::U64Value(42))
+        );
+    }
+
+    #[test]
+    fn test_jsonb_uint64_exceeding_i64_range_rejected() {
+        // A JSON number that only fits in u64 must be rejected, not wrapped:
+        // storing it as a negative i64 would silently corrupt the value. The
+        // unsigned -> signed transition is only lossless for values that fit
+        // the signed range.
+        let err = jsonb_value_to_log_value_data(
+            "counter",
+            JsonbValue::Number(JsonbNumber::UInt64(u64::MAX)),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("exceeds the i64 range supported by built-in log columns")
+        );
+    }
+
+    #[test]
+    fn test_existing_int64_column_rejects_numeric_string_value() {
+        // Regression guard for the signed -> unsigned transition scope: even a
+        // parseable numeric string must keep its pre-existing rejection when
+        // targeting a non-String column. Only the signed -> unsigned integer
+        // pairs gained coercion on this path, not the generic String ->
+        // numeric ones.
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("counter", ConcreteDataType::int64_datatype()),
+            ],
+            &[],
+        );
+
+        let err = parse_with_select(
+            request_with_log_attrs(vec![kv(
+                "counter",
+                OtlpValue::StringValue("42".to_string()),
+            )]),
+            "counter",
+            Some(&existing),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("failed to align log column 'counter'")
         );
     }
 }
