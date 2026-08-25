@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BinaryViewArray, new_null_array};
@@ -54,12 +55,17 @@ trait JsonGetResultBuilder {
     fn build(&mut self) -> ArrayRef;
 }
 
-fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetResultBuilder>> {
+fn result_builder(
+    len: usize,
+    with_type: &DataType,
+    is_json2: bool,
+) -> Result<Box<dyn JsonGetResultBuilder>> {
     let builder = match with_type {
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
-            Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len)))
-                as Box<dyn JsonGetResultBuilder>
-        }
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Box::new(StringResultBuilder {
+            inner: StringViewBuilder::with_capacity(len),
+            is_json2,
+        })
+            as Box<dyn JsonGetResultBuilder>,
         DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
         DataType::Float64 => Box::new(FloatResultBuilder(Float64Builder::with_capacity(len))),
         DataType::Boolean => Box::new(BoolResultBuilder(BooleanBuilder::with_capacity(len))),
@@ -71,20 +77,30 @@ fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetRes
 }
 
 // TODO: refactor this to StringLikeArrayBuilder from Arrow 57
-struct StringResultBuilder(StringViewBuilder);
+struct StringResultBuilder {
+    inner: StringViewBuilder,
+    is_json2: bool,
+}
 
 impl JsonGetResultBuilder for StringResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.0.append_option(jsonb::to_str(value).ok());
+        // Scalar casts stay unquoted and map JSON null to SQL NULL; only containers
+        // use `to_string` to preserve their JSON representation.
+        let value = if self.is_json2 && (jsonb::is_array(value) || jsonb::is_object(value)) {
+            Some(jsonb::to_string(value))
+        } else {
+            jsonb::to_str(value).ok()
+        };
+        self.inner.append_option(value);
         Ok(())
     }
 
     fn append_null(&mut self) {
-        self.0.append_null();
+        self.inner.append_null();
     }
 
     fn build(&mut self) -> ArrayRef {
-        Arc::new(self.0.finish())
+        Arc::new(self.inner.finish())
     }
 }
 
@@ -404,18 +420,21 @@ impl Function for JsonGetWithType {
         let result = match arg0.data_type() {
             DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                 let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+                let is_json2 = args.arg_fields.first().is_some_and(is_json2_extension_type);
 
-                if args.arg_fields.first().is_some_and(is_json2_extension_type) {
-                    // Query concretization projects nested JSON2 paths as Struct arrays. A binary
-                    // JSON2 argument is therefore an already-selected scalar or root value that
-                    // only needs conversion from its JSONB representation to the requested type.
+                if is_json2 && path.trim_start_matches('$').split('.').all(str::is_empty) {
                     JsonArray::from(&arg0)
                         .project_to(&with_type)
                         .map_err(|e| exec_datafusion_err!("{e:?}"))?
                 } else {
                     let jsons = arg0.as_binary_view();
-                    let mut builder = result_builder(len, &with_type)?;
-                    jsonb_get(jsons, path, builder.as_mut())?;
+                    let path = if is_json2 && !path.starts_with('$') {
+                        Cow::Owned(format!("$.{path}"))
+                    } else {
+                        Cow::Borrowed(path)
+                    };
+                    let mut builder = result_builder(len, &with_type, is_json2)?;
+                    jsonb_get(jsons, &path, builder.as_mut())?;
                     builder.build()
                 }
             }
@@ -511,6 +530,7 @@ mod tests {
     use datafusion_common::ScalarValue;
     use datafusion_common::arrow::array::{BinaryArray, BinaryViewArray, StringArray};
     use datafusion_common::arrow::datatypes::{Float64Type, Int64Type};
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::types::parse_string_to_jsonb;
     use serde_json::json;
 
@@ -564,6 +584,15 @@ mod tests {
             ],
             None,
         ))
+    }
+
+    fn test_json_field(json: &ArrayRef, is_json2: bool) -> Arc<Field> {
+        let field = Field::new("json", json.data_type().clone(), true);
+        Arc::new(if is_json2 {
+            field.with_extension_type(Json2ExtensionType::default())
+        } else {
+            field
+        })
     }
 
     #[test]
@@ -850,7 +879,10 @@ mod tests {
                     ColumnarValue::Array(json.clone()),
                     ColumnarValue::Scalar(path.into()),
                 ],
-                arg_fields: vec![],
+                arg_fields: vec![
+                    test_json_field(json, i >= json_strings.len()),
+                    Arc::new(Field::new("path", DataType::Utf8, false)),
+                ],
                 number_rows: 1,
                 return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
                 config_options: Arc::new(Default::default()),
@@ -984,7 +1016,11 @@ mod tests {
                     ColumnarValue::Scalar(path.into()),
                     ColumnarValue::Scalar(ScalarValue::Utf8View(None)),
                 ],
-                arg_fields: vec![],
+                arg_fields: vec![
+                    test_json_field(json, i >= json_strings.len()),
+                    Arc::new(Field::new("path", DataType::Utf8, false)),
+                    Arc::new(Field::new("with_type", DataType::Utf8View, true)),
+                ],
                 number_rows: 1,
                 return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
                 config_options: Arc::new(Default::default()),
