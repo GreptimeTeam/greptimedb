@@ -19,7 +19,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, ListValue, SemanticType, Value};
 use snafu::{Snafu, ensure};
 
-use super::{
+use crate::native_histogram::{
     CUSTOM_BUCKETS_SCHEMA, MAX_EXPONENTIAL_SCHEMA, NATIVE_HISTOGRAM_FIELD_NAMES,
     exponential_overflow_bucket_index, native_histogram_value_type,
 };
