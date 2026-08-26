@@ -16,38 +16,43 @@
 mod test {
     use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use api::v1::auth_header::AuthScheme;
+    use api::v1::greptime_request::Request as GreptimeQueryRequest;
     use api::v1::query_request::Query;
     use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, QueryRequest, SemanticType};
     use arrow_flight::flight_service_server::FlightServiceServer;
     use arrow_flight::{FlightData, FlightDescriptor, Ticket};
     use auth::user_provider_from_option;
+    use client::region::RegionRequester;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-    use common_grpc::flight::do_put::DoPutMetadata;
+    use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
     use common_grpc::flight::{FlightEncoder, FlightMessage};
-    use common_query::OutputData;
+    use common_query::{Output, OutputData};
     use common_recordbatch::adapter::RegionWatermarkEntry;
     use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
     use common_telemetry::tracing_context::TracingContext;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
-    use futures_util::StreamExt;
+    use futures_util::{Stream, StreamExt};
     use hyper_util::rt::TokioIo;
     use itertools::Itertools;
     use servers::grpc::builder::GrpcServerBuilder;
     use servers::grpc::flight::{
         FlightCraft, FlightCraftWrapper, FlightRecordBatchSource, FlightRecordBatchStream,
-        FlightRecordBatchStreamInput, TonicStream,
+        FlightRecordBatchStreamInput, PutRecordBatchRequestStream, TonicStream,
     };
     use servers::grpc::greptime_handler::GreptimeRequestHandler;
     use servers::grpc::{FlightCompression, GrpcServerConfig};
+    use servers::query_handler::grpc::GrpcQueryHandler;
     use servers::server::Server;
+    use session::context::QueryContextRef;
     use tonic::Response;
     use tonic::transport::Server as TonicServer;
     use tower::service_fn;
@@ -58,6 +63,10 @@ mod test {
     use crate::tests::test_util::MockInstance;
 
     struct SlowFlightCraft;
+
+    struct SlowRemoteQueryHandler {
+        region_requester: RegionRequester,
+    }
 
     fn slow_recordbatch_stream() -> SendableRecordBatchStream {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
@@ -98,14 +107,38 @@ mod test {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_do_get_timeout_does_not_cancel_slow_flight_stream() {
+    #[async_trait::async_trait]
+    impl GrpcQueryHandler for SlowRemoteQueryHandler {
+        async fn do_query(
+            &self,
+            _: GreptimeQueryRequest,
+            _: QueryContextRef,
+        ) -> servers::error::Result<Output> {
+            let stream = self
+                .region_requester
+                .do_get_inner(Ticket::default())
+                .await
+                .unwrap();
+            Ok(Output::new_with_stream(stream))
+        }
+
+        fn handle_put_record_batch_stream(
+            &self,
+            _: PutRecordBatchRequestStream,
+            _: QueryContextRef,
+        ) -> Pin<Box<dyn Stream<Item = servers::error::Result<DoPutResponse>> + Send>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    fn client_for_flight_craft<T>(addr: &'static str, craft: T) -> Client
+    where
+        T: FlightCraft,
+    {
         let (client_io, server_io) = tokio::io::duplex(1024);
         tokio::spawn(async move {
             TonicServer::builder()
-                .add_service(FlightServiceServer::new(FlightCraftWrapper(
-                    SlowFlightCraft,
-                )))
+                .add_service(FlightServiceServer::new(FlightCraftWrapper(craft)))
                 .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(
                     server_io,
                 )]))
@@ -117,7 +150,7 @@ mod test {
         let mut client_io = Some(client_io);
         channel_manager
             .reset_with_connector(
-                "slow-flight",
+                addr,
                 service_fn(move |_| {
                     let client_io = client_io.take();
 
@@ -129,7 +162,12 @@ mod test {
                 }),
             )
             .unwrap();
-        let client = Client::with_manager_and_urls(channel_manager, ["slow-flight"]);
+        Client::with_manager_and_urls(channel_manager, [addr])
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_do_get_timeout_does_not_cancel_slow_flight_stream() {
+        let client = client_for_flight_craft("slow-flight", SlowFlightCraft);
         let mut flight_client = client.make_flight_client(false, false).unwrap();
 
         let start = Instant::now();
@@ -144,6 +182,33 @@ mod test {
         assert!(start.elapsed() >= Duration::from_secs(1));
 
         assert!(stream.message().await.unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_request_timeout_does_not_cancel_slow_datanode_stream() {
+        let datanode_client = client_for_flight_craft("slow-datanode", SlowFlightCraft);
+        let frontend_handler = GreptimeRequestHandler::new(
+            Arc::new(SlowRemoteQueryHandler {
+                region_requester: RegionRequester::new(datanode_client, false, false),
+            }),
+            None,
+            None,
+            FlightCompression::default(),
+        );
+        let frontend_client = client_for_flight_craft("slow-frontend", frontend_handler);
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, frontend_client);
+
+        let start = Instant::now();
+        let output = database
+            .flight_request()
+            .with_timeout(Duration::from_secs(1))
+            .sql("select 1")
+            .await
+            .unwrap();
+        // `sql()` waits for the first Flight message. Succeeding after this delay
+        // proves the request timeout applied only to the response header.
+        assert!(start.elapsed() >= Duration::from_secs(1));
+        assert!(matches!(output.data, OutputData::Stream(_)));
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_flight_do_put() {
