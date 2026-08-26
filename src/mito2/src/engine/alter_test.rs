@@ -2799,3 +2799,102 @@ async fn test_bulk_insert_stale_wal_entry_replay_with_format(flat_format: bool) 
         "flat_format: {flat_format}"
     );
 }
+
+/// Regression test: `Between` / `InList` predicates (physical prefilter
+/// expressions, not `SimpleFilterEvaluator`s) must not fail the scan when the
+/// file stores the time index in the old unit - evaluating the new-unit
+/// literals against the file's column raises a cross-unit comparison error.
+/// The prefilter is dropped for such files instead; the query layer re-applies
+/// the predicate, so at the engine level only "no matching row is lost" is
+/// guaranteed (exactness is covered by the sqlness cases).
+#[tokio::test]
+async fn test_alter_time_index_widen_old_sst_between_inlist() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("max_row_group_row_count", "5")
+        .build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 10),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::ModifyColumnTypes {
+                    columns: vec![ModifyColumnType {
+                        column_name: "ts".to_string(),
+                        target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let between_expected: Vec<(i64, f64)> = (3..=6).map(|ts| (ts * 1_000_000, ts as f64)).collect();
+    assert_rows_present(
+        &between_expected,
+        scan_ts_and_field(
+            &engine,
+            region_id,
+            vec![col("ts").between(ts_us_lit(3_000_000), ts_us_lit(6_000_000))],
+        )
+        .await,
+    );
+
+    let inlist_expected = vec![(2_000_000, 2.0)];
+    assert_rows_present(
+        &inlist_expected,
+        scan_ts_and_field(
+            &engine,
+            region_id,
+            vec![col("ts").in_list(vec![ts_us_lit(2_000_000), ts_us_lit(5_000_500)], false)],
+        )
+        .await,
+    );
+
+    let not_in_expected: Vec<(i64, f64)> = (0..10)
+        .filter(|ts| *ts != 2)
+        .map(|ts| (ts * 1_000_000, ts as f64))
+        .collect();
+    assert_rows_present(
+        &not_in_expected,
+        scan_ts_and_field(
+            &engine,
+            region_id,
+            vec![col("ts").in_list(vec![ts_us_lit(2_000_000), ts_us_lit(5_000_500)], true)],
+        )
+        .await,
+    );
+}

@@ -2170,6 +2170,15 @@ impl PhysicalFilterContext {
                 if sst_column.column_schema.name != column_name {
                     return None;
                 }
+                // Schema evolution (an altered field column, or a widened time
+                // index unit) can make the column's file type differ from the
+                // expected type; evaluating the original expr against the
+                // file's column would raise a cross-type comparison error
+                // (e.g. Timestamp(ms) >= Timestamp(µs)). Drop the prefilter;
+                // the query layer re-applies the predicate above the scan.
+                if sst_column.column_schema.data_type != column.column_schema.data_type {
+                    return None;
+                }
                 column
             }
             None => sst_meta.column_by_name(&column_name)?,
