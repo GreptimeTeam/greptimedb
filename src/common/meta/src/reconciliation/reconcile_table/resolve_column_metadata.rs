@@ -25,7 +25,7 @@ use strum::AsRefStr;
 use crate::error::{self, MissingColumnIdsSnafu, Result};
 use crate::reconciliation::reconcile_table::reconcile_regions::ReconcileRegions;
 use crate::reconciliation::reconcile_table::update_table_info::UpdateTableInfo;
-use crate::reconciliation::reconcile_table::{ReconcileTableContext, State};
+use crate::reconciliation::reconcile_table::{ReconcileTableContext, State, TableMetadataState};
 use crate::reconciliation::utils::{
     ResolveColumnMetadataResult, build_column_metadata_from_table_info,
     check_column_metadatas_consistent, resolve_column_metadatas_with_latest,
@@ -101,6 +101,12 @@ impl State for ResolveColumnMetadata {
                 table_name, table_id
             );
 
+            ctx.persistent_ctx.result_summary.record_resolved_columns(
+                TableMetadataState::Consistent,
+                None,
+                Some(column_metadatas.len()),
+            );
+
             // Update metrics.
             ctx.mut_metrics().resolve_column_metadata_result =
                 Some(ResolveColumnMetadataResult::Consistent);
@@ -109,6 +115,10 @@ impl State for ResolveColumnMetadata {
                 Status::executing(false),
             ));
         };
+
+        ctx.persistent_ctx
+            .result_summary
+            .record_metadata_state(TableMetadataState::Inconsistent);
 
         match self.strategy {
             ResolveStrategy::UseMetasrv => {
@@ -126,6 +136,12 @@ impl State for ResolveColumnMetadata {
                 let region_ids =
                     resolve_column_metadatas_with_metasrv(&column_metadata, &self.region_metadata)?;
 
+                ctx.persistent_ctx.result_summary.record_resolved_columns(
+                    TableMetadataState::Inconsistent,
+                    Some(self.strategy),
+                    Some(column_metadata.len()),
+                );
+
                 // Update metrics.
                 let metrics = ctx.mut_metrics();
                 metrics.resolve_column_metadata_result =
@@ -139,6 +155,12 @@ impl State for ResolveColumnMetadata {
                 let (column_metadatas, region_ids) =
                     resolve_column_metadatas_with_latest(&self.region_metadata)?;
 
+                ctx.persistent_ctx.result_summary.record_resolved_columns(
+                    TableMetadataState::Inconsistent,
+                    Some(self.strategy),
+                    Some(column_metadatas.len()),
+                );
+
                 // Update metrics.
                 let metrics = ctx.mut_metrics();
                 metrics.resolve_column_metadata_result =
@@ -150,6 +172,10 @@ impl State for ResolveColumnMetadata {
             }
             ResolveStrategy::AbortOnConflict => {
                 let table_name = table_name.to_string();
+
+                ctx.persistent_ctx
+                    .result_summary
+                    .record_resolution_strategy(self.strategy);
 
                 // Update metrics.
                 let metrics = ctx.mut_metrics();

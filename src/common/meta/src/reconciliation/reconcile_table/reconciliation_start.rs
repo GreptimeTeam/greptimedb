@@ -46,7 +46,7 @@ impl State for ReconciliationStart {
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let table_id = ctx.table_id();
-        let table_name = ctx.table_name();
+        let table_name = ctx.table_name().clone();
 
         let (physical_table_id, physical_table_route) = ctx
             .table_metadata_manager
@@ -79,6 +79,9 @@ impl State for ReconciliationStart {
                 .list(physical_table_id, &physical_table_route.region_routes)
                 .await?
         };
+        ctx.persistent_ctx
+            .result_summary
+            .record_scanned_regions(region_metadatas.len());
 
         ensure!(!region_metadatas.is_empty(), {
             metrics::METRIC_META_RECONCILIATION_STATS
@@ -113,6 +116,8 @@ impl State for ReconciliationStart {
                 ),
             }
         });
+
+        ctx.persistent_ctx.result_summary.mark_start_completed();
 
         // Persist the physical table route.
         // TODO(weny): refetch the physical table route if repair is needed.
