@@ -45,13 +45,13 @@ use prost::Message;
 use query::metrics::terminal_recordbatch_metrics_from_plan_if_requested;
 use query::options::FlowQueryExtensions;
 use session::context::{Channel, QueryContextRef};
-use snafu::{IntoError, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::error::{InvalidParameterSnafu, Result, ToJsonSnafu};
+use crate::error::{InvalidParameterSnafu, InvalidQuerySnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::{
     FlightRecordBatchSource, FlightRecordBatchStream, FlightRecordBatchStreamInput,
 };
@@ -222,8 +222,10 @@ impl FlightCraft for GreptimeRequestHandler {
         );
         let flight_compression = self.flight_compression;
         async {
-            let query = self
-                .authenticate_request_with_query_ctx(&request, &query_ctx)
+            let query = request.request.context(InvalidQuerySnafu {
+                reason: "Expecting non-empty GreptimeRequest.",
+            })?;
+            self.authenticate_request_with_query_ctx(request.header.as_ref(), &query_ctx)
                 .await?;
             let output = self.handle_request_with_query_ctx(query, query_ctx.clone());
             let stream = to_flight_data_stream(

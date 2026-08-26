@@ -81,25 +81,22 @@ impl GreptimeRequestHandler {
     ) -> Result<Output> {
         let header = request.header.as_ref();
         let query_ctx = create_query_context(Channel::Grpc, header, hints, HashMap::new())?;
-        let query = self
-            .authenticate_request_with_query_ctx(&request, &query_ctx)
+        let query = request.request.context(InvalidQuerySnafu {
+            reason: "Expecting non-empty GreptimeRequest.",
+        })?;
+        self.authenticate_request_with_query_ctx(request.header.as_ref(), &query_ctx)
             .await?;
         self.handle_request_with_query_ctx(query, query_ctx).await
     }
 
     pub(crate) async fn authenticate_request_with_query_ctx(
         &self,
-        request: &GreptimeRequest,
+        header: Option<&RequestHeader>,
         query_ctx: &QueryContextRef,
-    ) -> Result<QueryRequest> {
-        let query = request.request.clone().context(InvalidQuerySnafu {
-            reason: "Expecting non-empty GreptimeRequest.",
-        })?;
-
-        let header = request.header.as_ref();
+    ) -> Result<()> {
         let user_info = context_auth::auth(self.user_provider.clone(), header, query_ctx).await?;
         query_ctx.set_current_user(user_info);
-        Ok(query)
+        Ok(())
     }
 
     pub(crate) fn handle_request_with_query_ctx(
