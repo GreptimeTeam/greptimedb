@@ -15,9 +15,7 @@
 use std::pin::Pin;
 
 use arrow_flight::FlightData;
-use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::{FlightDecoder, FlightMessage};
-use common_telemetry::error;
 use futures_util::stream::Peekable;
 use futures_util::{Stream, StreamExt};
 use snafu::{OptionExt, ResultExt};
@@ -45,7 +43,7 @@ impl From<&FlightMessage> for FlightMessageKind {
 }
 
 pub(crate) struct FlightMessageReader<S: Stream + Unpin> {
-    /// Remote Flight peer used to decorate response-stream errors.
+    /// Remote Flight peer associated with this response stream.
     remote_addr: String,
     messages: Peekable<S>,
 }
@@ -66,20 +64,13 @@ where
     }
 
     pub(crate) async fn read_first(&mut self) -> Result<FlightMessage> {
-        self.read_next()
-            .await?
-            .context(IllegalFlightMessagesSnafu {
-                reason: "Expect the response not to be empty",
-            })
-            .map_err(|error| wrap_flight_stream_error(self.remote_addr(), error))
+        self.read_next().await?.context(IllegalFlightMessagesSnafu {
+            reason: "Expect the response not to be empty",
+        })
     }
 
     pub(crate) async fn read_next(&mut self) -> Result<Option<FlightMessage>> {
-        self.messages
-            .next()
-            .await
-            .transpose()
-            .map_err(|error| wrap_flight_stream_error(&self.remote_addr, error))
+        self.messages.next().await.transpose()
     }
 
     pub(crate) async fn peek_next_message_kind(&mut self) -> Result<Option<FlightMessageKind>> {
@@ -95,23 +86,6 @@ where
                 .fail(),
             },
         }
-    }
-}
-
-pub(crate) fn wrap_flight_stream_error(remote_addr: &str, error: Error) -> Error {
-    let tonic_code = error.tonic_code().unwrap_or(tonic::Code::Unknown);
-    if error.status_code().should_log_error() {
-        error!(
-            error; "Failed to receive Flight data, addr: {}, code: {}",
-            remote_addr,
-            tonic_code
-        );
-    }
-
-    Error::FlightGet {
-        addr: remote_addr.to_string(),
-        tonic_code,
-        source: BoxedError::new(error),
     }
 }
 

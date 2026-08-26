@@ -53,8 +53,8 @@ mod test {
     use servers::query_handler::grpc::GrpcQueryHandler;
     use servers::server::Server;
     use session::context::QueryContextRef;
-    use tonic::Response;
     use tonic::transport::Server as TonicServer;
+    use tonic::{Response, Status};
     use tower::service_fn;
 
     use crate::cluster::GreptimeDbClusterBuilder;
@@ -63,6 +63,8 @@ mod test {
     use crate::tests::test_util::MockInstance;
 
     struct SlowFlightCraft;
+
+    struct ErrorFlightCraft;
 
     struct SlowRemoteQueryHandler {
         region_requester: RegionRequester,
@@ -108,6 +110,24 @@ mod test {
     }
 
     #[async_trait::async_trait]
+    impl FlightCraft for ErrorFlightCraft {
+        async fn do_get(
+            &self,
+            _: tonic::Request<Ticket>,
+        ) -> std::result::Result<Response<TonicStream<FlightData>>, tonic::Status> {
+            let stream = FlightRecordBatchStream::new(
+                FlightRecordBatchStreamInput::initializer(async {
+                    Err(Status::internal("deferred initializer detail"))
+                }),
+                TracingContext::default(),
+                FlightCompression::default(),
+                session::context::QueryContext::arc(),
+            );
+            Ok(Response::new(Box::pin(stream)))
+        }
+    }
+
+    #[async_trait::async_trait]
     impl GrpcQueryHandler for SlowRemoteQueryHandler {
         async fn do_query(
             &self,
@@ -135,10 +155,26 @@ mod test {
     where
         T: FlightCraft,
     {
+        client_for_flight_craft_with_max_encoding(addr, craft, None)
+    }
+
+    fn client_for_flight_craft_with_max_encoding<T>(
+        addr: &'static str,
+        craft: T,
+        max_encoding_message_size: Option<usize>,
+    ) -> Client
+    where
+        T: FlightCraft,
+    {
         let (client_io, server_io) = tokio::io::duplex(1024);
         tokio::spawn(async move {
+            let flight_service = FlightServiceServer::new(FlightCraftWrapper(craft));
+            let flight_service = match max_encoding_message_size {
+                Some(size) => flight_service.max_encoding_message_size(size),
+                None => flight_service,
+            };
             TonicServer::builder()
-                .add_service(FlightServiceServer::new(FlightCraftWrapper(craft)))
+                .add_service(flight_service)
                 .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(
                     server_io,
                 )]))
@@ -182,6 +218,37 @@ mod test {
         assert!(start.elapsed() >= Duration::from_secs(1));
 
         assert!(stream.message().await.unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_deferred_flight_initializer_error_preserves_message() {
+        let client = client_for_flight_craft("error-flight", ErrorFlightCraft);
+        let mut flight_client = client.make_flight_client(false, false).unwrap();
+        let mut stream = flight_client
+            .mut_inner()
+            .do_get(tonic::Request::new(Ticket::default()))
+            .await
+            .unwrap()
+            .into_inner();
+        let error = stream.message().await.unwrap_err();
+        assert_eq!(tonic::Code::Internal, error.code());
+        assert_eq!("deferred initializer detail", error.message());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_deferred_flight_encode_error_preserves_message() {
+        let client =
+            client_for_flight_craft_with_max_encoding("limited-flight", SlowFlightCraft, Some(1));
+        let mut flight_client = client.make_flight_client(false, false).unwrap();
+        let mut stream = flight_client
+            .mut_inner()
+            .do_get(tonic::Request::new(Ticket::default()))
+            .await
+            .unwrap()
+            .into_inner();
+        let error = stream.message().await.unwrap_err();
+        assert_eq!(tonic::Code::OutOfRange, error.code());
+        assert!(error.message().contains("message length too large"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

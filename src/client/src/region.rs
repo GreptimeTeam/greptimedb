@@ -25,7 +25,7 @@ use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
@@ -47,9 +47,7 @@ use crate::error::{
     self, FlightGetSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
     MissingFieldSnafu, Result, ServerSnafu,
 };
-use crate::flight::{
-    FlightMessageKind, FlightMessageReader, decode_flight_data, wrap_flight_stream_error,
-};
+use crate::flight::{FlightMessageKind, FlightMessageReader, decode_flight_data};
 use crate::{Client, metrics};
 
 const FLIGHT_DO_GET_TIMEOUT: Duration = Duration::from_secs(10);
@@ -210,13 +208,17 @@ async fn recordbatches_from_flight_message_stream<S>(
 where
     S: Stream<Item = Result<FlightMessage>> + Send + Unpin + 'static,
 {
-    let mut reader = FlightMessageReader::new(addr, flight_message_stream);
-    let FlightMessage::Schema(schema) = reader.read_first().await? else {
+    let mut reader = FlightMessageReader::new(addr.clone(), flight_message_stream);
+    let FlightMessage::Schema(schema) = reader
+        .read_first()
+        .await
+        .map_err(|error| flight_stream_error(reader.remote_addr(), error))?
+    else {
         return IllegalFlightMessagesSnafu {
             reason: "Expect schema to be the first flight message",
         }
         .fail()
-        .map_err(|error| wrap_flight_stream_error(reader.remote_addr(), error));
+        .map_err(|error| flight_stream_error(reader.remote_addr(), error));
     };
 
     let metrics = Arc::new(ArcSwapOption::from(None));
@@ -227,6 +229,7 @@ where
     let schema =
         Arc::new(datatypes::schema::Schema::try_from(schema).context(error::ConvertSchemaSnafu)?);
     let schema_cloned = schema.clone();
+    let stream_addr = addr;
     let stream = Box::pin(stream!({
         let _span = tracing_context.attach(common_telemetry::tracing::info_span!(
             "poll_flight_data_stream"
@@ -239,7 +242,8 @@ where
                 Ok(Some(message)) => message,
                 Ok(None) => break,
                 Err(error) => {
-                    yield Err(BoxedError::new(error)).context(ExternalSnafu);
+                    yield Err(BoxedError::new(flight_stream_error(&stream_addr, error)))
+                        .context(ExternalSnafu);
                     break;
                 }
             };
@@ -264,7 +268,11 @@ where
                                     break;
                                 }
                                 Err(error) => {
-                                    yield Err(BoxedError::new(error)).context(ExternalSnafu);
+                                    yield Err(BoxedError::new(flight_stream_error(
+                                        &stream_addr,
+                                        error,
+                                    )))
+                                    .context(ExternalSnafu);
                                     break;
                                 }
                             };
@@ -283,7 +291,8 @@ where
                         }
                         Ok(None) => stream_ended = true,
                         Err(error) => {
-                            yield Err(BoxedError::new(error)).context(ExternalSnafu);
+                            yield Err(BoxedError::new(flight_stream_error(&stream_addr, error)))
+                                .context(ExternalSnafu);
                             break;
                         }
                     }
@@ -316,6 +325,23 @@ where
         span: Span::current(),
     };
     Ok(Box::pin(record_batch_stream))
+}
+
+fn flight_stream_error(addr: &str, error: error::Error) -> error::Error {
+    let tonic_code = error.tonic_code().unwrap_or(tonic::Code::Unknown);
+    if error.status_code().should_log_error() {
+        error!(
+            error; "Failed to receive Flight data, addr: {}, code: {}",
+            addr,
+            tonic_code
+        );
+    }
+
+    error::Error::FlightGet {
+        addr: addr.to_string(),
+        tonic_code,
+        source: BoxedError::new(error),
+    }
 }
 
 pub fn build_remote_dyn_filter_update_request(
@@ -398,7 +424,7 @@ mod test {
 
     #[test]
     fn test_flight_stream_error_preserves_peer_address() {
-        let error = wrap_flight_stream_error(
+        let error = flight_stream_error(
             "127.0.0.1:4001",
             tonic::Status::unavailable("datanode unavailable").into(),
         );

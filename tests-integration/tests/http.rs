@@ -2250,6 +2250,7 @@ query_timeout = "10m"
 slow_query_threshold = "1m"
 experimental_min_refresh_duration = "5s"
 grpc_conn_timeout = "5s"
+experimental_flight_do_get_timeout = "10s"
 experimental_grpc_max_retries = 3
 experimental_frontend_scan_timeout = "30s"
 experimental_max_filter_num_per_query = 20
