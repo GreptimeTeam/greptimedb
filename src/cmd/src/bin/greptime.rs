@@ -18,6 +18,8 @@
 use clap::{Parser, Subcommand};
 use cmd::datanode::builder::InstanceBuilder;
 use cmd::error::{InitTlsProviderSnafu, Result};
+#[cfg(unix)]
+use cmd::error::DaemonizeSnafu;
 use cmd::options::GlobalOptions;
 use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone, user};
 use common_base::Plugins;
@@ -73,20 +75,24 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(debug_assertions)]
 fn main() -> Result<()> {
     use snafu::ResultExt;
+
+    let cli = Command::parse();
+    maybe_daemonize(&cli)?;
+
     // Set the stack size to 8MB for the thread so it wouldn't overflow on large stack usage in debug mode
     // see https://github.com/GreptimeTeam/greptimedb/pull/4317
     // and https://github.com/rust-lang/rust/issues/34283
     std::thread::Builder::new()
         .name("main_spawn".to_string())
         .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             {
                 tokio::runtime::Builder::new_multi_thread()
                     .thread_stack_size(8 * 1024 * 1024)
                     .enable_all()
                     .build()
                     .expect("Failed building the Runtime")
-                    .block_on(main_body())
+                    .block_on(main_body(cli))
             }
         })
         .context(cmd::error::SpawnThreadSnafu)?
@@ -95,15 +101,55 @@ fn main() -> Result<()> {
 }
 
 #[cfg(not(debug_assertions))]
-#[tokio::main]
-async fn main() -> Result<()> {
-    main_body().await
+fn main() -> Result<()> {
+    let cli = Command::parse();
+    maybe_daemonize(&cli)?;
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed building the Runtime")
+        .block_on(main_body(cli))
 }
 
-async fn main_body() -> Result<()> {
+async fn main_body(cli: Command) -> Result<()> {
     setup_human_panic();
     install_default_crypto_provider().map_err(|msg| InitTlsProviderSnafu { msg }.build())?;
-    start(Command::parse()).await
+    start(cli).await
+}
+
+/// If `--daemon` was passed for `standalone start`, fork into the background
+/// before any Tokio runtime is built. On non-Unix this is a no-op with a warning.
+fn maybe_daemonize(cli: &Command) -> Result<()> {
+    let daemon = matches!(&cli.subcmd, SubCommand::Standalone(cmd) if cmd.is_daemon());
+    if !daemon {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        let cwd = std::env::current_dir().map_err(|e| DaemonizeSnafu {
+            msg: format!("failed to read current working directory: {e}"),
+        }
+        .build())?;
+
+        daemonize::Daemonize::new()
+            .working_directory(cwd)
+            .start()
+            .map_err(|e| DaemonizeSnafu {
+                msg: format!("failed to daemonize: {e}"),
+            }
+            .build())?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        eprintln!(
+            "warning: `--daemon` is not supported on this platform; ignoring it and running in the foreground"
+        );
+    }
+
+    Ok(())
 }
 
 async fn start(cli: Command) -> Result<()> {

@@ -152,6 +152,11 @@ impl Command {
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         self.subcmd.load_options(global_options)
     }
+
+    /// Whether the `standalone start` command requested daemonization.
+    pub fn is_daemon(&self) -> bool {
+        self.subcmd.is_daemon()
+    }
 }
 
 #[derive(Parser)]
@@ -172,6 +177,12 @@ impl SubCommand {
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
+        }
+    }
+
+    fn is_daemon(&self) -> bool {
+        match self {
+            SubCommand::Start(cmd) => cmd.daemon,
         }
     }
 }
@@ -291,6 +302,9 @@ pub struct StartCommand {
     /// The working home directory of this standalone instance.
     #[clap(long)]
     data_home: Option<String>,
+    /// Run in the background as a daemon (Unix only; no-op on Windows).
+    #[clap(short, long)]
+    daemon: bool,
 }
 
 impl StartCommand {
@@ -1352,6 +1366,18 @@ mod tests {
         let command =
             StartCommand::try_parse_from(["standalone", "--rpc-addr", "127.0.0.1:34001"]).unwrap();
         assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
+    }
+
+    #[test]
+    fn test_parse_daemon_flag() {
+        let command = StartCommand::try_parse_from(["standalone", "--daemon"]).unwrap();
+        assert!(command.daemon);
+
+        let command = StartCommand::try_parse_from(["standalone", "-d"]).unwrap();
+        assert!(command.daemon);
+
+        let command = StartCommand::try_parse_from(["standalone"]).unwrap();
+        assert!(!command.daemon);
     }
 
     #[test]
