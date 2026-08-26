@@ -1236,16 +1236,9 @@ pub fn show_create_flow(
             .map(|schedule| schedule.anchor_secs)
             .filter(|anchor_secs| *anchor_secs != 0),
         comment,
-        // Defense-in-depth for SHOW CREATE: never surface the internal
-        // transient transport keys, even if malformed/old metadata carries
-        // them in `options`.
         flow_options: OptionMap::from_filtered_string_map(
             flow_val.options(),
-            &[
-                FlowType::FLOW_TYPE_KEY,
-                common_meta::ddl::create_flow::INTERNAL_EVAL_OFFSET_KEY,
-                common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY,
-            ],
+            &[FlowType::FLOW_TYPE_KEY],
         ),
         query,
     };

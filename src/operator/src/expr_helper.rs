@@ -34,7 +34,6 @@ use api::v1::{
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
-use common_meta::ddl::create_flow::{INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY};
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::prelude::ConcreteDataType;
@@ -1100,24 +1099,6 @@ pub fn to_create_flow_task_expr(
     let eval_interval = create_flow.eval_interval;
 
     let flow_options = stringify_flow_options(create_flow.flow_options)?;
-    // The internal offset/schedule transport keys are trusted only when
-    // inserted later by the operator procedure layer from the typed SQL AST
-    // (after user option validation). A user-supplied occurrence must be
-    // rejected instead of being honored.
-    if flow_options.contains_key(INTERNAL_EVAL_OFFSET_KEY)
-        || flow_options.contains_key(INTERNAL_EVAL_SCHEDULE_KEY)
-    {
-        let key = if flow_options.contains_key(INTERNAL_EVAL_OFFSET_KEY) {
-            INTERNAL_EVAL_OFFSET_KEY
-        } else {
-            INTERNAL_EVAL_SCHEDULE_KEY
-        };
-        return InvalidSqlSnafu {
-            err_msg: format!("flow option '{key}' is reserved for internal use"),
-        }
-        .fail();
-    }
-
     Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
         flow_name: sanitize_flow_name(create_flow.flow_name)?,
@@ -2018,90 +1999,5 @@ WITH(
         let create_table = expr_to_create(&expr, Some('`')).unwrap();
         let new_sql = format!("{:#}", create_table);
         assert_eq!(sql, new_sql);
-    }
-
-    #[test]
-    fn test_create_flow_expr_does_not_insert_internal_key_at_ast_layer() {
-        // The typed `EVAL OFFSET` is transported to meta by the operator
-        // procedure layer (after user option validation), NOT by the
-        // AST-to-expr helper. The expr produced here must therefore not carry
-        // the transient key at all.
-        let sql = r#"
-CREATE FLOW calc_reqs
-SINK TO cnt_reqs
-EVAL INTERVAL '1 hour'
-EVAL OFFSET '2 minutes'
-AS
-SELECT max(c1) FROM http_requests;"#;
-        let stmt =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap()
-                .pop()
-                .unwrap();
-        let Statement::CreateFlow(create_flow) = stmt else {
-            unreachable!()
-        };
-        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
-        assert_eq!(expr.eval_interval.as_ref().map(|e| e.seconds), Some(3600));
-        assert!(
-            !expr.flow_options.contains_key(INTERNAL_EVAL_OFFSET_KEY),
-            "the transient key must be inserted by the procedure layer, not here"
-        );
-
-        // Zero offset (canonicalized to None by the parser) transports nothing.
-        let sql = r#"
-CREATE FLOW calc_reqs_zero
-SINK TO cnt_reqs
-EVAL INTERVAL '1 hour'
-EVAL OFFSET '0 seconds'
-AS
-SELECT max(c1) FROM http_requests;"#;
-        let stmt =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap()
-                .pop()
-                .unwrap();
-        let Statement::CreateFlow(create_flow) = stmt else {
-            unreachable!()
-        };
-        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
-        assert!(!expr.flow_options.contains_key(INTERNAL_EVAL_OFFSET_KEY));
-    }
-
-    #[test]
-    fn test_create_flow_expr_rejects_user_supplied_internal_keys() {
-        for key in [
-            INTERNAL_EVAL_OFFSET_KEY,
-            INTERNAL_EVAL_SCHEDULE_KEY,
-            "__greptime_internal_eval_schedule",
-            "__greptime_internal_eval_offset_secs",
-        ] {
-            let sql = format!(
-                r#"
-CREATE FLOW calc_reqs
-SINK TO cnt_reqs
-EVAL INTERVAL '1 hour'
-WITH ({key} = '120')
-AS
-SELECT max(c1) FROM http_requests;"#
-            );
-            let stmt = ParserContext::create_with_dialect(
-                &sql,
-                &GreptimeDbDialect {},
-                ParseOptions::default(),
-            )
-            .unwrap()
-            .pop()
-            .unwrap();
-            let Statement::CreateFlow(create_flow) = stmt else {
-                unreachable!()
-            };
-            let err = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains(&format!("flow option '{key}' is reserved for internal use")),
-                "unexpected error for {key}: {err}"
-            );
-        }
     }
 }

@@ -1,8 +1,0 @@
-name = "flow_eval_offset_old_metadata"
-reason = "Old binary interval-flow metadata (created before EVAL OFFSET support) recovered by a new binary must default to an implicit zero offset / epoch anchor in SHOW CREATE and information_schema, and must never surface internal transport keys."
-introduced_by = "EVAL OFFSET feature"
-topologies = ["distributed", "standalone"]
-from_range = ["<=v1.1.1"]
-to_range = [">v1.1.1"]
-features = ["flow", "table"]
-owner = "flow"

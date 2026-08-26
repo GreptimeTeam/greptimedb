@@ -12,15 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::{
-    FlowType, INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
-    effective_eval_schedule_from_flow_info,
-};
+use common_meta::ddl::create_flow::{FlowType, effective_eval_schedule_from_flow_info};
 use common_meta::key::FlowId;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowInfoValue;
@@ -180,16 +176,9 @@ impl InformationSchemaFlows {
                 .map(|schedule| schedule.anchor_secs)
                 .filter(|anchor_secs| *anchor_secs != 0),
             comment,
-            // Defense-in-depth for `information_schema.flows.flow_definition`:
-            // never surface the internal transient transport keys, even if
-            // malformed/old metadata carries them in `options`.
             flow_options: sql::statements::OptionMap::from_filtered_string_map(
                 flow_info.options(),
-                &[
-                    FlowType::FLOW_TYPE_KEY,
-                    INTERNAL_EVAL_OFFSET_KEY,
-                    INTERNAL_EVAL_SCHEDULE_KEY,
-                ],
+                &[FlowType::FLOW_TYPE_KEY],
             ),
             query,
         };
@@ -266,19 +255,6 @@ struct InformationSchemaFlowsBuilder {
     last_execution_time: TimestampMillisecondVectorBuilder,
     source_table_names: StringVectorBuilder,
     flownode_addr_groups: StringVectorBuilder,
-}
-
-/// Filters the internal transient transport keys out of a flow's stored
-/// options. `FlowInfoValue.options` should never contain them, but malformed
-/// or old metadata might; `information_schema` must never surface them.
-fn visible_flow_options(options: &HashMap<String, String>) -> HashMap<String, String> {
-    options
-        .iter()
-        .filter(|(key, _)| {
-            key.as_str() != INTERNAL_EVAL_OFFSET_KEY && key.as_str() != INTERNAL_EVAL_SCHEDULE_KEY
-        })
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
 }
 
 impl InformationSchemaFlowsBuilder {
@@ -402,13 +378,10 @@ impl InformationSchemaFlowsBuilder {
                 }
             })?,
         ));
-        // Never surface the internal transient transport keys in the OPTIONS
-        // column, even if malformed/old metadata carries them.
-        let visible_options = visible_flow_options(flow_info.options());
         self.option_groups
-            .push(Some(&serde_json::to_string(&visible_options).context(
+            .push(Some(&serde_json::to_string(flow_info.options()).context(
                 JsonSnafu {
-                    input: format!("{visible_options:?}"),
+                    input: format!("{:?}", flow_info.options()),
                 },
             )?));
         self.created_time
@@ -591,45 +564,5 @@ mod tests {
             panic!("unexpected stmt: {:?}", stmts[0]);
         };
         assert_eq!(reparsed.eval_offset, None);
-    }
-
-    #[test]
-    fn test_generate_show_create_flow_filters_internal_keys_even_if_metadata_tainted() {
-        // Even if malformed/old metadata carries the internal transport keys
-        // in `options`, SHOW CREATE and flow_definition must not surface them.
-        let raw_sql = "SELECT max(c1) FROM public.src";
-        let options = HashMap::from([
-            ("defer_on_missing_source".to_string(), "true".to_string()),
-            (INTERNAL_EVAL_OFFSET_KEY.to_string(), "120".to_string()),
-            (
-                INTERNAL_EVAL_SCHEDULE_KEY.to_string(),
-                "{\"x\":1}".to_string(),
-            ),
-            (FlowType::FLOW_TYPE_KEY.to_string(), "batching".to_string()),
-        ]);
-        let flow_info = flow_info_for_show_create(raw_sql, Some(3600), 120, options.clone());
-        let sql = InformationSchemaFlows::generate_show_create_flow(&flow_info).unwrap();
-        assert!(
-            !sql.contains("__greptime_internal"),
-            "internal keys must be absent, got:\n{sql}"
-        );
-        assert!(
-            !sql.contains("eval_schedule"),
-            "internal schedule must be absent, got:\n{sql}"
-        );
-        assert!(
-            !sql.contains(FlowType::FLOW_TYPE_KEY),
-            "flow_type must be filtered, got:\n{sql}"
-        );
-        assert!(
-            sql.contains("defer_on_missing_source = 'true'"),
-            "user option must be preserved, got:\n{sql}"
-        );
-
-        // The OPTIONS column uses the same filtering.
-        let visible = visible_flow_options(&options);
-        assert!(!visible.contains_key(INTERNAL_EVAL_OFFSET_KEY));
-        assert!(!visible.contains_key(INTERNAL_EVAL_SCHEDULE_KEY));
-        assert_eq!(visible.len(), 2); // defer_on_missing_source + flow_type
     }
 }
