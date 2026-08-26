@@ -1,0 +1,20 @@
+src/client/src/database.rs
+  s_aa353de59809cc::t_35587b8c8b8a05 62,397
+  s_aa353de59809cc::t_18e7bce6abf5b7 57,402
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "8d14fa3ee1a91a24995ed17f98794a4ef5144b57",
+  "prompts": {},
+  "sessions": {
+    "s_aa353de59809cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a037e5-dc74-7ce3-b341-3c26620c3721",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
