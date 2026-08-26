@@ -708,9 +708,11 @@ pub struct IndexBuildTask {
     pub file: FileHandle,
     /// The target region metadata used to decode rows from the SST.
     ///
-    /// An SST may have been created by another region while being visible in
-    /// this region's manifest, so the file metadata cannot provide the target
-    /// schema and sequence domain.
+    /// An SST may originate in another region while being visible in the target
+    /// manifest. This metadata defines the target schema and sequence domain;
+    /// applying the staging manifest only makes imported files visible. Index
+    /// rebuild happens later when a flush, compaction, schema change, or manual
+    /// index build request schedules it.
     pub(crate) target_region_metadata: RegionMetadataRef,
     /// The manifest state this build is based on.
     pub(crate) source: IndexBuildSource,
@@ -2132,7 +2134,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_index_build_task_increments_legacy_index_version() {
+    async fn test_index_build_task_foreign_file_uses_target_metadata() {
         let env = SchedulerEnv::new().await;
         let mut scheduler = env.mock_index_build_scheduler(4);
         let source_metadata = Arc::new(sst_region_metadata());
