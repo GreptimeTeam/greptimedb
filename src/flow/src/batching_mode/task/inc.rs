@@ -280,6 +280,10 @@ impl BatchingTask {
             // row-level delta; the engine fails closed when the capability
             // does not hold at scan time.
             let incremental_mode = if self.sequence_range_capable().await {
+                debug!(
+                    "Flow {} selected sequence_range incremental mode",
+                    self.config.flow_id
+                );
                 FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE
             } else {
                 FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
