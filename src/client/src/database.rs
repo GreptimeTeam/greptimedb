@@ -54,12 +54,12 @@ use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{ResultExt, location};
+use snafu::{IntoError, ResultExt};
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
 use crate::error::{
-    ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
+    ConvertFlightDataSnafu, Error, FlightGetSnafu, FlightStreamSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu,
 };
 use crate::flight::{FlightMessageReader, decode_flight_data};
@@ -394,13 +394,12 @@ fn flight_stream_error(addr: &str, error: Error) -> Error {
         );
     }
 
-    Error::FlightStream {
+    FlightStreamSnafu {
         addr: addr.to_string(),
         tonic_code,
         message,
-        source: BoxedError::new(error),
-        location: location!(),
     }
+    .into_error(BoxedError::new(error))
 }
 
 #[derive(Clone, Debug, Default)]
