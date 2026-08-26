@@ -51,7 +51,8 @@ pub struct TwcsPicker {
     pub trigger_file_num: usize,
     /// Compaction time window in seconds.
     pub time_window_seconds: Option<i64>,
-    /// Max allowed compaction output file size.
+    /// Max allowed compaction output file size. The picker also uses it to predict
+    /// output splits when scoring candidates.
     pub max_output_file_size: Option<u64>,
     /// Whether the target region is in append mode.
     pub append_mode: bool,
@@ -166,7 +167,11 @@ impl TwcsPicker {
             find_sorted_runs_by_time_range(&mut files_to_merge)
         };
         let found_runs = sorted_runs.len();
-        let inputs = pick_count_first(sorted_runs, self.trigger_file_num);
+        let inputs = pick_count_first(
+            sorted_runs,
+            self.trigger_file_num,
+            self.max_output_file_size,
+        );
         let filter_deleted = !self.append_mode
             && !window_has_overlap(files, windows)
             && !selected_overlaps_unselected(&inputs, files);
@@ -195,38 +200,168 @@ struct OrderedFile<'a> {
     position_in_run: usize,
 }
 
-/// Score of a candidate compaction input. Higher is better: first by the number of SST files
-/// it removes, then by the number of files participating in an overlap (resolving overlap is
-/// what reduces sorted runs), then by smaller input bytes.
+/// Metrics of a candidate compaction input, accumulated incrementally as the
+/// candidate interval expands one file at a time.
+#[derive(Debug, Default)]
+struct Candidate {
+    /// Number of files in the interval.
+    num_files: usize,
+    /// Total input bytes of the interval.
+    total_size: usize,
+    /// Size of the largest single file in the interval.
+    largest_file_size: usize,
+    /// Files in the interval that overlap another interval file from a different
+    /// sorted run. Resolving these overlaps is what reduces sorted runs.
+    overlap_participants: usize,
+}
+
+impl Candidate {
+    /// Absorbs `file` into the candidate. `preceding` holds the interval files added
+    /// before it and `participations` tracks which of them already participate in an
+    /// intra-interval overlap; both exist only for overlap accounting.
+    fn absorb(
+        &mut self,
+        file: &OrderedFile,
+        preceding: &[OrderedFile],
+        participations: &mut Vec<bool>,
+    ) {
+        self.num_files += 1;
+        let file_size = file.file.size() as usize;
+        self.total_size += file_size;
+        self.largest_file_size = self.largest_file_size.max(file_size);
+
+        let mut participates = false;
+        for (offset, other) in preceding.iter().enumerate() {
+            if file.run_id != other.run_id && file.file.overlap_inclusive(other.file) {
+                if !participations[offset] {
+                    participations[offset] = true;
+                    self.overlap_participants += 1;
+                }
+                participates = true;
+            }
+        }
+        participations.push(participates);
+        if participates {
+            self.overlap_participants += 1;
+        }
+    }
+
+    /// Predicted number of output files after compacting this candidate. Compaction
+    /// output holds at most the input bytes, so a split threshold of
+    /// `max_output_file_size` yields at most `ceil(total_size / threshold)` files.
+    /// Without a threshold the output is a single file.
+    fn predicted_output_files(&self, max_output_file_size: Option<u64>) -> usize {
+        match max_output_file_size {
+            Some(max) if max > 0 => self.total_size.div_ceil(max as usize).max(1),
+            _ => 1,
+        }
+    }
+
+    /// Net file count reduction compacting this candidate would achieve, i.e. how
+    /// many fewer physical SSTs the window holds afterwards. Zero when the output
+    /// would be split back into at least as many files as the input.
+    fn file_reduction(&self, max_output_file_size: Option<u64>) -> usize {
+        self.num_files
+            .saturating_sub(self.predicted_output_files(max_output_file_size))
+    }
+
+    /// A large historical file is only rewritten once its peers contribute at least
+    /// the same amount of data, so every rewrite moves it into a larger size tier.
+    fn is_balanced(&self) -> bool {
+        self.largest_file_size <= self.total_size - self.largest_file_size
+    }
+
+    /// A candidate is worth compacting only if it makes progress on at least one
+    /// axis: it reduces the physical file count, or it resolves at least one
+    /// overlap (merging sorted runs and reducing read amplification). A pure
+    /// rewrite that achieves neither only burns I/O.
+    fn makes_progress(&self, max_output_file_size: Option<u64>) -> bool {
+        self.file_reduction(max_output_file_size) > 0 || self.overlap_participants > 0
+    }
+
+    fn score(&self, max_output_file_size: Option<u64>) -> CandidateScore {
+        CandidateScore {
+            file_reduction: self.file_reduction(max_output_file_size),
+            overlap_participants: self.overlap_participants,
+            total_size: self.total_size,
+        }
+    }
+}
+
+/// Score of a candidate compaction input. Higher is better: first by the predicted
+/// net file count reduction, then by the number of files participating in an
+/// overlap, then by smaller input bytes.
 #[derive(Debug)]
 struct CandidateScore {
-    num_files: usize,
+    file_reduction: usize,
     overlap_participants: usize,
-    size: usize,
+    total_size: usize,
 }
 
 impl CandidateScore {
     fn is_better_than(&self, other: &Self) -> bool {
-        self.num_files
-            .cmp(&other.num_files)
+        self.file_reduction
+            .cmp(&other.file_reduction)
             .then_with(|| self.overlap_participants.cmp(&other.overlap_participants))
-            .then_with(|| other.size.cmp(&self.size))
+            .then_with(|| other.total_size.cmp(&self.total_size))
             .is_gt()
     }
 }
 
 /// Picks a contiguous (in global time order) interval of files to compact.
 ///
-/// The picker first reorders all files from all sorted runs by `(start asc, end desc)` and
-/// then enumerates every interval of at most [`MAX_INPUT_FILES`] files. An interval is
-/// eligible when it holds at least `trigger_file_num` files and at least 2 files, and when
-/// no single file dominates the interval (`largest <= sum of the others`), so a large
-/// historical file is only rewritten once its peers contribute at least the same amount of
-/// data. The best interval wins by [`CandidateScore`]; ties keep the earliest interval.
+/// The picker reorders all files from all sorted runs by `(start asc, end desc)` and
+/// enumerates every interval of at most [`MAX_INPUT_FILES`] files as a [`Candidate`].
+/// An interval is eligible when it
+///
+/// - holds at least `trigger_file_num` files (and at least 2),
+/// - is balanced: no single file dominates it (`largest <= sum of the others`),
+/// - makes progress on at least one axis: it reduces the physical file count given
+///   the output split threshold `max_output_file_size`, or it resolves at least one
+///   overlap between sorted runs.
+///
+/// The best interval wins by [`CandidateScore`]; ties keep the earliest interval.
 fn pick_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     trigger_file_num: usize,
+    max_output_file_size: Option<u64>,
 ) -> Vec<FileHandle> {
+    let files = ordered_files(&sorted_runs);
+    let min_files = trigger_file_num.max(2);
+
+    let mut best = None;
+    for left in 0..files.len() {
+        let mut candidate = Candidate::default();
+        let right_bound = (left + MAX_INPUT_FILES).min(files.len());
+        let mut participations: Vec<bool> = Vec::with_capacity(right_bound - left);
+        for right in left..right_bound {
+            candidate.absorb(&files[right], &files[left..right], &mut participations);
+            if candidate.num_files < min_files
+                || !candidate.is_balanced()
+                || !candidate.makes_progress(max_output_file_size)
+            {
+                continue;
+            }
+
+            let score = candidate.score(max_output_file_size);
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, _)| score.is_better_than(best_score))
+            {
+                best = Some((score, &files[left..=right]));
+            }
+        }
+    }
+
+    let Some((_, best)) = best else {
+        return vec![];
+    };
+    best.iter().map(|file| file.file.clone()).collect()
+}
+
+/// Flattens sorted runs into files ordered by `(start asc, end desc)`, breaking ties
+/// by run and position to keep the order deterministic.
+fn ordered_files(sorted_runs: &[SortedRun<FileHandle>]) -> Vec<OrderedFile<'_>> {
     let mut files = sorted_runs
         .iter()
         .enumerate()
@@ -250,65 +385,7 @@ fn pick_count_first(
             .then_with(|| lhs.run_id.cmp(&rhs.run_id))
             .then_with(|| lhs.position_in_run.cmp(&rhs.position_in_run))
     });
-
-    let mut best = None;
-    for left in 0..files.len() {
-        let mut total_size = 0;
-        let mut largest_file_size = 0;
-        let mut overlap_participants = 0;
-        let right_bound = (left + MAX_INPUT_FILES).min(files.len());
-        let mut participants: Vec<bool> = Vec::with_capacity(right_bound - left);
-        for right in left..right_bound {
-            let right_file = &files[right];
-            let file_size = right_file.file.size() as usize;
-            total_size += file_size;
-            largest_file_size = largest_file_size.max(file_size);
-
-            let mut right_participates = false;
-            for (offset, other) in files[left..right].iter().enumerate() {
-                if right_file.run_id != other.run_id
-                    && right_file.file.overlap_inclusive(other.file)
-                {
-                    if !participants[offset] {
-                        participants[offset] = true;
-                        overlap_participants += 1;
-                    }
-                    right_participates = true;
-                }
-            }
-            participants.push(right_participates);
-            if right_participates {
-                overlap_participants += 1;
-            }
-
-            let num_files = right + 1 - left;
-            if num_files < trigger_file_num || num_files < 2 {
-                continue;
-            }
-            // A historical file is only rewritten after peers contribute at least the same
-            // amount of data, so every rewrite moves it into a larger size tier.
-            if largest_file_size > total_size - largest_file_size {
-                continue;
-            }
-
-            let score = CandidateScore {
-                num_files,
-                overlap_participants,
-                size: total_size,
-            };
-            if best
-                .as_ref()
-                .is_none_or(|(best_score, _)| score.is_better_than(best_score))
-            {
-                best = Some((score, &files[left..=right]));
-            }
-        }
-    }
-
-    let Some((_, best)) = best else {
-        return vec![];
-    };
-    best.iter().map(|file| file.file.clone()).collect()
+    files
 }
 
 fn selected_overlaps_unselected(selected: &[FileHandle], window: &Window) -> bool {
@@ -1895,6 +1972,7 @@ mod tests {
                 new_file(60, 69, 4, 100),
             ])],
             4,
+            None,
         );
 
         assert!(picked.is_empty());
@@ -1911,6 +1989,7 @@ mod tests {
                 new_file(80, 89, 5, 100),
             ])],
             4,
+            None,
         );
 
         assert_eq!(
@@ -1930,6 +2009,7 @@ mod tests {
                 new_file(80, 89, 5, 100),
             ])],
             4,
+            None,
         );
 
         assert_eq!(
@@ -1959,6 +2039,7 @@ mod tests {
                 SortedRun::from(vec![overlapping]),
             ],
             2,
+            None,
         );
         let ranges = picked_ranges(&picked);
 
@@ -1983,12 +2064,69 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let picked = pick_count_first(vec![SortedRun::from(files)], 2);
+        let picked = pick_count_first(vec![SortedRun::from(files)], 2, None);
         let ranges = picked_ranges(&picked);
 
         assert_eq!(MAX_INPUT_FILES, ranges.len());
         assert_eq!(Some(&(20, 29)), ranges.first());
         assert_eq!(Some(&(640, 649)), ranges.last());
+    }
+
+    #[test]
+    fn test_count_first_skips_pure_rewrite_without_progress() {
+        // Four non-overlapping files whose combined size splits back into at least
+        // four outputs: compacting them reduces neither the file count nor any
+        // overlap, so there is nothing worth picking.
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file(0, 9, 1, 600),
+                new_file(20, 29, 2, 600),
+                new_file(40, 49, 3, 600),
+                new_file(60, 69, 4, 600),
+            ])],
+            2,
+            Some(512),
+        );
+
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn test_count_first_allows_overlap_resolution_without_file_reduction() {
+        // Two large overlapping files from different runs: compacting them cannot
+        // reduce the file count (the output splits back into just as many files),
+        // but it resolves the overlap and merges two sorted runs into one.
+        let picked = pick_count_first(
+            vec![
+                SortedRun::from(vec![new_file(0, 19, 1, 600)]),
+                SortedRun::from(vec![new_file(10, 29, 2, 600)]),
+            ],
+            2,
+            Some(512),
+        );
+
+        assert_eq!(vec![(0, 19), (10, 29)], picked_ranges(&picked));
+    }
+
+    #[test]
+    fn test_count_first_prefers_guaranteed_reduction_over_pure_rewrite() {
+        // A window mixing large and small files: the large triple on its own is a
+        // pure rewrite, and every interval containing large files rewrites more
+        // bytes for the same predicted reduction, so the small triple wins.
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file(0, 9, 1, 600),
+                new_file(10, 19, 2, 600),
+                new_file(20, 29, 3, 600),
+                new_file(30, 39, 4, 10),
+                new_file(40, 49, 5, 10),
+                new_file(50, 59, 6, 10),
+            ])],
+            2,
+            Some(512),
+        );
+
+        assert_eq!(vec![(30, 39), (40, 49), (50, 59)], picked_ranges(&picked));
     }
 
     #[test]
@@ -2000,7 +2138,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let picked = pick_count_first(vec![SortedRun::from(files)], 2);
+        let picked = pick_count_first(vec![SortedRun::from(files)], 2, None);
         let ranges = picked_ranges(&picked);
 
         assert_eq!(MAX_INPUT_FILES, ranges.len());
@@ -2020,6 +2158,7 @@ mod tests {
                 SortedRun::from(vec![new_file(10, 19, 4, 1), new_file(30, 39, 5, 1)]),
             ],
             2,
+            None,
         );
 
         assert_eq!(
@@ -2046,6 +2185,7 @@ mod tests {
                 new_file(20, 29, 3, 10),
             ])],
             2,
+            None,
         );
 
         assert_eq!(
@@ -2067,6 +2207,7 @@ mod tests {
                 new_file(10, 19, 2, 10),
             ])],
             3,
+            None,
         );
 
         assert_eq!(
