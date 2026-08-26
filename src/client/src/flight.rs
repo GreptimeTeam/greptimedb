@@ -12,12 +12,108 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
+
 use arrow_flight::FlightData;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::{FlightDecoder, FlightMessage};
-use snafu::ResultExt;
+use common_telemetry::error;
+use futures_util::stream::Peekable;
+use futures_util::{Stream, StreamExt};
+use snafu::{OptionExt, ResultExt};
 
 use crate::Result;
-use crate::error::{ConvertFlightDataSnafu, Error};
+use crate::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlightMessageKind {
+    Schema,
+    RecordBatch,
+    AffectedRows,
+    Metrics,
+}
+
+impl From<&FlightMessage> for FlightMessageKind {
+    fn from(message: &FlightMessage) -> Self {
+        match message {
+            FlightMessage::Schema(_) => Self::Schema,
+            FlightMessage::RecordBatch(_) => Self::RecordBatch,
+            FlightMessage::AffectedRows { .. } => Self::AffectedRows,
+            FlightMessage::Metrics(_) => Self::Metrics,
+        }
+    }
+}
+
+pub(crate) struct FlightMessageReader<S: Stream + Unpin> {
+    /// Remote Flight peer used to decorate response-stream errors.
+    remote_addr: String,
+    messages: Peekable<S>,
+}
+
+impl<S> FlightMessageReader<S>
+where
+    S: Stream<Item = Result<FlightMessage>> + Unpin,
+{
+    pub(crate) fn new(remote_addr: impl Into<String>, messages: S) -> Self {
+        Self {
+            remote_addr: remote_addr.into(),
+            messages: messages.peekable(),
+        }
+    }
+
+    pub(crate) fn remote_addr(&self) -> &str {
+        &self.remote_addr
+    }
+
+    pub(crate) async fn read_first(&mut self) -> Result<FlightMessage> {
+        self.read_next()
+            .await?
+            .context(IllegalFlightMessagesSnafu {
+                reason: "Expect the response not to be empty",
+            })
+            .map_err(|error| wrap_flight_stream_error(self.remote_addr(), error))
+    }
+
+    pub(crate) async fn read_next(&mut self) -> Result<Option<FlightMessage>> {
+        self.messages
+            .next()
+            .await
+            .transpose()
+            .map_err(|error| wrap_flight_stream_error(&self.remote_addr, error))
+    }
+
+    pub(crate) async fn peek_next_message_kind(&mut self) -> Result<Option<FlightMessageKind>> {
+        match Pin::new(&mut self.messages).peek().await {
+            Some(Ok(message)) => Ok(Some(message.into())),
+            None => Ok(None),
+            Some(Err(_)) => match self.read_next().await {
+                // `peek` only borrows the error; consume it to preserve the source error.
+                Err(error) => Err(error),
+                Ok(_) => IllegalFlightMessagesSnafu {
+                    reason: "Flight stream changed after peek".to_string(),
+                }
+                .fail(),
+            },
+        }
+    }
+}
+
+pub(crate) fn wrap_flight_stream_error(remote_addr: &str, error: Error) -> Error {
+    let tonic_code = error.tonic_code().unwrap_or(tonic::Code::Unknown);
+    if error.status_code().should_log_error() {
+        error!(
+            error; "Failed to receive Flight data, addr: {}, code: {}",
+            remote_addr,
+            tonic_code
+        );
+    }
+
+    Error::FlightGet {
+        addr: remote_addr.to_string(),
+        tonic_code,
+        source: BoxedError::new(error),
+    }
+}
 
 pub(crate) fn decode_flight_data(
     decoder: &mut FlightDecoder,

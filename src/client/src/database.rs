@@ -59,7 +59,7 @@ use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu,
 };
-use crate::flight::decode_flight_data;
+use crate::flight::{FlightMessageReader, decode_flight_data};
 use crate::{Client, Result, error, from_grpc_response};
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
@@ -261,19 +261,14 @@ fn attach_terminal_metrics(output: Output, terminal_metrics: &OutputMetrics) -> 
 }
 
 async fn output_from_flight_message_stream<S>(
-    mut flight_message_stream: S,
+    remote_addr: String,
+    flight_message_stream: S,
 ) -> Result<OutputWithMetrics>
 where
     S: Stream<Item = Result<FlightMessage>> + Send + Unpin + 'static,
 {
-    let Some(first_flight_message) = flight_message_stream.next().await else {
-        return IllegalFlightMessagesSnafu {
-            reason: "Expect the response not to be empty",
-        }
-        .fail();
-    };
-
-    let first_flight_message = first_flight_message?;
+    let mut reader = FlightMessageReader::new(remote_addr, flight_message_stream);
+    let first_flight_message = reader.read_first().await?;
 
     match first_flight_message {
         FlightMessage::AffectedRows { rows, metrics } => {
@@ -281,7 +276,7 @@ where
             if let Some(metrics) = metrics {
                 terminal_metrics.update(Some(parse_terminal_metrics(&metrics)?));
             }
-            let next_message = flight_message_stream.next().await.transpose()?;
+            let next_message = reader.read_next().await?;
             match next_message {
                 None => terminal_metrics.mark_ready(),
                 Some(FlightMessage::Metrics(s)) if terminal_metrics.get().is_none() => {
@@ -320,15 +315,15 @@ where
             );
             let schema_cloned = schema.clone();
             let stream = Box::pin(stream!({
-                while let Some(flight_message_item) = flight_message_stream.next().await {
-                    let flight_message = match flight_message_item {
-                        Ok(message) => message,
-                        Err(e) => {
-                            yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                loop {
+                    let flight_message = match reader.read_next().await {
+                        Ok(Some(message)) => message,
+                        Ok(None) => break,
+                        Err(error) => {
+                            yield Err(BoxedError::new(error)).context(ExternalSnafu);
                             break;
                         }
                     };
-
                     match flight_message {
                         FlightMessage::RecordBatch(arrow_batch) => {
                             yield Ok(RecordBatch::from_df_record_batch(
@@ -766,6 +761,7 @@ impl Database {
         options.apply_to(&mut request)?;
 
         let mut client = self.client.make_flight_client(false, false)?;
+        let remote_addr = client.addr().to_string();
 
         let response = client.mut_inner().do_get(request).await.or_else(|e| {
             let tonic_code = e.code();
@@ -777,7 +773,7 @@ impl Database {
                 e
             );
             Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
-                addr: client.addr().to_string(),
+                addr: remote_addr.clone(),
                 tonic_code,
             })
         })?;
@@ -789,7 +785,7 @@ impl Database {
             future::ready(decode_flight_data(&mut decoder, flight_data))
         });
 
-        output_from_flight_message_stream(flight_message_stream).await
+        output_from_flight_message_stream(remote_addr, flight_message_stream).await
     }
 
     /// Ingest a stream of [RecordBatch]es that belong to a table, using Arrow Flight's "`DoPut`"
@@ -1239,13 +1235,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_affected_rows_inline_metrics_are_parsed() {
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![Ok(
-            FlightMessage::AffectedRows {
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
                 rows: 3,
                 metrics: Some(terminal_metrics_json()),
-            },
-        )]
-            as Vec<Result<FlightMessage>>))
+            })] as Vec<Result<FlightMessage>>),
+        )
         .await
         .unwrap();
 
@@ -1260,14 +1256,16 @@ mod tests {
     #[tokio::test]
     async fn test_affected_rows_inline_metrics_rejects_trailing_metrics() {
         let metrics_json = terminal_metrics_json();
-        let err = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::AffectedRows {
-                rows: 3,
-                metrics: Some(metrics_json.clone()),
-            }),
-            Ok(FlightMessage::Metrics(metrics_json)),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let err = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: Some(metrics_json.clone()),
+                }),
+                Ok(FlightMessage::Metrics(metrics_json)),
+            ] as Vec<Result<FlightMessage>>),
+        )
         .await
         .unwrap_err();
 
@@ -1289,12 +1287,14 @@ mod tests {
             vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
         )
         .unwrap();
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
-            Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
-            Ok(FlightMessage::Metrics("{not-json}".to_string())),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+                Ok(FlightMessage::Metrics("{not-json}".to_string())),
+            ] as Vec<Result<FlightMessage>>),
+        )
         .await
         .unwrap();
         let terminal_metrics = output.metrics.clone();
@@ -1333,18 +1333,20 @@ mod tests {
             vec![Arc::new(Int32Vector::from_slice([2])) as VectorRef],
         )
         .unwrap();
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
-            Ok(FlightMessage::RecordBatch(
-                first_batch.into_df_record_batch(),
-            )),
-            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(1))),
-            Ok(FlightMessage::RecordBatch(
-                second_batch.into_df_record_batch(),
-            )),
-            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(2))),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::RecordBatch(
+                    first_batch.into_df_record_batch(),
+                )),
+                Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(1))),
+                Ok(FlightMessage::RecordBatch(
+                    second_batch.into_df_record_batch(),
+                )),
+                Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(2))),
+            ] as Vec<Result<FlightMessage>>),
+        )
         .await
         .unwrap();
         let terminal_metrics = output.metrics.clone();
