@@ -39,7 +39,7 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::do_put::DoPutResponse;
 use common_grpc::flight::{
     FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage, SNAPSHOT_SEQS_METADATA_KEY,
@@ -54,7 +54,7 @@ use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::ResultExt;
+use snafu::{ResultExt, location};
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
@@ -271,7 +271,10 @@ where
     S: Stream<Item = Result<FlightMessage>> + Send + Unpin + 'static,
 {
     let mut reader = FlightMessageReader::new(remote_addr, flight_message_stream);
-    let first_flight_message = reader.read_first().await?;
+    let first_flight_message = reader
+        .read_first()
+        .await
+        .map_err(|error| flight_stream_error(reader.remote_addr(), error))?;
 
     match first_flight_message {
         FlightMessage::AffectedRows { rows, metrics } => {
@@ -279,7 +282,10 @@ where
             if let Some(metrics) = metrics {
                 terminal_metrics.update(Some(parse_terminal_metrics(&metrics)?));
             }
-            let next_message = reader.read_next().await?;
+            let next_message = reader
+                .read_next()
+                .await
+                .map_err(|error| flight_stream_error(reader.remote_addr(), error))?;
             match next_message {
                 None => terminal_metrics.mark_ready(),
                 Some(FlightMessage::Metrics(s)) if terminal_metrics.get().is_none() => {
@@ -323,7 +329,11 @@ where
                         Ok(Some(message)) => message,
                         Ok(None) => break,
                         Err(error) => {
-                            yield Err(BoxedError::new(error)).context(ExternalSnafu);
+                            yield Err(BoxedError::new(flight_stream_error(
+                                reader.remote_addr(),
+                                error,
+                            )))
+                            .context(ExternalSnafu);
                             break;
                         }
                     };
@@ -370,6 +380,26 @@ where
                 Box::pin(record_batch_stream),
             )))
         }
+    }
+}
+
+fn flight_stream_error(addr: &str, error: Error) -> Error {
+    let tonic_code = error.tonic_code().unwrap_or(tonic::Code::Unknown);
+    let message = error.to_string();
+    if error.status_code().should_log_error() {
+        error!(
+            error; "Failed to receive Flight data, addr: {}, code: {}",
+            addr,
+            tonic_code
+        );
+    }
+
+    Error::FlightStream {
+        addr: addr.to_string(),
+        tonic_code,
+        message,
+        source: BoxedError::new(error),
+        location: location!(),
     }
 }
 
@@ -1143,6 +1173,28 @@ mod tests {
         assert_eq!(expected.to_string(), actual.to_string());
         assert_eq!(expected.retry_hint(), actual.retry_hint());
         assert_eq!(expected.should_retry(), actual.should_retry());
+    }
+
+    #[test]
+    fn test_flight_stream_error_preserves_addr_and_message() {
+        let error = flight_stream_error(
+            "127.0.0.1:4001",
+            Status::out_of_range("message length too large").into(),
+        );
+
+        assert!(matches!(
+            &error,
+            Error::FlightStream {
+                addr,
+                tonic_code: Code::OutOfRange,
+                message,
+                ..
+            } if addr == "127.0.0.1:4001" && message == "message length too large"
+        ));
+        assert_eq!(
+            "Failed to receive Flight data from 127.0.0.1:4001, code: Operation was attempted past the valid range: message length too large",
+            error.to_string(),
+        );
     }
 
     #[test]
