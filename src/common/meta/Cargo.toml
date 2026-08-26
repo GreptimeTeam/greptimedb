@@ -89,7 +89,7 @@ strum.workspace = true
 table = { workspace = true, features = ["testing"] }
 tokio.workspace = true
 tokio-postgres = { workspace = true, optional = true }
-tokio-postgres-rustls = { version = "0.12", optional = true }
+tokio-postgres-rustls = { version = "0.14", optional = true }
 tonic.workspace = true
 tracing.workspace = true
 typetag.workspace = true
