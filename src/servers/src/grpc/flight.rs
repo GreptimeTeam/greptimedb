@@ -30,8 +30,7 @@ use bytes::{self, Bytes};
 use common_error::ext::ErrorExt;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{
-    FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightEncoder, FlightMessage,
-    SNAPSHOT_SEQS_METADATA_KEY,
+    FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage, SNAPSHOT_SEQS_METADATA_KEY,
 };
 use common_memory_manager::MemoryGuard;
 use common_query::{Output, OutputData};
@@ -46,14 +45,16 @@ use prost::Message;
 use query::metrics::terminal_recordbatch_metrics_from_plan_if_requested;
 use query::options::FlowQueryExtensions;
 use session::context::{Channel, QueryContextRef};
-use snafu::{IntoError, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::error::{InvalidParameterSnafu, Result, ToJsonSnafu};
-pub use crate::grpc::flight::stream::{FlightRecordBatchSource, FlightRecordBatchStream};
+use crate::error::{InvalidParameterSnafu, InvalidQuerySnafu, Result, ToJsonSnafu};
+pub use crate::grpc::flight::stream::{
+    FlightRecordBatchSource, FlightRecordBatchStream, FlightRecordBatchStreamInput,
+};
 use crate::grpc::greptime_handler::{
     GreptimeRequestHandler, create_query_context, get_request_type,
 };
@@ -221,9 +222,12 @@ impl FlightCraft for GreptimeRequestHandler {
         );
         let flight_compression = self.flight_compression;
         async {
-            let output = self
-                .handle_request_with_query_ctx(request, query_ctx.clone())
+            let query = request.request.context(InvalidQuerySnafu {
+                reason: "Expecting non-empty GreptimeRequest.",
+            })?;
+            self.authenticate_request_with_query_ctx(request.header.as_ref(), &query_ctx)
                 .await?;
+            let output = self.handle_request_with_query_ctx(query, query_ctx.clone());
             let stream = to_flight_data_stream(
                 output,
                 TracingContext::from_current_span(),
@@ -573,32 +577,36 @@ fn extract_json_metadata<T: serde::de::DeserializeOwned>(
     Ok(Some(parsed))
 }
 
-fn to_flight_data_stream(
-    output: Output,
+fn to_flight_data_stream<F>(
+    output: F,
     tracing_context: TracingContext,
     flight_compression: FlightCompression,
     query_ctx: QueryContextRef,
     should_emit_terminal_metrics: bool,
-) -> TonicStream<FlightData> {
+) -> TonicStream<FlightData>
+where
+    F: std::future::Future<Output = Result<Output>> + Send + 'static,
+{
+    let initializer = async move {
+        let output = output.await.map_err(Status::from)?;
+        output_to_flight_record_batch_source(output, should_emit_terminal_metrics)
+    };
+    let stream = FlightRecordBatchStream::new(
+        FlightRecordBatchStreamInput::initializer(initializer),
+        tracing_context,
+        flight_compression,
+        query_ctx,
+    );
+    Box::pin(stream) as _
+}
+
+fn output_to_flight_record_batch_source(
+    output: Output,
+    should_emit_terminal_metrics: bool,
+) -> TonicResult<FlightRecordBatchSource> {
     match output.data {
-        OutputData::Stream(stream) => {
-            let stream = FlightRecordBatchStream::new(
-                FlightRecordBatchSource::RecordBatches(stream),
-                tracing_context,
-                flight_compression,
-                query_ctx,
-            );
-            Box::pin(stream) as _
-        }
-        OutputData::RecordBatches(x) => {
-            let stream = FlightRecordBatchStream::new(
-                FlightRecordBatchSource::RecordBatches(x.as_stream()),
-                tracing_context,
-                flight_compression,
-                query_ctx,
-            );
-            Box::pin(stream) as _
-        }
+        OutputData::Stream(stream) => Ok(FlightRecordBatchSource::RecordBatches(stream)),
+        OutputData::RecordBatches(x) => Ok(FlightRecordBatchSource::RecordBatches(x.as_stream())),
         OutputData::AffectedRows(rows) => {
             let terminal_metrics = match terminal_recordbatch_metrics_from_plan_if_requested(
                 output.meta.plan,
@@ -607,20 +615,17 @@ fn to_flight_data_stream(
                 Some(metrics) => match serde_json::to_string(&metrics) {
                     Ok(metrics) => Some(metrics),
                     Err(e) => {
-                        let stream = tokio_stream::once(Err(Status::internal(format!(
+                        return Err(Status::internal(format!(
                             "Failed to serialize terminal metrics: {e}"
-                        ))));
-                        return Box::pin(stream) as _;
+                        )));
                     }
                 },
                 None => None,
             };
-            let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows {
+            Ok(FlightRecordBatchSource::AffectedRows {
                 rows,
                 metrics: terminal_metrics,
-            });
-            let stream = tokio_stream::iter(affected_rows.into_iter().map(Ok));
-            Box::pin(stream) as _
+            })
         }
     }
 }

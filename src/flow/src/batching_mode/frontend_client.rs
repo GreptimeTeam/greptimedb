@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use api::v1::greptime_request::Request;
-use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputWithMetrics};
 use common_error::ext::BoxedError;
@@ -340,53 +339,6 @@ impl FrontendClient {
         })
     }
 
-    /// Execute a SQL statement on the frontend.
-    pub async fn sql(&self, catalog: &str, schema: &str, sql: &str) -> Result<Output, Error> {
-        match self {
-            FrontendClient::Distributed { .. } => {
-                let db = self.get_random_active_frontend(catalog, schema).await?;
-                db.database
-                    .sql(sql)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)
-            }
-            FrontendClient::Standalone {
-                database_client, ..
-            } => {
-                let ctx = QueryContextBuilder::default()
-                    .current_catalog(catalog.to_string())
-                    .current_schema(schema.to_string())
-                    .build();
-                let ctx = Arc::new(ctx);
-                {
-                    let database_client = {
-                        database_client
-                            .handler
-                            .lock()
-                            .unwrap()
-                            .as_ref()
-                            .context(UnexpectedSnafu {
-                                reason: "Standalone's frontend instance is not set",
-                            })?
-                            .upgrade()
-                            .context(UnexpectedSnafu {
-                                reason: "Failed to upgrade database client",
-                            })?
-                    };
-                    let req = Request::Query(QueryRequest {
-                        query: Some(Query::Sql(sql.to_string())),
-                    });
-                    database_client
-                        .do_query(req, ctx)
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(ExternalSnafu)
-                }
-            }
-        }
-    }
-
     /// Execute a flow query and return terminal metrics. `snapshot_seqs` are
     /// optional read upper bounds used only by snapshot-fenced repair chunks.
     pub(crate) async fn query_with_terminal_metrics(
@@ -413,12 +365,12 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
                 db.database
-                    .query_with_terminal_metrics_and_flow_extensions(
-                        request,
-                        &hints,
-                        extensions,
-                        snapshot_seqs,
-                    )
+                    .flight_request()
+                    .with_hints(&hints)
+                    .with_flow_extensions(extensions)
+                    .with_snapshot_seqs(snapshot_seqs)
+                    .with_timeout(batch_opts.experimental_flight_do_get_timeout)
+                    .query_with_terminal_metrics(request)
                     .await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)
@@ -623,6 +575,7 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
+    use api::v1::query_request::Query;
     use arrow_flight::flight_service_server::FlightServiceServer;
     use arrow_flight::{FlightData, Ticket};
     use common_query::{Output, OutputData};
