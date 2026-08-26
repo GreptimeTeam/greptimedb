@@ -369,7 +369,7 @@ impl FrontendClient {
                     .with_hints(&hints)
                     .with_flow_extensions(extensions)
                     .with_snapshot_seqs(snapshot_seqs)
-                    .with_timeout(batch_opts.query_timeout)
+                    .with_timeout(batch_opts.experimental_flight_do_get_timeout)
                     .query_with_terminal_metrics(request)
                     .await
                     .map_err(BoxedError::new)
