@@ -57,12 +57,16 @@ pub enum FlightRecordBatchStreamInput<F = std::future::Ready<TonicResult<FlightR
 }
 
 impl FlightRecordBatchStreamInput {
+    /// Creates an input from a source that is already available.
     pub fn ready(source: FlightRecordBatchSource) -> Self {
         Self::Ready(source)
     }
 }
 
 impl<F> FlightRecordBatchStreamInput<F> {
+    /// Creates an input that obtains its source asynchronously.
+    ///
+    /// Errors from the initializer are returned through the Flight response stream.
     pub fn initializer(initializer: F) -> Self {
         Self::Initializer(initializer)
     }
