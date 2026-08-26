@@ -180,6 +180,10 @@ impl JsonArray<'_> {
             data_type, expect
         );
 
+        if data_type == &DataType::Null {
+            return Ok(new_null_array(expect, self.inner.len()));
+        }
+
         let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
             reason: "expect struct array",
         })?;
@@ -708,6 +712,16 @@ mod test {
             assert_eq!(2, widened.len());
             assert_eq!(2, widened.null_count());
         }
+
+        let target_type = DataType::Struct(Fields::from(vec![Field::new(
+            "value",
+            DataType::Int64,
+            true,
+        )]));
+        let widened = JsonArray::from(&nulls).widen_to(&target_type)?;
+        assert_eq!(&target_type, widened.data_type());
+        assert_eq!(2, widened.len());
+        assert_eq!(2, widened.null_count());
 
         Ok(())
     }

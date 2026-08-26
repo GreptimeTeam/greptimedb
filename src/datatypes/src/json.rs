@@ -140,6 +140,13 @@ impl JsonSettings {
 
     /// Encode a serde_json::Value into a Value::Json using current settings.
     pub fn encode(&self, json: Json) -> Result<Value> {
+        if self.type_hints.is_empty()
+            && self.max_auto_expanded_paths.is_none()
+            && let Json::Object(object) = &json
+            && object.is_empty()
+        {
+            return Ok(Value::Json(Box::new(JsonValue::null())));
+        }
         let mut context = JsonContext {
             path: Vec::new(),
             settings: self,
@@ -775,6 +782,17 @@ mod tests {
                 "{name}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_encode_root_empty_object_without_type_hints_as_json_null() -> Result<()> {
+        let settings = JsonSettings::default();
+
+        assert_eq!(
+            Value::Json(Box::new(JsonValue::null())),
+            settings.encode(json!({}))?
+        );
+        Ok(())
     }
 
     #[test]

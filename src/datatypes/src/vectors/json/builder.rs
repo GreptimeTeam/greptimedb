@@ -24,7 +24,7 @@ use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::StructType;
 use crate::types::json_type::{JsonNativeType, is_include};
 use crate::value::{ListValue, StructValue, StructValueRef, Value};
-use crate::vectors::{MutableVector, StructVectorBuilder};
+use crate::vectors::{MutableVector, NullVector, StructVectorBuilder};
 
 #[derive(Clone)]
 pub(crate) struct JsonVectorBuilder {
@@ -45,6 +45,12 @@ impl JsonVectorBuilder {
     }
 
     fn try_build(&mut self) -> Result<VectorRef> {
+        if matches!(self.merged_type, JsonNativeType::Null) {
+            let len = self.values.len();
+            self.values.clear();
+            return Ok(Arc::new(NullVector::new(len)));
+        }
+
         let DataType::Struct(fields) = self.merged_type.as_arrow_type() else {
             return UnexpectedSnafu {
                 reason: "merged JSON2 type must map to Arrow Struct in JsonVectorBuilder",
@@ -356,6 +362,19 @@ mod tests {
             .try_push_value_ref(&ValueRef::Boolean(true))
             .unwrap_err();
         assert!(err.to_string().contains("expected json value"));
+
+        let mut null_builder = JsonVectorBuilder::new(JsonNativeType::Null, 2);
+        null_builder.try_push_value_ref(&ValueRef::Json(Box::new(
+            crate::json::value::JsonValueRef::null(),
+        )))?;
+        null_builder.try_push_value_ref(&ValueRef::Json(Box::new(
+            crate::json::value::JsonValueRef::null(),
+        )))?;
+
+        let vector = null_builder.to_vector();
+        assert_eq!(2, vector.len());
+        assert_eq!(Value::Null, vector.get(0));
+        assert_eq!(Value::Null, vector.get(1));
 
         Ok(())
     }
