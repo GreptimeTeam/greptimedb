@@ -128,17 +128,32 @@ impl EnsureGlobalLimitForFetch {
     }
 }
 
-/// Returns the soft limit of a `FinalPartitioned` [`AggregateExec`], if any.
+/// Returns the soft limit of a multi-partition-capable [`AggregateExec`], if any.
 ///
 /// The `lim` hint pushed down by DataFusion's `LimitedDistinctAggregation` rule
 /// is only enforced per partition (see `group_values_soft_limit` in
 /// `GroupedHashAggregateStream`), so a multi-partition final aggregate needs a
 /// global fetch on top, just like a multi-partition [`FilterExec`].
+///
+/// Only unordered soft limits (`FinalPartitioned` or `SinglePartitioned` mode)
+/// qualify. Ordered limits come from `TopKAggregation`, where each partition
+/// keeps its local top-N candidates and the global top-N is chosen by the sort
+/// machinery above; truncating the merged candidates with a coalesce fetch
+/// would drop true top-N rows.
 fn aggregate_soft_limit(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
     plan.as_any()
         .downcast_ref::<AggregateExec>()
-        .filter(|agg| matches!(agg.mode(), AggregateMode::FinalPartitioned))
-        .and_then(|agg| agg.limit_options().map(|options| options.limit()))
+        .filter(|agg| {
+            matches!(
+                agg.mode(),
+                AggregateMode::FinalPartitioned | AggregateMode::SinglePartitioned
+            )
+        })
+        .and_then(|agg| {
+            agg.limit_options()
+                .filter(|options| options.descending().is_none())
+                .map(|options| options.limit())
+        })
 }
 
 #[derive(Clone)]
@@ -330,6 +345,43 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(agg, ParentContext::default()).unwrap();
 
         assert!(optimized.as_any().is::<AggregateExec>());
+    }
+
+    #[test]
+    fn ignores_topk_ordered_aggregate_limit() {
+        // Ordered limit options come from TopKAggregation: each partition only
+        // keeps its local top-N candidates, and the global top-N is chosen by
+        // the sort machinery above. Truncating the merged candidates with a
+        // coalesce fetch would drop true top-N rows.
+        let agg = agg_with_limit_options(
+            unordered_input(),
+            AggregateMode::FinalPartitioned,
+            LimitOptions::new_with_order(1, true),
+        );
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(agg, ParentContext::default()).unwrap();
+
+        assert!(optimized.as_any().is::<AggregateExec>());
+    }
+
+    #[test]
+    fn adds_global_limit_for_single_partitioned_aggregate_soft_limit() {
+        // CombinePartialFinalAggregate rewrites FinalPartitioned into
+        // SinglePartitioned while preserving limit_options; its output can
+        // still have multiple partitions.
+        let agg = agg_with_limit_options(
+            unordered_input(),
+            AggregateMode::SinglePartitioned,
+            LimitOptions::new(1),
+        );
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(agg, ParentContext::default()).unwrap();
+
+        assert!(optimized.as_any().is::<CoalescePartitionsExec>());
+        assert_eq!(optimized.fetch(), Some(1));
+        assert_eq!(optimized.output_partitioning().partition_count(), 1);
     }
 
     #[test]
@@ -649,6 +701,14 @@ mod tests {
         mode: AggregateMode,
         limit: usize,
     ) -> Arc<dyn ExecutionPlan> {
+        agg_with_limit_options(input, mode, LimitOptions::new(limit))
+    }
+
+    fn agg_with_limit_options(
+        input: Arc<dyn ExecutionPlan>,
+        mode: AggregateMode,
+        limit_options: LimitOptions,
+    ) -> Arc<dyn ExecutionPlan> {
         let schema = input.schema();
         let group_by = PhysicalGroupBy::new_single(vec![(
             col("a", schema.as_ref()).unwrap(),
@@ -657,7 +717,7 @@ mod tests {
         Arc::new(
             AggregateExec::try_new(mode, group_by, vec![], vec![], input, schema)
                 .unwrap()
-                .with_limit_options(Some(LimitOptions::new(limit))),
+                .with_limit_options(Some(limit_options)),
         )
     }
 
