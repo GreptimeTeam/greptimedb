@@ -227,6 +227,21 @@ SELECT * FROM information_schema.ssts_storage order by file_path;
 | data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>| <DATETIME>|<NUM>|
 +---------------------------------------------------------------------------------------------+-----------+-------------------------+---------+
 
+-- Regression: DISTINCT + LIMIT must not return more rows than the limit
+-- (the per-partition soft limit on AggregateExec needs a global fetch on top).
+SELECT COUNT(*) AS distinct_limited_rows
+FROM (
+  SELECT DISTINCT region_id
+  FROM information_schema.ssts_manifest
+  LIMIT 1
+);
+
++-----------------------+
+| distinct_limited_rows |
++-----------------------+
+| 1                     |
++-----------------------+
+
 DROP TABLE sst_case;
 
 Affected Rows: 0

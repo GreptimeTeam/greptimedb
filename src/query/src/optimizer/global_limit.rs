@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::GlobalLimitExec;
@@ -104,14 +105,15 @@ impl EnsureGlobalLimitForFetch {
             plan.with_new_children(children)?
         };
 
-        let Some(fetch) = plan.fetch() else {
+        let aggregate_limit = aggregate_soft_limit(&plan);
+        let Some(fetch) = plan.fetch().or(aggregate_limit) else {
             return Ok(plan);
         };
 
         if parent
             .global_fetch
             .is_some_and(|parent_fetch| parent_fetch <= fetch)
-            || !plan.as_any().is::<FilterExec>()
+            || !(plan.as_any().is::<FilterExec>() || aggregate_limit.is_some())
             || plan.output_partitioning().partition_count() <= 1
         {
             return Ok(plan);
@@ -124,6 +126,19 @@ impl EnsureGlobalLimitForFetch {
             parent.partitioning_to_restore,
         )
     }
+}
+
+/// Returns the soft limit of a `FinalPartitioned` [`AggregateExec`], if any.
+///
+/// The `lim` hint pushed down by DataFusion's `LimitedDistinctAggregation` rule
+/// is only enforced per partition (see `group_values_soft_limit` in
+/// `GroupedHashAggregateStream`), so a multi-partition final aggregate needs a
+/// global fetch on top, just like a multi-partition [`FilterExec`].
+fn aggregate_soft_limit(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
+    plan.as_any()
+        .downcast_ref::<AggregateExec>()
+        .filter(|agg| matches!(agg.mode(), AggregateMode::FinalPartitioned))
+        .and_then(|agg| agg.limit_options().map(|options| options.limit()))
 }
 
 #[derive(Clone)]
@@ -254,6 +269,9 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::physical_expr::expressions::{col, lit};
+    use datafusion::physical_plan::aggregates::{
+        AggregateExec, AggregateMode, LimitOptions, PhysicalGroupBy,
+    };
     use datafusion::physical_plan::filter::FilterExecBuilder;
     use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
     use datafusion::physical_plan::limit::GlobalLimitExec;
@@ -264,6 +282,55 @@ mod tests {
     use datafusion_physical_expr::{LexOrdering, Partitioning, PhysicalSortExpr};
 
     use super::*;
+
+    #[test]
+    fn adds_global_limit_for_multi_partition_aggregate_soft_limit() {
+        let agg = final_partitioned_agg_with_limit(unordered_input(), 1);
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(agg, ParentContext::default()).unwrap();
+
+        assert!(optimized.as_any().is::<CoalescePartitionsExec>());
+        assert_eq!(optimized.fetch(), Some(1));
+        assert_eq!(optimized.output_partitioning().partition_count(), 1);
+    }
+
+    #[test]
+    fn keeps_aggregate_soft_limit_under_parent_global_fetch() {
+        let agg = final_partitioned_agg_with_limit(unordered_input(), 1);
+        let coalesce = Arc::new(CoalescePartitionsExec::new(agg).with_fetch(Some(1)))
+            as Arc<dyn ExecutionPlan>;
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(coalesce, ParentContext::default()).unwrap();
+
+        // Idempotent: no extra coalesce is inserted under the existing one.
+        assert!(optimized.as_any().is::<CoalescePartitionsExec>());
+        assert!(optimized.children()[0].as_any().is::<AggregateExec>());
+    }
+
+    #[test]
+    fn ignores_partial_aggregate_soft_limit() {
+        let agg = partial_agg_with_limit(unordered_input(), 1);
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(agg, ParentContext::default()).unwrap();
+
+        assert!(optimized.as_any().is::<AggregateExec>());
+    }
+
+    #[test]
+    fn ignores_single_partition_aggregate_soft_limit() {
+        let schema = schema();
+        let batch = batch(schema.clone());
+        let input = Arc::new(TestMemoryExec::try_new(&[vec![batch]], schema, None).unwrap());
+        let agg = final_partitioned_agg_with_limit(input, 1);
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(agg, ParentContext::default()).unwrap();
+
+        assert!(optimized.as_any().is::<AggregateExec>());
+    }
 
     #[test]
     fn adds_global_limit_for_multi_partition_filter_fetch() {
@@ -561,6 +628,37 @@ mod tests {
         let batch = batch(schema.clone());
         let partitions = vec![vec![batch.clone()], vec![batch.clone()], vec![batch]];
         Arc::new(TestMemoryExec::try_new(&partitions, schema, None).unwrap())
+    }
+
+    fn final_partitioned_agg_with_limit(
+        input: Arc<dyn ExecutionPlan>,
+        limit: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        agg_with_limit(input, AggregateMode::FinalPartitioned, limit)
+    }
+
+    fn partial_agg_with_limit(
+        input: Arc<dyn ExecutionPlan>,
+        limit: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        agg_with_limit(input, AggregateMode::Partial, limit)
+    }
+
+    fn agg_with_limit(
+        input: Arc<dyn ExecutionPlan>,
+        mode: AggregateMode,
+        limit: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        let schema = input.schema();
+        let group_by = PhysicalGroupBy::new_single(vec![(
+            col("a", schema.as_ref()).unwrap(),
+            "a".to_string(),
+        )]);
+        Arc::new(
+            AggregateExec::try_new(mode, group_by, vec![], vec![], input, schema)
+                .unwrap()
+                .with_limit_options(Some(LimitOptions::new(limit))),
+        )
     }
 
     fn ordered_input() -> (Arc<dyn ExecutionPlan>, LexOrdering) {
