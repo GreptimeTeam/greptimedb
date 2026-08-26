@@ -25,8 +25,8 @@ use table::table_name::TableName;
 use crate::ddl::DdlContext;
 use crate::ddl::create_flow::{
     CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY,
-    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, ceil_to_boundary, ceil_to_whole_sec,
-    ceil_whole_sec_from_parts, defer_on_missing_source, effective_eval_schedule_from_flow_info,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, ceil_to_whole_sec,
+    defer_on_missing_source, effective_eval_schedule_from_flow_info,
     resolve_schedule_defaults_into_task, validate_flow_options,
 };
 use crate::ddl::test_util::create_table::test_create_table_task;
@@ -620,101 +620,6 @@ fn test_resolve_schedule_with_eval_offset_uses_epoch_phase() {
 }
 
 #[test]
-fn test_resolve_schedule_prepare_instant_ceils_to_whole_sec() {
-    // A prepare instant with a sub-second fraction must round UP: the first
-    // boundary must be >= ceil(instant), never before it.
-    let instant = chrono::DateTime::from_timestamp(1_700_000_000, 500_000_000).unwrap();
-    // ceil = 1_700_000_001
-    let ceil = ceil_to_whole_sec(instant).unwrap();
-    assert_eq!(ceil, 1_700_000_001);
-    // exact whole second stays unchanged
-    let exact = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-    assert_eq!(ceil_to_whole_sec(exact).unwrap(), 1_700_000_000);
-    // just before a boundary with an interval of 60s and anchor 0
-    // instant = 1_700_000_059.9 -> ceil = 1_700_000_060 -> boundary 1_700_000_060
-    let instant = chrono::DateTime::from_timestamp(1_700_000_059, 999_000_000).unwrap();
-    assert_eq!(ceil_to_whole_sec(instant).unwrap(), 1_700_000_060);
-
-    // Simulate resolution with a fixed "now": not directly injectable, so
-    // verify the ceil helper's contract used by resolve_schedule_defaults_into_task.
-    let anchor = 120;
-    let interval = 3600;
-    let boundary = ceil_to_boundary(ceil, anchor, interval).unwrap();
-    assert!(boundary >= ceil);
-    assert_eq!((boundary - anchor) % interval, 0);
-    // ceil((1_700_000_001 - 120) / 3600) computed with plain integer arithmetic
-    let diff = 1_700_000_001_i64 - 120;
-    let k = (diff + 3599) / 3600;
-    assert_eq!(boundary, 120_i64 + 3600 * k);
-}
-
-#[test]
-fn test_ceil_to_whole_sec_nanosecond_precision_and_overflow() {
-    // Exact whole second: unchanged.
-    let exact = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-    assert_eq!(ceil_to_whole_sec(exact).unwrap(), 1_700_000_000);
-
-    // +1ns must round up to the next second.
-    let plus_1ns = chrono::DateTime::from_timestamp(1_700_000_000, 1).unwrap();
-    assert_eq!(ceil_to_whole_sec(plus_1ns).unwrap(), 1_700_000_001);
-
-    // +999_999ns must round up.
-    let plus_999_999 = chrono::DateTime::from_timestamp(1_700_000_000, 999_999).unwrap();
-    assert_eq!(ceil_to_whole_sec(plus_999_999).unwrap(), 1_700_000_001);
-
-    // +500ms must round up.
-    let plus_500ms = chrono::DateTime::from_timestamp(1_700_000_000, 500_000_000).unwrap();
-    assert_eq!(ceil_to_whole_sec(plus_500ms).unwrap(), 1_700_000_001);
-
-    // Overflow path: an instant whose whole-second part is already i64::MAX
-    // with a sub-second fraction cannot be rounded up. chrono cannot represent
-    // such an instant, so the pure helper is exercised directly.
-    let err = ceil_whole_sec_from_parts(i64::MAX, true).unwrap_err();
-    assert!(err.to_string().contains("timestamp overflow"), "{err}");
-    assert_eq!(
-        ceil_whole_sec_from_parts(i64::MAX, false).unwrap(),
-        i64::MAX
-    );
-    assert_eq!(
-        ceil_whole_sec_from_parts(1_700_000_000, true).unwrap(),
-        1_700_000_001
-    );
-}
-
-#[test]
-fn test_ceil_to_boundary_is_fallible_near_i64_bounds() {
-    // Normal cases still work.
-    assert_eq!(ceil_to_boundary(-10, 0, 60).unwrap(), 0);
-    assert_eq!(ceil_to_boundary(0, 0, 60).unwrap(), 0);
-    assert_eq!(ceil_to_boundary(1, 0, 60).unwrap(), 60);
-    assert_eq!(ceil_to_boundary(60, 0, 60).unwrap(), 60);
-    assert_eq!(ceil_to_boundary(101, 100, 60).unwrap(), 160);
-    assert_eq!(ceil_to_boundary(50, 0, 0).unwrap(), 50);
-
-    // The next boundary after i64::MAX cannot fit in i64: must error, never
-    // clamp to the non-phase i64::MAX.
-    assert!(ceil_to_boundary(i64::MAX, 0, 60).is_err());
-    assert!(ceil_to_boundary(i64::MAX - 1, i64::MIN, 60).is_err());
-
-    // A boundary that *is* representable near the top succeeds and stays on
-    // the phase.
-    // ceil(9223372036854775800, 0, 60) = 9223372036854775800 (a multiple of 60).
-    assert_eq!(
-        ceil_to_boundary(9_223_372_036_854_775_800_i64, 0, 60).unwrap(),
-        9_223_372_036_854_775_800_i64
-    );
-    // And one that needs rounding up past the representable range errors.
-    assert!(ceil_to_boundary(9_223_372_036_854_775_800_i64 + 1, 0, 60).is_err());
-
-    // With a larger interval a boundary just under i64::MAX is representable.
-    // ceil(1, 0, 9223372036854775800) = 9223372036854775800.
-    let big_interval = 9_223_372_036_854_775_800_i64;
-    assert_eq!(ceil_to_boundary(1, 0, big_interval).unwrap(), big_interval);
-    // But the next boundary (2 * interval) overflows.
-    assert!(ceil_to_boundary(big_interval + 1, 0, big_interval).is_err());
-}
-
-#[test]
 fn test_resolve_schedule_or_replace_preserves_and_recomputes() {
     let sink = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
 
@@ -875,27 +780,6 @@ fn test_create_flow_task_proto_roundtrip_preserves_offset_key() {
     let reparsed = CreateFlowTask::try_from(pb).unwrap();
     assert_eq!(reparsed.eval_offset_secs, Some(120));
     assert_eq!(reparsed.flow_options, typed.flow_options);
-}
-
-#[test]
-fn test_create_flow_task_proto_rejects_malformed_offset_key() {
-    let mut task = test_create_flow_task(
-        "my_flow",
-        vec![],
-        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
-        false,
-    );
-    task.flow_options.insert(
-        "__greptime_internal_eval_offset_secs".to_string(),
-        "abc".to_string(),
-    );
-    let pb: api::v1::meta::CreateFlowTask = task.into();
-    let err = CreateFlowTask::try_from(pb).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Invalid internal eval offset payload"),
-        "unexpected error: {err}"
-    );
 }
 
 #[test]

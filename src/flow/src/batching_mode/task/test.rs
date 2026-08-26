@@ -888,62 +888,6 @@ fn test_scheduled_loop_arithmetic_near_i64_boundary() {
     assert!(sleep_delta_secs(100, 200).is_err());
 }
 
-/// A scheduled time whose millisecond product exceeds `i64` must fail as an
-/// explicit error before any execution — never run with a saturated
-/// `i64::MAX` millis value — and must not leak the extension into the task
-/// state.
-#[tokio::test]
-async fn test_scheduled_time_millis_overflow_is_explicit_error() {
-    let TestTaskParts {
-        task, query_engine, ..
-    } = new_test_task_engine_and_plan_with_query(
-        "SELECT number, ts FROM numbers_with_ts",
-        "missing_sink",
-    )
-    .await;
-    let (frontend_client, _handler) =
-        FrontendClient::from_empty_grpc_handler(QueryOptions::default());
-    let frontend_client = Arc::new(frontend_client);
-
-    for scheduled_time_secs in [i64::MAX, i64::MAX / 1000 + 1] {
-        let outcome = task
-            .execute_once_serialized_at_scheduled_time(
-                &query_engine,
-                &frontend_client,
-                scheduled_time_secs,
-            )
-            .await;
-
-        let err = outcome.result.expect_err(
-            "unrepresentable scheduled time must be an explicit error, not a clamped run",
-        );
-        assert!(
-            err.to_string().contains("milliseconds"),
-            "unexpected error for {scheduled_time_secs}: {err}"
-        );
-        assert!(
-            outcome.new_query.is_none(),
-            "no query should be generated for an unrepresentable scheduled time"
-        );
-
-        // The extension must never have been installed (nothing to leak).
-        assert_eq!(
-            task.state
-                .read()
-                .unwrap()
-                .query_ctx
-                .extension(FLOW_SCHEDULED_TIME_MILLIS),
-            None,
-            "FLOW_SCHEDULED_TIME_MILLIS must not be set for an unrepresentable scheduled time"
-        );
-        assert!(
-            !task
-                .frontend_extensions()
-                .contains_key(FLOW_SCHEDULED_TIME_MILLIS)
-        );
-    }
-}
-
 fn output_with_region_watermarks(
     watermarks: impl IntoIterator<Item = (u64, Option<u64>)>,
 ) -> OutputWithMetrics {

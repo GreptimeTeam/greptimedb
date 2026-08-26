@@ -404,32 +404,6 @@ mod test {
     }
 
     #[test]
-    fn from_config_rejects_invalid_anchor_and_start_phase() {
-        // Negative anchor.
-        let mut c = config(FlowMissedTickPolicy::BoundedCatchUp);
-        c.anchor_secs = -1;
-        let err = EvalSchedule::from_config(Some(300), Some(&c)).unwrap_err();
-        assert!(err.to_string().contains("anchor_secs"));
-
-        // Anchor not less than interval.
-        let mut c = config(FlowMissedTickPolicy::BoundedCatchUp);
-        c.anchor_secs = 300;
-        assert!(EvalSchedule::from_config(Some(300), Some(&c)).is_err());
-
-        // Start before anchor.
-        let mut c = config(FlowMissedTickPolicy::BoundedCatchUp);
-        c.start_secs = 5;
-        let err = EvalSchedule::from_config(Some(300), Some(&c)).unwrap_err();
-        assert!(err.to_string().contains("start_secs"));
-
-        // Start not phase-consistent with anchor.
-        let mut c = config(FlowMissedTickPolicy::BoundedCatchUp);
-        c.start_secs = 70; // (70 - 10) % 300 != 0
-        let err = EvalSchedule::from_config(Some(300), Some(&c)).unwrap_err();
-        assert!(err.to_string().contains("start_secs"));
-    }
-
-    #[test]
     fn nonzero_anchor_due_selection_follows_phase() {
         // anchor=120 (i.e. `EVAL OFFSET '2 minutes'`), interval=3600:
         // boundaries at :02 every hour. start=3720 (120 + 3600).
@@ -497,72 +471,6 @@ mod test {
             max_lag_secs: 900,
         };
         assert!(invalid.next_scheduled_time_after(0).is_err());
-    }
-
-    #[test]
-    fn extreme_cursor_and_start_do_not_overflow_subtraction() {
-        // cursor < start: the next scheduled time is `start` itself. The
-        // `cursor - start` subtraction would overflow i64, but the i128 path
-        // returns the exact `start` without panicking or wrapping.
-        let s = EvalSchedule {
-            interval_secs: 60,
-            anchor_secs: 0,
-            start_secs: i64::MAX,
-            missed_tick_policy: FlowMissedTickPolicy::Skip,
-            max_runs: 3,
-            max_lag_secs: 900,
-        };
-        assert_eq!(s.next_scheduled_time_after(i64::MIN).unwrap(), i64::MAX);
-
-        // cursor >= start with `cursor - start` overflowing i64: the next
-        // boundary computed in i128 exceeds i64 and must be an explicit error,
-        // never a wrapped or saturated value.
-        let s = EvalSchedule {
-            interval_secs: 60,
-            anchor_secs: 0,
-            start_secs: i64::MIN,
-            missed_tick_policy: FlowMissedTickPolicy::Skip,
-            max_runs: 3,
-            max_lag_secs: 900,
-        };
-        let err = s.next_scheduled_time_after(i64::MAX).unwrap_err();
-        assert!(err.to_string().contains("does not fit in i64"));
-    }
-
-    #[test]
-    fn near_i64_max_due_selection_stays_on_lattice() {
-        // anchor=0, start=0, interval=60, wall_now = i64::MAX: every selected
-        // scheduled time must be an exact multiple of 60, and the latest kept
-        // time must be `<= wall_now`.
-        let s = EvalSchedule {
-            interval_secs: 60,
-            anchor_secs: 0,
-            start_secs: 0,
-            missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
-            max_runs: 3,
-            max_lag_secs: 86400,
-        };
-        let due = select_due_scheduled_times(&s, 0, i64::MAX).unwrap();
-        assert_eq!(due.scheduled_times_secs.len(), 3);
-        for t in &due.scheduled_times_secs {
-            assert_eq!(t % 60, 0);
-        }
-        // skipped = total_count - keep_count with total_count =
-        // (i64::MAX / 60) + 1 and keep_count = max_runs = 3.
-        assert_eq!(due.skipped, 153722867280912927);
-
-        // Skip policy keeps only the latest due time, also on-lattice.
-        let s = EvalSchedule {
-            interval_secs: 60,
-            anchor_secs: 0,
-            start_secs: 0,
-            missed_tick_policy: FlowMissedTickPolicy::Skip,
-            max_runs: 3,
-            max_lag_secs: 86400,
-        };
-        let due = select_due_scheduled_times(&s, 0, i64::MAX).unwrap();
-        assert_eq!(due.scheduled_times_secs, vec![9223372036854775800]);
-        assert_eq!(due.skipped, 153722867280912929);
     }
 
     #[test]

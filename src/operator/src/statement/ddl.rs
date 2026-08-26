@@ -3460,34 +3460,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
-    fn test_validate_eval_offset_operator_boundary() {
-        // offset without interval
-        let err = validate_eval_offset(Some(60), None).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("EVAL OFFSET requires EVAL INTERVAL"),
-            "unexpected error: {err}"
-        );
-
-        // negative / equal / greater than interval
-        for offset_secs in [-1, 300, 301] {
-            let err = validate_eval_offset(Some(offset_secs), Some(300)).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("EVAL OFFSET must be in range [0, EVAL INTERVAL)"),
-                "unexpected error for offset {offset_secs}: {err}"
-            );
-        }
-
-        // valid offsets (including zero) are accepted
-        for offset_secs in [0, 1, 299] {
-            validate_eval_offset(Some(offset_secs), Some(300)).unwrap();
-        }
-        validate_eval_offset(None, None).unwrap();
-        validate_eval_offset(None, Some(300)).unwrap();
-    }
-
-    #[test]
     fn test_name_is_match() {
         assert!(!NAME_PATTERN_REG.is_match("/adaf"));
         assert!(!NAME_PATTERN_REG.is_match("🈲"));

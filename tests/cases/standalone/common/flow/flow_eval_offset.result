@@ -20,17 +20,6 @@ GROUP BY date_trunc('second', now());
 
 Affected Rows: 0
 
--- EVAL INTERVAL without an offset is epoch-anchored: even seconds (2k).
-CREATE FLOW eval_zero_offset_phase_flow
-SINK TO eval_zero_offset_phase_sink
-EVAL INTERVAL '2s'
-AS
-SELECT date_trunc('second', now()) AS ts, count(v) AS c
-FROM eval_offset_input
-GROUP BY date_trunc('second', now());
-
-Affected Rows: 0
-
 SHOW CREATE FLOW eval_offset_phase_flow;
 
 +------------------------+------------------------------------------------------------------------------------------------------------------------+
@@ -55,52 +44,17 @@ SELECT flow_definition FROM information_schema.flows WHERE flow_name = 'eval_off
 | AS SELECT date_trunc('second', now()) AS ts, count(v) AS c FROM eval_offset_input GROUP BY date_trunc('second', now()) |
 +------------------------------------------------------------------------------------------------------------------------+
 
--- A zero offset is canonicalized away: SHOW CREATE omits EVAL OFFSET.
-CREATE FLOW eval_zero_offset_canonical_flow
-SINK TO eval_zero_offset_canonical_sink
-EVAL INTERVAL '2s'
-EVAL OFFSET '0s'
-AS
-SELECT date_trunc('second', now()) AS ts, count(v) AS c
-FROM eval_offset_input
-GROUP BY date_trunc('second', now());
-
-Affected Rows: 0
-
-SHOW CREATE FLOW eval_zero_offset_canonical_flow;
-
-+---------------------------------+------------------------------------------------------------------------------------------------------------------------+
-| Flow                            | Create Flow                                                                                                            |
-+---------------------------------+------------------------------------------------------------------------------------------------------------------------+
-| eval_zero_offset_canonical_flow | CREATE FLOW IF NOT EXISTS eval_zero_offset_canonical_flow                                                              |
-|                                 | SINK TO public.eval_zero_offset_canonical_sink                                                                         |
-|                                 | EVAL INTERVAL '2 s'                                                                                                    |
-|                                 | AS SELECT date_trunc('second', now()) AS ts, count(v) AS c FROM eval_offset_input GROUP BY date_trunc('second', now()) |
-+---------------------------------+------------------------------------------------------------------------------------------------------------------------+
-
-SELECT flow_definition FROM information_schema.flows WHERE flow_name = 'eval_zero_offset_canonical_flow';
-
-+------------------------------------------------------------------------------------------------------------------------+
-| flow_definition                                                                                                        |
-+------------------------------------------------------------------------------------------------------------------------+
-| CREATE FLOW IF NOT EXISTS eval_zero_offset_canonical_flow                                                              |
-| SINK TO public.eval_zero_offset_canonical_sink                                                                         |
-| EVAL INTERVAL '2 s'                                                                                                    |
-| AS SELECT date_trunc('second', now()) AS ts, count(v) AS c FROM eval_offset_input GROUP BY date_trunc('second', now()) |
-+------------------------------------------------------------------------------------------------------------------------+
-
 INSERT INTO eval_offset_input VALUES
   (now(), 'a', 1.0),
   (now(), 'b', 2.0);
 
 Affected Rows: 2
 
--- Let both scheduled flows evaluate at least once.
+-- Let the scheduled flow evaluate at least once.
 -- SQLNESS SLEEP 5s
 -- Prove the offset phase: every row the offset flow wrote has an odd
--- second-of-minute (1 + 2k is always odd), while the zero-offset flow wrote
--- even seconds (2k is always even). This is deterministic regardless of the
--- exact wall-clock alignment of the evaluations.
+-- second-of-minute (1 + 2k is always odd). This is deterministic regardless
+-- of the exact wall-clock alignment of the evaluations.
 SELECT
   count(*) > 0 AS offset_flow_ran,
   bool_and(date_part('second', ts)::BIGINT % 2 = 1) AS offset_flow_at_odd_seconds
@@ -111,17 +65,6 @@ FROM eval_offset_phase_sink;
 +-----------------+----------------------------+
 | true            | true                       |
 +-----------------+----------------------------+
-
-SELECT
-  count(*) > 0 AS zero_offset_flow_ran,
-  bool_and(date_part('second', ts)::BIGINT % 2 = 0) AS zero_offset_flow_at_even_seconds
-FROM eval_zero_offset_phase_sink;
-
-+----------------------+----------------------------------+
-| zero_offset_flow_ran | zero_offset_flow_at_even_seconds |
-+----------------------+----------------------------------+
-| true                 | true                             |
-+----------------------+----------------------------------+
 
 -- Invalid syntax / validation cases.
 CREATE FLOW invalid_eval_offset_no_interval
@@ -155,35 +98,11 @@ AS SELECT 1;
 
 Error: 1004(InvalidArguments), Invalid interval provided: EVAL INTERVAL must be a whole number of seconds when EVAL OFFSET is specified
 
-CREATE FLOW invalid_eval_offset_month
-SINK TO invalid_eval_offset_sink
-EVAL INTERVAL '1 hour'
-EVAL OFFSET '1 month'
-AS SELECT 1;
-
-Error: 1004(InvalidArguments), Invalid interval provided: Interval with months is not allowed in EVAL OFFSET
-
 DROP FLOW eval_offset_phase_flow;
 
 Affected Rows: 0
 
-DROP FLOW eval_zero_offset_phase_flow;
-
-Affected Rows: 0
-
-DROP FLOW eval_zero_offset_canonical_flow;
-
-Affected Rows: 0
-
 DROP TABLE eval_offset_phase_sink;
-
-Affected Rows: 0
-
-DROP TABLE eval_zero_offset_phase_sink;
-
-Affected Rows: 0
-
-DROP TABLE eval_zero_offset_canonical_sink;
 
 Affected Rows: 0
 

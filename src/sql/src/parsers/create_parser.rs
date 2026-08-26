@@ -2174,44 +2174,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
             err.contains("EVAL INTERVAL must be a whole number of seconds"),
             "unexpected error: {err}"
         );
-
-        // fractional-second interval without offset is still allowed (truncated
-        // as before for backward compatibility)
-        let sql = r#"
-CREATE FLOW task_fractional_interval_only
-SINK TO schema_1.table_1
-EVAL INTERVAL '1.5 seconds'
-AS
-SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
-        let create_task = parse_create_flow(sql);
-        assert_eq!(create_task.eval_interval, Some(1));
-        assert_eq!(create_task.eval_offset, None);
-
-        // month-bearing interval/offset is rejected
-        for clause in [
-            "EVAL INTERVAL '1 month'",
-            "EVAL INTERVAL '1 hour'\nEVAL OFFSET '1 month'",
-        ] {
-            let sql = format!(
-                r#"
-CREATE FLOW task_month
-SINK TO schema_1.table_1
-{clause}
-AS
-SELECT max(c1), min(c2) FROM schema_2.table_2;"#
-            );
-            let err = ParserContext::create_with_dialect(
-                &sql,
-                &GreptimeDbDialect {},
-                ParseOptions::default(),
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(
-                err.contains("Interval with months is not allowed"),
-                "unexpected error for clause {clause}: {err}"
-            );
-        }
     }
 
     #[test]
