@@ -2525,6 +2525,47 @@ mod tests {
         Ok(())
     }
 
+    /// A physical prefilter expr must be dropped when the column's file type
+    /// differs from the expected type (e.g. an old-unit SST after the time
+    /// index unit was widened): evaluating the expected-unit literals against
+    /// the file's column raises a cross-unit comparison error.
+    #[test]
+    fn test_physical_filter_dropped_on_file_type_mismatch() {
+        let file_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        // The region metadata after widening the `ts` unit to microsecond.
+        let mut expected = (*file_metadata).clone();
+        for column in expected.column_metadatas.iter_mut() {
+            if column.column_schema.name == "ts" {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let expected = Arc::new(expected);
+
+        let format = FlatReadFormat::new(
+            file_metadata.clone(),
+            ReadColumns::new(file_metadata.column_metadatas.iter().map(|c| c.column_id)),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let between = col("ts").between(
+            lit(ScalarValue::TimestampMicrosecond(Some(1_000_000), None)),
+            lit(ScalarValue::TimestampMicrosecond(Some(2_000_000), None)),
+        );
+        // Same type: the prefilter is kept.
+        assert!(
+            PhysicalFilterContext::new_opt(&file_metadata, Some(&file_metadata), &format, &between)
+                .is_some()
+        );
+        // Widened unit: the prefilter is dropped.
+        assert!(
+            PhysicalFilterContext::new_opt(&file_metadata, Some(&expected), &format, &between)
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn test_nested_projection_reads_partial_json2_physical_fields() -> WhateverResult<()> {
         // Write a full JSON2-like Arrow struct:
