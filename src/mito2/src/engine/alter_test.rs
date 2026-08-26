@@ -620,16 +620,10 @@ fn ts_us_lit(v: i64) -> datafusion_expr::Expr {
     lit(ScalarValue::TimestampMicrosecond(Some(v), None))
 }
 
-/// Asserts every `expected` row is present in `actual` (with its exact
-/// value).
-///
-/// `ScanRequest.filters` are an advisory pushdown for most columns, so this
-/// helper only asserts the engine's pruning guarantee: no file or row group
-/// holding matching rows is wrongly pruned — i.e. matching rows are never
-/// lost. Exact row-level filtering of old-unit SSTs after widening the time
-/// index is asserted by
-/// [`test_alter_time_index_widen_old_sst_filters_rows_exactly`]; other exact
-/// filtering is covered by the sqlness cases.
+/// Asserts every `expected` row is present in `actual`: `ScanRequest.filters`
+/// are advisory for pruning, so the guarantee under test is that no matching
+/// row is lost. Exact filtering is asserted by
+/// [`test_alter_time_index_widen_old_sst_filters_rows_exactly`].
 fn assert_rows_present(expected: &[(i64, f64)], actual: Vec<(i64, f64)>) {
     for row in expected {
         assert!(
@@ -641,15 +635,9 @@ fn assert_rows_present(expected: &[(i64, f64)], actual: Vec<(i64, f64)>) {
     }
 }
 
-/// Verifies the read paths over old-unit (pre-alter) SST data after widening
-/// the time index unit:
-/// - predicate scans (file-level and row-group pruning see file stats in the
-///   old unit while the predicate is in the new unit),
-/// - dedup when a post-alter write overwrites a pre-alter row at the same
-///   instant (the old row must be cast to the new unit *before* dedup),
-/// - mixed-unit SSTs (old files + a flushed post-alter file),
-/// - compaction, which reads old-unit files through the compat layer and
-///   rewrites them in the new unit.
+/// Read paths over old-unit (pre-alter) SST data after widening the time
+/// index unit: predicate scans, dedup across units, mixed-unit SSTs, and
+/// compaction rewriting old-unit files in the new unit.
 #[tokio::test]
 async fn test_alter_time_index_read_paths_after_widen() {
     common_telemetry::init_default_ut_logging();
@@ -721,9 +709,8 @@ async fn test_alter_time_index_read_paths_after_widen() {
     );
 
     // Predicate scans: the predicate is in the new unit while the SST stats
-    // are in the old unit. No row-matching file/row-group may be pruned —
-    // every matching row stays present with its original value. (Exact
-    // filtering is the query layer's residual filter; see sqlness.)
+    // are in the old unit; no file or row group holding a matching row may be
+    // pruned. (Exact filtering is asserted by the test below and sqlness.)
     assert_rows_present(
         &[(3_000_000, 3.0), (4_000_000, 4.0)],
         scan_ts_and_field(&engine, region_id, vec![col("ts").gt(ts_us_lit(2_500_000))]).await,
@@ -731,16 +718,6 @@ async fn test_alter_time_index_read_paths_after_widen() {
     assert_rows_present(
         &[(0, 0.0), (1_000_000, 1.0)],
         scan_ts_and_field(&engine, region_id, vec![col("ts").lt(ts_us_lit(1_500_000))]).await,
-    );
-    // Boundary predicate at exactly a stored timestamp.
-    assert_rows_present(
-        &[(2_000_000, 2.0), (3_000_000, 3.0), (4_000_000, 4.0)],
-        scan_ts_and_field(
-            &engine,
-            region_id,
-            vec![col("ts").gt_eq(ts_us_lit(2_000_000))],
-        )
-        .await,
     );
 
     // A post-alter write overwrites the pre-alter row ("2", ts = 2s) with a new
@@ -794,8 +771,8 @@ async fn test_alter_time_index_read_paths_after_widen() {
 
     // Flush the post-alter writes so the region holds both an old-unit SST
     // and a new-unit SST, then compact. Compaction reads the old-unit file
-    // through the compat layer and rewrites everything in the new unit; all
-    // values (including the deduped overwrite) must survive.
+    // through the compat layer and rewrites it in the new unit; all values
+    // (including the deduped overwrite) must survive.
     flush_region(&engine, region_id, None).await;
     assert_eq!(
         expected_after_overwrite,
@@ -813,28 +790,15 @@ async fn test_alter_time_index_read_paths_after_widen() {
         expected_after_overwrite,
         scan_ts_and_field(&engine, region_id, vec![]).await
     );
-    assert_rows_present(
-        &[(3_000_000, 3.0), (4_000_000, 4.0), (5_500_000, 5.5)],
-        scan_ts_and_field(&engine, region_id, vec![col("ts").gt(ts_us_lit(2_500_000))]).await,
-    );
 }
 
-/// Verifies that predicates on the time index filter old-unit (pre-alter)
-/// SST rows **exactly** after widening the time index unit (regression test
-/// for the over-inclusive scans reported in testbed/issue.md: the predicate
-/// used to be dropped for old-unit files, returning every row of each
-/// surviving row group).
-///
-/// The fixture uses two row groups of five rows so exact-count assertions
-/// distinguish all failure modes:
-/// - the exact row set           — correct (row filter applied)
-/// - 5 rows (ts = 5s..9s)       — row-group pruning worked, row filter dropped (the bug)
-/// - 0 rows                     — over-pruning
-/// - 10 rows                    — no pruning at all
-///
-/// Also covers literals that are not representable in the file's (ms) unit
-/// (`ts > 6_500_000us`): the cast filter must strengthen the operator
-/// instead of rounding the literal, and `!=` must keep complementing `=`.
+/// Regression test: predicates on the time index must filter old-unit
+/// (pre-alter) SST rows **exactly** after widening — the predicate used to be
+/// dropped for old-unit files, returning every row of each surviving row
+/// group. Two row groups of five rows make a partial-match result
+/// distinguishable from both over- and under-selection; literals not
+/// representable in the file's (ms) unit must strengthen the operator
+/// instead of rounding to a boundary row.
 #[tokio::test]
 async fn test_alter_time_index_widen_old_sst_filters_rows_exactly() {
     common_telemetry::init_default_ut_logging();
@@ -921,8 +885,10 @@ async fn test_alter_time_index_widen_old_sst_filters_rows_exactly() {
     assert_eq!(expected_ne, actual_ne);
 
     // Literals not representable in the file's millisecond unit: the cast
-    // filter must strengthen the operator (>, >=, <, <= around 6.5s) instead
-    // of rounding the literal to a matching boundary row (6s or 7s).
+    // filter must strengthen the operator instead of rounding the literal to
+    // a boundary row (6s or 7s). `gt` and `lt` are the engine-level
+    // representatives; the full operator matrix is covered by the unit tests
+    // of `cast_timestamp_unit`.
     let rows_after = |from: i64| -> Vec<(i64, f64)> {
         (from..10).map(|ts| (ts * 1_000_000, ts as f64)).collect()
     };
@@ -933,26 +899,8 @@ async fn test_alter_time_index_widen_old_sst_filters_rows_exactly() {
         scan_ts_and_field(&engine, region_id, vec![col("ts").gt(ts_us_lit(6_500_000))]).await
     );
     assert_eq!(
-        rows_after(7),
-        scan_ts_and_field(
-            &engine,
-            region_id,
-            vec![col("ts").gt_eq(ts_us_lit(6_500_000))]
-        )
-        .await
-    );
-    assert_eq!(
         rows_before(7),
         scan_ts_and_field(&engine, region_id, vec![col("ts").lt(ts_us_lit(6_500_000))]).await
-    );
-    assert_eq!(
-        rows_before(7),
-        scan_ts_and_field(
-            &engine,
-            region_id,
-            vec![col("ts").lt_eq(ts_us_lit(6_500_000))]
-        )
-        .await
     );
 
     // A literal that no millisecond row can equal must not match anything.

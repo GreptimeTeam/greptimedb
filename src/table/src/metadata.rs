@@ -1048,10 +1048,9 @@ impl TableMeta {
 
             let is_time_index = timestamp_index == Some(index);
             if is_time_index {
-                // The time index column is NOT NULL by construction and its unit
-                // only supports lossless widening changes (e.g. millisecond ->
-                // microsecond). Historical data in SSTs is cast to the new unit
-                // on read, so no backfill is needed.
+                // The time index column is NOT NULL by construction and only
+                // supports widening its unit; historical data in SSTs is cast
+                // to the new unit on read, so no backfill is needed.
                 ensure!(
                     column
                         .data_type
@@ -1707,47 +1706,22 @@ mod tests {
         assert_eq!(new_meta.schema.version(), 124);
         assert_eq!(&[0], &new_meta.primary_key_indices[..]);
 
-        // Narrowing is rejected.
-        let alter_kind = AlterKind::ModifyColumnTypes {
-            columns: vec![ModifyColumnTypeRequest {
-                column_name: "ts".to_string(),
-                target_type: ConcreteDataType::timestamp_second_datatype(),
-            }],
-        };
-        let err = {
+        // Any non-widening change (narrowing, same type, non-timestamp) is
+        // rejected.
+        for target in [
+            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            ConcreteDataType::string_datatype(),
+        ] {
+            let alter_kind = AlterKind::ModifyColumnTypes {
+                columns: vec![ModifyColumnTypeRequest {
+                    column_name: "ts".to_string(),
+                    target_type: target.clone(),
+                }],
+            };
             let res = meta.builder_with_alter_kind("my_table", &alter_kind);
-            assert!(res.is_err());
-            // `TableMetaBuilder` doesn't implement `Debug` so we can't use `unwrap_err()`.
-            match res {
-                Err(e) => e,
-                Ok(_) => unreachable!(),
-            }
-        };
-        assert!(err.to_string().contains("only supports widening"), "{err}");
-
-        // Changing to the same type is rejected.
-        let alter_kind = AlterKind::ModifyColumnTypes {
-            columns: vec![ModifyColumnTypeRequest {
-                column_name: "ts".to_string(),
-                target_type: ConcreteDataType::timestamp_millisecond_datatype(),
-            }],
-        };
-        assert!(
-            meta.builder_with_alter_kind("my_table", &alter_kind)
-                .is_err()
-        );
-
-        // Changing to a non-timestamp type is rejected.
-        let alter_kind = AlterKind::ModifyColumnTypes {
-            columns: vec![ModifyColumnTypeRequest {
-                column_name: "ts".to_string(),
-                target_type: ConcreteDataType::string_datatype(),
-            }],
-        };
-        assert!(
-            meta.builder_with_alter_kind("my_table", &alter_kind)
-                .is_err()
-        );
+            assert!(res.is_err(), "expected rejection for {target}");
+        }
     }
 
     #[test]

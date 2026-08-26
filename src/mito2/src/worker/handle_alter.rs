@@ -462,14 +462,10 @@ fn log_option_update<T: std::fmt::Debug>(
     );
 }
 
-/// Checks that widening the time index unit does not overflow existing data.
-///
-/// The region's memtables are empty when this runs (they are flushed before an
-/// alter), so all data lives in SSTs and each file's time range bounds the
-/// values it stores. Widening casts multiply values by the unit factor, and
-/// values that no longer fit `i64` would be cast to NULL by Arrow — while the
-/// time index column is NOT NULL. So reject the alter if any file's time
-/// range overflows the target unit.
+/// Rejects a time index unit widening whose rescaled values would overflow
+/// `i64` in existing data. Memtables are flushed before an alter, so each
+/// SST's time range bounds its values; Arrow would cast overflowing values
+/// to NULL, which a NOT NULL time index cannot hold.
 fn check_time_index_widening_overflow(
     region_id: RegionId,
     version: &VersionRef,

@@ -1414,15 +1414,10 @@ impl ModifyColumnType {
                     }
                 );
             }
-            // The time index column only supports widening timestamp unit changes
-            // (e.g. `TimestampMillisecond -> TimestampMicrosecond`), which are
-            // lossless. Readers cast historical data in old SSTs to the new unit
-            // on the fly. Narrowing changes truncate values and are rejected.
-            //
-            // A same-type change is accepted here so that a retried alter
-            // procedure (region already altered before a previous attempt
-            // failed) validates and is skipped as a no-op by `need_alter`,
-            // instead of failing the retry forever.
+            // The time index column only supports widening its timestamp
+            // unit; historical SST data is cast to the new unit on read.
+            // A same-type change validates so a retried alter procedure is a
+            // no-op instead of failing the retry forever.
             SemanticType::Timestamp => {
                 ensure!(
                     column_meta.column_schema.data_type == self.target_type
@@ -1456,10 +1451,8 @@ impl ModifyColumnType {
     }
 
     /// Returns true if no column's datatype to change to the region.
-    ///
-    /// A column whose data type already equals the target type needs no
-    /// alteration. This keeps a retried alter (e.g. a procedure resubmitting
-    /// after the region was already altered) a successful no-op.
+    /// A column already in the target type needs no alteration, so a retried
+    /// alter is a successful no-op.
     pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
         debug_assert!(self.validate(metadata).is_ok());
         metadata

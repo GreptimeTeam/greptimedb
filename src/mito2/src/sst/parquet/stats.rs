@@ -81,19 +81,14 @@ impl<'a, T> RowGroupPruningStats<'a, T> {
 
     /// Casts stats values to the expected data type when the SST stores the
     /// column with a different type (e.g. after `MODIFY COLUMN` changed the
-    /// column type, including widening the time index unit).
+    /// column type, including widening the time index unit). The pruning
+    /// predicate is built against the expected schema, so raw file-typed
+    /// stats would prune wrongly.
     ///
-    /// The pruning predicate is built against the expected (current) schema,
-    /// so comparing raw file-typed stats against it can prune wrongly (e.g.
-    /// `4_000` milliseconds max vs a `2_500_000` microseconds literal).
-    ///
-    /// Parquet statistics of a timestamp column are raw integers, so the cast
-    /// is done in two steps: first interpret them in the file's type (a plain
-    /// reinterpret, e.g. `Int64 -> Timestamp(ms)`), then convert to the
-    /// expected type (a unit-aware conversion, e.g. `ms -> us`). A single-step
-    /// `Int64 -> Timestamp(us)` would reinterpret the value as microseconds
-    /// instead of scaling it. Returns `None` when either cast fails, so the
-    /// row group is kept (conservative).
+    /// Timestamp stats are raw integers: first reinterpret them in the file's
+    /// type, then convert to the expected type. A single-step cast would
+    /// reinterpret (not rescale) the value. Returns `None` on cast failure so
+    /// the row group is kept (conservative).
     fn cast_stats_to_expected(&self, column_id: ColumnId, values: ArrayRef) -> Option<ArrayRef> {
         // Without expected metadata the file metadata is the expected one,
         // so there is nothing to cast toward.

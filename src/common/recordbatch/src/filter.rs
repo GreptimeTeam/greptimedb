@@ -342,24 +342,17 @@ impl SimpleFilterEvaluator {
     }
 
     /// Casts the filter's timestamp literal into the unit of the `target`
-    /// timestamp type, so the filter can be evaluated directly against a
-    /// column stored in `target` (e.g. an old-unit SST after the time index
-    /// unit was widened) instead of being skipped for a cross-type
-    /// comparison error.
+    /// timestamp type, so it can be evaluated against a column stored in that
+    /// unit (e.g. an old-unit SST after the time index unit was widened).
     ///
-    /// The conversion preserves the predicate's semantics on rows of the
-    /// target unit exactly. When the literal is not representable in the
-    /// target unit (e.g. `ts = 7_000_500us` against a millisecond column),
-    /// the outcome keeps the row set instead of rounding the literal:
-    /// - `=` reports [`TimestampUnitCast::Pruned`] (no row can match) and
-    ///   `!=` reports [`TimestampUnitCast::Matched`] (every row matches);
-    /// - `>=` / `<` strengthen the operator (`>= 2_500_500us` on a
-    ///   millisecond column becomes `> 2500ms`) so the boundary row the
-    ///   rounded literal would wrongly include stays excluded.
+    /// When the literal is not representable in `target`'s unit (e.g.
+    /// `ts = 7_000_500us` against a millisecond column), the outcome keeps the
+    /// row set instead of rounding the literal: `=` prunes / `!=` matches, and
+    /// inequalities strengthen the operator (e.g. `>= 2_500_500us` becomes
+    /// `> 2500ms`) so the excluded boundary row stays excluded.
     ///
     /// Returns `None` when the filter doesn't compare against a tz-naive
-    /// timestamp literal, or `target` is not a timestamp type; the caller
-    /// decides how to treat such filters.
+    /// timestamp literal, or `target` is not a timestamp type.
     pub fn cast_timestamp_unit(&self, target: &ConcreteDataType) -> Option<TimestampUnitCast> {
         let target_unit = match target.as_arrow_type() {
             DataType::Timestamp(unit, _) => unit,
@@ -488,18 +481,17 @@ fn timestamp_scalar(value: i64, unit: TimeUnit) -> Option<Scalar<ArrayRef>> {
     scalar.to_scalar().ok()
 }
 
-/// The exact division of a literal's instant into the target unit.
+/// The exact division of a literal's instant into the target unit:
+/// `quotient * literal_scale + remainder == literal * target_scale` with
+/// `0 <= remainder < literal_scale`. `remainder == 0` iff the literal is
+/// representable in the target unit.
 struct UnitQuotient {
-    /// `quotient * literal_scale + remainder == literal * target_scale`, with
-    /// `0 <= remainder < literal_scale`. `quotient` is the literal's value
-    /// rounded toward negative infinity in the target unit, and `remainder`
-    /// is zero iff the literal is representable in the target unit.
     quotient: i64,
     remainder: i128,
 }
 
-/// Divides a `literal` (in `literal_unit`) by the `target_unit`, i.e. computes
-/// its value in `target_unit` exactly.
+/// Divides a `literal` (in `literal_unit`) by the `target_unit`, i.e.
+/// computes its value in `target_unit` exactly (floor division).
 fn div_mod_units(
     literal: i64,
     literal_unit: TimeUnit,

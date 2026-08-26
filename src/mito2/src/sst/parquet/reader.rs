@@ -2059,22 +2059,16 @@ impl SimpleFilterContext {
                         {
                             MaybeFilter::Filter(filter)
                         } else {
-                            // Schema evolution can make columns with the same id
-                            // have different concrete data types across SSTs:
-                            // altering a field column's type, or widening the
-                            // time index unit. Evaluating the original filter
-                            // against such an SST may raise an invalid
-                            // cross-type comparison error (e.g. Float64 == Utf8,
-                            // or a microsecond literal vs a millisecond column).
-                            //
-                            // Timestamp predicates must remain exactly enforced
-                            // here: the scan pipeline does not re-apply them to
-                            // the compat-cast batches of this SST, so cast the
-                            // predicate into the file's timestamp unit instead of
-                            // dropping it. Other mismatched types (altered field
-                            // columns) keep the conservative skip: the query
-                            // layer re-applies those predicates above the region
-                            // scan.
+                            // Schema evolution (altered field columns, or a
+                            // widened time index unit) can make columns with
+                            // the same id have different types across SSTs;
+                            // evaluating the original filter may raise an
+                            // invalid cross-type comparison. Timestamp
+                            // predicates are not re-applied above this scan,
+                            // so cast them into the file's unit instead of
+                            // dropping them; other mismatches keep the
+                            // conservative skip (the query layer re-applies
+                            // those predicates).
                             match filter.cast_timestamp_unit(&sst_column.column_schema.data_type) {
                                 Some(TimestampUnitCast::Filter(filter)) => {
                                     MaybeFilter::Filter(filter)

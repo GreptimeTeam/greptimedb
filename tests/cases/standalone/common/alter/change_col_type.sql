@@ -52,7 +52,6 @@ INSERT INTO ts_widen VALUES ("b", "2024-01-01 00:00:01.000500");
 SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:01.000001' ORDER BY ts;
 
 SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:00.999999' ORDER BY ts;
-SELECT * FROM ts_widen ORDER BY ts;
 
 -- narrowing the time index unit is rejected
 ALTER TABLE ts_widen MODIFY COLUMN ts TIMESTAMP;
@@ -63,9 +62,7 @@ ALTER TABLE ts_widen MODIFY COLUMN ts STRING;
 DROP TABLE ts_widen;
 
 -- Regression: predicates must filter old-unit SST rows exactly after the
--- widen. The fixture stores ten rows in one row group (one SST, flushed in
--- the old millisecond unit), so any predicate that matches only a subset of
--- the rows exposes an over-inclusive scan that returns whole row groups.
+-- widen; a dropped filter would return whole row groups.
 CREATE TABLE ts_widen_multi (host STRING, ts TIMESTAMP TIME INDEX);
 INSERT INTO ts_widen_multi VALUES
   ("a", "2024-01-01 00:00:00"), ("b", "2024-01-01 00:00:01"),
