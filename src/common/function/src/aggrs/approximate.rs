@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datafusion_expr::AggregateUDF;
+use datatypes::arrow::datatypes::DataType;
+
+use crate::aggrs::aggr_wrapper::DeltaMergeWrapper;
 use crate::function_registry::FunctionRegistry;
 
 pub mod hll;
@@ -21,12 +25,28 @@ pub(crate) struct ApproximateFunction;
 
 impl ApproximateFunction {
     pub fn register(registry: &FunctionRegistry) {
-        // uddsketch
-        registry.register_aggr(uddsketch::UddSketchState::state_udf_impl());
-        registry.register_aggr(uddsketch::UddSketchState::merge_udf_impl());
+        let uddsketch_state = uddsketch::UddSketchState::state_udf_impl();
+        let uddsketch_merge = uddsketch::UddSketchState::merge_udf_impl();
+        let uddsketch_delta = AggregateUDF::new_from_impl(DeltaMergeWrapper::new(
+            uddsketch_merge.clone(),
+            uddsketch::UDDSKETCH_STATE_NAME,
+            vec![DataType::Int64, DataType::Float64, DataType::Binary],
+            DataType::Binary,
+        ));
+        registry.register_aggr(uddsketch_state);
+        registry.register_aggr(uddsketch_merge);
+        registry.register_aggr(uddsketch_delta);
 
-        // hll
-        registry.register_aggr(hll::HllState::state_udf_impl());
-        registry.register_aggr(hll::HllState::merge_udf_impl());
+        let hll_state = hll::HllState::state_udf_impl();
+        let hll_merge = hll::HllState::merge_udf_impl();
+        let hll_delta = AggregateUDF::new_from_impl(DeltaMergeWrapper::new(
+            hll_merge.clone(),
+            hll::HLL_NAME,
+            vec![DataType::Binary],
+            DataType::Binary,
+        ));
+        registry.register_aggr(hll_state);
+        registry.register_aggr(hll_merge);
+        registry.register_aggr(hll_delta);
     }
 }

@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, TimestampMillisecondArray, UInt64Array,
+    ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, StringArray,
+    TimestampMillisecondArray, UInt64Array,
 };
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -43,20 +44,22 @@ use datafusion_expr::expr::{AggregateFunction, NullTreatment};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{
     Aggregate, AggregateUDFImpl, ColumnarValue, Expr, LogicalPlan, ScalarFunctionArgs, SortExpr,
-    TableScan, lit,
+    TableScan, TypeSignature, lit,
 };
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
-use datafusion_physical_expr::expressions::col;
+use datafusion_physical_expr::expressions::{Column as PhysicalColumn, col, lit as physical_lit};
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
-use datatypes::arrow_array::StringArray;
 use futures::{Stream, StreamExt as _};
+use hyperloglogplus::HyperLogLog;
 use pretty_assertions::assert_eq;
+use uddsketch::UddSketchRef;
 
 use super::*;
-use crate::aggrs::approximate::hll::HllState;
+use crate::aggrs::approximate::hll::{HllState, HllStateType};
 use crate::aggrs::approximate::uddsketch::UddSketchState;
 use crate::aggrs::count_hash::CountHash;
 use crate::function::Function as _;
+use crate::function_registry::FUNCTION_REGISTRY;
 use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 
@@ -920,9 +923,137 @@ fn test_avg_state_groups_accumulator_state_merge_evaluate() {
     );
 }
 
-/// For testing whether the UDAF state fields are correctly implemented.
-/// esp. for our own custom UDAF's state fields.
-/// By compare eval results before and after split to state/merge functions.
+#[test]
+fn test_registered_hll_delta_merge_semantics() {
+    let hll = FUNCTION_REGISTRY
+        .get_aggr_func(&aggr_delta_merge_func_name("hll"))
+        .expect("global approximate functions register hll delta merge");
+    assert_eq!(hll.name(), "__hll_delta_merge");
+    assert_eq!(
+        hll.signature().type_signature,
+        TypeSignature::Exact(vec![DataType::Binary, DataType::Binary])
+    );
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        Field::new("delta", DataType::Binary, true),
+        Field::new("persisted", DataType::Binary, true),
+    ]));
+    let expr = AggregateExprBuilder::new(
+        Arc::new(hll),
+        vec![
+            Arc::new(PhysicalColumn::new("delta", 0)),
+            Arc::new(PhysicalColumn::new("persisted", 1)),
+        ],
+    )
+    .schema(schema)
+    .alias("hll_delta_merge")
+    .build()
+    .unwrap();
+    let mut accum = expr.create_accumulator().unwrap();
+
+    let mut delta = HllState::new();
+    delta
+        .update_batch(&[Arc::new(StringArray::from(vec![Some("delta")]))])
+        .unwrap();
+    let mut persisted = HllState::new();
+    persisted
+        .update_batch(&[Arc::new(StringArray::from(vec![Some("persisted")]))])
+        .unwrap();
+    let ScalarValue::Binary(Some(delta)) = delta.evaluate().unwrap() else {
+        panic!("HLL state must be binary");
+    };
+    let ScalarValue::Binary(Some(persisted)) = persisted.evaluate().unwrap() else {
+        panic!("HLL state must be binary");
+    };
+
+    accum
+        .update_batch(&[
+            Arc::new(BinaryArray::from(vec![Some(delta.as_slice())])),
+            Arc::new(BinaryArray::from(vec![Some(persisted.as_slice())])),
+        ])
+        .unwrap();
+    let ScalarValue::Binary(Some(merged)) = accum.evaluate().unwrap() else {
+        panic!("HLL delta merge state must be binary");
+    };
+    let mut merged: HllStateType = bincode::deserialize(&merged).unwrap();
+    assert_eq!(merged.count().trunc() as u32, 2);
+}
+
+#[test]
+fn test_registered_uddsketch_delta_merge_semantics() {
+    let uddsketch = FUNCTION_REGISTRY
+        .get_aggr_func(&aggr_delta_merge_func_name("uddsketch_state"))
+        .expect("global approximate functions register uddsketch delta merge");
+    assert_eq!(uddsketch.name(), "__uddsketch_state_delta_merge");
+    assert_eq!(
+        uddsketch.signature().type_signature,
+        TypeSignature::Exact(vec![
+            DataType::Int64,
+            DataType::Float64,
+            DataType::Binary,
+            DataType::Binary,
+        ])
+    );
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        Field::new("delta", DataType::Binary, true),
+        Field::new("persisted", DataType::Binary, true),
+    ]));
+    let expr = AggregateExprBuilder::new(
+        Arc::new(uddsketch),
+        vec![
+            physical_lit(10_i64),
+            physical_lit(0.01_f64),
+            Arc::new(PhysicalColumn::new("delta", 0)),
+            Arc::new(PhysicalColumn::new("persisted", 1)),
+        ],
+    )
+    .schema(schema)
+    .alias("uddsketch_delta_merge")
+    .build()
+    .unwrap();
+    let mut accum = expr.create_accumulator().unwrap();
+
+    let mut delta = UddSketchState::new(10, 0.01).unwrap();
+    delta
+        .update_batch(&[
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.01])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
+        ])
+        .unwrap();
+    let mut persisted = UddSketchState::new(10, 0.01).unwrap();
+    persisted
+        .update_batch(&[
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.01])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+        ])
+        .unwrap();
+    let ScalarValue::Binary(Some(delta)) = delta.evaluate().unwrap() else {
+        panic!("UDDSketch state must be binary");
+    };
+    let ScalarValue::Binary(Some(persisted)) = persisted.evaluate().unwrap() else {
+        panic!("UDDSketch state must be binary");
+    };
+
+    accum
+        .update_batch(&[
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.01])) as ArrayRef,
+            Arc::new(BinaryArray::from(vec![Some(delta.as_slice())])),
+            Arc::new(BinaryArray::from(vec![Some(persisted.as_slice())])),
+        ])
+        .unwrap();
+    let ScalarValue::Binary(Some(merged)) = accum.evaluate().unwrap() else {
+        panic!("UDDSketch delta merge state must be binary");
+    };
+    let merged = UddSketchRef::parse(&merged).unwrap();
+    assert_eq!(merged.count(), 2);
+    let median = merged.quantile(0.5).unwrap().unwrap();
+    assert!((1.0..=2.0).contains(&median));
+}
+
 #[tokio::test]
 async fn test_udaf_correct_eval_result() {
     struct TestCase {

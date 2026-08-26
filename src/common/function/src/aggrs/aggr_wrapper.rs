@@ -65,6 +65,12 @@ pub fn aggr_merge_func_name(aggr_name: &str) -> String {
     format!("__{}_merge", aggr_name)
 }
 
+/// Returns the globally registered name used to merge a delta state with a
+/// persisted state.
+pub fn aggr_delta_merge_func_name(state_aggregate_name: &str) -> String {
+    format!("__{}_delta_merge", state_aggregate_name)
+}
+
 /// Check if the given aggregate expression is steppable.
 /// As in if it can be split into multiple steps:
 /// i.e. on datanode first call `state(input)` then
@@ -674,6 +680,239 @@ impl Accumulator for StateAccum {
         values: &[datatypes::arrow::array::ArrayRef],
     ) -> datafusion_common::Result<()> {
         self.inner.update_batch(values)
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
+        self.inner.state()
+    }
+}
+
+/// A globally registerable wrapper for a state-family merge UDAF.
+///
+/// The wrapped merge function has the family contract `P..., State`. This
+/// wrapper exposes `P..., delta_state, persisted_state` and forwards the two
+/// state columns to the existing accumulator in that order. State values are
+/// opaque to this adapter; null is the inner merge family's identity value.
+#[derive(Debug, Clone)]
+pub(crate) struct DeltaMergeWrapper {
+    inner: AggregateUDF,
+    name: String,
+    signature: Signature,
+    inner_types: Vec<DataType>,
+    state_type: DataType,
+}
+
+impl DeltaMergeWrapper {
+    /// Build the wrapper for one of the explicitly supported exact merge UDAFs.
+    ///
+    /// The caller supplies the known merge signature, so construction cannot
+    /// fail while inspecting an arbitrary UDAF signature.
+    pub(crate) fn new(
+        inner: AggregateUDF,
+        state_name: &str,
+        inner_types: Vec<DataType>,
+        state_type: DataType,
+    ) -> Self {
+        let mut wrapper_types = inner_types.clone();
+        wrapper_types.push(state_type.clone());
+        Self {
+            name: aggr_delta_merge_func_name(state_name),
+            signature: Signature::exact(wrapper_types, inner.signature().volatility),
+            inner,
+            inner_types,
+            state_type,
+        }
+    }
+
+    fn resolve_inner_args(
+        &self,
+        input_fields: &[FieldRef],
+    ) -> datafusion_common::Result<Vec<FieldRef>> {
+        if input_fields.len() != self.inner_types.len() + 1 {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "delta merge requires parameters, delta state, and persisted state".to_string(),
+            ));
+        }
+        for (field, expected_type) in input_fields[..self.inner_types.len()]
+            .iter()
+            .zip(&self.inner_types)
+        {
+            if field.data_type() != expected_type {
+                return Err(datafusion_common::DataFusionError::Plan(format!(
+                    "delta merge argument type does not match its exact signature: {:?} != {expected_type:?}",
+                    field.data_type()
+                )));
+            }
+        }
+        let persisted = &input_fields[self.inner_types.len()];
+        if persisted.data_type() != &self.state_type && persisted.data_type() != &DataType::Null {
+            return Err(datafusion_common::DataFusionError::Plan(format!(
+                "persisted state type does not match the exact state type: {:?} != {:?}",
+                persisted.data_type(),
+                self.state_type
+            )));
+        }
+        Ok(input_fields[..self.inner_types.len()].to_vec())
+    }
+}
+
+impl AggregateUDFImpl for DeltaMergeWrapper {
+    fn accumulator<'a, 'b>(
+        &'a self,
+        acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
+    ) -> datafusion_common::Result<Box<dyn Accumulator>> {
+        if acc_args.exprs.len() != acc_args.expr_fields.len() {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "delta merge expression and field arities differ".to_string(),
+            ));
+        }
+        let inner_fields = self.resolve_inner_args(acc_args.expr_fields)?;
+        for (expr, expected_type) in acc_args.exprs.iter().zip(
+            self.inner_types
+                .iter()
+                .chain(std::iter::once(&self.state_type)),
+        ) {
+            if expr.data_type(acc_args.schema)? != *expected_type {
+                return Err(datafusion_common::DataFusionError::Internal(
+                    "delta merge physical expression type is not resolved".to_string(),
+                ));
+            }
+        }
+        let state_index = self.inner_types.len() - 1;
+        let inner_args = datafusion_expr::function::AccumulatorArgs {
+            return_field: acc_args.return_field,
+            schema: acc_args.schema,
+            ignore_nulls: acc_args.ignore_nulls,
+            order_bys: acc_args.order_bys,
+            is_reversed: acc_args.is_reversed,
+            name: self.inner.name(),
+            is_distinct: acc_args.is_distinct,
+            exprs: &acc_args.exprs[..=state_index],
+            expr_fields: &inner_fields,
+        };
+        Ok(Box::new(DeltaMergeAccum {
+            inner: self.inner.accumulator(inner_args)?,
+            params: state_index,
+        }))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn is_nullable(&self) -> bool {
+        self.inner.is_nullable()
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+        let fields = arg_types
+            .iter()
+            .enumerate()
+            .map(|(index, data_type)| {
+                Arc::new(Field::new(index.to_string(), data_type.clone(), true))
+            })
+            .collect::<Vec<_>>();
+        let inner_fields = self.resolve_inner_args(&fields)?;
+        self.inner.return_type(
+            &inner_fields
+                .iter()
+                .map(|field| field.data_type().clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn return_field(&self, arg_fields: &[FieldRef]) -> datafusion_common::Result<FieldRef> {
+        let inner_fields = self.resolve_inner_args(arg_fields)?;
+        self.inner.return_field(&inner_fields)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
+        if arg_types.len() != self.inner_types.len() + 1
+            || arg_types[..self.inner_types.len()]
+                .iter()
+                .zip(&self.inner_types)
+                .any(|(actual, expected)| actual != expected)
+            || arg_types[self.inner_types.len()] != self.state_type
+        {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "delta merge arguments do not match its exact signature".to_string(),
+            ));
+        }
+        let mut expected = self.inner_types.clone();
+        expected.push(self.state_type.clone());
+        Ok(expected)
+    }
+
+    fn state_fields(
+        &self,
+        args: datafusion_expr::function::StateFieldsArgs,
+    ) -> datafusion_common::Result<Vec<FieldRef>> {
+        let inner_fields = self.resolve_inner_args(args.input_fields)?;
+        self.inner
+            .state_fields(datafusion_expr::function::StateFieldsArgs {
+                name: args.name,
+                input_fields: &inner_fields,
+                return_field: args.return_field,
+                ordering_fields: args.ordering_fields,
+                is_distinct: args.is_distinct,
+            })
+    }
+}
+
+impl PartialEq for DeltaMergeWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.inner == other.inner
+    }
+}
+impl Eq for DeltaMergeWrapper {}
+impl Hash for DeltaMergeWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.inner.hash(state);
+    }
+}
+
+#[derive(Debug)]
+struct DeltaMergeAccum {
+    inner: Box<dyn Accumulator>,
+    params: usize,
+}
+
+impl Accumulator for DeltaMergeAccum {
+    fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
+        self.inner.evaluate()
+    }
+
+    fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion_common::Result<()> {
+        if values.len() != self.params + 2 {
+            return Err(datafusion_common::DataFusionError::Plan(format!(
+                "delta merge expected {} arguments, got {}",
+                self.params + 2,
+                values.len()
+            )));
+        }
+        // Null-state identity is an inner family precondition. The wrapper
+        // forwards opaque states and never decodes or filters them.
+        let mut inner_values = values[..self.params + 1].to_vec();
+        self.inner.update_batch(&inner_values)?;
+        inner_values[self.params] = values[self.params + 1].clone();
+        self.inner.update_batch(&inner_values)
+    }
+
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> datafusion_common::Result<()> {
+        self.inner.merge_batch(states)
     }
 
     fn size(&self) -> usize {
