@@ -24,9 +24,12 @@ use api::v1::{
 use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
-use common_catalog::consts::MITO_ENGINE;
+use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE};
+use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
+use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_memory_manager::OnExhaustedPolicy;
+use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_runtime::Runtime;
@@ -84,6 +87,8 @@ macro_rules! grpc_tests {
                 test_auto_create_table,
                 test_auto_create_table_with_hints,
                 test_auto_create_table_disabled_by_config,
+                test_private_system_tables_auto_create_table_with_global_disabled,
+                test_private_system_tables_bypass_auto_create_hint,
                 test_otel_arrow_auth,
                 test_insert_and_select,
                 test_dbname,
@@ -477,6 +482,154 @@ pub async fn test_auto_create_table_disabled_by_config(store_type: StorageType) 
     assert!(
         !tables.contains("greptime_physical_table"),
         "physical table leaked despite disabled auto-create:\n{tables}"
+    );
+
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+pub async fn test_private_system_tables_auto_create_table_with_global_disabled(
+    store_type: StorageType,
+) {
+    let (_db, fe_grpc_server) = setup_grpc_server_with_auto_create_table_disabled(
+        store_type,
+        "test_private_system_tables_auto_create_table_with_global_disabled",
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_PRIVATE_SCHEMA_NAME,
+        grpc_client,
+    );
+    let (host, cpu, mem, ts) = expect_data();
+
+    for table_name in [
+        DEFAULT_EVENTS_TABLE_NAME,
+        SLOW_QUERY_TABLE_NAME,
+        REGION_STATS_HISTORY_TABLE_NAME,
+    ] {
+        let result = db
+            .insert(InsertRequests {
+                inserts: vec![InsertRequest {
+                    table_name: table_name.to_string(),
+                    columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                    row_count: 4,
+                }],
+            })
+            .await;
+        assert_eq!(result.unwrap(), 4);
+    }
+
+    let load = Column {
+        column_name: "load".to_string(),
+        values: Some(column::Values {
+            f64_values: vec![0.4, 0.5, 0.6, 0.7],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Field as i32,
+        datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
+    };
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![InsertRequest {
+                table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+                columns: vec![host, cpu, mem, ts, load],
+                row_count: 4,
+            }],
+        })
+        .await;
+    assert_eq!(result.unwrap(), 4);
+
+    let output = db
+        .sql(format!("SHOW CREATE TABLE {DEFAULT_EVENTS_TABLE_NAME}"))
+        .await
+        .unwrap();
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    assert!(record_batches.pretty_print().unwrap().contains("\"load\""));
+
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+pub async fn test_private_system_tables_bypass_auto_create_hint(store_type: StorageType) {
+    let (_db, fe_grpc_server) = setup_grpc_server(
+        store_type,
+        "test_private_system_tables_bypass_auto_create_hint",
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_PRIVATE_SCHEMA_NAME,
+        grpc_client,
+    );
+    let (host, cpu, mem, ts) = expect_data();
+
+    for table_name in [
+        DEFAULT_EVENTS_TABLE_NAME,
+        SLOW_QUERY_TABLE_NAME,
+        REGION_STATS_HISTORY_TABLE_NAME,
+    ] {
+        let result = db
+            .insert_with_hints(
+                InsertRequests {
+                    inserts: vec![InsertRequest {
+                        table_name: table_name.to_string(),
+                        columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                        row_count: 4,
+                    }],
+                },
+                &[("auto_create_table", "false")],
+            )
+            .await;
+        assert_eq!(result.unwrap(), 4);
+    }
+
+    let ordinary_table = "ordinary_private_table";
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![
+                    InsertRequest {
+                        table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+                        columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                        row_count: 4,
+                    },
+                    InsertRequest {
+                        table_name: ordinary_table.to_string(),
+                        columns: vec![host, cpu, mem, ts],
+                        row_count: 4,
+                    },
+                ],
+            },
+            &[("auto_create_table", "false")],
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains(ordinary_table) && err.contains("auto_create_table"),
+        "unexpected error: {err}"
+    );
+
+    let output = db.sql("SHOW TABLES").await.unwrap();
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    assert!(
+        !record_batches
+            .pretty_print()
+            .unwrap()
+            .contains(ordinary_table)
     );
 
     let _ = fe_grpc_server.shutdown().await;

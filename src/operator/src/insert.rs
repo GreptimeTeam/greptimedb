@@ -29,12 +29,15 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
+    DEFAULT_PRIVATE_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
+    TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
     trace_operations_table_name, trace_services_table_name,
 };
+use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
+use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
+use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::TriggerReason;
@@ -490,9 +493,9 @@ impl Inserter {
         Ok(inserts)
     }
 
-    /// Returns `None` if auto table creation is allowed, or `Some(reason)` if
-    /// disabled by either the global config or the request hint. The reason tells
-    /// which one, for a clearer error.
+    /// Returns `Some(reason)` if the config or request hint disables automatic
+    /// table creation. Exempt private system tables are handled by
+    /// [`Self::is_auto_create_exempt_private_table`].
     fn auto_create_disabled_reason(&self, ctx: &QueryContextRef) -> Result<Option<&'static str>> {
         let auto_create_table_hint = ctx
             .extension(AUTO_CREATE_TABLE_KEY)
@@ -512,6 +515,16 @@ impl Inserter {
         } else {
             None
         })
+    }
+
+    /// Returns whether a private system table may infer and reconcile its schema
+    /// even when automatic table creation is disabled.
+    fn is_auto_create_exempt_private_table(schema: &str, table: &str) -> bool {
+        schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            && matches!(
+                table,
+                DEFAULT_EVENTS_TABLE_NAME | SLOW_QUERY_TABLE_NAME | REGION_STATS_HISTORY_TABLE_NAME
+            )
     }
 
     /// Ensures a trace table has the request-global schema without requiring a
@@ -571,12 +584,21 @@ impl Inserter {
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
-
         let catalog = ctx.current_catalog();
         let schema = ctx.current_schema();
 
+        let auto_create_disabled_reason = self.auto_create_disabled_reason(ctx)?;
+        // Enabled batches permit every table, so only disabled batches need a whitelist scan.
+        let has_auto_create_exempt_table = auto_create_disabled_reason.is_some()
+            && requests
+                .inserts
+                .iter()
+                .any(|req| Self::is_auto_create_exempt_private_table(&schema, &req.table_name));
         let mut table_infos = HashMap::new();
-        if let Some(disabled_reason) = self.auto_create_disabled_reason(ctx)? {
+        // Without exempt tables, verify existing tables and reject missing ones without inferring schemas.
+        if let Some(disabled_reason) = auto_create_disabled_reason
+            && !has_auto_create_exempt_table
+        {
             let mut instant_table_ids = HashSet::new();
             for req in &requests.inserts {
                 let table = match self.get_table(catalog, &schema, &req.table_name).await? {
@@ -618,20 +640,25 @@ impl Inserter {
         let mut per_table_semantics: Option<Option<PerTableSemanticIndex>> = None;
 
         for req in &mut requests.inserts {
+            // Mixed batches need a per-table decision so an exempt table cannot authorize others.
+            let auto_create_allowed = auto_create_disabled_reason.is_none()
+                || Self::is_auto_create_exempt_private_table(&schema, &req.table_name);
             match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
-                    if let Some(alter_expr) = self.get_alter_table_expr_on_demand(
-                        req,
-                        &table,
-                        ctx,
-                        accommodate_existing_schema,
-                        is_single_value,
-                        auto_create_table_type.alter_existing(),
-                    )? {
+                    if auto_create_allowed
+                        && let Some(alter_expr) = self.get_alter_table_expr_on_demand(
+                            req,
+                            &table,
+                            ctx,
+                            accommodate_existing_schema,
+                            is_single_value,
+                            auto_create_table_type.alter_existing(),
+                        )?
+                    {
                         alter_tables.push(alter_expr);
                         need_refresh_table_infos.insert((
                             catalog.to_string(),
@@ -654,6 +681,17 @@ impl Inserter {
                         instant_table_ids.insert(table_info.table_id());
                     }
                     table_infos.insert(table_info.table_id(), table_info);
+                }
+                None if !auto_create_allowed
+                    && let Some(disabled_reason) = auto_create_disabled_reason =>
+                {
+                    return InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "Table `{}` does not exist, and {}",
+                            req.table_name, disabled_reason,
+                        ),
+                    }
+                    .fail();
                 }
                 None => {
                     let semantic_index = per_table_semantics
