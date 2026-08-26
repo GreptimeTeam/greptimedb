@@ -47,6 +47,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
 use futures::TryStreamExt;
+use serde::Serialize;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableInfo;
@@ -81,43 +82,40 @@ fn optional_value(v: Option<&str>) -> Value {
     v.map(Value::from).unwrap_or(Value::Null)
 }
 
-/// Renders a table's effective entity declarations as a JSON array, or `None`
-/// when the table declares none. Field order follows the declaration's own
-/// structure (type, where it came from, then identity before description).
-fn entity_declarations_json(declarations: &[TableEntityDeclaration]) -> Option<String> {
+/// The JSON form of one declaration in the `entity_declarations` column.
+#[derive(Serialize)]
+struct DeclarationEntry {
+    entity_type: String,
+    origin: &'static str,
+    id: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id_qualifier: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    superseded_by: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    descriptive: Vec<String>,
+}
+
+impl From<TableEntityDeclaration> for DeclarationEntry {
+    fn from(declaration: TableEntityDeclaration) -> Self {
+        Self {
+            entity_type: declaration.entity_type,
+            origin: declaration.origin.as_str(),
+            id: declaration.id_columns,
+            id_qualifier: declaration.id_qualifier,
+            superseded_by: declaration.superseded_by_columns,
+            descriptive: declaration.descriptive_columns,
+        }
+    }
+}
+
+fn entity_declarations_json(declarations: Vec<TableEntityDeclaration>) -> Option<String> {
     if declarations.is_empty() {
         return None;
     }
-    let entries = declarations
-        .iter()
-        .map(|declaration| {
-            let mut entry = serde_json::Map::new();
-            entry.insert(
-                "entity_type".to_string(),
-                declaration.entity_type.clone().into(),
-            );
-            entry.insert("origin".to_string(), declaration.origin.as_str().into());
-            entry.insert("id".to_string(), declaration.id_columns.clone().into());
-            if let Some(qualifier) = &declaration.id_qualifier {
-                entry.insert("id_qualifier".to_string(), qualifier.clone().into());
-            }
-            if !declaration.superseded_by_columns.is_empty() {
-                entry.insert(
-                    "superseded_by".to_string(),
-                    declaration.superseded_by_columns.clone().into(),
-                );
-            }
-            if !declaration.descriptive_columns.is_empty() {
-                entry.insert(
-                    "descriptive".to_string(),
-                    declaration.descriptive_columns.clone().into(),
-                );
-            }
-            serde_json::Value::Object(entry)
-        })
-        .collect::<Vec<_>>();
-    // Serializing a string/array map cannot realistically fail; fold a failure
-    // into `None` rather than panicking the query path, as the options tail does.
+    let entries: Vec<DeclarationEntry> = declarations.into_iter().map(Into::into).collect();
+    // Serializing strings cannot realistically fail; fold a failure into `None`
+    // rather than panicking the query path, as the options tail does.
     serde_json::to_string(&entries).ok()
 }
 
@@ -346,17 +344,9 @@ impl InformationSchemaSemanticTablesBuilder {
         table_info: Arc<TableInfo>,
         graph_provider: Option<&EntityGraphProviderRef>,
     ) {
-        let row = SemanticRow::extract(&table_info);
-        let declarations_json = graph_provider
-            .map(|provider| provider.table_declarations(&table_info))
-            .as_deref()
-            .and_then(entity_declarations_json);
-        // A table is part of the semantic layer when it carries a semantic key
-        // or when the conventions derive entities from it.
-        if row.is_none() && declarations_json.is_none() {
-            return;
-        }
-        let row = row.unwrap_or_default();
+        let semantic_row = SemanticRow::extract(&table_info);
+        let carries_options = semantic_row.is_some();
+        let row = semantic_row.unwrap_or_default();
 
         let table_name = table_info.name.as_ref();
         let catalog_v = Value::from(catalog_name);
@@ -378,6 +368,13 @@ impl InformationSchemaSemanticTablesBuilder {
             (METADATA_QUALITY, &quality_v),
         ];
         if !predicates.eval(&predicate_row) {
+            return;
+        }
+
+        let declarations_json = graph_provider
+            .map(|provider| provider.table_declarations(&table_info))
+            .and_then(entity_declarations_json);
+        if !carries_options && declarations_json.is_none() {
             return;
         }
 

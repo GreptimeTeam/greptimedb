@@ -129,15 +129,6 @@ impl EntityGraphProviderImpl {
     /// Parses `greptime.semantic.entity.<type>.{id|descriptive|scope}` options of
     /// one table into per-type declarations. A type with no `id` columns is skipped.
     fn parse_declarations(table_info: &TableInfo) -> Vec<EntityDeclaration> {
-        let Some(time_index) = table_info
-            .meta
-            .schema
-            .timestamp_column()
-            .map(|c| c.name.clone())
-        else {
-            return vec![];
-        };
-
         // entity_type -> (id_columns, descriptive_columns, scope_columns)
         type RoleColumns = (Vec<String>, Vec<String>, Vec<String>);
         let mut by_type: HashMap<String, RoleColumns> = HashMap::new();
@@ -153,6 +144,17 @@ impl EntityGraphProviderImpl {
                 EntityRole::Scope => entry.2 = cols,
             }
         }
+        if by_type.is_empty() {
+            return vec![];
+        }
+        let Some(time_index) = table_info
+            .meta
+            .schema
+            .timestamp_column()
+            .map(|c| c.name.clone())
+        else {
+            return vec![];
+        };
 
         by_type
             .into_iter()
@@ -241,13 +243,13 @@ impl EntityGraphProviderImpl {
         declarations: &mut [EntityDeclaration],
         supersessions: Vec<(usize, String)>,
     ) {
-        let identities: HashMap<String, Vec<String>> = declarations
-            .iter()
-            .map(|d| (d.entity_type.clone(), d.id_columns.clone()))
-            .collect();
         for (index, entity_type) in supersessions {
-            declarations[index].superseded_by_columns =
-                identities.get(&entity_type).cloned().unwrap_or_default();
+            let identity = declarations
+                .iter()
+                .find(|declaration| declaration.entity_type == entity_type)
+                .map(|declaration| declaration.id_columns.clone())
+                .unwrap_or_default();
+            declarations[index].superseded_by_columns = identity;
         }
     }
 
