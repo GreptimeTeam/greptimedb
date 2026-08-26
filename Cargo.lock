@@ -13933,6 +13933,7 @@ dependencies = [
  "common-recordbatch",
  "common-time",
  "datatypes",
+ "etcd-client",
  "flate2",
  "hex",
  "local-ip-address",
@@ -13951,6 +13952,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]

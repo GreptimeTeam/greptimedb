@@ -65,7 +65,6 @@ impl State for ReconcileRegions {
         let table_meta = ctx.build_table_meta(&self.column_metadatas)?;
         ctx.volatile_ctx.table_meta = Some(table_meta);
         let table_id = ctx.table_id();
-        let table_name = ctx.table_name().clone();
 
         let primary_keys = self
             .column_metadatas
@@ -139,7 +138,7 @@ impl State for ReconcileRegions {
                 UnexpectedSnafu {
                     err_msg: format!(
                         "The table column metadata schemas from datanodes are not the same, table: {}, table_id: {}",
-                        table_name,
+                        ctx.table_name(),
                         table_id
                     ),
                 },
@@ -153,7 +152,8 @@ impl State for ReconcileRegions {
         if column_metadatas != self.column_metadatas {
             info!(
                 "Datanode column metadatas are not consistent with metasrv, updating metasrv's column metadatas, table: {}, table_id: {}",
-                table_name, table_id
+                ctx.table_name(),
+                table_id
             );
             // Safety: fetched in the above.
             let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();

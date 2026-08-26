@@ -28,6 +28,7 @@ use store_api::storage::TableId;
 
 use crate::reconciliation::ResolveStrategy;
 
+/// Stable event type stored for physical table reconciliation procedures.
 pub(crate) const RECONCILE_TABLE_EVENT_TYPE: &str = "reconcile_table";
 const PAYLOAD_VERSION: u8 = 1;
 
@@ -55,6 +56,7 @@ pub(crate) struct ReconciliationLocator {
 }
 
 impl ReconciliationLocator {
+    /// Creates a locator for a physical table with its fully qualified name and ID.
     pub(crate) fn physical_table(
         catalog_name: &str,
         schema_name: &str,
@@ -107,6 +109,7 @@ pub(crate) struct ReconciliationEvent {
 }
 
 impl ReconciliationEvent {
+    /// Builds the bounded intent event emitted when table reconciliation is submitted.
     pub(crate) fn table_submitted(
         locator: ReconciliationLocator,
         resolve_strategy: ResolveStrategy,
@@ -125,6 +128,7 @@ impl ReconciliationEvent {
         }
     }
 
+    /// Builds a terminal event from the bounded reconciliation result summary.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn table_result(
         locator: ReconciliationLocator,
@@ -154,6 +158,7 @@ impl ReconciliationEvent {
         }
     }
 
+    /// Builds a table lifecycle event whose reconciliation payload is null.
     pub(crate) fn table_lifecycle(locator: ReconciliationLocator) -> Self {
         Self::lifecycle(ReconciliationEventType::Table, locator)
     }

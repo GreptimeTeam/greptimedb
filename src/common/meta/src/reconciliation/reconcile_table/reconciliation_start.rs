@@ -46,7 +46,6 @@ impl State for ReconciliationStart {
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let table_id = ctx.table_id();
-        let table_name = ctx.table_name().clone();
 
         let (physical_table_id, physical_table_route) = ctx
             .table_metadata_manager
@@ -58,14 +57,17 @@ impl State for ReconciliationStart {
             error::UnexpectedSnafu {
                 err_msg: format!(
                     "Reconcile table only works for physical table, but got logical table: {}, table_id: {}",
-                    table_name, table_id
+                    ctx.table_name(),
+                    table_id
                 ),
             }
         );
 
         info!(
             "Reconciling table: {}, table_id: {}, procedure_id: {}",
-            table_name, table_id, procedure_ctx.procedure_id
+            ctx.table_name(),
+            table_id,
+            procedure_ctx.procedure_id
         );
         // TODO(weny): Repairs the table route if needed.
         let region_metadata_lister = RegionMetadataLister::new(ctx.node_manager.clone());
@@ -95,7 +97,8 @@ impl State for ReconciliationStart {
             error::UnexpectedSnafu {
                 err_msg: format!(
                     "No region metadata found for table: {}, table_id: {}",
-                    table_name, table_id
+                    ctx.table_name(),
+                    table_id
                 ),
             }
         });
@@ -112,7 +115,8 @@ impl State for ReconciliationStart {
             error::UnexpectedSnafu {
                 err_msg: format!(
                     "Some regions are not opened, table: {}, table_id: {}",
-                    table_name, table_id
+                    ctx.table_name(),
+                    table_id
                 ),
             }
         });

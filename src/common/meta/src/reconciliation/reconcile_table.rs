@@ -151,6 +151,16 @@ impl ReconcileTableResultSummary {
         self.last_completed_phase = Some(TablePhase::UpdateTableInfo);
     }
 
+    fn is_empty(&self) -> bool {
+        self.metadata_state.is_none()
+            && self.resolution_strategy_applied.is_none()
+            && self.resolved_column_count.is_none()
+            && self.scanned_region_count == 0
+            && self.updated_region_count == 0
+            && !self.table_info_updated
+            && self.last_completed_phase.is_none()
+    }
+
     fn reset_replayed_resolution(&mut self) {
         self.metadata_state = None;
         self.resolution_strategy_applied = None;
@@ -161,12 +171,20 @@ impl ReconcileTableResultSummary {
     }
 
     fn reset_replayed_regions(&mut self) {
+        if self.is_empty() {
+            return;
+        }
+
         self.updated_region_count = 0;
         self.table_info_updated = false;
         self.last_completed_phase = Some(TablePhase::ResolveColumnMetadata);
     }
 
     fn reset_replayed_table_info(&mut self) {
+        if self.is_empty() {
+            return;
+        }
+
         self.table_info_updated = false;
         self.last_completed_phase = Some(TablePhase::ReconcileRegions);
     }
@@ -472,7 +490,6 @@ pub(crate) trait State: Sync + Send + Debug {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::sync::Arc;
 
     use common_event_recorder::{EventTypeFilter, EventTypeFilterRef};
@@ -480,26 +497,71 @@ mod tests {
         ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
         RetryPhase,
     };
+    use common_procedure_test::MockContextProvider;
     use serde_json::{Value, json};
+    use store_api::storage::RegionId;
 
     use super::*;
+    use crate::ddl::test_util::datanode_handler::PartialSuccessDatanodeHandler;
     use crate::key::DeserializedValueWithBytes;
     use crate::key::table_info::TableInfoValue;
-    use crate::key::test_utils::new_test_table_info;
+    use crate::key::table_route::PhysicalTableRouteValue;
+    use crate::key::test_utils::{new_test_table_info, new_test_table_info_with_name};
+    use crate::peer::Peer;
     use crate::reconciliation::reconcile_table::reconcile_regions::ReconcileRegions;
     use crate::reconciliation::reconcile_table::reconciliation_end::ReconciliationEnd;
     use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveColumnMetadata;
     use crate::reconciliation::reconcile_table::update_table_info::UpdateTableInfo;
+    use crate::reconciliation::utils::build_column_metadata_from_table_info;
+    use crate::rpc::router::{Region, RegionRoute};
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
+    struct TableEventHarness {
+        procedure_id: ProcedureId,
+        lifecycle_state: ProcedureState,
+        event_type_filter: EventTypeFilterRef,
+    }
+
+    impl TableEventHarness {
+        fn all() -> Self {
+            Self {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: ProcedureState::Running,
+                event_type_filter: Arc::new(EventTypeFilter::All),
+            }
+        }
+
+        fn selected(event_types: impl IntoIterator<Item = &'static str>) -> Self {
+            Self {
+                event_type_filter: Arc::new(EventTypeFilter::Only(
+                    event_types.into_iter().map(str::to_string).collect(),
+                )),
+                ..Self::all()
+            }
+        }
+
+        fn event(
+            &self,
+            procedure: &dyn Procedure,
+            trigger: EventTrigger,
+        ) -> Option<Box<dyn common_event_recorder::Event>> {
+            procedure.event(&EventContext {
+                procedure_id: self.procedure_id,
+                lifecycle_state: &self.lifecycle_state,
+                trigger,
+                event_type_filter: self.event_type_filter.clone(),
+                event_context: None,
+            })
+        }
+    }
+
     #[test]
-    fn table_event_hook_covers_root_child_filters_and_lifecycle_payloads() {
+    fn table_submitted_events_cover_root_and_child_intent() {
+        let events = TableEventHarness::all();
         let root = test_procedure(false);
         let child = test_procedure(true);
-        let running = ProcedureState::Running;
         for (procedure, is_subprocedure) in [(&root, false), (&child, true)] {
-            let submitted =
-                event_for(procedure, EventTrigger::Submitted, all_events(), &running).unwrap();
+            let submitted = events.event(procedure, EventTrigger::Submitted).unwrap();
             assert_eq!(submitted.event_type(), RECONCILE_TABLE_EVENT_TYPE);
             assert_eq!(
                 submitted.json_payload().unwrap(),
@@ -510,7 +572,11 @@ mod tests {
                 })
             );
         }
+    }
 
+    #[test]
+    fn table_non_terminal_lifecycle_events_have_null_payloads() {
+        let events = TableEventHarness::all();
         let mut procedure = test_procedure(true);
         procedure.context.persistent_ctx.result_summary = populated_summary();
 
@@ -527,13 +593,21 @@ mod tests {
             EventTrigger::RollingBack,
         ] {
             assert_eq!(
-                event_for(&procedure, trigger, all_events(), &running)
+                events
+                    .event(&procedure, trigger)
                     .unwrap()
                     .json_payload()
                     .unwrap(),
                 Value::Null
             );
         }
+    }
+
+    #[test]
+    fn table_terminal_events_report_bounded_results() {
+        let events = TableEventHarness::all();
+        let mut procedure = test_procedure(true);
+        procedure.context.persistent_ctx.result_summary = populated_summary();
 
         for (trigger, complete) in [
             (EventTrigger::Succeeded, true),
@@ -541,7 +615,8 @@ mod tests {
             (EventTrigger::Poisoned, false),
         ] {
             assert_eq!(
-                event_for(&procedure, trigger, all_events(), &running)
+                events
+                    .event(&procedure, trigger)
                     .unwrap()
                     .json_payload()
                     .unwrap(),
@@ -558,38 +633,31 @@ mod tests {
                 })
             );
         }
+    }
 
+    #[test]
+    fn table_event_filtering_uses_the_reconciliation_event_type() {
+        let procedure = test_procedure(false);
         assert!(
-            event_for(
-                &procedure,
-                EventTrigger::Submitted,
-                selected_events(RECONCILE_TABLE_EVENT_TYPE),
-                &running,
-            )
-            .is_some()
+            TableEventHarness::selected([RECONCILE_TABLE_EVENT_TYPE])
+                .event(&procedure, EventTrigger::Submitted)
+                .is_some()
         );
         assert!(
-            event_for(
-                &procedure,
-                EventTrigger::Submitted,
-                selected_events("create_table"),
-                &running,
-            )
-            .is_none()
+            TableEventHarness::selected(["create_table"])
+                .event(&procedure, EventTrigger::Submitted)
+                .is_none()
         );
         assert!(
-            event_for(
-                &procedure,
-                EventTrigger::Submitted,
-                Arc::new(EventTypeFilter::Only(HashSet::new())),
-                &running,
-            )
-            .is_none()
+            TableEventHarness::selected([])
+                .event(&procedure, EventTrigger::Submitted)
+                .is_none()
         );
     }
 
     #[test]
     fn table_old_json_without_result_summary_still_deserializes() {
+        let events = TableEventHarness::all();
         let procedure = test_procedure(false);
         let mut value: Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
         value["persistent_ctx"]
@@ -603,15 +671,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            event_for(
-                &loaded,
-                EventTrigger::Succeeded,
-                all_events(),
-                &ProcedureState::Running,
-            )
-            .unwrap()
-            .json_payload()
-            .unwrap(),
+            events
+                .event(&loaded, EventTrigger::Succeeded)
+                .unwrap()
+                .json_payload()
+                .unwrap(),
             json!({
                 "version": 1,
                 "complete": true,
@@ -628,20 +692,17 @@ mod tests {
 
     #[test]
     fn table_partial_summary_preserves_completed_work_without_advancing_phases() {
+        let events = TableEventHarness::all();
         let mut procedure = test_procedure(false);
         let summary = &mut procedure.context.persistent_ctx.result_summary;
         summary.record_scanned_regions(2);
 
         assert_eq!(
-            event_for(
-                &procedure,
-                EventTrigger::Failed,
-                all_events(),
-                &ProcedureState::Running,
-            )
-            .unwrap()
-            .json_payload()
-            .unwrap(),
+            events
+                .event(&procedure, EventTrigger::Failed)
+                .unwrap()
+                .json_payload()
+                .unwrap(),
             json!({
                 "version": 1,
                 "complete": false,
@@ -659,15 +720,11 @@ mod tests {
         summary.mark_start_completed();
         summary.record_metadata_state(TableMetadataState::Inconsistent);
         assert_eq!(
-            event_for(
-                &procedure,
-                EventTrigger::Failed,
-                all_events(),
-                &ProcedureState::Running,
-            )
-            .unwrap()
-            .json_payload()
-            .unwrap(),
+            events
+                .event(&procedure, EventTrigger::Failed)
+                .unwrap()
+                .json_payload()
+                .unwrap(),
             json!({
                 "version": 1,
                 "complete": false,
@@ -689,15 +746,93 @@ mod tests {
         );
         summary.record_updated_regions(1);
         assert_eq!(
-            event_for(
-                &procedure,
-                EventTrigger::Failed,
-                all_events(),
-                &ProcedureState::Running,
-            )
-            .unwrap()
-            .json_payload()
-            .unwrap(),
+            events
+                .event(&procedure, EventTrigger::Failed)
+                .unwrap()
+                .json_payload()
+                .unwrap(),
+            json!({
+                "version": 1,
+                "complete": false,
+                "metadata_state": "inconsistent",
+                "resolution_strategy_applied": "use_latest",
+                "resolved_column_count": 3,
+                "scanned_region_count": 2,
+                "updated_region_count": 1,
+                "table_info_updated": false,
+                "last_completed_phase": "resolve_column_metadata",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn table_mixed_region_outcome_preserves_partial_result() {
+        let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(
+            PartialSuccessDatanodeHandler { retryable: false },
+        )));
+        let context = Context {
+            node_manager: ddl_context.node_manager,
+            table_metadata_manager: ddl_context.table_metadata_manager,
+            cache_invalidator: ddl_context.cache_invalidator,
+        };
+        let mut procedure = ReconcileTableProcedure::new(
+            context,
+            42,
+            TableName::new("greptime", "public", "metrics"),
+            ResolveStrategy::UseLatest,
+            false,
+        );
+
+        let mut table_info = new_test_table_info_with_name(42, "metrics");
+        table_info.meta.column_ids = vec![0, 1, 2];
+        let name_to_ids = table_info.name_to_ids().unwrap();
+        let column_metadatas = build_column_metadata_from_table_info(
+            table_info.meta.schema.column_schemas(),
+            &table_info.meta.primary_key_indices,
+            &name_to_ids,
+        )
+        .unwrap();
+        let region_ids = [RegionId::new(42, 1), RegionId::new(42, 2)];
+        procedure.context.persistent_ctx.table_info_value = Some(
+            DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info)),
+        );
+        procedure.context.persistent_ctx.physical_table_route =
+            Some(PhysicalTableRouteValue::new(vec![
+                RegionRoute {
+                    region: Region::new_test(region_ids[0]),
+                    leader_peer: Some(Peer::empty(1)),
+                    ..Default::default()
+                },
+                RegionRoute {
+                    region: Region::new_test(region_ids[1]),
+                    leader_peer: Some(Peer::empty(2)),
+                    ..Default::default()
+                },
+            ]));
+
+        let summary = &mut procedure.context.persistent_ctx.result_summary;
+        summary.record_scanned_regions(region_ids.len());
+        summary.mark_start_completed();
+        summary.record_resolved_columns(
+            TableMetadataState::Inconsistent,
+            Some(ResolveStrategy::UseLatest),
+            Some(column_metadatas.len()),
+        );
+        procedure.state = Box::new(ReconcileRegions::new(column_metadatas, region_ids.to_vec()));
+
+        let procedure_ctx = ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
+        };
+        assert!(procedure.execute(&procedure_ctx).await.is_err());
+
+        assert_eq!(
+            TableEventHarness::all()
+                .event(&procedure, EventTrigger::Failed)
+                .unwrap()
+                .json_payload()
+                .unwrap(),
             json!({
                 "version": 1,
                 "complete": false,
@@ -772,6 +907,24 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn table_recovery_preserves_empty_legacy_summary_for_advanced_states() {
+        let mut procedure = test_procedure(false);
+        procedure.state = Box::new(ReconcileRegions::new(vec![], vec![]));
+        let mut loaded = load_without_result_summary(&procedure);
+        loaded.recover().unwrap();
+        assert_summary_is_empty(&loaded.context.persistent_ctx.result_summary);
+        assert_empty_failed_event(&loaded);
+
+        let table_info =
+            DeserializedValueWithBytes::from_inner(TableInfoValue::new(new_test_table_info(42)));
+        procedure.state = Box::new(UpdateTableInfo::new(table_info, vec![]));
+        let mut loaded = load_without_result_summary(&procedure);
+        loaded.recover().unwrap();
+        assert_summary_is_empty(&loaded.context.persistent_ctx.result_summary);
+        assert_empty_failed_event(&loaded);
+    }
+
     fn populated_summary() -> ReconcileTableResultSummary {
         ReconcileTableResultSummary {
             metadata_state: Some(TableMetadataState::Inconsistent),
@@ -794,6 +947,38 @@ mod tests {
         assert!(summary.last_completed_phase.is_none());
     }
 
+    fn assert_empty_failed_event(procedure: &ReconcileTableProcedure) {
+        assert_eq!(
+            TableEventHarness::all()
+                .event(procedure, EventTrigger::Failed)
+                .unwrap()
+                .json_payload()
+                .unwrap(),
+            json!({
+                "version": 1,
+                "complete": false,
+                "metadata_state": null,
+                "resolution_strategy_applied": null,
+                "resolved_column_count": null,
+                "scanned_region_count": 0,
+                "updated_region_count": 0,
+                "table_info_updated": false,
+                "last_completed_phase": null,
+            })
+        );
+    }
+
+    fn load_without_result_summary(procedure: &ReconcileTableProcedure) -> ReconcileTableProcedure {
+        let mut value: Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+        value["persistent_ctx"]
+            .as_object_mut()
+            .unwrap()
+            .remove("result_summary");
+
+        ReconcileTableProcedure::from_json(test_context(), &serde_json::to_string(&value).unwrap())
+            .unwrap()
+    }
+
     fn test_procedure(is_subprocedure: bool) -> ReconcileTableProcedure {
         ReconcileTableProcedure::new(
             test_context(),
@@ -811,30 +996,5 @@ mod tests {
             table_metadata_manager: ddl_context.table_metadata_manager,
             cache_invalidator: ddl_context.cache_invalidator,
         }
-    }
-
-    fn event_for(
-        procedure: &dyn Procedure,
-        trigger: EventTrigger,
-        event_type_filter: EventTypeFilterRef,
-        lifecycle_state: &ProcedureState,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
-        procedure.event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state,
-            trigger,
-            event_type_filter,
-            event_context: None,
-        })
-    }
-
-    fn all_events() -> EventTypeFilterRef {
-        Arc::new(EventTypeFilter::All)
-    }
-
-    fn selected_events(event_type: &str) -> EventTypeFilterRef {
-        Arc::new(EventTypeFilter::Only(HashSet::from([
-            event_type.to_string()
-        ])))
     }
 }

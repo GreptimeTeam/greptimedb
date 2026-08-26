@@ -23,6 +23,7 @@ use sqlness::interceptor::{InterceptorRef, Registry};
 
 use crate::cmd::bare::ServerAddr;
 use crate::cmd::compat_case::{self, CompatCase, try_infer_version, version_matches_range};
+use crate::cmd::compat_procedure::OldProcedureSnapshot;
 use crate::cmd::datanode_overlay::{
     DatanodeOverlay, DatanodeProtectionPolicy, PreparedDatanodeOverlay,
 };
@@ -748,7 +749,7 @@ async fn run_profile(profile: &CompatProfile, config: &ProfileRunConfig<'_>) -> 
 
     let mut progress = ProfileProgress::default();
     for (case_index, case) in profile.cases().iter().enumerate() {
-        match run_compat_phase(&db, case, config.interceptor_registry, CompatPhase::Setup).await {
+        match run_compat_setup(&db, case, config.interceptor_registry, setup_etcd).await {
             Ok(()) => {
                 println!("  Setup: {} - OK", case.metadata.name);
                 progress.record_setup_success(case_index);
@@ -1019,6 +1020,34 @@ fn default_compat_case_dir() -> PathBuf {
     path.push("compatibility");
     path.push("cases");
     path
+}
+
+async fn run_compat_setup(
+    db: &crate::env::bare::GreptimeDB,
+    case: &CompatCase,
+    registry: &Registry,
+    setup_etcd: bool,
+) -> Result<(), String> {
+    let snapshot = match case.metadata.old_procedure() {
+        Some(procedure) => {
+            if !setup_etcd {
+                return Err(
+                    "old_procedure snapshots require distributed compatibility etcd".to_string(),
+                );
+            }
+            Some(OldProcedureSnapshot::start(&procedure.type_name).await?)
+        }
+        None => None,
+    };
+
+    run_compat_phase(db, case, registry, CompatPhase::Setup).await?;
+
+    if let Some(snapshot) = snapshot {
+        let procedure_id = snapshot.clone_captured().await?;
+        println!("  Captured old procedure snapshot for recovery: {procedure_id}");
+    }
+
+    Ok(())
 }
 
 /// Run a single compat phase (setup or verify) for one case.
@@ -1354,6 +1383,7 @@ mod tests {
                 old_config: overlay.map(|_| OldConfigMetadata {
                     datanode: PathBuf::from("overlay.toml"),
                 }),
+                old_procedure: None,
             },
             dir: case_dir,
             namespace: name.to_string(),

@@ -1,0 +1,11 @@
+name = "reconcile_table_procedure_upgrade"
+reason = "Verify a physical-table reconciliation procedure persisted by the old binary recovers after an upgrade."
+introduced_by = "PR #8935"
+topologies = ["distributed"]
+from_range = ["=v1.0.2", "=v1.1.4"]
+to_range = [">=v1.3.0"]
+features = ["metasrv", "procedure", "reconciliation", "upgrade"]
+owner = "metasrv"
+
+[old_procedure]
+type_name = "metasrv-procedure::ReconcileTable"
