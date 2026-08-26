@@ -1,0 +1,22 @@
+src/servers/src/grpc/greptime_handler.rs
+  s_aa353de59809cc::t_dd405b443b30ea 84-87,94,96,99
+src/servers/src/grpc/flight.rs
+  s_aa353de59809cc::t_4d5da7ec243025 48,54
+  s_aa353de59809cc::t_dd405b443b30ea 225-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "41c33f1beb9c30ee8eb8623622c53b8af5f8064e",
+  "prompts": {},
+  "sessions": {
+    "s_aa353de59809cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a037e5-dc74-7ce3-b341-3c26620c3721",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
