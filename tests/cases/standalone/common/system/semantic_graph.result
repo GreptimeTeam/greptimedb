@@ -97,10 +97,10 @@ order by entity_type, entity_id;
 +------------------+-----------+-------------------------------------+---------+-------------------+------------------------------+
 | entity_type      | entity_id | entity_id_attrs                     | scope   | descriptive       | source_tables                |
 +------------------+-----------+-------------------------------------+---------+-------------------+------------------------------+
-| host             | h1        |                                     |         |                   | ["public.graph_app_metrics"] |
+| host             | h1        | {"host":"h1"}                       |         |                   | ["public.graph_app_metrics"] |
 | process          | cart,h1   | {"host":"h1","service_name":"cart"} |         | {"env":"us-east"} | ["public.graph_app_metrics"] |
-| service          | cart      |                                     | us-east |                   | ["public.graph_app_metrics"] |
-| service.instance | cart-0    |                                     |         |                   | ["public.graph_app_metrics"] |
+| service          | cart      | {"service_name":"cart"}             | us-east |                   | ["public.graph_app_metrics"] |
+| service.instance | cart-0    | {"instance":"cart-0"}               |         |                   | ["public.graph_app_metrics"] |
 +------------------+-----------+-------------------------------------+---------+-------------------+------------------------------+
 
 select src_type, src_id, dst_type, dst_id, rel_type, provenance, confidence
@@ -258,12 +258,12 @@ select entity_type, entity_id, entity_id_attrs, scope, source_tables
 from greptime_private.semantic_entities
 order by entity_id;
 
-+-------------+-----------+-----------------+-------+---------------------------+
-| entity_type | entity_id | entity_id_attrs | scope | source_tables             |
-+-------------+-----------+-----------------+-------+---------------------------+
-| service     | cart      |                 |       | ["public.graph_traces_b"] |
-| service     | frontend  |                 |       | ["public.graph_traces_a"] |
-+-------------+-----------+-----------------+-------+---------------------------+
++-------------+-----------+-----------------------------+-------+---------------------------+
+| entity_type | entity_id | entity_id_attrs             | scope | source_tables             |
++-------------+-----------+-----------------------------+-------+---------------------------+
+| service     | cart      | {"service_name":"cart"}     |       | ["public.graph_traces_b"] |
+| service     | frontend  | {"service_name":"frontend"} |       | ["public.graph_traces_a"] |
++-------------+-----------+-----------------------------+-------+---------------------------+
 
 drop table graph_traces_a;
 

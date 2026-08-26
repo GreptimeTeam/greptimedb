@@ -485,8 +485,8 @@ fn escaped_id_value(value: Expr) -> Expr {
 /// The identifying *column names* are deliberately absent: the same identity
 /// reaches us under different names per source — a trace table's
 /// `service_name` against a metric table's `job` — and encoding them would
-/// split one entity into one per signal. `entity_id_attrs` keeps the
-/// structured form.
+/// split one entity into one per signal. `entity_id_attrs` carries the names
+/// beside the id, where they document its origin without dividing it.
 ///
 /// `col` constructs the column reference (unqualified for registry branches,
 /// join-side-qualified for the calls derivation).
@@ -676,9 +676,7 @@ fn registry_source(
     let mut rows = Vec::with_capacity(1 + rest.len());
     for decl in std::iter::once(first).chain(rest) {
         // CAST even a single-column id: id columns need not be strings, and
-        // the computed table declares entity_id STRING. An id assembled from
-        // more than one column additionally carries its parts as a JSON
-        // object in entity_id_attrs, the structured form of the id string.
+        // the computed table declares entity_id STRING.
         let entity_id = entity_id_expr(&decl.id_columns, decl.id_qualifier.as_deref(), &|c| {
             ident(c)
         });
@@ -688,11 +686,11 @@ fn registry_source(
             .chain(&decl.id_columns)
             .cloned()
             .collect::<Vec<_>>();
-        let entity_id_attrs = if id_parts.len() == 1 {
-            null_json()
-        } else {
-            json_object_expr(&id_parts)
-        };
+        // Carried for single-column ids too. Entity equality reads entity_id
+        // alone, so this is not part of the identity; it tells a consumer
+        // holding an id which attributes produced it, without which a bare
+        // `a3f2...` cannot be traced back to a column of the source table.
+        let entity_id_attrs = json_object_expr(&id_parts);
 
         let scope = match decl.scope_columns.as_slice() {
             [] => lit(""),
@@ -1021,8 +1019,12 @@ mod tests {
         let batch = &batches[0];
         assert_eq!(strings(batch, 4), vec!["service"; batch.num_rows()]);
         assert_eq!(strings(batch, 5), vec!["cart"; batch.num_rows()]);
-        // Single-column id -> entity_id_attrs and descriptive are typed-JSON NULLs.
-        assert!(json_texts(batch, 6).iter().all(Option::is_none));
+        // A single-column id still names its attribute; descriptive stays a
+        // typed-JSON NULL, none having been declared.
+        assert_eq!(
+            json_texts(batch, 6),
+            vec![Some(r#"{"service_name":"cart"}"#.to_string()); batch.num_rows()]
+        );
         assert!(json_texts(batch, 8).iter().all(Option::is_none));
         assert_eq!(
             json_texts(batch, 9),

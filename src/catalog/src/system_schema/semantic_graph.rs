@@ -224,10 +224,11 @@ fn json() -> ConcreteDataType {
 ///   observed evidence there).
 /// - `entity_type`   — the entity's type, e.g. `service`, `host`, `k8s.pod`,
 ///   `process`, `service.instance` (the OTel-style, possibly dotted, type).
-/// - `entity_id`     — canonical identifier: the value verbatim for a
-///   single-attribute identity, or a sorted `k=v,k=v` rendering for a composite.
-/// - `entity_id_attrs` — JSON object of the identifying attributes (the
-///   escaping-safe source of truth for composite ids); NULL for single-attribute ids.
+/// - `entity_id`     — canonical identifier: the identifying values in declared
+///   order, escaped and joined.
+/// - `entity_id_attrs` — JSON object of the identifying attributes, always
+///   present: it names the attributes the id was assembled from, so a consumer
+///   holding an id can tell which columns it came from and query them back.
 /// - `scope`         — namespace/environment the id is scoped to; empty when none.
 /// - `descriptive`   — JSON snapshot of the entity's descriptive (non-identifying)
 ///   attributes; NULL when no descriptive columns were declared.
