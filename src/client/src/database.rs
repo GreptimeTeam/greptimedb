@@ -21,13 +21,16 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use api::v1::auth_header::AuthScheme;
+#[cfg(feature = "testing")]
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
+#[cfg(feature = "testing")]
+use api::v1::{AlterTableExpr, CreateTableExpr, DdlRequest};
 use api::v1::{
-    AlterTableExpr, AuthHeader, Basic, CreateTableExpr, DdlRequest, GreptimeRequest,
-    InsertRequests, QueryRequest, RequestHeader, RowInsertRequests,
+    AuthHeader, Basic, GreptimeRequest, InsertRequests, QueryRequest, RequestHeader,
+    RowInsertRequests,
 };
 use arc_swap::ArcSwapOption;
 use arrow_flight::{FlightData, Ticket};
@@ -738,11 +741,13 @@ impl Database {
     }
 
     /// Creates a new table using the provided table expression.
+    #[cfg(feature = "testing")]
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
         self.flight_request().create(expr).await
     }
 
     /// Alters an existing table using the provided alter expression.
+    #[cfg(feature = "testing")]
     pub async fn alter(&self, expr: AlterTableExpr) -> Result<Output> {
         self.flight_request().alter(expr).await
     }
@@ -891,6 +896,7 @@ impl<'a> DatabaseFlightRequest<'a> {
     }
 
     /// Creates a new table using the provided table expression.
+    #[cfg(feature = "testing")]
     pub async fn create(self, expr: CreateTableExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
@@ -900,6 +906,7 @@ impl<'a> DatabaseFlightRequest<'a> {
     }
 
     /// Alters an existing table using the provided alter expression.
+    #[cfg(feature = "testing")]
     pub async fn alter(self, expr: AlterTableExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::AlterTable(expr)),
