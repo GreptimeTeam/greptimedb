@@ -1,0 +1,36 @@
+tests-integration/tests/http.rs
+  s_aa353de59809cc::t_00a0c33a82a8f2 2253
+tests-integration/src/grpc/flight.rs
+  s_aa353de59809cc::t_7a36e1dc6851ab 67-68,112-125,223-233
+  s_aa353de59809cc::t_93b37d88527531 234-235
+  s_aa353de59809cc::t_c7a4a8a6c14698 128,158-165,171,177,236-239,242-252
+  s_aa353de59809cc::t_f02e86a25a33de 240-241
+  s_aa353de59809cc::t_7ff2101257536d 172-175
+  s_aa353de59809cc::t_325c8d96ac420a 57
+  s_aa353de59809cc::t_c161506a9a3b6f 126-127,129,155-157,253
+src/client/src/flight.rs
+  s_aa353de59809cc::t_6b595a9b68e0a3 46
+  s_aa353de59809cc::t_2a927c5ded1755 67-69,73
+src/client/src/region.rs
+  s_aa353de59809cc::t_0652d798e7fbd4 211,427
+  s_aa353de59809cc::t_2a927c5ded1755 245-246,271-275,294-295
+  s_aa353de59809cc::t_9a1d39b3fbf9c6 28
+  s_aa353de59809cc::t_b6ab7f2519d2cc 50,212-216,221,232,330-344
+  s_aa353de59809cc::t_0a0cafebdfbbe2 345-346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "048d27b6992341a1fe25fef3f2547462f15fe671",
+  "prompts": {},
+  "sessions": {
+    "s_aa353de59809cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a037e5-dc74-7ce3-b341-3c26620c3721",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
