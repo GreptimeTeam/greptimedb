@@ -17,7 +17,10 @@ mod common;
 use std::borrow::Cow;
 
 use api::v1::ColumnDataType;
+use api::v1::json_value::Value as JsonValue;
 use api::v1::value::ValueData;
+use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
+use datatypes::extension::json::Json2ExtensionType;
 
 const INPUT_VALUE_OBJ: &str = r#"
 [
@@ -111,6 +114,38 @@ transform:
         jsonb::Value::String(Cow::Borrowed("test")),
     );
     assert_eq!(v, jsonb::Value::Object(expected));
+}
+
+#[test]
+fn test_json2_parse() {
+    let pipeline_yaml = r#"
+---
+processors:
+  - json_parse:
+      field: commit
+
+transform:
+  - field: commit
+    type: json2
+"#;
+
+    let output = common::parse_and_exec(INPUT_VALUE_OBJ, pipeline_yaml);
+
+    assert_eq!(output.schema[0].datatype, ColumnDataType::Json as i32);
+    assert!(output.schema[0].datatype_extension.is_none());
+    assert_eq!(
+        output.schema[0]
+            .options
+            .as_ref()
+            .and_then(|options| options.options.get(EXTENSION_TYPE_NAME_KEY))
+            .map(String::as_str),
+        Some(Json2ExtensionType::NAME)
+    );
+
+    let ValueData::JsonValue(value) = output.rows[0].values[0].value_data.as_ref().unwrap() else {
+        panic!("expect JSON2 value");
+    };
+    assert!(matches!(value.value, Some(JsonValue::Object(_))));
 }
 
 #[test]

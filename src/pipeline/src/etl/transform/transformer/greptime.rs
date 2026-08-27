@@ -226,6 +226,16 @@ impl GreptimeTransformer {
         pipeline_map: &mut VrlValue,
         is_v1: bool,
     ) -> Result<Vec<GreptimeValue>> {
+        self.transform_mut_with_schema(pipeline_map, is_v1, &SchemaInfo::default(), None)
+    }
+
+    pub(crate) fn transform_mut_with_schema(
+        &self,
+        pipeline_map: &mut VrlValue,
+        is_v1: bool,
+        schema_info: &SchemaInfo,
+        table_suffix: Option<&str>,
+    ) -> Result<Vec<GreptimeValue>> {
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
         for transform in self.transforms.iter() {
@@ -236,7 +246,17 @@ impl GreptimeTransformer {
                 // let keep us `get` here to be compatible with v1
                 match pipeline_map.get(column_name) {
                     Some(v) => {
-                        let value_data = coerce_value(v, transform)?;
+                        let json_settings = if transform.type_ == ColumnDataType::Json
+                            && matches!(v, VrlValue::Array(_) | VrlValue::Object(_))
+                        {
+                            schema_info.json_settings_for_column(
+                                field.target_or_input_field(),
+                                table_suffix,
+                            )?
+                        } else {
+                            None
+                        };
+                        let value_data = coerce_value(v, transform, json_settings.as_ref())?;
                         // every transform fields has only one output field
                         values[output_index] = GreptimeValue { value_data };
                     }
@@ -274,6 +294,12 @@ impl GreptimeTransformer {
 
     pub fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
         &self.schema
+    }
+
+    pub fn has_json_transform(&self) -> bool {
+        self.transforms
+            .iter()
+            .any(|transform| transform.type_ == ColumnDataType::Json)
     }
 
     pub fn transforms_mut(&mut self) -> &mut Transforms {
@@ -348,8 +374,8 @@ pub struct SchemaInfo {
     pub schema: Vec<ColumnMetadata>,
     /// index of the column name
     pub index: HashMap<String, usize>,
-    /// The pipeline's corresponding table (if already created). Useful to retrieve column schemas.
-    table: Option<Arc<Table>>,
+    /// Tables already looked up, keyed by their resolved suffix. Missing tables are cached as None.
+    tables: HashMap<String, Option<Arc<Table>>>,
 }
 
 impl SchemaInfo {
@@ -357,7 +383,7 @@ impl SchemaInfo {
         Self {
             schema: Vec::with_capacity(capacity),
             index: HashMap::with_capacity(capacity),
-            table: None,
+            tables: HashMap::new(),
         }
     }
 
@@ -369,16 +395,33 @@ impl SchemaInfo {
         Self {
             schema: schema_list.into_iter().map(Into::into).collect(),
             index,
-            table: None,
+            tables: HashMap::new(),
         }
     }
 
     pub fn set_table(&mut self, table: Option<Arc<Table>>) {
-        self.table = table;
+        self.set_table_for_suffix(String::new(), table);
+    }
+
+    pub fn has_table_for_suffix(&self, table_suffix: &str) -> bool {
+        self.tables.contains_key(table_suffix)
+    }
+
+    pub fn set_table_for_suffix(&mut self, table_suffix: String, table: Option<Arc<Table>>) {
+        self.tables.insert(table_suffix, table);
+    }
+
+    fn table_for_suffix(&self, table_suffix: Option<&str>) -> Option<&Arc<Table>> {
+        let table_suffix = table_suffix.unwrap_or_default();
+        match self.tables.get(table_suffix) {
+            Some(table) => table.as_ref(),
+            None if !table_suffix.is_empty() => self.tables.get("").and_then(Option::as_ref),
+            None => None,
+        }
     }
 
     fn find_column_schema_in_table(&self, column_name: &str) -> Option<ColumnMetadata> {
-        if let Some(table) = &self.table
+        if let Some(table) = self.table_for_suffix(None)
             && let Some(i) = table.schema_ref().column_index_by_name(column_name)
         {
             let column_schema = table.schema_ref().column_schemas()[i].clone();
@@ -397,6 +440,30 @@ impl SchemaInfo {
             })
         } else {
             None
+        }
+    }
+
+    fn json_settings_for_column(
+        &self,
+        column_name: &str,
+        table_suffix: Option<&str>,
+    ) -> Result<Option<JsonSettings>> {
+        let Some(column_schema) = self
+            .table_for_suffix(table_suffix)
+            .and_then(|table| table.schema_ref().column_schema_by_name(column_name))
+        else {
+            return Ok(None);
+        };
+        if !column_schema.data_type.is_json2() {
+            return Ok(None);
+        }
+
+        if let Some(extension) = column_schema.extension_type::<Json2ExtensionType>()? {
+            Ok(Some(extension.metadata().json_settings().clone()))
+        } else {
+            Ok(Some(
+                parse_legacy_json2_settings(column_schema.metadata())?.unwrap_or_default(),
+            ))
         }
     }
 
@@ -499,12 +566,12 @@ pub(crate) fn values_to_rows(
         // Single object: extract ContextOpt and table_suffix
         let mut result = std::collections::HashMap::new();
 
-        let mut opt = match ContextOpt::from_pipeline_map_to_opt(&mut values) {
+        let table_suffix = ContextOpt::resolve_table_suffix(tablesuffix_template, &values);
+        let opt = match ContextOpt::from_pipeline_map_to_opt(&mut values) {
             Ok(r) => r,
             Err(e) => return if skip_error { Ok(result) } else { Err(e) },
         };
 
-        let table_suffix = opt.resolve_table_suffix(tablesuffix_template, &values);
         let row = match values_to_row(schema_info, values, pipeline_ctx, row, need_calc_ts) {
             Ok(r) => r,
             Err(e) => return if skip_error { Ok(result) } else { Err(e) },
@@ -528,11 +595,11 @@ pub(crate) fn values_to_rows(
         }
 
         // Extract ContextOpt and table_suffix for this element
-        let mut opt = unwrap_or_continue_if_err!(
+        let table_suffix = ContextOpt::resolve_table_suffix(tablesuffix_template, &value);
+        let opt = unwrap_or_continue_if_err!(
             ContextOpt::from_pipeline_map_to_opt(&mut value),
             skip_error
         );
-        let table_suffix = opt.resolve_table_suffix(tablesuffix_template, &value);
         let transformed_row = unwrap_or_continue_if_err!(
             values_to_row(schema_info, value, pipeline_ctx, row.clone(), need_calc_ts),
             skip_error
@@ -691,35 +758,13 @@ fn resolve_value(
         }
 
         VrlValue::Array(_) | VrlValue::Object(_) => {
-            let is_json2 = schema_info
-                .find_column_schema_in_table(&column_name)
-                // TODO(LFC): Default to JSON2 for auto-created tables.
-                .is_some_and(|x| {
-                    matches!(
-                        &x.column_schema.data_type,
-                        ConcreteDataType::Json(column_type) if column_type.is_json2()
-                    )
-                });
+            let json_settings = schema_info.json_settings_for_column(&column_name, None)?;
 
-            let value = if is_json2 {
+            let value = if let Some(json_settings) = json_settings {
                 let value: serde_json::Value = value.try_into().map_err(|e: StdError| {
                     CoerceIncompatibleTypesSnafu { msg: e.to_string() }.build()
                 })?;
-                let value =
-                    if let Some(column) = schema_info.find_column_schema_in_table(&column_name) {
-                        if let Some(extension) = column
-                            .column_schema
-                            .extension_type::<Json2ExtensionType>()?
-                        {
-                            extension.metadata().json_settings().encode(value)?
-                        } else {
-                            parse_legacy_json2_settings(column.column_schema.metadata())?
-                                .unwrap_or_default()
-                                .encode(value)?
-                        }
-                    } else {
-                        JsonSettings::default().encode(value)?
-                    };
+                let value = json_settings.encode(value)?;
 
                 resolve_schema(
                     index,
@@ -907,7 +952,7 @@ pub fn flatten_object(object: VrlValue, max_nested_levels: usize) -> Result<VrlV
     Ok(VrlValue::Object(flattened))
 }
 
-fn vrl_value_to_serde_json(value: &VrlValue) -> serde_json_crate::Value {
+pub(crate) fn vrl_value_to_serde_json(value: &VrlValue) -> serde_json_crate::Value {
     match value {
         VrlValue::Null => serde_json_crate::Value::Null,
         VrlValue::Boolean(b) => serde_json_crate::Value::Bool(*b),
@@ -980,9 +1025,106 @@ fn do_flatten_object(
 #[cfg(test)]
 mod tests {
     use api::v1::SemanticType;
+    use common_recordbatch::RecordBatch;
+    use datatypes::extension::json::JsonMetadata;
+    use datatypes::json::JsonTypeHint;
+    use datatypes::schema::{ColumnSchema as DatatypeColumnSchema, Schema};
+    use table::test_util::MemTable;
 
     use super::*;
     use crate::{PipelineDefinition, identity_pipeline};
+
+    #[test]
+    fn test_transform_json2_uses_destination_table_settings() {
+        let table = |name: &str, settings: JsonSettings, sample: serde_json::Value| {
+            let data_type = settings.encode(sample).unwrap().data_type();
+            let mut column_schema = DatatypeColumnSchema::new("payload", data_type, true);
+            column_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(
+                JsonMetadata::new(settings),
+            )));
+            MemTable::table(
+                name,
+                RecordBatch::new_empty(Arc::new(Schema::new(vec![column_schema]))),
+            )
+        };
+        let int_settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["age".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                nullable: false,
+                default_constraint: None,
+                inverted_index: false,
+            }],
+            None,
+        )
+        .unwrap();
+        let mut schema_info = SchemaInfo::default();
+        schema_info.set_table(Some(table(
+            "events",
+            int_settings,
+            serde_json::json!({"age": 42}),
+        )));
+        let string_settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["age".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                nullable: false,
+                default_constraint: None,
+                inverted_index: false,
+            }],
+            None,
+        )
+        .unwrap();
+        schema_info.set_table_for_suffix(
+            "_mobile".to_string(),
+            Some(table(
+                "events_mobile",
+                string_settings,
+                serde_json::json!({"age": "42"}),
+            )),
+        );
+
+        let pipeline = crate::parse(&crate::Content::Yaml(
+            r#"
+transform:
+  - field: source, payload
+    type: json2
+table_suffix: _${device}
+"#,
+        ))
+        .unwrap();
+        let (pipeline, _, pipeline_definition, pipeline_params) = crate::setup_pipeline!(pipeline);
+        let pipeline_context =
+            PipelineContext::new(&pipeline_definition, &pipeline_params, Channel::Unknown);
+
+        let error = pipeline
+            .exec_mut(
+                serde_json::json!({"source": {"age": "42"}}).into(),
+                &pipeline_context,
+                &mut schema_info,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("does not match JSON2 type hint"),
+            "{error:?}"
+        );
+
+        let mut rows = pipeline
+            .exec_mut(
+                serde_json::json!({"source": {"age": "42"}, "device": "mobile"}).into(),
+                &pipeline_context,
+                &mut schema_info,
+            )
+            .unwrap()
+            .into_transformed()
+            .unwrap();
+        let (row, table_suffix) = rows.swap_remove(0);
+        assert_eq!(table_suffix.as_deref(), Some("_mobile"));
+        assert!(matches!(
+            &row.values[0].value_data,
+            Some(ValueData::JsonValue(_))
+        ));
+    }
 
     #[test]
     fn test_identify_pipeline() {

@@ -69,10 +69,6 @@ pub struct ContextOpt {
 
     // reset the schema in query context
     schema: Option<String>,
-
-    // pipeline options, not set in query context
-    // can be removed before the end of the pipeline execution
-    table_suffix: Option<String>,
 }
 
 impl ContextOpt {
@@ -112,9 +108,7 @@ impl ContextOpt {
                     GREPTIME_SKIP_WAL => {
                         opt.skip_wal = Some(v);
                     }
-                    GREPTIME_TABLE_SUFFIX => {
-                        opt.table_suffix = Some(v);
-                    }
+                    GREPTIME_TABLE_SUFFIX => {}
                     _ => {}
                 }
             }
@@ -123,12 +117,13 @@ impl ContextOpt {
     }
 
     pub(crate) fn resolve_table_suffix(
-        &mut self,
         table_suffix: Option<&TableSuffixTemplate>,
         pipeline_map: &VrlValue,
     ) -> Option<String> {
-        self.table_suffix
-            .take()
+        pipeline_map
+            .as_object()
+            .and_then(|map| map.get(GREPTIME_TABLE_SUFFIX))
+            .map(|value| value.to_string_lossy().to_string())
             .or_else(|| table_suffix.and_then(|s| s.apply(pipeline_map)))
     }
 

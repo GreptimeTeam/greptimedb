@@ -196,7 +196,8 @@ impl TransformIndexOptions {
 // ColumnDataType::TimestampMicrosecond
 // ColumnDataType::TimestampMillisecond
 // ColumnDataType::TimestampSecond
-// ColumnDataType::Binary
+// ColumnDataType::Binary (JSONB)
+// ColumnDataType::Json (JSON2)
 
 impl Transform {
     pub(crate) fn get_default(&self) -> Option<&ValueData> {
