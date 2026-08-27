@@ -1090,10 +1090,6 @@ impl HttpServer {
                     "/workload_scheduler/weights",
                     routing::post(workload_scheduler::set_weights_handler),
                 )
-                .route(
-                    "/workload_scheduler/max_concurrent_polls",
-                    routing::post(workload_scheduler::set_max_concurrent_polls_handler),
-                )
                 .route("/enable_trace", routing::post(dyn_trace::dyn_trace_handler))
                 .nest(
                     "/prof",
@@ -1578,7 +1574,6 @@ mod test {
     use axum::routing::{get, post};
     use common_query::{Output, OutputData};
     use common_recordbatch::RecordBatches;
-    use common_runtime::global::{RuntimeOptions, WorkloadSchedulerOptions};
     use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -1765,8 +1760,7 @@ mod test {
             );
         }
 
-        // Debug routes, including the scheduler toggle, are also hidden from
-        // the dedicated API listener.
+        // Debug routes are also hidden from the dedicated API listener.
         assert_eq!(
             api_client
                 .post("/debug/workload_scheduler/enabled")
@@ -1776,143 +1770,15 @@ mod test {
                 .status(),
             StatusCode::NOT_FOUND
         );
-    }
-
-    #[tokio::test]
-    pub async fn test_workload_scheduler_constructed_http_lifecycle() {
-        // This test is intentionally runnable in isolation: the common-runtime
-        // globals are process-wide and must be initialized before any request
-        // reaches a scheduler handler. The exact test command below gives it a
-        // fresh test process.
-        let runtime_options = RuntimeOptions {
-            global_rt_size: 1,
-            compact_rt_size: 1,
-            compact_rt_max_blocking_threads: 1,
-            experimental_workload_scheduler: WorkloadSchedulerOptions {
-                enable: true,
-                max_concurrent_polls: 2,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        common_runtime::init_global_runtimes(&runtime_options);
-
-        let (tx, _rx) = mpsc::channel(100);
-        let app = make_test_app(tx);
-        let client = TestClient::new(app).await;
-
-        let initial = client.get("/debug/workload_scheduler").send().await;
-        assert_eq!(initial.status(), StatusCode::OK);
-        let initial: serde_json::Value = initial.json().await;
-        assert_eq!(initial["enabled"], true);
-        assert!(initial["max_concurrent_polls"].is_number());
-        assert!(initial["classes"].is_object());
-
-        common_runtime::spawn_query(async {}).await.unwrap();
-        common_runtime::spawn_ingest(async {}).await.unwrap();
-
-        let after_tasks = client.get("/debug/workload_scheduler").send().await;
-        assert_eq!(after_tasks.status(), StatusCode::OK);
-        let after_tasks: serde_json::Value = after_tasks.json().await;
-        assert!(
-            after_tasks["classes"]["query"]["tasks"]
-                .as_u64()
-                .is_some_and(|tasks| tasks > 0)
-        );
-        assert!(
-            after_tasks["classes"]["write"]["tasks"]
-                .as_u64()
-                .is_some_and(|tasks| tasks > 0)
-        );
-
-        let disabled = client
-            .post("/debug/workload_scheduler/enabled")
-            .body("false")
-            .send()
-            .await;
-        assert_eq!(disabled.status(), StatusCode::OK);
-
-        let disabled_status = client.get("/debug/workload_scheduler").send().await;
-        assert_eq!(disabled_status.status(), StatusCode::OK);
-        let disabled_status: serde_json::Value = disabled_status.json().await;
-        assert_eq!(disabled_status["enabled"], false);
         assert_eq!(
-            disabled_status["classes"]["query"]["tasks"],
-            after_tasks["classes"]["query"]["tasks"]
-        );
-        assert_eq!(
-            disabled_status["classes"]["write"]["tasks"],
-            after_tasks["classes"]["write"]["tasks"]
-        );
-        assert_eq!(
-            disabled_status["max_concurrent_polls"],
-            after_tasks["max_concurrent_polls"]
-        );
-
-        let enabled = client
-            .post("/debug/workload_scheduler/enabled")
-            .body("true")
-            .send()
-            .await;
-        assert_eq!(enabled.status(), StatusCode::OK);
-
-        let final_status = client.get("/debug/workload_scheduler").send().await;
-        assert_eq!(final_status.status(), StatusCode::OK);
-        let final_status: serde_json::Value = final_status.json().await;
-        assert_eq!(final_status["enabled"], true);
-        assert!(final_status["classes"].is_object());
-        assert_eq!(
-            final_status["max_concurrent_polls"],
-            disabled_status["max_concurrent_polls"]
-        );
-        assert_eq!(
-            final_status["classes"]["query"]["tasks"],
-            disabled_status["classes"]["query"]["tasks"]
-        );
-        assert_eq!(
-            final_status["classes"]["write"]["tasks"],
-            disabled_status["classes"]["write"]["tasks"]
-        );
-    }
-
-    #[tokio::test]
-    pub async fn test_workload_scheduler_enabled_body_syntax_and_errors() {
-        let (tx, _rx) = mpsc::channel(100);
-        let app = make_test_app(tx);
-        let client = TestClient::new(app).await;
-
-        // The endpoint consumes a JSON boolean body, rather than a form or a
-        // query parameter. Bare booleans must get past JSON parsing even when
-        // the scheduler was not constructed for this test process. Since the
-        // process-global scheduler cannot be constructed after initialization,
-        // this test deliberately does not assert an enabled/disabled sequence.
-        for body in ["true", "false"] {
-            let valid = client
-                .post("/debug/workload_scheduler/enabled")
-                .body(body)
+            api_client
+                .post("/debug/workload_scheduler/weights")
+                .body(r#"{"query":3,"write":7}"#)
                 .send()
-                .await;
-            assert!(matches!(
-                valid.status(),
-                StatusCode::OK | StatusCode::BAD_REQUEST
-            ));
-            if valid.status() == StatusCode::BAD_REQUEST {
-                let valid_body = valid.text().await;
-                assert!(valid_body.contains("workload scheduler was not constructed at startup"));
-                assert!(!valid_body.contains("Failed to parse payload as json"));
-            }
-        }
-
-        for body in ["\"true\"", "not-json"] {
-            let invalid = client
-                .post("/debug/workload_scheduler/enabled")
-                .body(body)
-                .send()
-                .await;
-            assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-            let invalid_body = invalid.text().await;
-            assert!(invalid_body.contains("Failed to parse payload as json"));
-        }
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[test]

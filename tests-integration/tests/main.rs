@@ -40,7 +40,6 @@ mod mysql;
 mod reconciliation_event;
 mod view_ddl_event;
 mod wal_prune_event;
-mod workload_scheduler;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 

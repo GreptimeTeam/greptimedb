@@ -429,7 +429,7 @@ impl StartCommand {
             Some(&opts.component.slow_query),
         );
 
-        common_runtime::init_global_runtimes(&opts.runtime);
+        common_runtime::init_standalone_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);

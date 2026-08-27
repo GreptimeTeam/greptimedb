@@ -70,7 +70,6 @@ impl InstanceBuilder {
             None,
         );
 
-        common_runtime::init_global_runtimes(&opts.runtime);
         common_runtime::init_datanode_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();

@@ -28,7 +28,6 @@
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
 | `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable the scheduler. Disabled by default. |
-| `runtime.experimental_workload_scheduler.max_concurrent_polls` | Integer | `0` | Maximum task polls admitted to Tokio at once. Zero uses 4 * global_rt_size. |
 | `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
 | `runtime.experimental_workload_scheduler.write_weight` | Integer | `8` | Relative write share while both query and write workloads are backlogged. |
 | `http` | -- | -- | The HTTP server options. |
@@ -523,7 +522,6 @@
 | `runtime.ingest_rt_size` | Integer | `8` | The number of threads to execute datanode ingestion operations. |
 | `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
 | `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable the scheduler. Disabled by default. |
-| `runtime.experimental_workload_scheduler.max_concurrent_polls` | Integer | `0` | Maximum task polls admitted to Tokio at once. Zero uses 4 * global_rt_size. |
 | `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
 | `runtime.experimental_workload_scheduler.write_weight` | Integer | `8` | Relative write share while both query and write workloads are backlogged. |
 | `meta_client` | -- | -- | The metasrv client options. |

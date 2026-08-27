@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! Global runtimes
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::{Mutex, Once};
@@ -44,23 +45,18 @@ pub(crate) const WRITE_TASK_CLASS: TaskClass = TaskClass::new(2);
 pub struct WorkloadSchedulerOptions {
     /// Enables policy-controlled query and write task spawning.
     pub enable: bool,
-    /// Maximum polls admitted to Tokio at once. Zero uses four times
-    /// `global_rt_size` to keep worker queues fed without making them
-    /// effectively unbounded.
-    pub max_concurrent_polls: usize,
     /// Relative share for query polls while writes are also backlogged.
-    pub query_weight: u32,
+    pub query_weight: NonZeroU32,
     /// Relative share for write polls while queries are also backlogged.
-    pub write_weight: u32,
+    pub write_weight: NonZeroU32,
 }
 
 impl Default for WorkloadSchedulerOptions {
     fn default() -> Self {
         Self {
             enable: false,
-            max_concurrent_polls: 0,
-            query_weight: 2,
-            write_weight: 8,
+            query_weight: NonZeroU32::new(2).unwrap(),
+            write_weight: NonZeroU32::new(8).unwrap(),
         }
     }
 }
@@ -282,83 +278,55 @@ static GLOBAL_RUNTIMES: Lazy<GlobalRuntimes> = Lazy::new(|| {
 
 static CONFIG_RUNTIMES: Lazy<Mutex<ConfigRuntimes>> =
     Lazy::new(|| Mutex::new(ConfigRuntimes::default()));
+static START: Once = Once::new();
 
-/// Initialize the global runtimes
+/// Initialize runtimes for frontend, metasrv, and flownode processes.
 ///
-/// # Panics
-/// Panics when the global runtimes are already initialized.
-/// You should call this function before using any runtime functions.
+/// Query and ingest work share the global runtime and no workload scheduler is
+/// constructed for these process roles.
 pub fn init_global_runtimes(options: &RuntimeOptions) {
-    static START: Once = Once::new();
-    START.call_once(move || {
+    START.call_once(|| {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
         assert!(!c.already_init, "Global runtimes already initialized");
-        c.global_runtime = Some(create_runtime(
-            "global",
-            "global-worker",
-            options.global_rt_size,
-        ));
-        c.compact_runtime = Some(create_compact_runtime(
-            "compact",
-            "compact-worker",
-            options.compact_rt_size,
-            options.compact_rt_max_blocking_threads,
-        ));
-        c.hb_runtime = Some(create_runtime("heartbeat", "hb-worker", HB_WORKERS));
-        c.workload_scheduler = create_workload_scheduler(options);
+        init_common_runtimes(&mut c, options);
+        c.already_init = true;
     });
 }
 
-fn create_workload_scheduler(options: &RuntimeOptions) -> Option<Scheduler> {
-    let scheduler_options = &options.experimental_workload_scheduler;
-    if !scheduler_options.enable {
-        return None;
-    }
-    if scheduler_options.query_weight == 0 || scheduler_options.write_weight == 0 {
-        warn!(
-            "The experimental workload scheduler is disabled because query_weight and \
-             write_weight must both be greater than zero"
-        );
-        return None;
-    }
-
-    let max_concurrent_polls = if scheduler_options.max_concurrent_polls == 0 {
-        options.global_rt_size.saturating_mul(4)
-    } else {
-        scheduler_options.max_concurrent_polls
-    };
-    if max_concurrent_polls == 0 {
-        warn!(
-            "The experimental workload scheduler is disabled because max_concurrent_polls \
-             resolved to zero"
-        );
-        return None;
-    }
-
-    let scheduler = Scheduler::builder()
-        .max_concurrent_polls(max_concurrent_polls)
-        .weight(QUERY_TASK_CLASS, scheduler_options.query_weight)
-        .weight(WRITE_TASK_CLASS, scheduler_options.write_weight)
-        .build();
-    register_workload_scheduler_metrics(scheduler.clone());
-    info!(
-        "Enabled the experimental workload scheduler: max_concurrent_polls={}, \
-         query_weight={}, write_weight={}",
-        max_concurrent_polls, scheduler_options.query_weight, scheduler_options.write_weight
-    );
-    Some(scheduler)
-}
-
-/// Initialize the datanode-specific global runtimes.
+/// Initialize runtimes for a standalone process.
 ///
-/// # Panics
-/// Panics when the global runtimes are already initialized.
-/// You should call this function before using any runtime functions.
-pub fn init_datanode_runtimes(options: &RuntimeOptions) {
-    static START: Once = Once::new();
-    START.call_once(move || {
+/// Query and ingest work share the global runtime. The scheduler is always
+/// constructed, with the global runtime size as its internal bound, and starts
+/// enabled according to configuration.
+pub fn init_standalone_runtimes(options: &RuntimeOptions) {
+    START.call_once(|| {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
         assert!(!c.already_init, "Global runtimes already initialized");
+        init_common_runtimes(&mut c, options);
+        c.workload_scheduler = Some(create_workload_scheduler(options, options.global_rt_size));
+        c.already_init = true;
+    });
+}
+
+/// Initialize runtimes for a datanode process.
+///
+/// Query and ingest use dedicated runtimes. The scheduler is always
+/// constructed with their checked combined size as its internal bound, and
+/// starts enabled according to configuration.
+///
+/// # Panics
+///
+/// Panics if the configured query and ingest runtime sizes overflow `usize`
+/// when combined.
+pub fn init_datanode_runtimes(options: &RuntimeOptions) {
+    let capacity = options
+        .query_rt_size
+        .checked_add(options.ingest_rt_size)
+        .expect("datanode workload scheduler runtime capacity overflowed usize");
+    START.call_once(|| {
+        let mut c = CONFIG_RUNTIMES.lock().unwrap();
+        assert!(!c.already_init, "Global runtimes already initialized");
+        init_common_runtimes(&mut c, options);
         c.query_runtime = Some(create_runtime(
             "query",
             "query-worker",
@@ -369,7 +337,49 @@ pub fn init_datanode_runtimes(options: &RuntimeOptions) {
             "ingest-worker",
             options.ingest_rt_size,
         ));
+        c.workload_scheduler = Some(create_workload_scheduler(options, capacity));
+        c.already_init = true;
     });
+}
+
+fn init_common_runtimes(c: &mut ConfigRuntimes, options: &RuntimeOptions) {
+    c.global_runtime = Some(create_runtime(
+        "global",
+        "global-worker",
+        options.global_rt_size,
+    ));
+    c.compact_runtime = Some(create_compact_runtime(
+        "compact",
+        "compact-worker",
+        options.compact_rt_size,
+        options.compact_rt_max_blocking_threads,
+    ));
+    c.hb_runtime = Some(create_runtime("heartbeat", "hb-worker", HB_WORKERS));
+}
+
+fn create_workload_scheduler(options: &RuntimeOptions, capacity: usize) -> Scheduler {
+    assert!(
+        capacity > 0,
+        "experimental workload scheduler capacity must be greater than zero"
+    );
+    let scheduler_options = &options.experimental_workload_scheduler;
+    let scheduler = Scheduler::builder()
+        // This is deliberately an internal scheduler bound, not public config.
+        .max_concurrent_polls(capacity)
+        .weight(QUERY_TASK_CLASS, scheduler_options.query_weight.get())
+        .weight(WRITE_TASK_CLASS, scheduler_options.write_weight.get())
+        .build();
+    scheduler.set_enabled(scheduler_options.enable);
+    register_workload_scheduler_metrics(scheduler.clone());
+    info!(
+        "Constructed the experimental workload scheduler: internal_capacity={}, \
+         query_weight={}, write_weight={}, enabled={}",
+        capacity,
+        scheduler_options.query_weight,
+        scheduler_options.write_weight,
+        scheduler_options.enable
+    );
+    scheduler
 }
 
 macro_rules! define_global_runtime_spawn {
@@ -436,6 +446,22 @@ pub fn set_workload_scheduler_enabled(enabled: bool) -> bool {
     true
 }
 
+/// Sets the query and write weights atomically. Returns `false` when no
+/// scheduler was constructed at startup.
+pub fn set_workload_scheduler_weights(query: NonZeroU32, write: NonZeroU32) -> bool {
+    let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
+        warn!(
+            "The experimental workload scheduler was not constructed at startup; ignoring query_weight={query}, write_weight={write}"
+        );
+        return false;
+    };
+
+    let weights = BTreeMap::from([(QUERY_TASK_CLASS, query), (WRITE_TASK_CLASS, write)]);
+    scheduler.set_weights(&weights);
+    info!("Experimental workload scheduler weights query={query}, write={write}");
+    true
+}
+
 /// Returns scheduler counters when the experimental workload scheduler was
 /// constructed at startup, including while it is dynamically disabled.
 pub fn workload_scheduler_stats() -> Option<SchedulerStats> {
@@ -443,60 +469,6 @@ pub fn workload_scheduler_stats() -> Option<SchedulerStats> {
         .workload_scheduler
         .as_ref()
         .map(Scheduler::stats)
-}
-
-/// Dynamically adjusts the query and write weights of the experimental workload
-/// scheduler at runtime. Returns `false` and leaves the scheduler unchanged when
-/// it was not constructed at startup or either weight is zero.
-pub fn set_workload_scheduler_weights(query_weight: u32, write_weight: u32) -> bool {
-    let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
-        warn!(
-            "The experimental workload scheduler was not constructed at startup; ignoring query_weight={}, \
-             write_weight={}",
-            query_weight, write_weight
-        );
-        return false;
-    };
-
-    let Some(query_weight) = NonZeroU32::new(query_weight) else {
-        warn!("Refusing to set workload scheduler weights: query_weight must be greater than zero");
-        return false;
-    };
-    let Some(write_weight) = NonZeroU32::new(write_weight) else {
-        warn!("Refusing to set workload scheduler weights: write_weight must be greater than zero");
-        return false;
-    };
-
-    scheduler.set_weight(QUERY_TASK_CLASS, query_weight);
-    scheduler.set_weight(WRITE_TASK_CLASS, write_weight);
-    info!(
-        "Updated experimental workload scheduler weights: query_weight={query_weight}, \
-         write_weight={write_weight}"
-    );
-    true
-}
-
-/// Dynamically adjusts the maximum number of concurrent polls admitted to
-/// Tokio by the experimental workload scheduler at runtime. Returns `false`
-/// and leaves the scheduler unchanged when it was not constructed at startup
-/// or the limit is zero.
-pub fn set_workload_scheduler_max_concurrent_polls(limit: usize) -> bool {
-    let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
-        warn!(
-            "The experimental workload scheduler was not constructed at startup; ignoring \
-             max_concurrent_polls={limit}"
-        );
-        return false;
-    };
-
-    if limit == 0 {
-        warn!("Refusing to set workload scheduler max_concurrent_polls to zero");
-        return false;
-    }
-
-    scheduler.set_max_concurrent_polls(limit);
-    info!("Updated experimental workload scheduler max_concurrent_polls to {limit}");
-    true
 }
 
 #[cfg(test)]
@@ -621,18 +593,14 @@ mod tests {
     }
 
     #[test]
-    fn test_workload_scheduler_default_admission_window() {
-        let mut options = RuntimeOptions {
-            global_rt_size: 3,
-            ..RuntimeOptions::default()
-        };
-        options.experimental_workload_scheduler.enable = true;
+    fn test_workload_scheduler_builds_with_initial_enabled_state() {
+        let mut options = RuntimeOptions::default();
+        options.experimental_workload_scheduler.enable = false;
+        let scheduler = create_workload_scheduler(&options, options.global_rt_size);
+        assert!(!scheduler.is_enabled());
 
-        let scheduler = create_workload_scheduler(&options).unwrap();
-        let stats = scheduler.stats();
-        assert_eq!(12, stats.max_concurrent_polls);
-        assert_eq!(2, stats.classes[&QUERY_TASK_CLASS].weight);
-        assert_eq!(8, stats.classes[&WRITE_TASK_CLASS].weight);
+        scheduler.set_enabled(true);
+        assert!(scheduler.is_enabled());
     }
 
     #[test]
