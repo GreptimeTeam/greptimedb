@@ -2898,3 +2898,95 @@ async fn test_alter_time_index_widen_old_sst_between_inlist() {
         .await,
     );
 }
+
+/// Regression test: the range-result-cache key builder must tolerate a
+/// partition `FileTimeRange` whose unit differs from the implied range's
+/// (region) unit after the time index unit was widened. The key builder used
+/// to `assert_eq!` the units and panic for any scan combining a tag filter
+/// (fingerprinting is tag-gated) with a time filter over an old-unit SST.
+#[tokio::test]
+async fn test_alter_time_index_widen_range_cache_key_mixed_units() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Ten rows in millisecond resolution: ts = 0s..9s, tag = "0".."9".
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 10),
+        },
+    )
+    .await;
+    // One SST written in the old (ms) unit.
+    flush_region(&engine, region_id, None).await;
+
+    // Widen the time index unit to microsecond.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::ModifyColumnTypes {
+                    columns: vec![ModifyColumnType {
+                        column_name: "ts".to_string(),
+                        target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    // A tag filter plus a time filter whose implied range does NOT cover the
+    // file range: the cache key keeps the time filters; both predicates are
+    // applied exactly against the old-unit SST.
+    let actual = scan_ts_and_field(
+        &engine,
+        region_id,
+        vec![
+            col("tag_0").eq(lit("7")),
+            col("ts").gt(ts_us_lit(2_500_000)),
+        ],
+    )
+    .await;
+    assert_eq!(vec![(7_000_000, 7.0)], actual);
+
+    // A time filter whose implied range covers the whole (old-unit) file
+    // range: the key builder compares instants across the unit mismatch to
+    // drop the time filters from the cache key; results stay exact.
+    let covering = |lit_us: i64| vec![col("tag_0").eq(lit("7")), col("ts").gt(ts_us_lit(lit_us))];
+    assert_eq!(
+        vec![(7_000_000, 7.0)],
+        scan_ts_and_field(&engine, region_id, covering(-10_000_000)).await
+    );
+    // A different but equally-covering bound resolves to the same cache key
+    // (time filters stripped) and must return the same rows, whether it hits
+    // the range cache or recomputes.
+    assert_eq!(
+        vec![(7_000_000, 7.0)],
+        scan_ts_and_field(&engine, region_id, covering(-20_000_000)).await
+    );
+}
