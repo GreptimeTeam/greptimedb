@@ -30,7 +30,7 @@ use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
-use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{EmptyRecordBatchStream, RecordBatch, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
@@ -80,6 +80,29 @@ pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
 
 /// Whether to fallback to the original plan when failed to push down.
 pub const QUERY_FALLBACK_HINT: &str = "query_fallback";
+
+// An unbounded queue keeps draining source RPCs while mutation RPCs on a shared
+// HTTP/2 connection are pending, trading bounded memory for request liveness.
+async fn forward_record_batches(
+    mut stream: SendableRecordBatchStream,
+    batch_tx: tokio::sync::mpsc::UnboundedSender<Result<RecordBatch>>,
+) -> Result<()> {
+    while let Some(batch) = stream.next().await {
+        match batch.context(CreateRecordBatchSnafu) {
+            Ok(batch) => {
+                if batch_tx.send(Ok(batch)).is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            Err(error) => {
+                let _ = batch_tx.send(Err(error));
+                break;
+            }
+        }
+    }
+    Ok(())
+}
 
 fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
     let mut region_id = None;
@@ -206,7 +229,7 @@ impl DatafusionQueryEngine {
         let Output { data, meta } = self
             .exec_query_plan((*dml.input).clone(), query_ctx.clone())
             .await?;
-        let mut stream = match data {
+        let stream = match data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
             OutputData::Stream(stream) => stream,
             _ => unreachable!(),
@@ -217,53 +240,31 @@ impl DatafusionQueryEngine {
 
         match dml.op {
             WriteOp::Insert(_) => {
-                // An unbounded queue keeps draining source RPCs while sink RPCs on a shared
-                // HTTP/2 connection are pending, trading bounded memory for request liveness.
-                let (batch_tx, mut batch_rx) = tokio::sync::mpsc::unbounded_channel();
-                let producer = async move {
-                    while let Some(batch) = stream.next().await {
-                        let batch = batch.context(CreateRecordBatchSnafu);
-                        let is_err = batch.is_err();
-                        if batch_tx.send(batch).is_err() {
-                            break;
-                        }
-                        if is_err {
-                            break;
-                        }
-                        tokio::task::yield_now().await;
-                    }
-                    Ok::<_, crate::error::Error>(())
-                };
-                let consumer = async {
-                    while let Some(batch) = batch_rx.recv().await {
-                        let batch = batch?;
-                        let column_vectors = batch
-                            .column_vectors(&table_name.to_string(), table.schema())
-                            .map_err(BoxedError::new)
-                            .context(QueryExecutionSnafu)?;
-                        // We ignore the insert op.
-                        let output = self
-                            .insert(&table_name, column_vectors, query_ctx.clone())
-                            .await?;
-                        let (rows, cost) = output.extract_rows_and_cost();
-                        affected_rows += rows;
-                        insert_cost += cost;
-                    }
-                    Ok::<_, crate::error::Error>(())
-                };
-                try_join(producer, consumer).await?;
+                let (batch_tx, batch_rx) = tokio::sync::mpsc::unbounded_channel();
+                let producer = forward_record_batches(stream, batch_tx);
+                let consumer = self.consume_insert_record_batches(
+                    batch_rx,
+                    &table_name,
+                    table.schema(),
+                    query_ctx.clone(),
+                );
+                let ((), (rows, cost)) = try_join(producer, consumer).await?;
+                affected_rows += rows;
+                insert_cost += cost;
             }
             WriteOp::Delete => {
-                while let Some(batch) = stream.next().await {
-                    let batch = batch.context(CreateRecordBatchSnafu)?;
-                    let column_vectors = batch
-                        .column_vectors(&table_name.to_string(), table.schema())
-                        .map_err(BoxedError::new)
-                        .context(QueryExecutionSnafu)?;
-                    affected_rows += self
-                        .delete(&table_name, &table, column_vectors, query_ctx.clone())
-                        .await?;
-                }
+                // Keep DELETE on the same producer/consumer schedule as INSERT so the source
+                // stream can continue draining while mutation RPCs are pending.
+                let (batch_tx, batch_rx) = tokio::sync::mpsc::unbounded_channel();
+                let producer = forward_record_batches(stream, batch_tx);
+                let consumer = self.consume_delete_record_batches(
+                    batch_rx,
+                    &table_name,
+                    &table,
+                    query_ctx.clone(),
+                );
+                let (rows, ()) = try_join(consumer, producer).await?;
+                affected_rows += rows;
             }
             _ => unreachable!("guarded by the 'ensure!' at the beginning"),
         }
@@ -271,6 +272,53 @@ impl DatafusionQueryEngine {
             OutputData::AffectedRows(affected_rows),
             OutputMeta::new(meta.plan, insert_cost),
         ))
+    }
+
+    async fn consume_insert_record_batches(
+        &self,
+        mut batch_rx: tokio::sync::mpsc::UnboundedReceiver<Result<RecordBatch>>,
+        table_name: &ResolvedTableReference,
+        table_schema: Arc<Schema>,
+        query_ctx: QueryContextRef,
+    ) -> Result<(usize, usize)> {
+        let mut affected_rows = 0;
+        let mut insert_cost = 0;
+        while let Some(batch) = batch_rx.recv().await {
+            let batch = batch?;
+            let column_vectors = batch
+                .column_vectors(&table_name.to_string(), table_schema.clone())
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?;
+            // We ignore the insert op.
+            let output = self
+                .insert(table_name, column_vectors, query_ctx.clone())
+                .await?;
+            let (rows, cost) = output.extract_rows_and_cost();
+            affected_rows += rows;
+            insert_cost += cost;
+        }
+        Ok((affected_rows, insert_cost))
+    }
+
+    async fn consume_delete_record_batches(
+        &self,
+        mut batch_rx: tokio::sync::mpsc::UnboundedReceiver<Result<RecordBatch>>,
+        table_name: &ResolvedTableReference,
+        table: &TableRef,
+        query_ctx: QueryContextRef,
+    ) -> Result<usize> {
+        let mut affected_rows = 0;
+        while let Some(batch) = batch_rx.recv().await {
+            let batch = batch?;
+            let column_vectors = batch
+                .column_vectors(&table_name.to_string(), table.schema())
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?;
+            affected_rows += self
+                .delete(table_name, table, column_vectors, query_ctx.clone())
+                .await?;
+        }
+        Ok(affected_rows)
     }
 
     #[tracing::instrument(skip_all)]
