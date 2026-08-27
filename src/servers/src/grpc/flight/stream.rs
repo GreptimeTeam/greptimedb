@@ -576,6 +576,17 @@ mod test {
             }
             other => panic!("expected record batch after pending metrics, got {other:?}"),
         }
+
+        drop(tx);
+        let final_metrics_data = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            decoder.try_decode(&final_metrics_data).unwrap().unwrap(),
+            FlightMessage::Metrics(_)
+        ));
     }
 
     #[tokio::test]

@@ -526,6 +526,32 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_record_batch_stream_captures_final_metrics_after_record_batch() {
+        let schema = test_schema();
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
+        )
+        .unwrap();
+        let final_metrics = serde_json::to_string(&RecordBatchMetrics {
+            elapsed_compute: 99,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut recordbatches = recordbatches_from_flight_message_stream(stream::iter(vec![
+            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+            Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+            Ok(FlightMessage::Metrics(final_metrics)),
+        ]))
+        .await
+        .unwrap();
+
+        assert_eq!(recordbatches.next().await.unwrap().unwrap().num_rows(), 1);
+        assert!(recordbatches.next().await.is_none());
+        assert_eq!(recordbatches.metrics().unwrap().elapsed_compute, 99);
+    }
+
+    #[tokio::test]
     async fn test_record_batch_stream_exposes_error_after_pre_batch_metrics() {
         let schema = test_schema();
         let mut recordbatches = recordbatches_from_flight_message_stream(stream::iter(vec![

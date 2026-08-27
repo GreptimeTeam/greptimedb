@@ -229,31 +229,52 @@ fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<St
 
 fn is_explain_analyze_verbose(stmt: &Statement) -> bool {
     matches!(stmt, Statement::Explain(explain) if explain.analyze && explain.verbose)
+        || matches!(stmt, Statement::Tql(Tql::Analyze(analyze)) if analyze.is_verbose)
 }
 
 fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
-    let Statement::Explain(explain) = stmt else {
-        return InvalidSqlSnafu {
-            err_msg: "only EXPLAIN ANALYZE VERBOSE statement is supported",
+    match stmt {
+        Statement::Explain(explain) => {
+            ensure!(
+                explain.analyze && explain.verbose,
+                InvalidSqlSnafu {
+                    err_msg: "statement must be EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE"
+                }
+            );
+            match explain.format {
+                None | Some(AnalyzeFormat::JSON) => {
+                    // Keep explicit FORMAT JSON accepted, but pass JSON through
+                    // QueryContext.explain_format instead of the statement to avoid
+                    // the planner's current `EXPLAIN VERBOSE with FORMAT` limitation.
+                    explain.format = None;
+                    Ok(())
+                }
+                Some(_) => InvalidSqlSnafu {
+                    err_msg: "only FORMAT JSON is supported for EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE",
+                }
+                .fail(),
+            }
         }
-        .fail();
-    };
-    ensure!(
-        explain.analyze && explain.verbose,
-        InvalidSqlSnafu {
-            err_msg: "statement must be EXPLAIN ANALYZE VERBOSE"
+        Statement::Tql(Tql::Analyze(analyze)) => {
+            ensure!(
+                analyze.is_verbose,
+                InvalidSqlSnafu {
+                    err_msg: "statement must be EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE"
+                }
+            );
+            match analyze.format {
+                None | Some(AnalyzeFormat::JSON) => {
+                    analyze.format = None;
+                    Ok(())
+                }
+                Some(_) => InvalidSqlSnafu {
+                    err_msg: "only FORMAT JSON is supported for EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE",
+                }
+                .fail(),
+            }
         }
-    );
-    match explain.format {
-        None | Some(AnalyzeFormat::JSON) => {
-            // Keep explicit FORMAT JSON accepted, but pass JSON through
-            // QueryContext.explain_format instead of the statement to avoid the
-            // planner's current `EXPLAIN VERBOSE with FORMAT` limitation.
-            explain.format = None;
-            Ok(())
-        }
-        Some(_) => InvalidSqlSnafu {
-            err_msg: "only FORMAT JSON is supported for analyze stream",
+        _ => InvalidSqlSnafu {
+            err_msg: "only EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE statement is supported",
         }
         .fail(),
     }
@@ -709,7 +730,7 @@ impl Instance {
         ensure!(
             stmts.len() == 1,
             InvalidSqlSnafu {
-                err_msg: "only single EXPLAIN ANALYZE VERBOSE statement is supported"
+                err_msg: "only a single EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE statement is supported"
             }
         );
         let mut stmt = stmts.remove(0);
@@ -1775,6 +1796,9 @@ mod tests {
             "explain analyze select 1",
             "explain analyze verbose format text select 1",
             "explain analyze verbose format graphviz select 1",
+            "TQL ANALYZE (0, 10, '5s') physical_metric",
+            "TQL EXPLAIN VERBOSE (0, 10, '5s') physical_metric",
+            "TQL ANALYZE VERBOSE FORMAT TEXT (0, 10, '5s') physical_metric",
         ] {
             let mut stmts = parse_test_sql(sql);
             assert!(
@@ -1786,16 +1810,19 @@ mod tests {
         for sql in [
             "explain analyze verbose select 1",
             "explain analyze verbose format json select 1",
+            "TQL ANALYZE VERBOSE (0, 10, '5s') physical_metric",
+            "TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') physical_metric",
         ] {
             let mut stmts = parse_test_sql(sql);
             assert!(
                 validate_analyze_stream_statement(&mut stmts[0]).is_ok(),
                 "{sql}"
             );
-            let Statement::Explain(explain) = &stmts[0] else {
-                unreachable!();
-            };
-            assert!(explain.format.is_none());
+            match &stmts[0] {
+                Statement::Explain(explain) => assert!(explain.format.is_none()),
+                Statement::Tql(Tql::Analyze(analyze)) => assert!(analyze.format.is_none()),
+                _ => unreachable!(),
+            }
         }
 
         assert_eq!(
@@ -1806,11 +1833,16 @@ mod tests {
         assert!(is_explain_analyze_verbose(
             &parse_test_sql("explain analyze verbose select 1")[0]
         ));
+        assert!(is_explain_analyze_verbose(
+            &parse_test_sql("TQL ANALYZE VERBOSE (0, 10, '5s') physical_metric")[0]
+        ));
         for sql in [
             "select 1",
             "explain select 1",
             "explain analyze select 1",
             "explain verbose select 1",
+            "TQL ANALYZE (0, 10, '5s') physical_metric",
+            "TQL EXPLAIN VERBOSE (0, 10, '5s') physical_metric",
         ] {
             assert!(
                 !is_explain_analyze_verbose(&parse_test_sql(sql)[0]),
