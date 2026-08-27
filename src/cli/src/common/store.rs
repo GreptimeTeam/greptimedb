@@ -125,6 +125,14 @@ impl StoreConfig {
         }
     }
 
+    /// Sanitize store addrs for logging (redacts passwords in connection strings).
+    fn sanitize_store_addrs(&self) -> Vec<String> {
+        self.store_addrs
+            .iter()
+            .map(|addr| common_meta::kv_backend::util::sanitize_connection_string(addr))
+            .collect()
+    }
+
     /// Builds a [`KvBackendRef`] from the store configuration.
     pub async fn build(&self) -> Result<KvBackendRef, BoxedError> {
         let max_txn_ops = self.max_txn_ops;
@@ -134,7 +142,7 @@ impl StoreConfig {
         } else {
             common_telemetry::info!(
                 "Building kvbackend with store addrs: {:?}, backend: {:?}",
-                store_addrs,
+                &self.sanitize_store_addrs(),
                 self.backend
             );
             let kvbackend = match self.backend {
@@ -213,5 +221,55 @@ impl StoreConfig {
                 Ok(Arc::new(chroot_kvbackend))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_store_addrs_mysql_url() {
+        let config = StoreConfig {
+            store_addrs: vec!["mysql://user:secret123@localhost:3306/greptime".to_string()],
+            ..Default::default()
+        };
+        let sanitized = config.sanitize_store_addrs();
+        assert_eq!(sanitized.len(), 1);
+        assert!(!sanitized[0].contains("secret123"), "password leaked: {}", sanitized[0]);
+        assert!(sanitized[0].contains("***"), "should be redacted: {}", sanitized[0]);
+    }
+
+    #[test]
+    fn test_sanitize_store_addrs_postgres_dsn() {
+        let config = StoreConfig {
+            store_addrs: vec!["host=localhost port=5432 user=postgres password=mypass dbname=greptime".to_string()],
+            ..Default::default()
+        };
+        let sanitized = config.sanitize_store_addrs();
+        assert_eq!(sanitized.len(), 1);
+        assert!(!sanitized[0].contains("mypass"), "password leaked: {}", sanitized[0]);
+        assert!(sanitized[0].contains("***"), "should be redacted: {}", sanitized[0]);
+    }
+
+    #[test]
+    fn test_sanitize_store_addrs_etcd_no_credential() {
+        let config = StoreConfig {
+            store_addrs: vec!["127.0.0.1:2379".to_string()],
+            ..Default::default()
+        };
+        let sanitized = config.sanitize_store_addrs();
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0], "127.0.0.1:2379");
+    }
+
+    #[test]
+    fn test_sanitize_store_addrs_empty() {
+        let config = StoreConfig {
+            store_addrs: vec![],
+            ..Default::default()
+        };
+        let sanitized = config.sanitize_store_addrs();
+        assert!(sanitized.is_empty());
     }
 }
