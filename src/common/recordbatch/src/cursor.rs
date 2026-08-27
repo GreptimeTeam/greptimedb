@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use tokio::sync::Mutex;
 
@@ -28,12 +29,15 @@ struct Inner {
 
 /// A cursor on RecordBatchStream that fetches data batch by batch
 pub struct RecordBatchStreamCursor {
+    schema: SchemaRef,
     inner: Mutex<Inner>,
 }
 
 impl RecordBatchStreamCursor {
     pub fn new(stream: SendableRecordBatchStream) -> RecordBatchStreamCursor {
+        let schema = stream.schema();
         Self {
+            schema,
             inner: Mutex::new(Inner {
                 stream,
                 current_row_index: 0,
@@ -41,6 +45,11 @@ impl RecordBatchStreamCursor {
                 total_rows_in_current_batch: 0,
             }),
         }
+    }
+
+    /// Returns the schema of the underlying record batch stream.
+    pub fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     /// Take `size` of row from the `RecordBatchStream` and create a new

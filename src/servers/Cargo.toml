@@ -167,8 +167,8 @@ servers = { workspace = true, features = ["testing"] }
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
-tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.12"
+tokio-postgres.workspace = true
+tokio-postgres-rustls = "0.14"
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
