@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use api::v1::greptime_request::Request;
+use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputWithMetrics};
 use common_error::ext::BoxedError;
@@ -337,6 +338,53 @@ impl FrontendClient {
         .with_context(|_| CreateSinkTableSnafu {
             create: create.clone(),
         })
+    }
+
+    /// Execute a SQL statement on the frontend.
+    pub async fn sql(&self, catalog: &str, schema: &str, sql: &str) -> Result<Output, Error> {
+        match self {
+            FrontendClient::Distributed { .. } => {
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+                db.database
+                    .sql(sql)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)
+            }
+            FrontendClient::Standalone {
+                database_client, ..
+            } => {
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .build();
+                let ctx = Arc::new(ctx);
+                {
+                    let database_client = {
+                        database_client
+                            .handler
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .context(UnexpectedSnafu {
+                                reason: "Standalone's frontend instance is not set",
+                            })?
+                            .upgrade()
+                            .context(UnexpectedSnafu {
+                                reason: "Failed to upgrade database client",
+                            })?
+                    };
+                    let req = Request::Query(QueryRequest {
+                        query: Some(Query::Sql(sql.to_string())),
+                    });
+                    database_client
+                        .do_query(req, ctx)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)
+                }
+            }
+        }
     }
 
     /// Execute a flow query and return terminal metrics. `snapshot_seqs` are
