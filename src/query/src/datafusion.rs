@@ -44,6 +44,7 @@ use datafusion_expr::{
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
+use futures_util::future::try_join;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
@@ -214,30 +215,57 @@ impl DatafusionQueryEngine {
         let mut affected_rows = 0;
         let mut insert_cost = 0;
 
-        while let Some(batch) = stream.next().await {
-            let batch = batch.context(CreateRecordBatchSnafu)?;
-            let column_vectors = batch
-                .column_vectors(&table_name.to_string(), table.schema())
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?;
-
-            match dml.op {
-                WriteOp::Insert(_) => {
-                    // We ignore the insert op.
-                    let output = self
-                        .insert(&table_name, column_vectors, query_ctx.clone())
-                        .await?;
-                    let (rows, cost) = output.extract_rows_and_cost();
-                    affected_rows += rows;
-                    insert_cost += cost;
-                }
-                WriteOp::Delete => {
+        match dml.op {
+            WriteOp::Insert(_) => {
+                // An unbounded queue keeps draining source RPCs while sink RPCs on a shared
+                // HTTP/2 connection are pending, trading bounded memory for request liveness.
+                let (batch_tx, mut batch_rx) = tokio::sync::mpsc::unbounded_channel();
+                let producer = async move {
+                    while let Some(batch) = stream.next().await {
+                        let batch = batch.context(CreateRecordBatchSnafu);
+                        let is_err = batch.is_err();
+                        if batch_tx.send(batch).is_err() {
+                            break;
+                        }
+                        if is_err {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    Ok::<_, crate::error::Error>(())
+                };
+                let consumer = async {
+                    while let Some(batch) = batch_rx.recv().await {
+                        let batch = batch?;
+                        let column_vectors = batch
+                            .column_vectors(&table_name.to_string(), table.schema())
+                            .map_err(BoxedError::new)
+                            .context(QueryExecutionSnafu)?;
+                        // We ignore the insert op.
+                        let output = self
+                            .insert(&table_name, column_vectors, query_ctx.clone())
+                            .await?;
+                        let (rows, cost) = output.extract_rows_and_cost();
+                        affected_rows += rows;
+                        insert_cost += cost;
+                    }
+                    Ok::<_, crate::error::Error>(())
+                };
+                try_join(producer, consumer).await?;
+            }
+            WriteOp::Delete => {
+                while let Some(batch) = stream.next().await {
+                    let batch = batch.context(CreateRecordBatchSnafu)?;
+                    let column_vectors = batch
+                        .column_vectors(&table_name.to_string(), table.schema())
+                        .map_err(BoxedError::new)
+                        .context(QueryExecutionSnafu)?;
                     affected_rows += self
                         .delete(&table_name, &table, column_vectors, query_ctx.clone())
                         .await?;
                 }
-                _ => unreachable!("guarded by the 'ensure!' at the beginning"),
             }
+            _ => unreachable!("guarded by the 'ensure!' at the beginning"),
         }
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
