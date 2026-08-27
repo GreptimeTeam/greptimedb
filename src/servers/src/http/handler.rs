@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,11 +27,10 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
-use common_recordbatch::{RecordBatch, SendableRecordBatchStream, util};
+use common_recordbatch::util;
 use common_telemetry::tracing;
 use datafusion::physical_plan::ExecutionPlan;
-use datatypes::schema::SchemaRef;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,6 +39,7 @@ use snafu::ResultExt;
 use sql::dialect::GreptimeDbDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
+use tokio::sync::{Notify, watch};
 
 use crate::error::{FailedToParseQuerySnafu, InvalidQuerySnafu, Result};
 use crate::http::header::collect_plan_metrics;
@@ -100,15 +101,40 @@ struct AnalyzeStreamPayload {
     code: Option<u32>,
 }
 
-struct AnalyzeStreamState {
-    stream: SendableRecordBatchStream,
-    schema: SchemaRef,
-    plan: Option<Arc<dyn ExecutionPlan>>,
-    batches: Vec<RecordBatch>,
-    seq: u64,
-    start: Instant,
-    requested_interval_ms: u64,
-    current_interval_ms: u64,
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub enum AnalyzeStreamMessage {
+    Empty,
+    Metrics {
+        payload: String,
+    },
+    Terminal {
+        event_name: &'static str,
+        payload: String,
+    },
+}
+
+struct AnalyzeStreamWorkerGuard {
+    cancel: watch::Sender<bool>,
+    handle: Option<common_runtime::JoinHandle<()>>,
+}
+
+impl Drop for AnalyzeStreamWorkerGuard {
+    fn drop(&mut self) {
+        let _ = self.cancel.send(true);
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+struct AnalyzeStreamBodyState {
+    latest_metrics: watch::Receiver<Option<String>>,
+    terminal: watch::Receiver<Option<AnalyzeStreamMessage>>,
+    notify: Arc<Notify>,
+    // Keeping the guard in the body state makes dropping the response cancel and
+    // abort the worker instead of leaving an owned query stream detached.
+    _worker: AnalyzeStreamWorkerGuard,
     done: bool,
 }
 
@@ -195,7 +221,7 @@ pub async fn sql(
 
 /// Handler to stream partial `EXPLAIN ANALYZE VERBOSE` metrics as SSE.
 ///
-/// This experimental endpoint is POST-only SSE, so browser `EventSource` does
+/// This endpoint is POST-only SSE, so browser `EventSource` does
 /// not apply. Each `metrics` event carries a complete snapshot (not a delta);
 /// large snapshots are throttled but never truncated. `final`, `canceled`, and
 /// `error` are terminal events. If the client disconnects it won't receive a
@@ -284,88 +310,180 @@ pub async fn sql_analyze_stream(
     };
     let schema = stream.schema();
 
-    let sse_stream = futures::stream::unfold(
-        AnalyzeStreamState {
-            stream,
-            schema,
-            plan,
-            batches: Vec::new(),
-            seq: 0,
-            start,
-            requested_interval_ms: interval_ms,
-            current_interval_ms: interval_ms,
+    let (metrics_tx, metrics_rx) = watch::channel::<Option<String>>(None);
+    let (terminal_tx, terminal_rx) = watch::channel::<Option<AnalyzeStreamMessage>>(None);
+    let notify = Arc::new(Notify::new());
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    let worker_notify = notify.clone();
+    let panic_notify = notify.clone();
+    let worker_terminal_tx = terminal_tx.clone();
+    let worker = common_runtime::spawn_global(async move {
+        let worker_result = AssertUnwindSafe(async move {
+            let mut stream = stream;
+            let mut batches = Vec::new();
+            let mut seq = 0;
+            let mut current_interval_ms = interval_ms;
+            let tick = tokio::time::sleep(Duration::from_millis(current_interval_ms));
+            tokio::pin!(tick);
+
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.changed() => return,
+                    item = stream.next() => {
+                        match item {
+                            Some(Ok(next_batch)) => batches.push(next_batch),
+                            Some(Err(err)) => {
+                                let status = err.status_code();
+                                let event_name = if status == StatusCode::Cancelled { "canceled" } else { "error" };
+                                let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
+                                    seq,
+                                    state: event_name,
+                                    partial: false,
+                                    start,
+                                    plan: plan.as_ref(),
+                                    output: None,
+                                    reason: Some(err.output_msg()),
+                                    code: Some(status as u32),
+                                });
+                                send_analyze_terminal(&terminal_tx, &worker_notify, event_name, payload);
+                                return;
+                            }
+                            None => {
+                                let output = HttpRecordsOutput::try_new(schema.clone(), batches)
+                                    .map(GreptimeQueryOutput::Records);
+                                let (event_name, payload) = make_final_analyze_event(
+                                    output.map_err(|err| (err.output_msg(), err.status_code() as u32)),
+                                    seq,
+                                    start,
+                                    plan.as_ref(),
+                                );
+                                send_analyze_terminal(&terminal_tx, &worker_notify, event_name, payload);
+                                return;
+                            }
+                        }
+                    }
+                    _ = &mut tick, if plan.is_some() => {
+                        let (payload, payload_bytes) = make_analyze_payload(AnalyzePayloadArgs {
+                            seq,
+                            state: "metrics",
+                            partial: true,
+                            start,
+                            plan: plan.as_ref(),
+                            output: None,
+                            reason: None,
+                            code: None,
+                        });
+                        current_interval_ms = adaptive_interval_ms(payload_bytes, interval_ms);
+                        seq += 1;
+                        if metrics_tx.send(Some(payload)).is_err() {
+                            return;
+                        }
+                        worker_notify.notify_one();
+                        tick.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_interval_ms));
+                    }
+                }
+            }
+        })
+        .catch_unwind()
+        .await;
+
+        if worker_result.is_err() {
+            let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
+                seq: 0,
+                state: "error",
+                partial: false,
+                start,
+                plan: None,
+                output: None,
+                reason: Some("analyze stream worker panicked".to_string()),
+                code: Some(StatusCode::Internal as u32),
+            });
+            send_analyze_terminal(&worker_terminal_tx, &panic_notify, "error", payload);
+        }
+    });
+
+    let sse_stream = analyze_stream_body(metrics_rx, terminal_rx, notify, cancel_tx, worker);
+
+    Sse::new(sse_stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
+#[doc(hidden)]
+pub fn analyze_stream_body(
+    metrics: watch::Receiver<Option<String>>,
+    terminal: watch::Receiver<Option<AnalyzeStreamMessage>>,
+    notify: Arc<Notify>,
+    cancel: watch::Sender<bool>,
+    worker: common_runtime::JoinHandle<()>,
+) -> impl futures::Stream<Item = std::result::Result<Event, std::convert::Infallible>> {
+    futures::stream::unfold(
+        AnalyzeStreamBodyState {
+            latest_metrics: metrics,
+            terminal,
+            notify,
+            _worker: AnalyzeStreamWorkerGuard {
+                cancel,
+                handle: Some(worker),
+            },
             done: false,
         },
         |mut state| async move {
             if state.done {
                 return None;
             }
-            let tick = tokio::time::sleep(Duration::from_millis(state.current_interval_ms));
-            tokio::pin!(tick);
             loop {
-                tokio::select! {
-                    item = state.stream.next() => {
-                        match item {
-                            Some(Ok(batch)) => state.batches.push(batch),
-                            Some(Err(err)) => {
-                                let status = err.status_code();
-                                let event_name = if status == StatusCode::Cancelled { "canceled" } else { "error" };
-                                let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
-                                    seq: state.seq,
-                                    state: event_name,
-                                    partial: false,
-                                    start: state.start,
-                                    plan: state.plan.as_ref(),
-                                    output: None,
-                                    reason: Some(err.output_msg()),
-                                    code: Some(status as u32),
-                                });
-                                state.seq += 1;
-                                state.done = true;
-                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), state));
-                            }
-                            None => {
-                                let batches = std::mem::take(&mut state.batches);
-                                let output = HttpRecordsOutput::try_new(state.schema.clone(), batches)
-                                    .map(GreptimeQueryOutput::Records);
-                                let (event_name, payload) = make_final_analyze_event(
-                                    output.map_err(|err| (err.output_msg(), err.status_code() as u32)),
-                                    state.seq,
-                                    state.start,
-                                    state.plan.as_ref(),
-                                );
-                                state.seq += 1;
-                                state.done = true;
-                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), state));
-                            }
-                        }
-                    }
-                    _ = &mut tick => {
-                        if state.plan.is_some() {
-                            let (payload, payload_bytes) = make_analyze_payload(AnalyzePayloadArgs {
-                                seq: state.seq,
-                                state: "metrics",
-                                partial: true,
-                                start: state.start,
-                                plan: state.plan.as_ref(),
-                                output: None,
-                                reason: None,
-                                code: None,
-                            });
-                            state.current_interval_ms = adaptive_interval_ms(payload_bytes, state.requested_interval_ms);
-                            state.seq += 1;
-                            return Some((Ok::<Event, std::convert::Infallible>(Event::default().event("metrics").data(payload)), state));
-                        }
-                        tick.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(state.current_interval_ms));
+                let notify = Arc::clone(&state.notify);
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                // Register before checking the slots to avoid a lost wakeup.
+                notified.as_mut().enable();
+                let latest = {
+                    let latest = state.latest_metrics.borrow_and_update();
+                    latest.has_changed().then(|| latest.clone())
+                };
+                if let Some(Some(payload)) = latest {
+                    return Some((Ok(Event::default().event("metrics").data(payload)), state));
+                }
+                // Inspect the terminal slot directly because a closed watch channel
+                // can otherwise hide a value published while a worker was unwinding.
+                if state.terminal.borrow().is_some() {
+                    let terminal = { state.terminal.borrow_and_update().clone() };
+                    if let Some(AnalyzeStreamMessage::Terminal {
+                        event_name,
+                        payload,
+                    }) = terminal
+                    {
+                        state.done = true;
+                        return Some((Ok(Event::default().event(event_name).data(payload)), state));
                     }
                 }
+                notified.await;
             }
         },
-    );
+    )
+}
 
-    Sse::new(sse_stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-        .into_response()
+#[doc(hidden)]
+pub fn send_analyze_terminal(
+    terminal_tx: &watch::Sender<Option<AnalyzeStreamMessage>>,
+    notify: &Notify,
+    event_name: &'static str,
+    payload: String,
+) {
+    if terminal_tx.send_if_modified(|terminal| {
+        if terminal.is_none() {
+            *terminal = Some(AnalyzeStreamMessage::Terminal {
+                event_name,
+                payload,
+            });
+            true
+        } else {
+            false
+        }
+    }) {
+        notify.notify_one();
+    }
 }
 
 fn adaptive_interval_ms(payload_bytes: usize, requested_ms: u64) -> u64 {
@@ -438,7 +556,9 @@ fn make_analyze_payload(args: AnalyzePayloadArgs<'_>) -> (String, usize) {
         reason,
         code,
     } = args;
-    let metrics = plan.and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, true).ok());
+    // Periodic snapshots are compact; terminal snapshots retain verbose plan details.
+    let metrics =
+        plan.and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, !partial).ok());
     let payload = AnalyzeStreamPayload {
         seq,
         state,
