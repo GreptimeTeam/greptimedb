@@ -65,6 +65,8 @@ pub struct ManifestSstEntry {
     pub file_path: String,
     /// File size in bytes.
     pub file_size: u64,
+    /// Maximum uncompressed row group size in bytes. Zero means unknown.
+    pub max_row_group_uncompressed_size: u64,
     /// Full path of the index file in object store.
     pub index_file_path: Option<String>,
     /// File size of the index file in object store.
@@ -81,6 +83,8 @@ pub struct ManifestSstEntry {
     pub max_ts: Timestamp,
     /// The sequence number associated with this file.
     pub sequence: Option<u64>,
+    /// Human-readable partition expression associated with this file.
+    pub partition_expr: Option<String>,
     /// The region id of region that creates the file.
     pub origin_region_id: RegionId,
     /// The node id fetched from the manifest.
@@ -109,6 +113,11 @@ impl ManifestSstEntry {
             ColumnSchema::new("level", Ty::uint8_datatype(), false),
             ColumnSchema::new("file_path", Ty::string_datatype(), false),
             ColumnSchema::new("file_size", Ty::uint64_datatype(), false),
+            ColumnSchema::new(
+                "max_row_group_uncompressed_size",
+                Ty::uint64_datatype(),
+                false,
+            ),
             ColumnSchema::new("index_file_path", Ty::string_datatype(), true),
             ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
             ColumnSchema::new("num_rows", Ty::uint64_datatype(), false),
@@ -117,6 +126,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
+            ColumnSchema::new("partition_expr", Ty::string_datatype(), true),
             ColumnSchema::new("origin_region_id", Ty::uint64_datatype(), false),
             ColumnSchema::new("node_id", Ty::uint64_datatype(), true),
             ColumnSchema::new("visible", Ty::boolean_datatype(), false),
@@ -139,6 +149,8 @@ impl ManifestSstEntry {
         let levels = entries.iter().map(|e| e.level);
         let file_paths = entries.iter().map(|e| e.file_path.as_str());
         let file_sizes = entries.iter().map(|e| e.file_size);
+        let max_row_group_uncompressed_sizes =
+            entries.iter().map(|e| e.max_row_group_uncompressed_size);
         let index_file_paths = entries.iter().map(|e| e.index_file_path.as_ref());
         let index_file_sizes = entries.iter().map(|e| e.index_file_size);
         let num_rows = entries.iter().map(|e| e.num_rows);
@@ -155,6 +167,7 @@ impl ManifestSstEntry {
                 .map(|ts| ts.value())
         });
         let sequences = entries.iter().map(|e| e.sequence);
+        let partition_exprs = entries.iter().map(|e| e.partition_expr.as_ref());
         let origin_region_ids = entries.iter().map(|e| e.origin_region_id.as_u64());
         let node_ids = entries.iter().map(|e| e.node_id);
         let visible_flags = entries.iter().map(|e| Some(e.visible));
@@ -173,6 +186,9 @@ impl ManifestSstEntry {
             Arc::new(UInt8Array::from_iter_values(levels)),
             Arc::new(StringArray::from_iter_values(file_paths)),
             Arc::new(UInt64Array::from_iter_values(file_sizes)),
+            Arc::new(UInt64Array::from_iter_values(
+                max_row_group_uncompressed_sizes,
+            )),
             Arc::new(StringArray::from_iter(index_file_paths)),
             Arc::new(UInt64Array::from_iter(index_file_sizes)),
             Arc::new(UInt64Array::from_iter_values(num_rows)),
@@ -181,6 +197,7 @@ impl ManifestSstEntry {
             Arc::new(TimestampNanosecondArray::from_iter(min_ts)),
             Arc::new(TimestampNanosecondArray::from_iter(max_ts)),
             Arc::new(UInt64Array::from_iter(sequences)),
+            Arc::new(StringArray::from_iter(partition_exprs)),
             Arc::new(UInt64Array::from_iter_values(origin_region_ids)),
             Arc::new(UInt64Array::from_iter(node_ids)),
             Arc::new(BooleanArray::from_iter(visible_flags)),
@@ -458,6 +475,7 @@ mod tests {
                 level: 1,
                 file_path: "/p1".to_string(),
                 file_size: 100,
+                max_row_group_uncompressed_size: 80,
                 index_file_path: None,
                 index_file_size: None,
                 num_rows: 10,
@@ -466,6 +484,7 @@ mod tests {
                 min_ts: Timestamp::new_millisecond(1000), // 1s -> 1_000_000_000ns
                 max_ts: Timestamp::new_second(2),         // 2s -> 2_000_000_000ns
                 sequence: None,
+                partition_expr: Some("a < 10".to_string()),
                 origin_region_id: region_id1,
                 node_id: Some(1),
                 visible: false,
@@ -484,6 +503,7 @@ mod tests {
                 level: 3,
                 file_path: "/p2".to_string(),
                 file_size: 200,
+                max_row_group_uncompressed_size: 160,
                 index_file_path: Some("idx".to_string()),
                 index_file_size: Some(11),
                 num_rows: 20,
@@ -492,6 +512,7 @@ mod tests {
                 min_ts: Timestamp::new_nanosecond(5),     // 5ns
                 max_ts: Timestamp::new_microsecond(2000), // 2ms -> 2_000_000ns
                 sequence: Some(9),
+                partition_expr: None,
                 origin_region_id: region_id2,
                 node_id: None,
                 visible: true,
@@ -601,8 +622,16 @@ mod tests {
         assert_eq!(100, file_sizes.value(0));
         assert_eq!(200, file_sizes.value(1));
 
-        let index_file_paths = batch
+        let max_row_group_uncompressed_sizes = batch
             .column(11)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(80, max_row_group_uncompressed_sizes.value(0));
+        assert_eq!(160, max_row_group_uncompressed_sizes.value(1));
+
+        let index_file_paths = batch
+            .column(12)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -610,7 +639,7 @@ mod tests {
         assert_eq!("idx", index_file_paths.value(1));
 
         let index_file_sizes = batch
-            .column(12)
+            .column(13)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -618,7 +647,7 @@ mod tests {
         assert_eq!(11, index_file_sizes.value(1));
 
         let num_rows = batch
-            .column(13)
+            .column(14)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -626,7 +655,7 @@ mod tests {
         assert_eq!(20, num_rows.value(1));
 
         let num_row_groups = batch
-            .column(14)
+            .column(15)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -634,7 +663,7 @@ mod tests {
         assert_eq!(4, num_row_groups.value(1));
 
         let num_series = batch
-            .column(15)
+            .column(16)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -642,7 +671,7 @@ mod tests {
         assert!(num_series.is_null(1));
 
         let min_ts = batch
-            .column(16)
+            .column(17)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -650,7 +679,7 @@ mod tests {
         assert_eq!(5, min_ts.value(1));
 
         let max_ts = batch
-            .column(17)
+            .column(18)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -658,15 +687,23 @@ mod tests {
         assert_eq!(2_000_000, max_ts.value(1));
 
         let sequences = batch
-            .column(18)
+            .column(19)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
         assert!(sequences.is_null(0));
         assert_eq!(9, sequences.value(1));
 
+        let partition_exprs = batch
+            .column(20)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("a < 10", partition_exprs.value(0));
+        assert!(partition_exprs.is_null(1));
+
         let origin_region_ids = batch
-            .column(19)
+            .column(21)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -674,7 +711,7 @@ mod tests {
         assert_eq!(region_id2.as_u64(), origin_region_ids.value(1));
 
         let node_ids = batch
-            .column(20)
+            .column(22)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -682,7 +719,7 @@ mod tests {
         assert!(node_ids.is_null(1));
 
         let visible = batch
-            .column(21)
+            .column(23)
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
@@ -690,7 +727,7 @@ mod tests {
         assert!(visible.value(1));
 
         let primary_key_min = batch
-            .column(22)
+            .column(24)
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
@@ -698,7 +735,7 @@ mod tests {
         assert!(primary_key_min.is_null(1));
 
         let primary_key_max = batch
-            .column(23)
+            .column(25)
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
