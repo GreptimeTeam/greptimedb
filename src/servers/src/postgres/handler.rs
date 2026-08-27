@@ -40,6 +40,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::CopyData;
 use pgwire::messages::data::DataRow;
+use query::dist_analyze_output_schema;
 use query::planner::DfLogicalPlanner;
 use query::query_engine::DescribeResult;
 use session::Session;
@@ -554,6 +555,16 @@ fn describe_fields(
     session: &Arc<Session>,
 ) -> PgWireResult<Vec<FieldInfo>> {
     match sql_plan {
+        // EXPLAIN ANALYZE: at execution time the physical plan is replaced with
+        // GreptimeDB's `DistAnalyzeExec` (see `optimize_physical_plan`), whose
+        // output schema (stage/node/plan) differs from the DataFusion `Analyze`
+        // logical plan schema (plan_type/plan). Describe with the schema the
+        // client will actually receive so the DataRow field count matches.
+        SqlPlan::Plan(LogicalPlan::Analyze(_), _) => {
+            let schema: Schema =
+                Schema::try_from(dist_analyze_output_schema()).map_err(convert_err)?;
+            schema_to_pg(&schema, format, None).map_err(convert_err)
+        }
         // query
         SqlPlan::Plan(plan, _) if !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_)) => {
             let schema: Schema = plan.schema().clone().try_into().map_err(convert_err)?;
@@ -677,6 +688,24 @@ fn describe_fields(
             } else {
                 // fallback to NoData
                 Ok(vec![])
+            }
+        }
+        // FETCH cursor: return the cursor's schema so the RowDescription
+        // matches the DataRow field count sent during Execute.
+        SqlPlan::Statement(Statement::FetchCursor(fetch), _) => {
+            let cursor_name = fetch.cursor_name.to_string();
+            match session.get_cursor(&cursor_name) {
+                Some(cursor) => {
+                    // `cursor.schema()` is the GreptimeDB `SchemaRef` captured
+                    // when the cursor was declared; `schema_to_pg` accepts it
+                    // directly (no DataFusion -> GreptimeDB conversion needed).
+                    schema_to_pg(&cursor.schema(), format, None).map_err(convert_err)
+                }
+                None => {
+                    // Cursor not found (e.g. DECLARE hasn't executed yet in
+                    // an extended-protocol batch). Return NoData as a fallback.
+                    Ok(vec![])
+                }
             }
         }
         _ => {
