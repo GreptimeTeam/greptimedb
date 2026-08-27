@@ -291,7 +291,6 @@ struct TableResolutionPlan {
 
 struct PendingBatch {
     tables: HashMap<TableId, TableBatch>,
-    created_at: Instant,
     total_row_count: usize,
     db_string: String,
     ctx: QueryContextRef,
@@ -324,6 +323,8 @@ enum WorkerCommand {
         response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
         _permit: OwnedSemaphorePermit,
     },
+    #[cfg(test)]
+    Ack { ack_tx: oneshot::Sender<()> },
 }
 
 // Batch key is derived from QueryContext; it assumes catalog/schema/physical_table fully
@@ -899,7 +900,6 @@ impl PendingBatch {
         let db_string = ctx.get_db_string();
         Self {
             tables: HashMap::new(),
-            created_at: Instant::now(),
             total_row_count: 0,
             db_string,
             ctx,
@@ -942,7 +942,8 @@ fn start_worker(
 ) {
     tokio::spawn(async move {
         let mut batch = None;
-        let mut interval = tokio::time::interval(flush_interval);
+        let flush_timer = tokio::time::sleep(flush_interval);
+        tokio::pin!(flush_timer);
         let mut shutdown_rx = shutdown.subscribe();
         let idle_deadline = tokio::time::Instant::now() + worker_idle_timeout;
         let idle_timer = tokio::time::sleep_until(idle_deadline);
@@ -955,6 +956,13 @@ fn start_worker(
                         Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
                             idle_timer.as_mut().reset(tokio::time::Instant::now() + worker_idle_timeout);
 
+                            if batch.is_none() {
+                                // Anchor the flush deadline to this batch's first submission,
+                                // rather than to the worker's creation time.
+                                flush_timer
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + flush_interval);
+                            }
                             let pending_batch = batch.get_or_insert_with(||{
                                 PENDING_BATCHES.inc();
                                 PendingBatch::new(ctx)
@@ -993,6 +1001,10 @@ fn start_worker(
                             }
                             break;
                         }
+                        #[cfg(test)]
+                        Some(WorkerCommand::Ack { ack_tx }) => {
+                            let _ = ack_tx.send(());
+                        }
                     }
                 }
                 _ = &mut idle_timer => {
@@ -1014,19 +1026,16 @@ fn start_worker(
                     );
                     break;
                 }
-                _ = interval.tick() => {
-                    if batch
-                        .as_ref()
-                        .is_some_and(|batch| batch.created_at.elapsed() >= flush_interval)
-                        && let Some(flush) = drain_batch(&mut batch) {
-                            spawn_flush(
-                                flush,
-                                partition_manager.clone(),
-                                node_manager.clone(),
-                                catalog_manager.clone(),
-                                flow_notification_tx.clone(),
-                                flush_semaphore.clone(),
-                            ).await;
+                _ = &mut flush_timer, if batch.is_some() => {
+                    if let Some(flush) = drain_batch(&mut batch) {
+                        spawn_flush(
+                            flush,
+                            partition_manager.clone(),
+                            node_manager.clone(),
+                            catalog_manager.clone(),
+                            flow_notification_tx.clone(),
+                            flush_semaphore.clone(),
+                        ).await;
                     }
                 }
                 _ = shutdown_rx.recv() => {
@@ -1865,7 +1874,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use api::region::RegionResponse;
     use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
@@ -1881,7 +1890,10 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
     use catalog::error::Result as CatalogResult;
-    use common_meta::cache::{TableFlownodeSetCacheRef, new_table_flownode_set_cache};
+    use catalog::memory::MemoryCatalogManager;
+    use common_meta::cache::{
+        TableFlownodeSetCacheRef, new_table_flownode_set_cache, new_table_route_cache,
+    };
     use common_meta::error::Result as MetaResult;
     use common_meta::instruction::{CacheIdent, CreateFlow};
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -1900,15 +1912,17 @@ mod tests {
     use dashmap::DashMap;
     use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
     use moka::future::CacheBuilder;
+    use partition::cache::new_partition_info_cache;
     use partition::error::Result as PartitionResult;
+    use partition::manager::PartitionRuleManager;
     use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
     use smallvec::SmallVec;
     use snafu::ResultExt;
     use store_api::storage::RegionId;
     use table::metadata::TableId;
     use table::test_util::table_info::test_table_info;
-    use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
-    use tokio::time::sleep;
+    use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot};
+    use tokio::time::{advance, sleep};
 
     use super::{
         BatchKey, Error, FlushBatch, FlushRegionWrite, FlushWaiter, PendingBatch,
@@ -1919,7 +1933,7 @@ mod tests {
         flush_batch, flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
         notify_flow_dirty_windows_after_flush, plan_region_batches, remove_worker_if_same_channel,
         should_close_worker_on_idle_timeout, should_dispatch_concurrently,
-        start_flow_notification_worker, strip_partition_columns_from_batch,
+        start_flow_notification_worker, start_worker, strip_partition_columns_from_batch,
         transform_logical_batches_to_physical, try_enqueue_flow_notification,
     };
     use crate::error;
@@ -2372,7 +2386,6 @@ mod tests {
                     row_count: 1,
                 },
             )]),
-            created_at: Instant::now(),
             total_row_count: 1,
             db_string: ctx.get_db_string(),
             ctx: ctx.clone(),
@@ -2932,6 +2945,169 @@ mod tests {
         assert!(should_close_worker_on_idle_timeout(0, 0));
         assert!(!should_close_worker_on_idle_timeout(1, 0));
         assert!(!should_close_worker_on_idle_timeout(0, 1));
+    }
+
+    const WORKER_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    async fn submit_mock_worker_batch(
+        worker_tx: &mpsc::Sender<WorkerCommand>,
+        total_rows: usize,
+        timestamp: i64,
+    ) -> oneshot::Receiver<std::result::Result<(), Arc<Error>>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        worker_tx
+            .send(WorkerCommand::Submit {
+                table_batches: vec![(
+                    "cpu".to_string(),
+                    42,
+                    mock_aligned_tag_batch("tag1", "host-1", timestamp, 1.0),
+                )],
+                total_rows,
+                ctx: session::context::QueryContext::arc(),
+                response_tx,
+                _permit: permit,
+            })
+            .await
+            .unwrap();
+
+        // The channel is FIFO, so the ack proves the worker has dequeued and
+        // processed the submission (anchoring the flush deadline) before the
+        // caller advances virtual time.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        worker_tx.send(WorkerCommand::Ack { ack_tx }).await.unwrap();
+        ack_rx
+            .await
+            .expect("worker exited before acking the submitted batch");
+
+        response_rx
+    }
+
+    async fn receive_mock_flush_result(
+        response_rx: oneshot::Receiver<std::result::Result<(), Arc<Error>>>,
+        context: &str,
+    ) -> std::result::Result<(), Arc<Error>> {
+        // Under paused time the timeout auto-advances the clock and fires
+        // deterministically if the flush never completes.
+        tokio::time::timeout(WORKER_TEST_TIMEOUT, response_rx)
+            .await
+            .unwrap_or_else(|_| panic!("{context}"))
+            .expect("flush result channel closed without a result")
+    }
+
+    fn assert_missing_physical_table(result: std::result::Result<(), Arc<Error>>) {
+        let err = result.expect_err("the empty catalog should make the flush fail");
+        assert!(
+            matches!(
+                err.as_ref(),
+                Error::Internal { err_msg }
+                    if err_msg.contains("not found during pending flush")
+            ),
+            "unexpected flush error: {err}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_worker_rearms_creation_relative_deadline_after_size_flush() {
+        let flush_interval = Duration::from_secs(10);
+        let worker_idle_timeout = Duration::from_secs(30);
+        let key = BatchKey {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            physical_table: "phy".to_string(),
+        };
+        let workers = Arc::new(DashMap::new());
+        let (worker_tx, worker_rx) = mpsc::channel(1);
+        workers.insert(
+            key.clone(),
+            PendingWorker {
+                tx: worker_tx.clone(),
+            },
+        );
+
+        let backend = Arc::new(MemoryKvBackend::default());
+        let table_route_cache = Arc::new(new_table_route_cache(
+            "pending-rows-flush-deadline-routes".to_string(),
+            CacheBuilder::new(1).build(),
+            backend.clone(),
+        ));
+        let partition_info_cache = Arc::new(new_partition_info_cache(
+            "pending-rows-flush-deadline-partitions".to_string(),
+            CacheBuilder::new(1).build(),
+            table_route_cache.clone(),
+        ));
+        let partition_manager = Arc::new(PartitionRuleManager::new(
+            backend,
+            table_route_cache,
+            partition_info_cache,
+        ));
+        let node_manager: NodeManagerRef = Arc::new(ConcurrentMockNodeManager {
+            datanodes: Arc::new(HashMap::new()),
+        });
+        let catalog_manager = MemoryCatalogManager::with_default_setup();
+        let (flow_notification_tx, _flow_notification_rx) = mpsc::channel(1);
+        let (shutdown, _) = broadcast::channel(1);
+
+        start_worker(
+            key.clone(),
+            worker_tx.clone(),
+            workers.clone(),
+            worker_rx,
+            shutdown.clone(),
+            partition_manager,
+            node_manager,
+            catalog_manager,
+            flow_notification_tx,
+            flush_interval,
+            worker_idle_timeout,
+            2,
+            Arc::new(Semaphore::new(1)),
+        );
+
+        // Start the worker, then size-flush a batch halfway to the first
+        // worker-aligned interval boundary. This arms the reusable timer and
+        // drains the batch before that deadline is reached.
+        tokio::task::yield_now().await;
+        advance(flush_interval / 2).await;
+        let size_flush_rx = submit_mock_worker_batch(&worker_tx, 2, 1000).await;
+        let size_flush_result =
+            receive_mock_flush_result(size_flush_rx, "row threshold did not flush the first batch")
+                .await;
+        assert_missing_physical_table(size_flush_result);
+
+        // Submit a low-volume batch before the first batch's old timer would
+        // expire. It must receive a fresh full interval.
+        advance(flush_interval / 5).await;
+        let mut timed_flush_rx = submit_mock_worker_batch(&worker_tx, 1, 2000).await;
+
+        advance(flush_interval - Duration::from_millis(1)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            timed_flush_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        advance(Duration::from_millis(1)).await;
+        let timed_flush_result = receive_mock_flush_result(
+            timed_flush_rx,
+            "batch was not flushed one interval after its creation",
+        )
+        .await;
+        assert_missing_physical_table(timed_flush_result);
+
+        let _ = shutdown.send(());
+        for _ in 0..10 {
+            if !workers.contains_key(&key) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !workers.contains_key(&key),
+            "worker did not exit after shutdown"
+        );
     }
 
     #[tokio::test]
