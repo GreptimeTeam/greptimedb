@@ -26,7 +26,7 @@ use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
 use crate::ddl::tests::create_flow::{create_test_flow, create_test_pending_flow};
 use crate::error;
 use crate::key::table_route::TableRouteValue;
-use crate::rpc::ddl::{DropFlowTask, EventContext};
+use crate::rpc::ddl::DropFlowTask;
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
 pub(crate) fn test_drop_flow_task(
@@ -48,7 +48,7 @@ async fn test_drop_flow_not_found() {
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
     let ddl_context = new_ddl_context(node_manager);
     let task = test_drop_flow_task("my_flow", flow_id, false);
-    let mut procedure = DropFlowProcedure::new(task, EventContext::default(), ddl_context);
+    let mut procedure = DropFlowProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowNotFound { .. });
 }
@@ -81,17 +81,17 @@ async fn test_drop_flow() {
         create_test_flow(&ddl_context, "my_flow", source_table_names, sink_table_name).await;
     // Drops the flows
     let task = test_drop_flow_task("my_flow", flow_id, false);
-    let mut procedure = DropFlowProcedure::new(task, EventContext::default(), ddl_context.clone());
+    let mut procedure = DropFlowProcedure::new(task, ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
 
     // Drops if not exists
     let task = test_drop_flow_task("my_flow", flow_id, true);
-    let mut procedure = DropFlowProcedure::new(task, EventContext::default(), ddl_context.clone());
+    let mut procedure = DropFlowProcedure::new(task, ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
 
     // Drops again
     let task = test_drop_flow_task("my_flow", flow_id, false);
-    let mut procedure = DropFlowProcedure::new(task, EventContext::default(), ddl_context);
+    let mut procedure = DropFlowProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowNotFound { .. });
 }
@@ -129,11 +129,11 @@ async fn test_drop_pending_flow_without_routes() {
     assert!(flow_info.flownode_ids().is_empty());
 
     let task = test_drop_flow_task("drop_pending_flow", flow_id, false);
-    let mut procedure = DropFlowProcedure::new(task, EventContext::default(), ddl_context.clone());
+    let mut procedure = DropFlowProcedure::new(task, ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
 
     let task = test_drop_flow_task("drop_pending_flow", flow_id, false);
-    let mut procedure = DropFlowProcedure::new(task, EventContext::default(), ddl_context);
+    let mut procedure = DropFlowProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowNotFound { .. });
 }

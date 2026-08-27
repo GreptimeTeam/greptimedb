@@ -20,9 +20,9 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::ProcedureId;
 use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
+use crate::{ProcedureContext, ProcedureId};
 
 pub mod poison_store;
 pub mod state_store;
@@ -55,6 +55,9 @@ pub struct ProcedureMessage {
     /// Errors raised during the procedure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Context associated with the root submission.
+    #[serde(default, skip_serializing_if = "ProcedureContext::is_empty")]
+    pub context: ProcedureContext,
 }
 
 /// A collection of all procedures' messages.
@@ -88,6 +91,7 @@ impl ProcedureStore {
     }
 
     /// Dump the `procedure` to the storage.
+    #[cfg(test)]
     pub(crate) async fn store_procedure(
         &self,
         procedure_id: ProcedureId,
@@ -96,12 +100,33 @@ impl ProcedureStore {
         data: String,
         parent_id: Option<ProcedureId>,
     ) -> Result<()> {
+        self.store_procedure_with_context(
+            procedure_id,
+            step,
+            type_name,
+            data,
+            parent_id,
+            ProcedureContext::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn store_procedure_with_context(
+        &self,
+        procedure_id: ProcedureId,
+        step: u32,
+        type_name: String,
+        data: String,
+        parent_id: Option<ProcedureId>,
+        context: ProcedureContext,
+    ) -> Result<()> {
         let message = ProcedureMessage {
             type_name,
             data,
             parent_id,
             step,
             error: None,
+            context,
         };
         let key = ParsedKey {
             prefix: &self.proc_path,
@@ -356,6 +381,7 @@ mod tests {
     }
 
     use async_trait::async_trait;
+    use common_event_recorder::{PersistentEventContext, TriggerReason};
     use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use object_store::services::Fs as Builder;
 
@@ -462,6 +488,7 @@ mod tests {
             parent_id: None,
             step: 4,
             error: None,
+            context: ProcedureContext::default(),
         };
 
         let json = serde_json::to_string(&message).unwrap();
@@ -477,6 +504,29 @@ mod tests {
             json,
             r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1","step":4}"#
         );
+
+        message.context = ProcedureContext::from_event_context(PersistentEventContext::new(
+            TriggerReason::AutoRebalance,
+        ));
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1","step":4,"context":{"event_context":{"reason":"auto_rebalance"}}}"#
+        );
+
+        message.context.actor = Some("alice".to_string());
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains(r#""actor":"alice""#));
+        assert_eq!(
+            serde_json::from_str::<ProcedureMessage>(&json).unwrap(),
+            message
+        );
+
+        let legacy: ProcedureMessage = serde_json::from_str(
+            r#"{"type_name":"TestMessage","data":"legacy","parent_id":null,"step":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.context, ProcedureContext::default());
     }
 
     struct MockProcedure {
@@ -541,6 +591,7 @@ mod tests {
             parent_id: None,
             step: 0,
             error: None,
+            context: ProcedureContext::default(),
         };
         assert_eq!(expect, *msg);
     }
@@ -589,6 +640,7 @@ mod tests {
             parent_id: None,
             step: 1,
             error: None,
+            context: ProcedureContext::default(),
         };
         store
             .rollback_procedure(procedure_id, message)

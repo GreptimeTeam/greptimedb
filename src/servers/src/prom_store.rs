@@ -34,11 +34,11 @@ use datafusion::dataframe::DataFrame;
 use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
-use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt, ensure};
 use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
+use crate::prom_remote_write::REMOTE_WRITE_V1_VERSION;
 use crate::row_writer::{self, MultiTableData};
 
 pub const METRIC_NAME_LABEL: &str = "__name__";
@@ -92,11 +92,6 @@ pub fn is_database_selection_label(label: &str) -> bool {
 /// Check if given label is a physical table selection label
 pub fn is_physical_table_selection_label(label: &str) -> bool {
     label == PHYSICAL_TABLE_LABEL || label == PHYSICAL_TABLE_LABEL_ALT
-}
-
-/// Metrics for push gateway protocol
-pub struct Metrics {
-    pub exposition: MetricsExposition<PrometheusType, PrometheusValue>,
 }
 
 /// Get table name from remote query
@@ -458,7 +453,9 @@ fn recordbatch_to_timeseries(
 }
 
 pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertRequests, usize)> {
-    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
+        .with_label_values(&["convert", REMOTE_WRITE_V1_VERSION])
+        .start_timer();
 
     let mut multi_table_data = MultiTableData::new();
 

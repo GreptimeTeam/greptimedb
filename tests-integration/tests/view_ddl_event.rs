@@ -16,17 +16,21 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
-use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
-use tests_integration::test_util::{StorageType, get_test_store_config};
+use tests_integration::test_util::{
+    StorageType, get_test_store_config, setup_authenticated_grpc_database,
+};
 use uuid::Uuid;
 
-use crate::event_recorder_test_util::{assert_single_event, find_eventually_string};
+use crate::event_recorder_test_util::{
+    assert_procedure_actor, assert_single_event, find_eventually_string,
+};
 
 const CREATE_VIEW_EVENT_TYPE: &str = "create_view";
 const DROP_VIEW_EVENT_TYPE: &str = "drop_view";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_view_ddl_events() {
@@ -72,37 +76,35 @@ async fn execute_view_ddl(
     source_table: &str,
     view: &str,
 ) {
-    instance
-        .do_query(
-            &format!(
-                "CREATE TABLE {source_table} (host STRING PRIMARY KEY, amount DOUBLE, ts TIMESTAMP TIME INDEX)"
-            ),
-            QueryContext::arc(),
-        )
+    let (database, _grpc_server) = setup_authenticated_grpc_database(
+        instance.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
+    )
+    .await;
+
+    database
+        .sql(format!(
+            "CREATE TABLE {source_table} (host STRING PRIMARY KEY, amount DOUBLE, ts TIMESTAMP TIME INDEX)"
+        ))
         .await
-        .remove(0)
         .unwrap();
 
-    instance
-        .do_query(
-            &format!("CREATE VIEW {view} AS SELECT amount FROM {source_table}"),
-            QueryContext::arc(),
-        )
+    database
+        .sql(format!(
+            "CREATE VIEW {view} AS SELECT amount FROM {source_table}"
+        ))
         .await
-        .remove(0)
         .unwrap();
     assert_create_events(instance, view).await;
 
-    instance
-        .do_query(&format!("DROP VIEW {view}"), QueryContext::arc())
-        .await
-        .remove(0)
-        .unwrap();
+    database.sql(format!("DROP VIEW {view}")).await.unwrap();
     assert_drop_events(instance, view).await;
 }
 
 async fn assert_create_events(instance: &Arc<frontend::instance::Instance>, view: &str) {
     let procedure_id = find_submitted_procedure_id(instance, CREATE_VIEW_EVENT_TYPE, view).await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
     assert_single_event(
         instance,
         &format!(
@@ -134,9 +136,9 @@ WHERE type = '{CREATE_VIEW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND catalog_name IS NULL
-  AND schema_name IS NULL
-  AND view_name IS NULL
+  AND catalog_name = 'greptime'
+  AND schema_name = 'public'
+  AND view_name = '{view}'
   AND view_id IS NOT NULL
   AND json_is_null(payload)"#,
         ),
@@ -157,11 +159,12 @@ async fn assert_event_context(
         "event_context",
     )
     .await;
-    assert_eq!(r#"{"reason":"manual"}"#, actual);
+    assert_eq!(r#"{"protocol":"grpc","reason":"manual"}"#, actual);
 }
 
 async fn assert_drop_events(instance: &Arc<frontend::instance::Instance>, view: &str) {
     let procedure_id = find_submitted_procedure_id(instance, DROP_VIEW_EVENT_TYPE, view).await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
     assert_single_event(
         instance,
         &format!(
@@ -190,10 +193,10 @@ WHERE type = '{DROP_VIEW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND catalog_name IS NULL
-  AND schema_name IS NULL
-  AND view_name IS NULL
-  AND view_id IS NULL
+  AND catalog_name = 'greptime'
+  AND schema_name = 'public'
+  AND view_name = '{view}'
+  AND view_id IS NOT NULL
   AND json_is_null(payload)"#,
         ),
     )

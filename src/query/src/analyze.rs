@@ -46,6 +46,21 @@ const STAGE: &str = "stage";
 const NODE: &str = "node";
 const PLAN: &str = "plan";
 
+/// Returns the fixed output schema of [`DistAnalyzeExec`]:
+/// (`stage`: UInt32, `node`: UInt32, `plan`: Utf8).
+///
+/// Exposed so protocol-level `Describe` handlers can advertise the schema
+/// clients will actually receive (the physical plan is rewritten in
+/// `optimize_physical_plan` and its schema differs from the DataFusion
+/// `Analyze` logical plan schema).
+pub fn dist_analyze_output_schema() -> SchemaRef {
+    SchemaRef::new(Schema::new(vec![
+        Field::new(STAGE, DataType::UInt32, true),
+        Field::new(NODE, DataType::UInt32, true),
+        Field::new(PLAN, DataType::Utf8, true),
+    ]))
+}
+
 #[derive(Debug)]
 pub struct DistAnalyzeExec {
     input: Arc<dyn ExecutionPlan>,
@@ -58,11 +73,7 @@ pub struct DistAnalyzeExec {
 impl DistAnalyzeExec {
     /// Create a new DistAnalyzeExec
     pub fn new(input: Arc<dyn ExecutionPlan>, verbose: bool, format: AnalyzeFormat) -> Self {
-        let schema = SchemaRef::new(Schema::new(vec![
-            Field::new(STAGE, DataType::UInt32, true),
-            Field::new(NODE, DataType::UInt32, true),
-            Field::new(PLAN, DataType::Utf8, true),
-        ]));
+        let schema = dist_analyze_output_schema();
         let properties = Arc::new(Self::compute_properties(&input, schema.clone()));
         Self {
             input,

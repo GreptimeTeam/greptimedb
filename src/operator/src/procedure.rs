@@ -27,11 +27,12 @@ use common_meta::rpc::procedure::{
 };
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::table_name::TableName;
 
 use crate::error;
-use crate::utils::to_meta_query_context_with_trigger_reason;
+use crate::utils::to_executor_context;
 
 /// The operator for procedures which implements [`ProcedureServiceHandler`].
 #[derive(Clone)]
@@ -59,8 +60,8 @@ impl ProcedureServiceOperator {
 impl ProcedureServiceHandler for ProcedureServiceOperator {
     async fn purge_table(
         &self,
+        query_ctx: QueryContextRef,
         table_name: TableName,
-        query_ctx: session::context::QueryContextRef,
     ) -> QueryResult<()> {
         let dropped = self
             .table_metadata_manager
@@ -76,24 +77,25 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
             })
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)?;
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_ctx, TriggerReason::Manual);
-        let request = SubmitDdlTaskRequest::new(
-            meta_query_context,
-            DdlTask::new_purge_dropped_table(dropped.table_id),
-        );
+        let executor_context = to_executor_context(query_ctx, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_purge_dropped_table(dropped.table_id));
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)?;
         Ok(())
     }
 
-    async fn migrate_region(&self, request: MigrateRegionRequest) -> QueryResult<Option<String>> {
+    async fn migrate_region(
+        &self,
+        query_ctx: QueryContextRef,
+        request: MigrateRegionRequest,
+    ) -> QueryResult<Option<String>> {
+        let executor_context = to_executor_context(query_ctx, TriggerReason::Manual);
         Ok(self
             .procedure_executor
-            .migrate_region(&ExecutorContext::default(), request)
+            .migrate_region(&executor_context, request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)?
@@ -135,17 +137,27 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
         &self.catalog_manager
     }
 
-    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> QueryResult<MetaGcResponse> {
+    async fn gc_regions(
+        &self,
+        query_ctx: QueryContextRef,
+        request: MetaGcRegionsRequest,
+    ) -> QueryResult<MetaGcResponse> {
+        let executor_context = to_executor_context(query_ctx, TriggerReason::Manual);
         self.procedure_executor
-            .gc_regions(&ExecutorContext::default(), request)
+            .gc_regions(&executor_context, request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)
     }
 
-    async fn gc_table(&self, request: MetaGcTableRequest) -> QueryResult<MetaGcResponse> {
+    async fn gc_table(
+        &self,
+        query_ctx: QueryContextRef,
+        request: MetaGcTableRequest,
+    ) -> QueryResult<MetaGcResponse> {
+        let executor_context = to_executor_context(query_ctx, TriggerReason::Manual);
         self.procedure_executor
-            .gc_table(&ExecutorContext::default(), request)
+            .gc_table(&executor_context, request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)
@@ -162,10 +174,10 @@ mod tests {
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::procedure_executor::{ProcedureExecutor, ProcedureExecutorRef};
-    use common_meta::rpc::ddl::{
-        DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TRIGGER_REASON_EXTENSION_KEY,
+    use common_meta::procedure_executor::{
+        ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
     };
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
     use common_meta::rpc::procedure::{MigrateRegionResponse, ProcedureStateResponse};
     use session::context::QueryContextBuilder;
     use table::table_name::TableName;
@@ -175,6 +187,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingProcedureExecutor {
         requests: Mutex<Vec<SubmitDdlTaskRequest>>,
+        contexts: Mutex<Vec<ExecutorContext>>,
         fail: bool,
     }
 
@@ -182,9 +195,10 @@ mod tests {
     impl ProcedureExecutor for RecordingProcedureExecutor {
         async fn submit_ddl_task(
             &self,
-            _: &ExecutorContext,
+            context: ExecutorContext,
             request: SubmitDdlTaskRequest,
         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            self.contexts.lock().unwrap().push(context);
             self.requests.lock().unwrap().push(request);
             if self.fail {
                 return common_meta::error::UnsupportedSnafu {
@@ -273,20 +287,19 @@ mod tests {
             .build()
             .into();
 
-        operator.purge_table(name.clone(), query_ctx).await.unwrap();
+        operator.purge_table(query_ctx, name.clone()).await.unwrap();
 
         let requests = executor.requests.lock().unwrap();
         assert!(
             matches!(&requests[0].task, DdlTask::PurgeDroppedTable(task) if task.table_id == 42)
         );
-        assert_eq!(requests[0].query_context.current_catalog, "catalog");
-        assert_eq!(requests[0].query_context.current_schema, "schema");
+        let contexts = executor.contexts.lock().unwrap();
+        let query_context = contexts[0].query_context.as_ref().unwrap();
+        assert_eq!(query_context.current_catalog, "catalog");
+        assert_eq!(query_context.current_schema, "schema");
         assert_eq!(
-            Some(&TriggerReason::Manual.as_ref().to_string()),
-            requests[0]
-                .query_context
-                .extensions
-                .get(TRIGGER_REASON_EXTENSION_KEY)
+            contexts[0].event_input.as_ref().map(|input| input.reason),
+            Some(TriggerReason::Manual)
         );
     }
 
@@ -303,12 +316,12 @@ mod tests {
         );
         let error = operator
             .purge_table(
-                TableName::new("catalog", "schema", "missing"),
                 QueryContextBuilder::default()
                     .current_catalog("catalog".to_string())
                     .current_schema("schema".to_string())
                     .build()
                     .into(),
+                TableName::new("catalog", "schema", "missing"),
             )
             .await
             .unwrap_err();
@@ -326,12 +339,12 @@ mod tests {
         assert!(
             operator
                 .purge_table(
-                    name,
                     QueryContextBuilder::default()
                         .current_catalog("catalog".to_string())
                         .current_schema("schema".to_string())
                         .build()
-                        .into()
+                        .into(),
+                    name,
                 )
                 .await
                 .is_err()

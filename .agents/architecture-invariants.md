@@ -20,15 +20,18 @@ metadata KV values (`common-meta` keys, metric-engine metadata), and gRPC
 messages. A node running an old version may read data written by a new one and
 vice versa.
 
-- Add fields, don't repurpose or reorder them. For serde types use
-  `#[serde(default)]` / `#[serde(alias)]`; never change the meaning of an existing
-  field or the discriminant of an existing enum variant.
-- Monotonic version counters (e.g. the mito2 manifest version) only ever move
-  forward — never reset or skip.
+- Preserve the contract of the actual encoding: Protobuf field numbers/types,
+  serde field and variant names, positional field order, and explicitly encoded
+  enum discriminants. Do not treat Rust declaration order as a wire contract
+  for name-based formats such as JSON.
+- Use `#[serde(default)]` for newly optional data and `#[serde(alias)]` for a
+  compatible rename. Do not reset or reuse versions within one persisted
+  history.
 - When a change touches a persisted or wire format, add a case to the
-  compatibility test suite. See `docs/rfcs/2025-07-04-compatibility-test-framework.md`
-  — compatibility has been broken on releases before (v0.14.1, v0.15.1) precisely
-  because this step was skipped.
+  compatibility test suite. Follow [`tests/compatibility/README.md`](../tests/compatibility/README.md)
+  and [`tests/compatibility/AGENTS.md`](../tests/compatibility/AGENTS.md). The
+  original compatibility RFC describes a superseded case format and is not the
+  current runbook.
 - Wire types are generated from the external `greptime-proto` crate; change the
   format there first, then bump the dependency (see invariant 6's pattern).
 
@@ -43,8 +46,8 @@ The workspace is layered; dependencies point downward only.
   `file-engine`) implement it; `datanode` drives engines **through the trait**,
   not through engine internals.
 - `frontend` reaches storage through `operator` / `query` / `catalog`, not by
-  depending on `datanode` internals. Standalone mode is the one bridge, via a
-  `RegionServer` wrapper (`src/frontend/src/instance/standalone.rs`).
+  depending on `datanode` internals. Standalone mode is the one bridge, via the
+  `RegionServer` adapter in `src/standalone/src/datanode_manager.rs`.
 - Do not introduce circular dependencies. New deps go through
   `[workspace.dependencies]` in the root `Cargo.toml`, not per-crate version
   literals.
@@ -54,9 +57,9 @@ The workspace is layered; dependencies point downward only.
 Runtimes are partitioned by workload so one workload can't starve another. They
 live in `common-runtime` (`src/common/runtime/`).
 
-- Use the categorized spawns — `spawn_global`, `spawn_query`, `spawn_ingest`,
-  `spawn_compact`, `spawn_hb` — instead of constructing your own tokio runtime,
-  and pick the category that matches the work.
+- Runtime construction belongs in process bootstrap or test/benchmark harnesses.
+  Product components use `spawn_global`, `spawn_query`, `spawn_ingest`,
+  `spawn_compact`, or `spawn_hb` instead of a component-local Tokio runtime.
 - Run CPU-bound or synchronous-blocking work via `spawn_blocking_*`; never do
   heavy CPU or blocking syscalls directly inside an async task.
 - Never call `block_on*` from inside an async context or an engine worker — it
@@ -85,23 +88,19 @@ unfinished work merge without freezing it into the stable config surface.
 
 When you stabilize such a feature, drop the prefix and document the migration.
 
-## 6. DataFusion is a pinned fork — two sections, two forms
+## 6. DataFusion is a pinned fork — workspace dependencies plus patches
 
 GreptimeDB uses a fork at `GreptimeTeam/datafusion`, wired up in the root
-`Cargo.toml` through **two sections that hold different things**:
+`Cargo.toml` through two sections:
 
-- `[workspace.dependencies]` pins each DataFusion sub-crate to an **exact
-  crates.io version** (e.g. `datafusion = "=53.1.0"`).
-- `[patch.crates-io]` redirects those same crates to the **fork at a git rev**
-  (e.g. `datafusion = { git = ".../GreptimeTeam/datafusion.git", rev = "..." }`).
+- `[workspace.dependencies]` pins directly referenced sub-crates to an exact
+  crates.io version.
+- `[patch.crates-io]` redirects resolution to the fork. It may also contain
+  transitive-only sub-crates with no workspace dependency.
 
-So:
-
-- Adding a new DataFusion sub-crate dependency means adding it to **both**
-  sections — the `=<version>` entry under `[workspace.dependencies]` and the
-  matching git-rev patch under `[patch.crates-io]`.
-- Upgrading DataFusion means bumping the version in `[workspace.dependencies]`
-  **and** the rev in `[patch.crates-io]` together, for all of them.
+Add a direct dependency to `[workspace.dependencies]` and patch it if needed; a
+transitive-only override needs only the patch. Upgrade all exact pins and fork
+revisions together.
 
 ## 7. Enterprise-gated code is licensed differently from the rest
 

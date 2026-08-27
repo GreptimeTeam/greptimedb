@@ -18,10 +18,9 @@
 //! They live in `greptime_private`, not `information_schema`: scanning them
 //! triggers read-time derivation over telemetry tables (trace self-joins, ...),
 //! which breaks the "cheap, metadata-only" expectation users have of
-//! `information_schema`. `greptime_private` already signals "system-managed,
-//! computed data objects", and it is also where the physical declared-edge
-//! table will live (a follow-up), so derived and declared edges will share one
-//! schema.
+//! `information_schema`. `greptime_private` also hosts the physical
+//! declared-edge table (`semantic_relationships_declared`), whose rows are
+//! unioned into the computed `semantic_relationships`.
 //!
 //! These are thin forwarders: their rows are derived at read time by the injected
 //! [`EntityGraphProvider`], which enumerates the `table_semantics` declarations,
@@ -36,9 +35,14 @@
 use std::sync::{Arc, LazyLock, Weak};
 
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_ENTITIES_TABLE_ID,
+    CONFIDENCE_COLUMN, DEFAULT_PRIVATE_SCHEMA_NAME, DST_ID_COLUMN, DST_TYPE_COLUMN,
+    DURATION_COUNT_COLUMN, DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN, ENTITY_DESCRIPTIVE_COLUMN,
+    ENTITY_ID_ATTRS_COLUMN, ENTITY_ID_COLUMN, ENTITY_SCOPE_COLUMN, ENTITY_TYPE_COLUMN,
+    ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, OBSERVED_AT_COLUMN, PROVENANCE_COLUMN, REL_TYPE_COLUMN,
+    REQUEST_COUNT_COLUMN, SEMANTIC_ENTITIES_TABLE_ID,
     SEMANTIC_ENTITIES_TABLE_NAME as SEMANTIC_ENTITIES, SEMANTIC_RELATIONSHIPS_TABLE_ID,
-    SEMANTIC_RELATIONSHIPS_TABLE_NAME as SEMANTIC_RELATIONSHIPS,
+    SEMANTIC_RELATIONSHIPS_TABLE_NAME as SEMANTIC_RELATIONSHIPS, SOURCE_TABLES_COLUMN,
+    SRC_ID_COLUMN, SRC_TYPE_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
 };
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
@@ -49,6 +53,7 @@ use common_recordbatch::{
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures::StreamExt;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 use table::TableRef;
@@ -59,17 +64,18 @@ use crate::system_schema::{SystemSchemaProviderInner, SystemTable, SystemTableRe
 
 pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
 
-/// Produces the rows of the computed entity-graph tables
-/// (`semantic_entities` / `semantic_relationships`) at read time.
+/// Produces the rows of the computed entity-graph tables at read time.
 ///
-/// The computed tables are thin forwarders to this provider, which is
-/// implemented above the query engine (in the frontend): it enumerates the entity
-/// declarations from `table_semantics`, builds the typed derivation plans, and
-/// executes them. It is injected into the catalog manager *after* construction —
-/// the provider needs the engine, which needs the catalog manager — so this late
-/// binding breaks the `catalog -> query` dependency cycle. Keeping derivation out
-/// of `catalog` also respects the crate layering (the plan builders live in
-/// `operator`). See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+/// Implemented above the query engine (in the frontend) and injected into the
+/// catalog manager *after* construction — the provider needs the engine, which
+/// needs the catalog manager — so this late binding breaks the
+/// `catalog -> query` dependency cycle.
+///
+/// `query_ctx` is the outer query's context, captured when the computed table
+/// is resolved: the derivation must read only sources that context may read
+/// and execute under it, inheriting the caller's permissions, cancellation and
+/// deadline (the RFC's derivation contract). `None` (context-less internal
+/// resolution) keeps the provider's default behaviour.
 #[async_trait::async_trait]
 pub trait EntityGraphProvider: Send + Sync {
     /// Produces the entity registry (`semantic_entities`) rows for `catalog`.
@@ -78,6 +84,7 @@ pub trait EntityGraphProvider: Send + Sync {
         &self,
         catalog: &str,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> std::result::Result<Option<SendableRecordBatchStream>, BoxedError>;
 
     /// Produces the relationship set (`semantic_relationships`) rows for `catalog`.
@@ -85,6 +92,7 @@ pub trait EntityGraphProvider: Send + Sync {
         &self,
         catalog: &str,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> std::result::Result<Option<SendableRecordBatchStream>, BoxedError>;
 }
 
@@ -94,13 +102,21 @@ pub trait EntityGraphProvider: Send + Sync {
 pub(crate) struct SemanticGraphTableProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    /// The resolving query's context; captured per resolution (the provider is
+    /// built on demand, never cached), so it cannot leak across sessions.
+    query_ctx: Option<QueryContextRef>,
 }
 
 impl SemanticGraphTableProvider {
-    pub(crate) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    pub(crate) fn new(
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+        query_ctx: Option<QueryContextRef>,
+    ) -> Self {
         Self {
             catalog_name,
             catalog_manager,
+            query_ctx,
         }
     }
 
@@ -139,6 +155,7 @@ impl SystemSchemaProviderInner for SemanticGraphTableProvider {
             kind,
             self.catalog_name.clone(),
             self.catalog_manager.clone(),
+            self.query_ctx.clone(),
         )) as _)
     }
 }
@@ -178,16 +195,16 @@ fn json() -> ConcreteDataType {
 /// - `source_tables` — JSON array of the telemetry tables that contributed this entity.
 static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
-        ColumnSchema::new("observed_at", ts(), false).with_time_index(true),
-        ColumnSchema::new("window_start", ts(), true),
-        ColumnSchema::new("window_end", ts(), true),
-        ColumnSchema::new("fresh_until", ts(), true),
-        ColumnSchema::new("entity_type", string(), false),
-        ColumnSchema::new("entity_id", string(), false),
-        ColumnSchema::new("entity_id_attrs", json(), true),
-        ColumnSchema::new("scope", string(), true),
-        ColumnSchema::new("descriptive", json(), true),
-        ColumnSchema::new("source_tables", json(), true),
+        ColumnSchema::new(OBSERVED_AT_COLUMN, ts(), false).with_time_index(true),
+        ColumnSchema::new(WINDOW_START_COLUMN, ts(), true),
+        ColumnSchema::new(WINDOW_END_COLUMN, ts(), true),
+        ColumnSchema::new(FRESH_UNTIL_COLUMN, ts(), true),
+        ColumnSchema::new(ENTITY_TYPE_COLUMN, string(), false),
+        ColumnSchema::new(ENTITY_ID_COLUMN, string(), false),
+        ColumnSchema::new(ENTITY_ID_ATTRS_COLUMN, json(), true),
+        ColumnSchema::new(ENTITY_SCOPE_COLUMN, string(), true),
+        ColumnSchema::new(ENTITY_DESCRIPTIVE_COLUMN, json(), true),
+        ColumnSchema::new(SOURCE_TABLES_COLUMN, json(), true),
     ]))
 });
 
@@ -220,22 +237,38 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 ///   `db.system`, `peer.service`.
 static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
-        ColumnSchema::new("observed_at", ts(), false).with_time_index(true),
-        ColumnSchema::new("window_start", ts(), true),
-        ColumnSchema::new("window_end", ts(), true),
-        ColumnSchema::new("fresh_until", ts(), true),
-        ColumnSchema::new("src_type", string(), false),
-        ColumnSchema::new("src_id", string(), false),
-        ColumnSchema::new("dst_type", string(), false),
-        ColumnSchema::new("dst_id", string(), false),
-        ColumnSchema::new("rel_type", string(), false),
-        ColumnSchema::new("provenance", string(), false),
-        ColumnSchema::new("confidence", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("request_count", ConcreteDataType::int64_datatype(), true),
-        ColumnSchema::new("error_count", ConcreteDataType::int64_datatype(), true),
-        ColumnSchema::new("duration_sum", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("duration_count", ConcreteDataType::int64_datatype(), true),
-        ColumnSchema::new("attributes", json(), true),
+        ColumnSchema::new(OBSERVED_AT_COLUMN, ts(), false).with_time_index(true),
+        ColumnSchema::new(WINDOW_START_COLUMN, ts(), true),
+        ColumnSchema::new(WINDOW_END_COLUMN, ts(), true),
+        ColumnSchema::new(FRESH_UNTIL_COLUMN, ts(), true),
+        ColumnSchema::new(SRC_TYPE_COLUMN, string(), false),
+        ColumnSchema::new(SRC_ID_COLUMN, string(), false),
+        ColumnSchema::new(DST_TYPE_COLUMN, string(), false),
+        ColumnSchema::new(DST_ID_COLUMN, string(), false),
+        ColumnSchema::new(REL_TYPE_COLUMN, string(), false),
+        ColumnSchema::new(PROVENANCE_COLUMN, string(), false),
+        ColumnSchema::new(
+            CONFIDENCE_COLUMN,
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            REQUEST_COUNT_COLUMN,
+            ConcreteDataType::int64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(ERROR_COUNT_COLUMN, ConcreteDataType::int64_datatype(), true),
+        ColumnSchema::new(
+            DURATION_SUM_COLUMN,
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            DURATION_COUNT_COLUMN,
+            ConcreteDataType::int64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(EDGE_ATTRIBUTES_COLUMN, json(), true),
     ]))
 });
 
@@ -252,6 +285,7 @@ struct SemanticGraphTable {
     schema: SchemaRef,
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    query_ctx: Option<QueryContextRef>,
 }
 
 impl SemanticGraphTable {
@@ -259,6 +293,7 @@ impl SemanticGraphTable {
         kind: GraphTableKind,
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
+        query_ctx: Option<QueryContextRef>,
     ) -> Self {
         let schema = match kind {
             GraphTableKind::Entities => ENTITIES_SCHEMA.clone(),
@@ -269,6 +304,7 @@ impl SemanticGraphTable {
             schema,
             catalog_name,
             catalog_manager,
+            query_ctx,
         }
     }
 
@@ -277,6 +313,7 @@ impl SemanticGraphTable {
         catalog: String,
         catalog_manager: Weak<dyn CatalogManager>,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>> {
         let provider = utils::entity_graph_provider(&catalog_manager)?;
         // No provider (engine not up / non-frontend node): stream empty.
@@ -284,8 +321,12 @@ impl SemanticGraphTable {
             return Ok(None);
         };
         match kind {
-            GraphTableKind::Entities => provider.scan_entities(&catalog, request).await,
-            GraphTableKind::Relationships => provider.scan_relationships(&catalog, request).await,
+            GraphTableKind::Entities => provider.scan_entities(&catalog, request, query_ctx).await,
+            GraphTableKind::Relationships => {
+                provider
+                    .scan_relationships(&catalog, request, query_ctx)
+                    .await
+            }
         }
         .context(InternalSnafu)
     }
@@ -338,10 +379,11 @@ impl SystemTable for SemanticGraphTable {
         let kind = self.kind;
         let catalog = self.catalog_name.clone();
         let catalog_manager = self.catalog_manager.clone();
+        let query_ctx = self.query_ctx.clone();
 
         let stream_schema = schema.clone();
         let stream = async move {
-            let stream = Self::derive(kind, catalog, catalog_manager, request)
+            let stream = Self::derive(kind, catalog, catalog_manager, request, query_ctx)
                 .await
                 .map_err(BoxedError::new)
                 .context(common_recordbatch::error::ExternalSnafu)?;

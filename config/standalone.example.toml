@@ -57,7 +57,7 @@ max_concurrent_queries = 0
 ## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
-## Defaults to max(num_cpus / 2, 1).
+## Defaults to max(num_cpus / 2, 2).
 #+ compact_rt_max_blocking_threads = 4
 
 ## The HTTP server options.
@@ -204,8 +204,13 @@ enable = true
 [otlp]
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
+## Experimental: enable cumulative OTLP exponential histogram ingestion.
+experimental_enable_exponential_histogram = false
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
+## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
+## resource attributes, so metrics-only services reach the semantic graph.
+experimental_enable_resource_info = false
 
 ## Prometheus remote storage options
 [prom_store]
@@ -729,6 +734,9 @@ schedule_compaction_after_edit = true
 ## Whether to enable flat format as the default SST format.
 default_flat_format = true
 
+## Whether to enable the experimental two-phase mode for eligible metric series scans.
+experimental_series_scan_v2 = true
+
 ## The options for index in Mito engine.
 [region_engine.mito.index]
 
@@ -922,7 +930,7 @@ ttl = "90d"
 ## `alter_database`, `drop_database`, `create_flow`, `drop_flow`,
 ## `create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,
 ## `drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,
-## `create_view`, `drop_view`.
+## `create_view`, `drop_view`, `admin_function`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
 #+ event_types = ["create_database"]

@@ -370,8 +370,6 @@ impl StartCommand {
         opts: FrontendOptions,
         plugins: Plugins,
     ) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -379,6 +377,8 @@ impl StartCommand {
             opts.component.node_id.clone(),
             Some(&opts.component.slow_query),
         );
+
+        common_runtime::init_global_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
@@ -467,6 +467,8 @@ impl StartCommand {
         // Some queries are expected to take long time.
         let mut channel_config = opts.datanode.client.channel_config();
         channel_config.timeout = None;
+        // Source Flight streams and sink unary responses share pooled connections.
+        channel_config.http2_adaptive_window = Some(true);
         if opts.grpc.flight_compression.transport_compression() {
             channel_config.accept_compression = true;
             channel_config.send_compression = true;

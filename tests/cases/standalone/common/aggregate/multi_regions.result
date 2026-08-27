@@ -62,6 +62,7 @@ select sum(val) from t;
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[sum(t.val)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(t.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_state(t.val)] REDACTED
@@ -96,6 +97,7 @@ select sum(val) from t group by idc;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[sum(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[idc@0 as idc], aggr=[sum(t.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[__sum_state(t.val)] REDACTED

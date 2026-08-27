@@ -14,17 +14,21 @@
 
 use std::sync::Arc;
 
-use client::OutputData;
+use client::{Database, OutputData};
 use common_test_util::temp_dir::create_temp_dir;
-use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
-use tests_integration::test_util::{StorageType, get_test_store_config};
+use tests_integration::test_util::{
+    StorageType, get_test_store_config, setup_authenticated_grpc_database,
+};
 
-use crate::event_recorder_test_util::{assert_single_event, find_eventually_string};
+use crate::event_recorder_test_util::{
+    assert_procedure_actor, assert_single_event, find_eventually_string,
+};
 
 const DATABASE_NAME: &str = "database_ddl_events";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_database_ddl_events() {
@@ -44,8 +48,14 @@ async fn test_database_ddl_events() {
         .build(true)
         .await;
     let instance = cluster.fe_instance();
+    let (database, _grpc_server) = setup_authenticated_grpc_database(
+        instance.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
+    )
+    .await;
 
-    execute_database_ddl(instance).await;
+    execute_database_ddl(&database).await;
 
     assert_database_events(instance).await;
 }
@@ -57,23 +67,25 @@ async fn test_standalone_database_ddl_events() {
         .build()
         .await;
     let instance = standalone.fe_instance();
+    let (database, _grpc_server) = setup_authenticated_grpc_database(
+        instance.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
+    )
+    .await;
 
-    execute_database_ddl(instance).await;
+    execute_database_ddl(&database).await;
 
     assert_database_events(instance).await;
 }
 
-async fn execute_database_ddl(instance: &Arc<frontend::instance::Instance>) {
+async fn execute_database_ddl(database: &Database) {
     for sql in [
         format!("CREATE DATABASE IF NOT EXISTS {DATABASE_NAME} WITH (ttl = '1h')"),
         format!("ALTER DATABASE {DATABASE_NAME} SET 'ttl' = '2h'"),
         format!("DROP DATABASE IF EXISTS {DATABASE_NAME}"),
     ] {
-        let output = instance
-            .do_query(&sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        let output = database.sql(sql).await.unwrap();
         assert!(matches!(output.data, OutputData::AffectedRows(_)));
     }
 }
@@ -111,10 +123,27 @@ async fn assert_database_event(
     event_type: &str,
     submitted_payload_predicate: &str,
 ) {
+    let procedure_id = find_eventually_string(
+        instance,
+        &format!(
+            r#"SELECT procedure_id
+FROM greptime_private.events
+WHERE type = '{event_type}'
+  AND schema_name = '{DATABASE_NAME}'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
+ORDER BY timestamp DESC
+LIMIT 1"#
+        ),
+        "procedure_id",
+    )
+    .await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
+
     let submitted = format!(
         r#"SELECT count(*) AS event_count
 FROM greptime_private.events
 WHERE type = '{event_type}'
+  AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Running'
   AND json_path_match(procedure_trigger, '$.type == "Submitted"')
   AND catalog_name = 'greptime'
@@ -125,21 +154,22 @@ WHERE type = '{event_type}'
     let actual = find_eventually_string(
         instance,
         &format!(
-            "SELECT json_to_string(event_context) AS event_context FROM greptime_private.events WHERE type = '{event_type}' AND procedure_state = 'Running' AND json_path_match(procedure_trigger, '$.type == \"Submitted\"') ORDER BY timestamp DESC LIMIT 1"
+            "SELECT json_to_string(event_context) AS event_context FROM greptime_private.events WHERE procedure_id = '{procedure_id}' AND json_path_match(procedure_trigger, '$.type == \"Submitted\"')"
         ),
         "event_context",
     )
     .await;
-    assert_eq!(r#"{"reason":"manual"}"#, actual);
+    assert_eq!(r#"{"protocol":"grpc","reason":"manual"}"#, actual);
 
     let lifecycle = format!(
         r#"SELECT count(*) AS event_count
 FROM greptime_private.events
 WHERE type = '{event_type}'
+  AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND catalog_name IS NULL
-  AND schema_name IS NULL
+  AND catalog_name = 'greptime'
+  AND schema_name = '{DATABASE_NAME}'
   AND json_is_null(payload)"#
     );
     assert_single_event(instance, &lifecycle).await;

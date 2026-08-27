@@ -25,8 +25,8 @@ use common_meta::lock_key::RemoteWalLock;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext, EventTrigger,
-    LockKey, Procedure, ProcedureState, Result as ProcedureResult, Status, StringKey,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, ProcedureState, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{info, warn};
 use manager::{WalPruneProcedureGuard, WalPruneProcedureTracker};
@@ -213,10 +213,7 @@ impl Procedure for WalPruneProcedure {
         LockKey::new(vec![lock_key])
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(WAL_PRUNE_EVENT_TYPE) {
             return None;
         }
@@ -506,11 +503,12 @@ mod tests {
         let mut procedure =
             WalPruneProcedure::new(context, None, "test_topic".to_string(), 42, false);
         let running = ProcedureState::Running;
-        let runtime_context = |trigger, lifecycle_state, event_type_filter| EventRuntimeContext {
+        let runtime_context = |trigger, lifecycle_state, event_type_filter| EventContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,
             event_type_filter: Arc::new(event_type_filter),
+            event_context: None,
         };
 
         for trigger in [EventTrigger::Submitted, EventTrigger::Recovered] {

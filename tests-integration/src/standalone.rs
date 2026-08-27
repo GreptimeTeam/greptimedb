@@ -49,14 +49,14 @@ use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
 use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
 use frontend::frontend::Frontend;
+use frontend::instance::Instance;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{Instance, StandaloneDatanodeManager};
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use snafu::ResultExt;
-use standalone::StandaloneRepartitionProcedureFactory;
 use standalone::options::StandaloneOptions;
+use standalone::{StandaloneDatanodeManager, StandaloneRepartitionProcedureFactory};
 
 use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
@@ -369,6 +369,11 @@ impl GreptimeDbStandaloneBuilder {
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             slow_query: self.slow_query_options.clone(),
             auto_create_table: self.auto_create_table,
+            // Tests cover the descriptor, so they run with it enabled.
+            otlp: frontend::service_config::OtlpOptions {
+                experimental_enable_resource_info: true,
+                ..Default::default()
+            },
             ..StandaloneOptions::default()
         };
 

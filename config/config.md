@@ -25,7 +25,7 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
-| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 1). |
+| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
@@ -74,7 +74,9 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
+| `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
+| `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
@@ -185,6 +187,7 @@
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.schedule_compaction_after_edit` | Bool | `true` | Whether to allow to schedule a compaction after a successful region edit.<br/><br/>Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.<br/>Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.<br/>Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit. |
 | `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
+| `region_engine.mito.experimental_series_scan_v2` | Bool | `true` | Whether to enable the experimental two-phase mode for eligible metric series scans. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
@@ -234,7 +237,7 @@
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 
@@ -254,7 +257,7 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
-| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 1). |
+| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
@@ -315,7 +318,9 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
+| `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
+| `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
@@ -372,6 +377,7 @@
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event type: `admin_function`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 
 
 ### Metasrv
@@ -396,7 +402,7 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
-| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 1). |
+| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `backend_tls` | -- | -- | TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)<br/>When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here<br/><br/>Note: if TLS is configured in both this section and the `store_addrs` connection string, the<br/>settings here will override the TLS settings in `store_addrs`. |
 | `backend_tls.mode` | String | `prefer` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- "disable" - No TLS<br/>- "prefer" (default) - Try TLS, fallback to plain<br/>- "require" - Require TLS<br/>- "verify_ca" - Require TLS and verify CA<br/>- "verify_full" - Require TLS and verify hostname |
 | `backend_tls.cert_path` | String | `""` | Path to client certificate file (for client authentication)<br/>Like "/path/to/client.crt" |
@@ -507,8 +513,8 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
-| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 1). |
-| `runtime.query_rt_size` | Integer | `7` | The number of threads to execute datanode query operations.<br/>Defaults to max(num_cpus - 1, 1). |
+| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.query_rt_size` | Integer | `7` | The number of threads to execute datanode query operations.<br/>Defaults to max(num_cpus - 1, 2). |
 | `runtime.ingest_rt_size` | Integer | `8` | The number of threads to execute datanode ingestion operations. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
@@ -605,6 +611,7 @@
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.schedule_compaction_after_edit` | Bool | `true` | Whether to allow to schedule a compaction after a successful region edit.<br/><br/>Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.<br/>Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.<br/>Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit. |
 | `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
+| `region_engine.mito.experimental_series_scan_v2` | Bool | `true` | Whether to enable the experimental two-phase mode for eligible metric series scans. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |

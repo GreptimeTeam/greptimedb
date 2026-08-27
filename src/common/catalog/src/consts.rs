@@ -167,6 +167,14 @@ pub fn is_readonly_table(schema: &str, table: &str) -> bool {
             ))
 }
 
+/// Returns true for tables whose *definition* is system-owned while their rows
+/// are user-written: created with a canonical schema on first write; user
+/// CREATE/ALTER/RENAME-into rejected; DML and DROP/TRUNCATE allowed (the next
+/// write recreates the table). Currently only the declared-edge table.
+pub fn is_ddl_reserved_table(schema: &str, table: &str) -> bool {
+    schema == DEFAULT_PRIVATE_SCHEMA_NAME && table == SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME
+}
+
 // ---- special table and fields ----
 pub const TRACE_ID_COLUMN: &str = "trace_id";
 pub const SPAN_ID_COLUMN: &str = "span_id";
@@ -208,4 +216,41 @@ pub const SEMANTIC_ENTITIES_TABLE_NAME: &str = "semantic_entities";
 /// Computed relationship set: the edge set of the observability graph, derived at
 /// read time (`calls`/`runs_on`/... ) and unioned with the declared-edge table.
 pub const SEMANTIC_RELATIONSHIPS_TABLE_NAME: &str = "semantic_relationships";
+/// Physical table of hand-declared edges, unioned into the computed
+/// `semantic_relationships`; see [`is_ddl_reserved_table`] for its lifecycle.
+pub const SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME: &str = "semantic_relationships_declared";
+
+/// Width of the window the graph derivation bins observations into. Sources
+/// synthesizing observations must land a row in every window they describe,
+/// so this is shared rather than restated per crate.
+pub const SEMANTIC_GRAPH_WINDOW_NANOS: i64 = 60 * 1_000_000_000;
+
+// Column names of the graph tables: `catalog` exposes these schemas and the
+// read-time plans in `operator` must project exactly them.
+pub const OBSERVED_AT_COLUMN: &str = "observed_at";
+pub const WINDOW_START_COLUMN: &str = "window_start";
+pub const WINDOW_END_COLUMN: &str = "window_end";
+pub const FRESH_UNTIL_COLUMN: &str = "fresh_until";
+pub const ENTITY_TYPE_COLUMN: &str = "entity_type";
+pub const ENTITY_ID_COLUMN: &str = "entity_id";
+pub const ENTITY_ID_ATTRS_COLUMN: &str = "entity_id_attrs";
+pub const ENTITY_SCOPE_COLUMN: &str = "scope";
+pub const ENTITY_DESCRIPTIVE_COLUMN: &str = "descriptive";
+pub const SOURCE_TABLES_COLUMN: &str = "source_tables";
+pub const SRC_TYPE_COLUMN: &str = "src_type";
+pub const SRC_ID_COLUMN: &str = "src_id";
+pub const DST_TYPE_COLUMN: &str = "dst_type";
+pub const DST_ID_COLUMN: &str = "dst_id";
+pub const REL_TYPE_COLUMN: &str = "rel_type";
+pub const PROVENANCE_COLUMN: &str = "provenance";
+pub const CONFIDENCE_COLUMN: &str = "confidence";
+pub const REQUEST_COUNT_COLUMN: &str = "request_count";
+pub const ERROR_COUNT_COLUMN: &str = "error_count";
+pub const DURATION_SUM_COLUMN: &str = "duration_sum";
+pub const DURATION_COUNT_COLUMN: &str = "duration_count";
+pub const EDGE_ATTRIBUTES_COLUMN: &str = "attributes";
+// Declared-edge table only.
+pub const VALID_FROM_COLUMN: &str = "valid_from";
+pub const VALID_UNTIL_COLUMN: &str = "valid_until";
+pub const GENERATION_ID_COLUMN: &str = "generation_id";
 // ---- End of entity relationship graph tables ----

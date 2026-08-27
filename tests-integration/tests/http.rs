@@ -18,8 +18,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+use api::greptime_proto::io::prometheus::write::v2::metadata::MetricType as RemoteWriteV2MetricType;
 use api::greptime_proto::io::prometheus::write::v2::{
-    BucketSpan, Histogram, Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
+    BucketSpan, Histogram, Metadata as RemoteWriteV2Metadata, Sample as RemoteWriteV2Sample,
+    TimeSeries as RemoteWriteV2TimeSeries,
 };
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
@@ -48,7 +50,9 @@ use log_query::{AggFunc, Context, Limit, LogExpr, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
@@ -81,6 +85,8 @@ use tests_integration::test_util::{
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
+
+use crate::event_recorder_test_util::assert_procedure_actor_by_table;
 
 #[macro_export]
 macro_rules! http_test {
@@ -156,9 +162,12 @@ macro_rules! http_tests {
                 test_pipeline_index_options,
 
                 test_otlp_metrics_new,
+                test_otlp_exponential_histogram,
                 test_otlp_metric_translation_strategies,
+                test_otlp_metrics_resource_info_conflicts,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
+                test_otlp_traces_v1_entity_graph,
                 test_otlp_logs,
                 test_loki_pb_logs,
                 test_loki_pb_logs_with_pipeline,
@@ -255,6 +264,29 @@ pub async fn test_http_auth(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    let actor_query_client = &client;
+    assert_procedure_actor_by_table(
+        "create_table",
+        "auth_test",
+        "writeonly_user",
+        |query| async move {
+            let res = actor_query_client
+                .get(&format!("/v1/sql?db=public&sql={}", encode(&query)))
+                .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+                .send()
+                .await;
+            let Ok(body) = serde_json::from_str::<GreptimedbV1Response>(&res.text().await) else {
+                return false;
+            };
+            matches!(
+                body.output().first(),
+                Some(GreptimeQueryOutput::Records(records))
+                    if records.rows().first().and_then(|row| row.first()).and_then(Value::as_bool)
+                        == Some(true)
+            )
+        },
+    )
+    .await;
     let res = client
         .get("/v1/sql?db=public&sql=insert into auth_test values(1);")
         .header(
@@ -904,7 +936,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(
         body.data,
         serde_json::from_value::<PrometheusResponse>(
-            json!({"resultType":"scalar","result":[1.0,"2"]})
+            json!({"resultType":"scalar","result":[1.0,"2.0"]})
         )
         .unwrap()
     );
@@ -2173,6 +2205,12 @@ default_merge_mode = "last_non_null"
 [jaeger]
 enable = true
 
+[otlp]
+enable = true
+experimental_enable_exponential_histogram = false
+trace_ingest_chunk_size = 512
+experimental_enable_resource_info = true
+
 [prom_store]
 enable = true
 with_metric_engine = true
@@ -2214,6 +2252,7 @@ query_timeout = "10m"
 slow_query_threshold = "1m"
 experimental_min_refresh_duration = "5s"
 grpc_conn_timeout = "5s"
+experimental_flight_do_get_timeout = "10s"
 experimental_grpc_max_retries = 3
 experimental_frontend_scan_timeout = "30s"
 experimental_max_filter_num_per_query = 20
@@ -2255,6 +2294,7 @@ scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
 schedule_compaction_after_edit = true
 default_flat_format = true
+experimental_series_scan_v2 = true
 
 [region_engine.mito.index]
 aux_path = ""
@@ -2693,6 +2733,74 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     )
     .await;
 
+    // A series carrying inline metadata (v2 senders SHOULD) upgrades its
+    // table's quality to declared, with the metric type and the unit
+    // canonicalised from the OpenMetrics word to UCUM.
+    let mut write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "remote_write_v2_typed_total"),
+            ("job", "api"),
+        ],
+        vec![RemoteWriteV2Sample {
+            value: 1.0,
+            timestamp: 1000,
+            start_timestamp: 0,
+        }],
+    );
+    let unit_ref = write_request.symbols.len() as u32;
+    write_request.symbols.push("seconds".to_string());
+    write_request.timeseries[0].metadata = Some(RemoteWriteV2Metadata {
+        r#type: RemoteWriteV2MetricType::Counter as i32,
+        help_ref: 0,
+        unit_ref,
+    });
+    let compressed_request = prom_store::snappy_compress(&write_request.encode_to_vec())
+        .expect("failed to encode snappy");
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    validate_data(
+        "prometheus_remote_write_v2_declared_metadata",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_typed_total' \
+         and create_options like '%greptime.semantic.metric.type=counter%' \
+         and create_options like '%greptime.semantic.metric.unit=s%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=declared%';",
+        "[[1]]",
+    )
+    .await;
+
+    let res = client
+        .get("/v1/prometheus/api/v1/metadata?metric=remote_write_v2_typed_total")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "remote_write_v2_typed_total": [
+      {
+        "type": "counter",
+        "unit": "seconds",
+        "help": ""
+      }
+    ]
+  }
+}"#
+    );
+
     guard.remove_all().await;
 }
 
@@ -2830,9 +2938,207 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         "prometheus_remote_write_v2_native_histogram_rows",
         &client,
         "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
-        "[[3000,{\"count_f64\":null,\"count_u64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_u64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_u64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_u64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
+        "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
     )
     .await;
+
+    let res = client
+        .get("/v1/prometheus/api/v1/metadata?metric=remote_write_v2_latency_seconds")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "remote_write_v2_latency_seconds": [
+      {
+        "type": "histogram",
+        "unit": "",
+        "help": ""
+      }
+    ]
+  }
+}"#
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=histogram_count(remote_write_v2_latency_seconds)&time=4")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    // Finite vector sample values use the HTTP response's ryu contract, so
+    // integral f64 values retain their explicit `.0`; timestamps remain JSON numbers.
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "value": [
+          4.0,
+          "6.0"
+        ]
+      }
+    ]
+  }
+}"#
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=remote_write_v2_latency_seconds&time=4")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "histogram": [
+          4.0,
+          {
+            "count": "6",
+            "sum": "20",
+            "buckets": [
+              [
+                3,
+                "-0.002",
+                "0.002",
+                "0.5"
+              ],
+              [
+                0,
+                "1.4142135623730951",
+                "1.681792830507429",
+                "2"
+              ],
+              [
+                0,
+                "1.681792830507429",
+                "2",
+                "3.5"
+              ]
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}"#
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query_range?query=remote_write_v2_latency_seconds&start=3&end=4&step=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "matrix",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "histograms": [
+          [
+            3.0,
+            {
+              "count": "8",
+              "sum": "10",
+              "buckets": [
+                [
+                  1,
+                  "-0.5",
+                  "-0.3535533905932738",
+                  "1"
+                ],
+                [
+                  3,
+                  "-0.001",
+                  "0.001",
+                  "1"
+                ],
+                [
+                  0,
+                  "0.7071067811865476",
+                  "1",
+                  "1"
+                ],
+                [
+                  0,
+                  "1",
+                  "1.4142135623730951",
+                  "3"
+                ],
+                [
+                  0,
+                  "1.4142135623730951",
+                  "2",
+                  "2"
+                ]
+              ]
+            }
+          ],
+          [
+            4.0,
+            {
+              "count": "6",
+              "sum": "20",
+              "buckets": [
+                [
+                  3,
+                  "-0.002",
+                  "0.002",
+                  "0.5"
+                ],
+                [
+                  0,
+                  "1.4142135623730951",
+                  "1.681792830507429",
+                  "2"
+                ],
+                [
+                  0,
+                  "1.681792830507429",
+                  "2",
+                  "3.5"
+                ]
+              ]
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}"#
+    );
 
     validate_data(
         "prometheus_remote_write_v2_native_histogram_table_created",
@@ -2888,6 +3194,53 @@ pub async fn test_prometheus_remote_write_batched(store_type: StorageType) {
          and create_options like '%greptime.semantic.signal_type=metric%' \
          and create_options like '%greptime.semantic.source=prometheus%' \
          and create_options like '%greptime.semantic.metric.metadata_quality=inferred%'",
+        "[[1]]",
+    )
+    .await;
+
+    // The batched path bypasses the operator's auto-create: v2 per-series
+    // metadata must reach its table options through the batch create too.
+    let mut write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (
+                prom_store::METRIC_NAME_LABEL,
+                "remote_write_batched_typed_total",
+            ),
+            ("job", "api"),
+        ],
+        vec![RemoteWriteV2Sample {
+            value: 1.0,
+            timestamp: 1000,
+            start_timestamp: 0,
+        }],
+    );
+    let unit_ref = write_request.symbols.len() as u32;
+    write_request.symbols.push("bytes".to_string());
+    write_request.timeseries[0].metadata = Some(RemoteWriteV2Metadata {
+        r#type: RemoteWriteV2MetricType::Gauge as i32,
+        help_ref: 0,
+        unit_ref,
+    });
+    let compressed_request = prom_store::snappy_compress(&write_request.encode_to_vec())
+        .expect("failed to encode snappy");
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    wait_for_data(
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_batched_typed_total' \
+         and create_options like '%greptime.semantic.metric.type=gauge%' \
+         and create_options like '%greptime.semantic.metric.unit=By%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=declared%'",
         "[[1]]",
     )
     .await;
@@ -6150,7 +6503,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = "[[\"claude_code_cost_usage_USD_total\"],[\"claude_code_token_usage_tokens_total\"],[\"demo\"],[\"greptime_physical_table\"],[\"numbers\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\"],[\"claude_code_token_usage_tokens_total\"],[\"demo\"],[\"greptime_otel_resource_info\"],[\"greptime_physical_table\"],[\"numbers\"]]";
     validate_data("otlp_metrics_all_tables", &client, "show tables;", expected).await;
 
     // Metric-engine logical table carries the semantic identity. Match substrings
@@ -6217,6 +6570,33 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     )
     .await;
 
+    // The synthesized resource descriptor: a plain mito info table keyed by
+    // the raw OTel attribute keys (service.name is the only allowlisted
+    // resource attribute in this payload), independent of the promote/ignore
+    // headers. The timestamp is the newest data-point time.
+    validate_data(
+        "otlp_metrics_resource_info",
+        &client,
+        "select job, \"service.name\", greptime_value, greptime_timestamp from greptime_otel_resource_info;",
+        "[[\"claude-code\",\"claude-code\",1.0,1753780559836]]",
+    )
+    .await;
+    // All four ownership markers must land on auto-create: the descriptor
+    // write path refuses tables that miss any of them, so a missing stamp
+    // here would silently stop every follow-up descriptor write.
+    validate_data(
+        "otlp_metrics_resource_info_options",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'greptime_otel_resource_info' \
+         and engine = 'mito' \
+         and create_options like '%greptime.semantic.metric.type=info%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=declared%' \
+         and create_options like '%greptime.semantic.signal_type=metric%' \
+         and create_options like '%greptime.semantic.source=opentelemetry%';",
+        "[[1]]",
+    )
+    .await;
+
     // drop table
     let res = client
         .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD_total`;")
@@ -6225,6 +6605,11 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .get("/v1/sql?sql=drop table claude_code_token_usage_tokens_total;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table greptime_otel_resource_info;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -6354,6 +6739,16 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     )
     .await;
 
+    // the descriptor was auto-created again after the earlier drop
+    validate_data(
+        "otlp_metrics_resource_info_recreated",
+        &client,
+        "select count(*) from information_schema.tables \
+         where table_name = 'greptime_otel_resource_info' and engine = 'mito';",
+        "[[1]]",
+    )
+    .await;
+
     // drop table
     let res = client
         .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD_total`;")
@@ -6365,6 +6760,178 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table greptime_otel_resource_info;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // job composition end-to-end: service.namespace folds into "<ns>/<name>"
+    // on both the descriptor and the metric tables
+    let content = r#"
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"service.namespace","value":{"stringValue":"shop"}},{"key":"host.id","value":{"stringValue":"h-1"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"ns_gauge","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":1.0}]}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    validate_data(
+        "otlp_metrics_namespace_job_descriptor",
+        &client,
+        "select job, \"service.name\", \"service.namespace\", \"host.id\" from greptime_otel_resource_info;",
+        "[[\"shop/api\",\"api\",\"shop\",\"h-1\"]]",
+    )
+    .await;
+    validate_data(
+        "otlp_metrics_namespace_job_metric_table",
+        &client,
+        "select job from ns_gauge;",
+        "[[\"shop/api\"]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
+    use opentelemetry_proto::tonic::metrics::v1::{
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
+        ResourceMetrics, ScopeMetrics, exponential_histogram_data_point, metric,
+    };
+    use tests_integration::test_util::setup_test_http_app_with_otlp_exponential_histogram;
+
+    common_telemetry::init_default_ut_logging();
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "otlp.exponential.latency".to_string(),
+                    data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                        data_points: vec![
+                            ExponentialHistogramDataPoint {
+                                start_time_unix_nano: 1_000_000_000,
+                                time_unix_nano: 3_000_000_000,
+                                count: 4,
+                                sum: Some(8.0),
+                                scale: 0,
+                                zero_count: 1,
+                                positive: Some(exponential_histogram_data_point::Buckets {
+                                    offset: -1,
+                                    bucket_counts: vec![1, 2],
+                                }),
+                                ..Default::default()
+                            },
+                            ExponentialHistogramDataPoint {
+                                start_time_unix_nano: 1_000_000_000,
+                                time_unix_nano: 4_000_000_000,
+                                scale: -5,
+                                ..Default::default()
+                            },
+                        ],
+                        aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = req.encode_to_vec();
+    let headers = || {
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )]
+    };
+
+    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
+        store_type,
+        "test_otlp_exponential_histogram_disabled",
+        false,
+    )
+    .await;
+    let client = TestClient::new(app).await;
+    let res = send_req(
+        &client,
+        headers(),
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let status = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
+    assert_eq!(3, status.code);
+    assert!(
+        status
+            .message
+            .contains("otlp.experimental_enable_exponential_histogram")
+    );
+    validate_data(
+        "otlp_exponential_histogram_disabled_no_table",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'otlp_exponential_latency';",
+        "[[0]]",
+    )
+    .await;
+    guard.remove_all().await;
+
+    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
+        store_type,
+        "test_otlp_exponential_histogram_enabled",
+        true,
+    )
+    .await;
+    let client = TestClient::new(app).await;
+    let res = send_req(&client, headers(), "/v1/otlp/v1/metrics", body, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+    let response = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = response.partial_success.unwrap();
+    assert_eq!(1, partial_success.rejected_data_points);
+    assert!(partial_success.error_message.contains("scale -5"));
+
+    validate_data(
+        "otlp_exponential_histogram_row",
+        &client,
+        "select greptime_timestamp, greptime_native_histogram from otlp_exponential_latency;",
+        "[[3000,{\"count_f64\":null,\"count_i64\":4,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,2],\"positive_span_lengths\":[2],\"positive_span_offsets\":[0],\"reset_hint\":0,\"schema\":0,\"start_timestamp\":1000,\"sum\":8.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.0}]]",
+    )
+    .await;
+    validate_data(
+        "otlp_exponential_histogram_metadata",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'otlp_exponential_latency' and create_options like '%greptime.semantic.metric.type=histogram%' and create_options like '%greptime.semantic.metric.temporality=cumulative%';",
+        "[[1]]",
+    )
+    .await;
+
+    for query in [
+        "histogram_count(otlp_exponential_latency)",
+        "histogram_sum(otlp_exponential_latency)",
+        "histogram_quantile(0.5,otlp_exponential_latency)",
+        "histogram_count(rate(otlp_exponential_latency[5s]))",
+    ] {
+        let res = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time=3",
+                encode(query)
+            ))
+            .send()
+            .await;
+        assert_eq!(StatusCode::OK, res.status(), "query: {query}");
+        let body = res.text().await;
+        assert!(body.contains("otlp_exponential_latency"), "{query}: {body}");
+    }
 
     guard.remove_all().await;
 }
@@ -6428,6 +6995,24 @@ pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
     )
     .await;
 
+    // the descriptor's columns are the fixed raw keys regardless of the
+    // translation strategy, and only allowlisted attributes are projected
+    validate_data(
+        "otlp_metric_translation_strategy_resource_info",
+        &client,
+        "select job, \"service.name\" from greptime_otel_resource_info;",
+        "[[\"strategy-service\",\"strategy-service\"]]",
+    )
+    .await;
+    validate_data(
+        "otlp_metric_translation_strategy_resource_info_allowlist",
+        &client,
+        "select count(*) from information_schema.columns \
+         where table_name = 'greptime_otel_resource_info' and column_name = 'resource.attr';",
+        "[[0]]",
+    )
+    .await;
+
     let res = send_req(
         &client,
         vec![
@@ -6446,6 +7031,122 @@ pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::BAD_REQUEST, res.status());
+
+    guard.remove_all().await;
+}
+
+pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_metrics_resource_info_conflicts")
+            .await;
+    let client = TestClient::new(app).await;
+
+    let content_type = || {
+        (
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )
+    };
+
+    // A metric named like the descriptor wins the table name: it goes through
+    // the normal metric-engine path and no descriptor is synthesized.
+    let content = r#"
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}},{"key":"host.id","value":{"stringValue":"h-1"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"greptime_otel_resource_info","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":1.0}]}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![content_type()],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+    assert!(body.partial_success.is_none());
+    validate_data(
+        "otlp_metrics_name_collision_engine",
+        &client,
+        "select count(*) from information_schema.tables \
+         where table_name = 'greptime_otel_resource_info' and engine = 'metric';",
+        "[[1]]",
+    )
+    .await;
+    let res = execute_sql(&client, "drop table greptime_otel_resource_info;").await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // A pre-existing table with an incompatible schema fails the descriptor
+    // write, which degrades to an OTLP partial-success warning while the
+    // metric data itself is accepted.
+    let res = execute_sql(
+        &client,
+        "create table greptime_otel_resource_info (ts timestamp time index, job double, greptime_value double);",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = r#"
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"api"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"conflict_gauge","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":7.0}]}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![content_type()],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = body.partial_success.as_ref().unwrap();
+    assert_eq!(partial_success.rejected_data_points, 0);
+    assert!(
+        partial_success
+            .error_message
+            .contains("greptime_otel_resource_info"),
+        "unexpected warning: {}",
+        partial_success.error_message
+    );
+    validate_data(
+        "otlp_metrics_conflict_main_data_accepted",
+        &client,
+        "select greptime_value from conflict_gauge;",
+        "[[7.0]]",
+    )
+    .await;
+
+    // The descriptor is auto-created again once the conflicting table is
+    // gone, and a follow-up write into it does not degrade.
+    let res = execute_sql(&client, "drop table greptime_otel_resource_info;").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    for round in 0..2 {
+        let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+        let res = send_req(
+            &client,
+            vec![content_type()],
+            "/v1/otlp/v1/metrics",
+            req.encode_to_vec(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+        let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+        assert!(
+            body.partial_success.is_none(),
+            "round {round} unexpectedly degraded: {:?}",
+            body.partial_success
+        );
+    }
+    validate_data(
+        "otlp_metrics_owned_descriptor_keeps_accepting",
+        &client,
+        "select count(*) from greptime_otel_resource_info;",
+        "[[1]]",
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -6520,6 +7221,19 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     )
     .await;
 
+    // The v0 data model is frozen on the unsigned `duration_nano`: pin the
+    // schema so the unsigned→signed flip of the built-in models (which flips
+    // only v1) cannot leak into v0 and break writes into pre-existing v0
+    // tables.
+    validate_data(
+        "otlp_traces_v0_schema",
+        &client,
+        "select column_name, lower(data_type) from information_schema.columns \
+         where table_name = 'opentelemetry_traces' and column_name = 'duration_nano';",
+        r#"[["duration_nano","bigint unsigned"]]"#,
+    )
+    .await;
+
     // drop table
     let res = client
         .get("/v1/sql?sql=drop table opentelemetry_traces;")
@@ -6566,6 +7280,86 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
         "otlp_traces_with_gzip",
         &client,
         "select * from opentelemetry_traces;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// One real OTLP export must come out of `semantic_relationships` as the
+/// zero-configuration chain; resources missing an identity column derive
+/// nothing extra.
+pub async fn test_otlp_traces_v1_entity_graph(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_traces_entity_graph").await;
+    let client = TestClient::new(app).await;
+
+    let span = |trace_id: &str, span_id: &str, parent: &str, kind: u32| {
+        json!({
+            "traceId": trace_id,
+            "spanId": span_id,
+            "parentSpanId": parent,
+            "name": "op",
+            "kind": kind,
+            "startTimeUnixNano": "1736480942444376000",
+            "endTimeUnixNano": "1736480942444499000",
+            "attributes": [],
+            "status": { "message": "", "code": 0 }
+        })
+    };
+    let resource_spans = |attributes: Vec<Value>, spans: Vec<Value>| {
+        json!({
+            "resource": { "attributes": attributes },
+            "scopeSpans": [{ "scope": { "name": "graph-tests" }, "spans": spans }],
+            "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+        })
+    };
+
+    // frontend: full identity (instance id + pod uid); cart: bare service —
+    // no instance entity; batch: instance id but no pod uid — no runs_on.
+    let req: ExportTraceServiceRequest = serde_json::from_value(json!({
+        "resourceSpans": [
+            resource_spans(
+                vec![
+                    make_string_attr("service.name", "frontend"),
+                    make_string_attr("service.instance.id", "inst-1"),
+                    make_string_attr("k8s.pod.uid", "uid-9"),
+                    make_string_attr("k8s.pod.name", "api-1"),
+                    make_string_attr("k8s.namespace.name", "default"),
+                ],
+                vec![span("c05d7a4ec8e1f231f02ed6e8da8655b4", "d24f921c75f68e23", "", 3)],
+            ),
+            resource_spans(
+                vec![make_string_attr("service.name", "cart")],
+                vec![span(
+                    "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                    "9630f2916e2f7909",
+                    "d24f921c75f68e23",
+                    2,
+                )],
+            ),
+            resource_spans(
+                vec![
+                    make_string_attr("service.name", "batch"),
+                    make_string_attr("service.instance.id", "binst-1"),
+                ],
+                vec![span("cc9e0991a2e63d274984bd44ee669203", "8f847259b0f6e1ab", "", 1)],
+            ),
+        ]
+    }))
+    .unwrap();
+    let res = send_trace_v1_req(&client, "graph_traces", req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["service","frontend","service","cart","calls"],["service.instance","batch,binst-1","service","batch","part_of"],["service.instance","frontend,inst-1","service","frontend","part_of"],["service.instance","frontend,inst-1","k8s.pod","uid-9","runs_on"]]"#;
+    validate_data(
+        "otlp_traces_entity_graph",
+        &client,
+        "select src_type, src_id, dst_type, dst_id, rel_type \
+         from greptime_private.semantic_relationships \
+         where observed_at >= '2025-01-01 00:00:00' order by rel_type, src_id;",
         expected,
     )
     .await;
@@ -6655,7 +7449,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
 
-    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -6708,7 +7502,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part1","CREATE TABLE IF NOT EXISTS \"trace_table_part1\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\n\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part1","CREATE TABLE IF NOT EXISTS \"trace_table_part1\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\n\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -6745,7 +7539,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part4","CREATE TABLE IF NOT EXISTS \"trace_table_part4\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '4',\n  trace_id >= '4' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < 'c',\n  trace_id >= 'c'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part4","CREATE TABLE IF NOT EXISTS \"trace_table_part4\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '4',\n  trace_id >= '4' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < 'c',\n  trace_id >= 'c'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -6782,7 +7576,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part32","CREATE TABLE IF NOT EXISTS \"trace_table_part32\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '08',\n  trace_id >= '08' AND trace_id < '10',\n  trace_id >= '10' AND trace_id < '18',\n  trace_id >= '18' AND trace_id < '20',\n  trace_id >= '20' AND trace_id < '28',\n  trace_id >= '28' AND trace_id < '30',\n  trace_id >= '30' AND trace_id < '38',\n  trace_id >= '38' AND trace_id < '40',\n  trace_id >= '40' AND trace_id < '48',\n  trace_id >= '48' AND trace_id < '50',\n  trace_id >= '50' AND trace_id < '58',\n  trace_id >= '58' AND trace_id < '60',\n  trace_id >= '60' AND trace_id < '68',\n  trace_id >= '68' AND trace_id < '70',\n  trace_id >= '70' AND trace_id < '78',\n  trace_id >= '78' AND trace_id < '80',\n  trace_id >= '80' AND trace_id < '88',\n  trace_id >= '88' AND trace_id < '90',\n  trace_id >= '90' AND trace_id < '98',\n  trace_id >= '98' AND trace_id < 'a0',\n  trace_id >= 'a0' AND trace_id < 'a8',\n  trace_id >= 'a8' AND trace_id < 'b0',\n  trace_id >= 'b0' AND trace_id < 'b8',\n  trace_id >= 'b8' AND trace_id < 'c0',\n  trace_id >= 'c0' AND trace_id < 'c8',\n  trace_id >= 'c8' AND trace_id < 'd0',\n  trace_id >= 'd0' AND trace_id < 'd8',\n  trace_id >= 'd8' AND trace_id < 'e0',\n  trace_id >= 'e0' AND trace_id < 'e8',\n  trace_id >= 'e8' AND trace_id < 'f0',\n  trace_id >= 'f0' AND trace_id < 'f8',\n  trace_id >= 'f8'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part32","CREATE TABLE IF NOT EXISTS \"trace_table_part32\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '08',\n  trace_id >= '08' AND trace_id < '10',\n  trace_id >= '10' AND trace_id < '18',\n  trace_id >= '18' AND trace_id < '20',\n  trace_id >= '20' AND trace_id < '28',\n  trace_id >= '28' AND trace_id < '30',\n  trace_id >= '30' AND trace_id < '38',\n  trace_id >= '38' AND trace_id < '40',\n  trace_id >= '40' AND trace_id < '48',\n  trace_id >= '48' AND trace_id < '50',\n  trace_id >= '50' AND trace_id < '58',\n  trace_id >= '58' AND trace_id < '60',\n  trace_id >= '60' AND trace_id < '68',\n  trace_id >= '68' AND trace_id < '70',\n  trace_id >= '70' AND trace_id < '78',\n  trace_id >= '78' AND trace_id < '80',\n  trace_id >= '80' AND trace_id < '88',\n  trace_id >= '88' AND trace_id < '90',\n  trace_id >= '90' AND trace_id < '98',\n  trace_id >= '98' AND trace_id < 'a0',\n  trace_id >= 'a0' AND trace_id < 'a8',\n  trace_id >= 'a8' AND trace_id < 'b0',\n  trace_id >= 'b0' AND trace_id < 'b8',\n  trace_id >= 'b8' AND trace_id < 'c0',\n  trace_id >= 'c0' AND trace_id < 'c8',\n  trace_id >= 'c8' AND trace_id < 'd0',\n  trace_id >= 'd0' AND trace_id < 'd8',\n  trace_id >= 'd8' AND trace_id < 'e0',\n  trace_id >= 'e0' AND trace_id < 'e8',\n  trace_id >= 'e8' AND trace_id < 'f0',\n  trace_id >= 'f0' AND trace_id < 'f8',\n  trace_id >= 'f8'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -7359,6 +8153,15 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     assert!(
         partial_success.error_message.contains(
             "Rejected span 00000000000000000000000000000013:0000000000000013 (InvalidArguments)"
+        ),
+        "unexpected partial success body: {body:?}"
+    );
+    // The rejection must name the column, the failing value and the target type,
+    // otherwise locating the bad attribute needs a collector-side capture.
+    assert!(
+        partial_success.error_message.contains(
+            "failed to coerce trace column 'span_attributes.attr_int' in table \
+             'trace_type_abort' from String(\"not_a_number\") to Int64"
         ),
         "unexpected partial success body: {body:?}"
     );
@@ -9172,7 +9975,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let trace_table_sql = "[[\"mytable\",\"CREATE TABLE IF NOT EXISTS \\\"mytable\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"timestamp_end\\\" TIMESTAMP(9) NULL,\\n  \\\"duration_nano\\\" BIGINT UNSIGNED NULL,\\n  \\\"parent_span_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"trace_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_id\\\" STRING NULL,\\n  \\\"span_kind\\\" STRING NULL,\\n  \\\"span_name\\\" STRING NULL,\\n  \\\"span_status_code\\\" STRING NULL,\\n  \\\"span_status_message\\\" STRING NULL,\\n  \\\"trace_state\\\" STRING NULL,\\n  \\\"scope_name\\\" STRING NULL,\\n  \\\"scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_attributes.operation.type\\\" STRING NULL,\\n  \\\"span_attributes.net.peer.ip\\\" STRING NULL,\\n  \\\"span_attributes.peer.service\\\" STRING NULL,\\n  \\\"span_events\\\" JSON NULL,\\n  \\\"span_links\\\" JSON NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\nPARTITION ON COLUMNS (\\\"trace_id\\\") (\\n  trace_id < '1',\\n  trace_id >= '1' AND trace_id < '2',\\n  trace_id >= '2' AND trace_id < '3',\\n  trace_id >= '3' AND trace_id < '4',\\n  trace_id >= '4' AND trace_id < '5',\\n  trace_id >= '5' AND trace_id < '6',\\n  trace_id >= '6' AND trace_id < '7',\\n  trace_id >= '7' AND trace_id < '8',\\n  trace_id >= '8' AND trace_id < '9',\\n  trace_id >= '9' AND trace_id < 'a',\\n  trace_id >= 'a' AND trace_id < 'b',\\n  trace_id >= 'b' AND trace_id < 'c',\\n  trace_id >= 'c' AND trace_id < 'd',\\n  trace_id >= 'd' AND trace_id < 'e',\\n  trace_id >= 'e' AND trace_id < 'f',\\n  trace_id >= 'f'\\n)\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.entity.service.id' = 'service_name',\\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\\n  'greptime.semantic.signal_type' = 'trace',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\\n  table_data_model = 'greptime_trace_v1',\\n  ttl = '7days'\\n)\"]]";
+    let trace_table_sql = "[[\"mytable\",\"CREATE TABLE IF NOT EXISTS \\\"mytable\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"timestamp_end\\\" TIMESTAMP(9) NULL,\\n  \\\"duration_nano\\\" BIGINT NULL,\\n  \\\"parent_span_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"trace_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_id\\\" STRING NULL,\\n  \\\"span_kind\\\" STRING NULL,\\n  \\\"span_name\\\" STRING NULL,\\n  \\\"span_status_code\\\" STRING NULL,\\n  \\\"span_status_message\\\" STRING NULL,\\n  \\\"trace_state\\\" STRING NULL,\\n  \\\"scope_name\\\" STRING NULL,\\n  \\\"scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_attributes.operation.type\\\" STRING NULL,\\n  \\\"span_attributes.net.peer.ip\\\" STRING NULL,\\n  \\\"span_attributes.peer.service\\\" STRING NULL,\\n  \\\"span_events\\\" JSON NULL,\\n  \\\"span_links\\\" JSON NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\nPARTITION ON COLUMNS (\\\"trace_id\\\") (\\n  trace_id < '1',\\n  trace_id >= '1' AND trace_id < '2',\\n  trace_id >= '2' AND trace_id < '3',\\n  trace_id >= '3' AND trace_id < '4',\\n  trace_id >= '4' AND trace_id < '5',\\n  trace_id >= '5' AND trace_id < '6',\\n  trace_id >= '6' AND trace_id < '7',\\n  trace_id >= '7' AND trace_id < '8',\\n  trace_id >= '8' AND trace_id < '9',\\n  trace_id >= '9' AND trace_id < 'a',\\n  trace_id >= 'a' AND trace_id < 'b',\\n  trace_id >= 'b' AND trace_id < 'c',\\n  trace_id >= 'c' AND trace_id < 'd',\\n  trace_id >= 'd' AND trace_id < 'e',\\n  trace_id >= 'e' AND trace_id < 'f',\\n  trace_id >= 'f'\\n)\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.entity.service.id' = 'service_name',\\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\\n  'greptime.semantic.signal_type' = 'trace',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\\n  table_data_model = 'greptime_trace_v1',\\n  ttl = '7days'\\n)\"]]";
     validate_data(
         "trace_v1_create_table",
         &client,
@@ -10204,6 +11007,7 @@ pub async fn test_http_memory_limit(store_type: StorageType) {
         None,
         Some(http_opts),
         Some(memory_limiter),
+        false,
     )
     .await;
 

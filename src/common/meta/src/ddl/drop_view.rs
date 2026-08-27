@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
@@ -35,7 +35,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
-use crate::rpc::ddl::{DropViewTask, EventContext};
+use crate::rpc::ddl::DropViewTask;
 
 /// The procedure for dropping a view.
 pub struct DropViewProcedure {
@@ -48,13 +48,12 @@ pub struct DropViewProcedure {
 impl DropViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropView";
 
-    pub fn new(task: DropViewTask, event_context: EventContext, context: DdlContext) -> Self {
+    pub fn new(task: DropViewTask, context: DdlContext) -> Self {
         Self {
             context,
             data: DropViewData {
                 state: DropViewState::Prepare,
                 task,
-                event_context,
             },
         }
     }
@@ -214,7 +213,7 @@ impl Procedure for DropViewProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
         if !ctx.event_type_filter.allows(DROP_VIEW_EVENT_TYPE) {
             return None;
         }
@@ -228,10 +227,17 @@ impl Procedure for DropViewProcedure {
                     table_ref.table,
                     self.data.view_id(),
                     self.data.task.drop_if_exists,
-                    self.data.event_context.clone(),
                 )
             }
-            _ => ViewDdlEvent::drop_lifecycle(),
+            _ => {
+                let table_ref = self.data.table_ref();
+                ViewDdlEvent::drop_lifecycle(
+                    table_ref.catalog,
+                    table_ref.schema,
+                    table_ref.table,
+                    self.data.view_id(),
+                )
+            }
         };
 
         Some(Box::new(event))
@@ -243,8 +249,6 @@ impl Procedure for DropViewProcedure {
 pub(crate) struct DropViewData {
     state: DropViewState,
     task: DropViewTask,
-    #[serde(default)]
-    event_context: EventContext,
 }
 
 impl DropViewData {

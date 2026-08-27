@@ -18,12 +18,14 @@ use std::fmt::Display;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use common_event_recorder::PersistentEventContext;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::EventContext;
 use common_meta::rpc::router::RegionRoute;
-use common_procedure::{ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher};
+use common_procedure::{
+    ProcedureContext, ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher,
+};
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -458,8 +460,20 @@ impl RegionMigrationManager {
         }
 
         let submitting_region_ids = task.region_ids.clone();
+        // TODO(weny): Pass the actor when region migration task submission propagates it.
+        let procedure_context = ProcedureContext {
+            actor: None,
+            event_context: Some(PersistentEventContext::new(
+                task.trigger_reason.to_trigger_reason(),
+            )),
+        };
         let procedure_id = self
-            .submit_procedure_inner(task, procedure_guards, catalog_and_schema)
+            .submit_procedure_inner(
+                procedure_context,
+                task,
+                procedure_guards,
+                catalog_and_schema,
+            )
             .await?;
         Ok(SubmitRegionMigrationTaskResult {
             migrated,
@@ -475,6 +489,7 @@ impl RegionMigrationManager {
 
     async fn submit_procedure_inner(
         &self,
+        procedure_context: ProcedureContext,
         task: RegionMigrationTaskBatch,
         procedure_guards: Vec<RegionMigrationProcedureGuard>,
         catalog_and_schema: Vec<(String, String)>,
@@ -486,12 +501,13 @@ impl RegionMigrationManager {
                 task.to_peer.clone(),
                 task.region_ids.clone(),
                 task.timeout,
-                EventContext::new(task.trigger_reason.to_trigger_reason()),
+                task.trigger_reason,
             ),
             self.context_factory.clone(),
             procedure_guards,
         );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
         let procedure_manager = self.procedure_manager.clone();
@@ -527,8 +543,14 @@ impl RegionMigrationManager {
     /// Submits a new region migration procedure.
     pub async fn submit_procedure(
         &self,
+        procedure_context: ProcedureContext,
         mut task: RegionMigrationProcedureTask,
     ) -> Result<Option<ProcedureId>> {
+        if let Some(event_context) = procedure_context.event_context.as_ref() {
+            task.trigger_reason =
+                RegionMigrationTriggerReason::from_trigger_reason(event_context.reason);
+        }
+
         let Some(guard) = self.insert_running_procedure(&task) else {
             return error::MigrationRunningSnafu {
                 region_id: task.region_id,
@@ -582,12 +604,13 @@ impl RegionMigrationManager {
                 to_peer,
                 vec![region_id],
                 timeout,
-                EventContext::new(trigger_reason.to_trigger_reason()),
+                trigger_reason,
             ),
             self.context_factory.clone(),
             vec![guard],
         );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
         let procedure_manager = self.procedure_manager.clone();
@@ -651,7 +674,15 @@ mod test {
             .unwrap()
             .insert(region_id, task.clone());
 
-        let err = manager.submit_procedure(task).await.unwrap_err();
+        let err = manager
+            .submit_procedure(
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    task.trigger_reason.to_trigger_reason(),
+                )),
+                task,
+            )
+            .await
+            .unwrap_err();
         assert_matches!(err, error::Error::MigrationRunning { .. });
     }
 
@@ -669,7 +700,15 @@ mod test {
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
-        let err = manager.submit_procedure(task).await.unwrap_err();
+        let err = manager
+            .submit_procedure(
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    task.trigger_reason.to_trigger_reason(),
+                )),
+                task,
+            )
+            .await
+            .unwrap_err();
         assert_matches!(err, error::Error::InvalidArguments { .. });
     }
 
@@ -687,7 +726,15 @@ mod test {
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
-        let err = manager.submit_procedure(task).await.unwrap_err();
+        let err = manager
+            .submit_procedure(
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    task.trigger_reason.to_trigger_reason(),
+                )),
+                task,
+            )
+            .await
+            .unwrap_err();
         assert_matches!(err, error::Error::TableRouteNotFound { .. });
     }
 
@@ -715,7 +762,15 @@ mod test {
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
-        let err = manager.submit_procedure(task).await.unwrap_err();
+        let err = manager
+            .submit_procedure(
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    task.trigger_reason.to_trigger_reason(),
+                )),
+                task,
+            )
+            .await
+            .unwrap_err();
         assert_matches!(err, error::Error::RegionRouteNotFound { .. });
     }
 
@@ -743,7 +798,15 @@ mod test {
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
-        let err = manager.submit_procedure(task).await.unwrap_err();
+        let err = manager
+            .submit_procedure(
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    task.trigger_reason.to_trigger_reason(),
+                )),
+                task,
+            )
+            .await
+            .unwrap_err();
         assert_matches!(err, error::Error::LeaderPeerChanged { .. });
         assert_eq!(
             err.to_string(),
@@ -776,7 +839,15 @@ mod test {
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
-        let err = manager.submit_procedure(task).await.unwrap_err();
+        let err = manager
+            .submit_procedure(
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    task.trigger_reason.to_trigger_reason(),
+                )),
+                task,
+            )
+            .await
+            .unwrap_err();
         assert_matches!(err, error::Error::InvalidArguments { .. });
         assert_eq!(
             err.to_string(),
@@ -809,7 +880,15 @@ mod test {
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
-        let err = manager.submit_procedure(task).await.unwrap_err();
+        let err = manager
+            .submit_procedure(
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    task.trigger_reason.to_trigger_reason(),
+                )),
+                task,
+            )
+            .await
+            .unwrap_err();
         assert_matches!(err, error::Error::RegionMigrated { .. });
     }
 

@@ -79,7 +79,7 @@ impl FixedTraceColumnIndexes {
         Ok(Self {
             timestamp,
             timestamp_end: field("timestamp_end", ColumnDataType::TimestampNanosecond)?,
-            duration_nano: field(DURATION_NANO_COLUMN, ColumnDataType::Uint64)?,
+            duration_nano: field(DURATION_NANO_COLUMN, ColumnDataType::Int64)?,
             parent_span_id: field(PARENT_SPAN_ID_COLUMN, ColumnDataType::String)?,
             trace_id: field(TRACE_ID_COLUMN, ColumnDataType::String)?,
             span_id: field(SPAN_ID_COLUMN, ColumnDataType::String)?,
@@ -342,6 +342,22 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     write_span_to_row_inner(writer, span, row_index, &fixed_columns, None)
 }
 
+/// Computes the span duration as the signed `duration_nano` value written by
+/// the v1 data model.
+///
+/// A span whose end precedes its start carries no meaningful duration; it
+/// clamps to 0 instead of wrapping — a negative `duration_nano` would fail
+/// the checked Int64→UInt64 coercion into pre-existing unsigned tables and
+/// would break unsigned readers such as the Jaeger query API. A duration
+/// that does not fit `i64` saturates at `i64::MAX`. Clamping at the source
+/// keeps new Int64 tables and existing UInt64 tables behaving identically:
+/// the written value is always a non-negative, in-range `i64`.
+fn span_duration_nano(span: &TraceSpan) -> i64 {
+    span.end_in_nanosecond
+        .saturating_sub(span.start_in_nanosecond)
+        .min(i64::MAX as u64) as i64
+}
+
 /// Writes one span and optionally records its dynamic columns for reconciliation.
 fn write_span_to_row_inner(
     writer: &mut TableData,
@@ -367,9 +383,7 @@ fn write_span_to_row_inner(
         ),
         (
             fixed_columns.duration_nano,
-            Some(ValueData::U64Value(
-                span.end_in_nanosecond - span.start_in_nanosecond,
-            )),
+            Some(ValueData::I64Value(span_duration_nano(&span))),
         ),
         (
             fixed_columns.parent_span_id,
@@ -633,6 +647,12 @@ fn write_attributes_with_schema(
                     row,
                 );
             }
+            // `StringValueStrindex` is profiling-signal-only and references the
+            // Profiling `ProfilesDictionary.string_table`, which is unavailable to
+            // traces. Per the OTLP spec, non-Profiling receivers must treat it as a
+            // non-fatal issue and process the value as if it were absent. Like the
+            // `None` arm, no field is written for the attribute.
+            Some(OtlpValue::StringValueStrindex(_)) => {}
             None => {}
         }
     }
@@ -656,6 +676,7 @@ mod tests {
         KeyValue {
             key: key.to_string(),
             value: Some(AnyValue { value: Some(value) }),
+            ..Default::default()
         }
     }
 
@@ -683,6 +704,49 @@ mod tests {
     }
 
     #[test]
+    fn test_span_end_before_start_records_zero_duration() {
+        // A span whose end precedes its start carries no meaningful duration;
+        // it clamps to 0 instead of wrapping. A negative value would fail the
+        // checked Int64→UInt64 coercion into pre-existing unsigned tables and
+        // break unsigned readers such as the Jaeger query API.
+        let mut span = make_span("svc", "trace", "span");
+        span.start_in_nanosecond = 200;
+        span.end_in_nanosecond = 100;
+
+        let (schema, rows) = build_trace_table_data(&[span])
+            .unwrap()
+            .into_schema_and_rows();
+
+        let idx = schema
+            .iter()
+            .position(|c| c.column_name == DURATION_NANO_COLUMN)
+            .unwrap();
+        assert_eq!(rows[0].values[idx].value_data, Some(ValueData::I64Value(0)));
+    }
+
+    #[test]
+    fn test_span_duration_above_i64_max_saturates() {
+        // The companion clamp: a duration that fits u64 but not i64 saturates
+        // at i64::MAX rather than wrapping to a negative number.
+        let mut span = make_span("svc", "trace", "span");
+        span.start_in_nanosecond = 0;
+        span.end_in_nanosecond = u64::MAX;
+
+        let (schema, rows) = build_trace_table_data(&[span])
+            .unwrap()
+            .into_schema_and_rows();
+
+        let idx = schema
+            .iter()
+            .position(|c| c.column_name == DURATION_NANO_COLUMN)
+            .unwrap();
+        assert_eq!(
+            rows[0].values[idx].value_data,
+            Some(ValueData::I64Value(i64::MAX))
+        );
+    }
+
+    #[test]
     fn test_fixed_trace_columns_keep_schema_and_values_aligned() {
         let table_data = build_trace_table_data(&[make_span("svc", "trace", "span")]).unwrap();
         let (schema, rows) = table_data.into_schema_and_rows();
@@ -695,7 +759,7 @@ mod tests {
                 "timestamp_end",
                 Some(ValueData::TimestampNanosecondValue(2)),
             ),
-            (DURATION_NANO_COLUMN, Some(ValueData::U64Value(1))),
+            (DURATION_NANO_COLUMN, Some(ValueData::I64Value(1))),
             (PARENT_SPAN_ID_COLUMN, None),
             (
                 TRACE_ID_COLUMN,

@@ -18,9 +18,9 @@ use std::time::Duration;
 
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::root_source;
+use common_event_recorder::{PersistentEventContext, TriggerReason};
 use common_meta::key::table_name::TableNameKey;
-use common_meta::rpc::ddl::EventContext;
-use common_procedure::{ProcedureWithId, watcher};
+use common_procedure::{ProcedureContext, ProcedureWithId, watcher};
 use common_query::Output;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
@@ -817,7 +817,6 @@ async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
         false,                   // full_file_listing
         Duration::from_secs(10), // timeout
         Default::default(),
-        EventContext::default(),
     );
 
     // Submit the procedure to the procedure manager
@@ -856,6 +855,9 @@ async fn trigger_full_gc(ticker: &GcTickerRef) {
             region_ids: None,
             full_file_listing: None,
             timeout: None,
+            procedure_context: ProcedureContext::from_event_context(PersistentEventContext::new(
+                TriggerReason::Manual,
+            )),
         })
         .await
         .unwrap();

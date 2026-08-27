@@ -19,21 +19,24 @@
 //! [`NativeHistogram`] is the query-time representation and therefore normalizes
 //! integer and floating-point payloads to absolute `f64` counts.
 
+mod encoding;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, Int32Array, ListArray, PrimitiveArray, StructArray,
-    TimestampMillisecondArray, UInt64Array,
+    Array, ArrayRef, Float64Array, Int32Array, Int64Array, ListArray, PrimitiveArray, StructArray,
+    TimestampMillisecondArray,
 };
 use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType as ArrowDataType, Field, Float64Type, Int32Type, Int64Type,
-    TimestampMillisecondType, UInt32Type, UInt64Type,
+    TimestampMillisecondType,
 };
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::types::{StructField, StructType};
+pub use encoding::{NativeHistogramError, encode_native_histogram, native_histogram_column_schema};
 use once_cell::sync::Lazy;
 
 use crate::prelude::greptime_native_histogram;
@@ -50,8 +53,8 @@ pub const POSITIVE_SPAN_OFFSETS_FIELD: &str = "positive_span_offsets";
 pub const POSITIVE_SPAN_LENGTHS_FIELD: &str = "positive_span_lengths";
 pub const NEGATIVE_SPAN_OFFSETS_FIELD: &str = "negative_span_offsets";
 pub const NEGATIVE_SPAN_LENGTHS_FIELD: &str = "negative_span_lengths";
-pub const COUNT_U64_FIELD: &str = "count_u64";
-pub const ZERO_COUNT_U64_FIELD: &str = "zero_count_u64";
+pub const COUNT_I64_FIELD: &str = "count_i64";
+pub const ZERO_COUNT_I64_FIELD: &str = "zero_count_i64";
 pub const POSITIVE_BUCKETS_I64_FIELD: &str = "positive_buckets_i64";
 pub const NEGATIVE_BUCKETS_I64_FIELD: &str = "negative_buckets_i64";
 pub const COUNT_F64_FIELD: &str = "count_f64";
@@ -72,8 +75,8 @@ pub const NATIVE_HISTOGRAM_FIELD_NAMES: &[&str] = &[
     POSITIVE_SPAN_LENGTHS_FIELD,
     NEGATIVE_SPAN_OFFSETS_FIELD,
     NEGATIVE_SPAN_LENGTHS_FIELD,
-    COUNT_U64_FIELD,
-    ZERO_COUNT_U64_FIELD,
+    COUNT_I64_FIELD,
+    ZERO_COUNT_I64_FIELD,
     POSITIVE_BUCKETS_I64_FIELD,
     NEGATIVE_BUCKETS_I64_FIELD,
     COUNT_F64_FIELD,
@@ -108,9 +111,9 @@ pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
             ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
         ),
         POSITIVE_SPAN_LENGTHS_FIELD | NEGATIVE_SPAN_LENGTHS_FIELD => Some(
-            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::uint32_datatype())),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
         ),
-        COUNT_U64_FIELD | ZERO_COUNT_U64_FIELD => Some(ConcreteDataType::uint64_datatype()),
+        COUNT_I64_FIELD | ZERO_COUNT_I64_FIELD => Some(ConcreteDataType::int64_datatype()),
         POSITIVE_BUCKETS_I64_FIELD | NEGATIVE_BUCKETS_I64_FIELD => Some(
             ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int64_datatype())),
         ),
@@ -195,7 +198,7 @@ pub struct Span {
     /// The first bucket index, or the gap after the preceding span.
     pub offset: i32,
     /// Number of consecutive buckets in the span.
-    pub length: u32,
+    pub length: i32,
 }
 
 /// Inclusion rules for a materialized bucket's lower and upper bounds.
@@ -213,6 +216,15 @@ struct Bucket {
     upper: f64,
     count: f64,
     boundary_rule: BoundaryRule,
+}
+
+/// Additional information produced while estimating a native histogram quantile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeHistogramQuantileInfo {
+    /// NaN observations made the estimated quantile skew higher.
+    NaNSkew,
+    /// The requested quantile fell beyond all populated buckets because of NaN observations.
+    NaNResult,
 }
 
 /// Query-time representation of a Prometheus native histogram.
@@ -245,6 +257,25 @@ pub struct NativeHistogram {
     pub positive_buckets: Vec<f64>,
     /// Absolute counts for negative buckets.
     pub negative_buckets: Vec<f64>,
+}
+
+/// Formats a histogram component like Prometheus's default `%g` formatter.
+fn format_promql_histogram_float(value: f64) -> String {
+    let abs = value.abs();
+    if !value.is_finite() || value == 0.0 || (1e-4..1e6).contains(&abs) {
+        return format_prometheus_float(value);
+    }
+
+    let scientific = format!("{value:e}");
+    let Some((mantissa, exponent)) = scientific.rsplit_once('e') else {
+        return scientific;
+    };
+    let (sign, exponent) = if let Some(exponent) = exponent.strip_prefix('-') {
+        ('-', exponent)
+    } else {
+        ('+', exponent.strip_prefix('+').unwrap_or(exponent))
+    };
+    format!("{mantissa}e{sign}{exponent:0>2}")
 }
 
 impl NativeHistogram {
@@ -378,7 +409,10 @@ impl NativeHistogram {
 
     /// Formats this histogram using PromQL native histogram sample notation.
     pub fn promql_string(&self) -> String {
-        let mut parts = vec![format!("count:{}", self.count), format!("sum:{}", self.sum)];
+        let mut parts = vec![
+            format!("count:{}", format_promql_histogram_float(self.count)),
+            format!("sum:{}", format_promql_histogram_float(self.sum)),
+        ];
         if let Some(buckets) = self.all_buckets() {
             parts.extend(
                 buckets
@@ -392,7 +426,11 @@ impl NativeHistogram {
                         };
                         format!(
                             "{}{},{}{}:{}",
-                            left, bucket.lower, bucket.upper, right, bucket.count
+                            left,
+                            format_promql_histogram_float(bucket.lower),
+                            format_promql_histogram_float(bucket.upper),
+                            right,
+                            format_promql_histogram_float(bucket.count)
                         )
                     }),
             );
@@ -609,19 +647,27 @@ impl NativeHistogram {
     /// Returns negative or positive infinity outside `[0, 1]`, and `NaN` when
     /// the quantile cannot be estimated.
     pub fn quantile(&self, q: f64) -> f64 {
+        self.quantile_with_info(q).0
+    }
+
+    /// Estimates the value at quantile `q` and reports the effect of NaN observations.
+    pub fn quantile_with_info(&self, q: f64) -> (f64, Option<NativeHistogramQuantileInfo>) {
         if q < 0.0 {
-            return f64::NEG_INFINITY;
+            return (f64::NEG_INFINITY, None);
         }
         if q > 1.0 {
-            return f64::INFINITY;
+            return (f64::INFINITY, None);
         }
         if self.count == 0.0 || q.is_nan() {
-            return f64::NAN;
+            return (f64::NAN, None);
         }
 
         let Some(mut buckets) = self.all_buckets() else {
-            return f64::NAN;
+            return (f64::NAN, None);
         };
+        let bucket_total = buckets.iter().map(|bucket| bucket.count).sum::<f64>();
+        let has_nan_observations = self.sum.is_nan() && bucket_total < self.count;
+        let info = has_nan_observations.then_some(NativeHistogramQuantileInfo::NaNSkew);
         let rank = q * self.count;
         let mut count = 0.0;
         for bucket in &mut buckets {
@@ -642,42 +688,65 @@ impl NativeHistogram {
             } else if self.uses_custom_buckets() {
                 if bucket.lower == f64::NEG_INFINITY {
                     if bucket.upper <= 0.0 {
-                        return bucket.upper;
+                        return (bucket.upper, info);
                     }
                     bucket.lower = 0.0;
                 } else if bucket.upper == f64::INFINITY {
-                    return bucket.lower;
+                    return (bucket.lower, info);
                 }
             }
 
             let rank_in_bucket = rank - (count - bucket.count);
             let fraction = rank_in_bucket / bucket.count;
             if self.uses_custom_buckets() || (bucket.lower <= 0.0 && bucket.upper >= 0.0) {
-                return bucket.lower + (bucket.upper - bucket.lower) * fraction;
+                return (
+                    bucket.lower + (bucket.upper - bucket.lower) * fraction,
+                    info,
+                );
             }
 
             let log_lower = bucket.lower.abs().log2();
             let log_upper = bucket.upper.abs().log2();
             if bucket.lower > 0.0 {
-                return 2.0_f64.powf(log_lower + (log_upper - log_lower) * fraction);
+                return (
+                    2.0_f64.powf(log_lower + (log_upper - log_lower) * fraction),
+                    info,
+                );
             }
-            return -2.0_f64.powf(log_upper + (log_lower - log_upper) * (1.0 - fraction));
+            return (
+                -2.0_f64.powf(log_upper + (log_lower - log_upper) * (1.0 - fraction)),
+                info,
+            );
         }
 
-        f64::NAN
+        let info = if self.sum.is_nan() && count < self.count {
+            Some(if count < rank {
+                NativeHistogramQuantileInfo::NaNResult
+            } else {
+                NativeHistogramQuantileInfo::NaNSkew
+            })
+        } else {
+            None
+        };
+        (f64::NAN, info)
     }
 
     /// Estimates the fraction of observations between `lower` and `upper`.
     pub fn fraction(&self, lower: f64, upper: f64) -> f64 {
+        self.fraction_with_info(lower, upper).0
+    }
+
+    /// Estimates a fraction and reports whether NaN observations were excluded.
+    pub fn fraction_with_info(&self, lower: f64, upper: f64) -> (f64, bool) {
         if self.count == 0.0 || lower.is_nan() || upper.is_nan() {
-            return f64::NAN;
+            return (f64::NAN, false);
         }
         if lower >= upper {
-            return 0.0;
+            return (0.0, false);
         }
 
         let Some(mut buckets) = self.all_buckets() else {
-            return f64::NAN;
+            return (f64::NAN, false);
         };
         let count = if self.sum.is_nan() {
             buckets.iter().map(|bucket| bucket.count).sum()
@@ -733,7 +802,10 @@ impl NativeHistogram {
             upper_rank = count;
         }
 
-        (upper_rank - lower_rank) / self.count
+        (
+            (upper_rank - lower_rank) / self.count,
+            self.sum.is_nan() && count < self.count,
+        )
     }
 
     /// Converts populated buckets to `(boundary rule, lower, upper, count)` strings.
@@ -1313,7 +1385,7 @@ where
         .collect()
 }
 
-fn read_spans(offsets: Vec<i32>, lengths: Vec<u32>, name: &str) -> DfResult<Vec<Span>> {
+fn read_spans(offsets: Vec<i32>, lengths: Vec<i32>, name: &str) -> DfResult<Vec<Span>> {
     if offsets.len() != lengths.len() {
         return Err(DataFusionError::Execution(format!(
             "native histogram {name} span offsets and lengths mismatch: {} vs {}",
@@ -1321,11 +1393,18 @@ fn read_spans(offsets: Vec<i32>, lengths: Vec<u32>, name: &str) -> DfResult<Vec<
             lengths.len()
         )));
     }
-    Ok(offsets
+    offsets
         .into_iter()
         .zip(lengths)
-        .map(|(offset, length)| Span { offset, length })
-        .collect())
+        .map(|(offset, length)| {
+            if length < 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "native histogram {name} span has negative length {length}"
+                )));
+            }
+            Ok(Span { offset, length })
+        })
+        .collect()
 }
 
 fn check_span_bucket_count(spans: &[Span], buckets: usize, name: &str) -> DfResult<()> {
@@ -1352,12 +1431,12 @@ pub fn read_histogram(array: &StructArray, row: usize) -> DfResult<Option<Native
     let schema = required_primitive::<Int32Type>(array, SCHEMA_FIELD, row)?;
     let positive_spans = read_spans(
         list_values::<Int32Type>(array, POSITIVE_SPAN_OFFSETS_FIELD, row)?,
-        list_values::<UInt32Type>(array, POSITIVE_SPAN_LENGTHS_FIELD, row)?,
+        list_values::<Int32Type>(array, POSITIVE_SPAN_LENGTHS_FIELD, row)?,
         "positive",
     )?;
     let negative_spans = read_spans(
         list_values::<Int32Type>(array, NEGATIVE_SPAN_OFFSETS_FIELD, row)?,
-        list_values::<UInt32Type>(array, NEGATIVE_SPAN_LENGTHS_FIELD, row)?,
+        list_values::<Int32Type>(array, NEGATIVE_SPAN_LENGTHS_FIELD, row)?,
         "negative",
     )?;
 
@@ -1372,8 +1451,8 @@ pub fn read_histogram(array: &StructArray, row: usize) -> DfResult<Option<Native
             )
         } else {
             (
-                required_primitive::<UInt64Type>(array, COUNT_U64_FIELD, row)? as f64,
-                optional_primitive::<UInt64Type>(array, ZERO_COUNT_U64_FIELD, row)?
+                required_primitive::<Int64Type>(array, COUNT_I64_FIELD, row)? as f64,
+                optional_primitive::<Int64Type>(array, ZERO_COUNT_I64_FIELD, row)?
                     .unwrap_or_default() as f64,
                 list_values::<Int64Type>(array, POSITIVE_BUCKETS_I64_FIELD, row)?
                     .into_iter()
@@ -1429,8 +1508,8 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
     let mut positive_span_lengths = Vec::with_capacity(values.len());
     let mut negative_span_offsets = Vec::with_capacity(values.len());
     let mut negative_span_lengths = Vec::with_capacity(values.len());
-    let mut count_u64 = Vec::<Option<u64>>::with_capacity(values.len());
-    let mut zero_count_u64 = Vec::<Option<u64>>::with_capacity(values.len());
+    let mut count_i64 = Vec::<Option<i64>>::with_capacity(values.len());
+    let mut zero_count_i64 = Vec::<Option<i64>>::with_capacity(values.len());
     let mut positive_buckets_i64 = Vec::with_capacity(values.len());
     let mut negative_buckets_i64 = Vec::with_capacity(values.len());
     let mut count_f64 = Vec::with_capacity(values.len());
@@ -1476,8 +1555,8 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
                     .map(|span| span.length)
                     .collect(),
             ));
-            count_u64.push(None);
-            zero_count_u64.push(None);
+            count_i64.push(None);
+            zero_count_i64.push(None);
             positive_buckets_i64.push(list_opt(Vec::<i64>::new()));
             negative_buckets_i64.push(list_opt(Vec::<i64>::new()));
             count_f64.push(Some(histogram.count));
@@ -1495,8 +1574,8 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
             positive_span_lengths.push(None);
             negative_span_offsets.push(None);
             negative_span_lengths.push(None);
-            count_u64.push(None);
-            zero_count_u64.push(None);
+            count_i64.push(None);
+            zero_count_i64.push(None);
             positive_buckets_i64.push(None);
             negative_buckets_i64.push(None);
             count_f64.push(None);
@@ -1532,7 +1611,7 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
         ),
         (
             POSITIVE_SPAN_LENGTHS_FIELD,
-            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
                 positive_span_lengths,
             )),
         ),
@@ -1544,14 +1623,14 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
         ),
         (
             NEGATIVE_SPAN_LENGTHS_FIELD,
-            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
                 negative_span_lengths,
             )),
         ),
-        (COUNT_U64_FIELD, Arc::new(UInt64Array::from(count_u64))),
+        (COUNT_I64_FIELD, Arc::new(Int64Array::from(count_i64))),
         (
-            ZERO_COUNT_U64_FIELD,
-            Arc::new(UInt64Array::from(zero_count_u64)),
+            ZERO_COUNT_I64_FIELD,
+            Arc::new(Int64Array::from(zero_count_i64)),
         ),
         (
             POSITIVE_BUCKETS_I64_FIELD,
@@ -1618,6 +1697,35 @@ mod tests {
     }
 
     #[test]
+    fn promql_string_matches_prometheus_float_format() {
+        assert_eq!(format_promql_histogram_float(0.0001), "0.0001");
+        assert_eq!(format_promql_histogram_float(1_000_000.0), "1e+06");
+
+        let histogram = NativeHistogram {
+            schema: CUSTOM_BUCKETS_SCHEMA,
+            zero_threshold: 0.0,
+            sum: 2_349_209.324,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: vec![0.00001],
+            positive_spans: vec![Span {
+                offset: 0,
+                length: 2,
+            }],
+            negative_spans: Vec::new(),
+            count: 3.0,
+            zero_count: 0.0,
+            positive_buckets: vec![1.0, 2.0],
+            negative_buckets: Vec::new(),
+        };
+
+        assert_eq!(
+            histogram.promql_string(),
+            "{count:3, sum:2.349209324e+06, [-Inf,1e-05]:1, (1e-05,+Inf]:2}"
+        );
+    }
+
+    #[test]
     fn span_rebuild_checks_offsets_and_preserves_empty_input() {
         assert_eq!(
             spans_from_indices_counts(Vec::new()),
@@ -1662,7 +1770,7 @@ mod tests {
 
         assert_eq!(read_histogram(array, 0).unwrap(), Some(expected));
         assert!(
-            primitive_child::<UInt64Type>(array, COUNT_U64_FIELD)
+            primitive_child::<Int64Type>(array, COUNT_I64_FIELD)
                 .unwrap()
                 .is_null(0)
         );
@@ -2079,7 +2187,57 @@ mod tests {
         histogram.count = 10.0;
         histogram.sum = f64::NAN;
 
-        assert_eq!(histogram.fraction(f64::NEG_INFINITY, f64::INFINITY), 0.8);
+        assert_eq!(
+            histogram.fraction_with_info(f64::NEG_INFINITY, f64::INFINITY),
+            (0.8, true)
+        );
+    }
+
+    #[test]
+    fn quantile_reports_nan_observation_effect() {
+        let mut histogram = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![8.0],
+        );
+        histogram.count = 10.0;
+        histogram.sum = f64::NAN;
+
+        let (skewed, info) = histogram.quantile_with_info(0.5);
+        assert!(skewed.is_finite());
+        assert_eq!(info, Some(NativeHistogramQuantileInfo::NaNSkew));
+
+        let (nan, info) = histogram.quantile_with_info(0.9);
+        assert!(nan.is_nan());
+        assert_eq!(info, Some(NativeHistogramQuantileInfo::NaNResult));
+
+        histogram.count = 8.0;
+        assert_eq!(histogram.quantile_with_info(0.5).1, None);
+
+        histogram.count = 3.0;
+        histogram.positive_spans.clear();
+        histogram.positive_buckets.clear();
+        let (nan, info) = histogram.quantile_with_info(0.0);
+        assert!(nan.is_nan());
+        assert_eq!(info, Some(NativeHistogramQuantileInfo::NaNSkew));
+
+        histogram.schema = CUSTOM_BUCKETS_SCHEMA;
+        histogram.count = 10.0;
+        histogram.positive_spans = vec![Span {
+            offset: 0,
+            length: 1,
+        }];
+        histogram.positive_buckets = vec![8.0];
+        for (bound, offset, expected) in [(-1.0, 0, -1.0), (1.0, 1, 1.0)] {
+            histogram.custom_values = vec![bound];
+            histogram.positive_spans[0].offset = offset;
+            assert_eq!(
+                histogram.quantile_with_info(0.5),
+                (expected, Some(NativeHistogramQuantileInfo::NaNSkew))
+            );
+        }
     }
 
     #[test]

@@ -1360,7 +1360,11 @@ pub async fn show_processlist(
         ]
     };
 
-    let filters = vec![];
+    let filters = if query_ctx.current_user().is_admin() {
+        vec![]
+    } else {
+        vec![col(process_list::CATALOG).eq(lit(query_ctx.current_catalog()))]
+    };
     let like_field = None;
     let sort = vec![col("id").sort(true, true)];
     query_from_information_schema_table(

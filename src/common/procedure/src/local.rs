@@ -43,8 +43,8 @@ use crate::rwlock::{KeyRwLock, OwnedKeyRwLockGuard};
 use crate::store::poison_store::PoisonStoreRef;
 use crate::store::{ProcedureMessage, ProcedureMessages, ProcedureStore, StateStoreRef};
 use crate::{
-    BoxedProcedure, ContextProvider, EventTrigger, LockKey, PoisonKey, ProcedureId,
-    ProcedureManager, ProcedureState, ProcedureWithId, StringKey, Watcher,
+    BoxedProcedure, ContextProvider, EventTrigger, LockKey, PoisonKey, ProcedureContext,
+    ProcedureId, ProcedureManager, ProcedureState, ProcedureWithId, StringKey, Watcher,
 };
 
 /// The expired time of a procedure's metadata.
@@ -81,6 +81,8 @@ pub(crate) struct ProcedureMeta {
     type_name: String,
     /// Parent procedure id.
     parent_id: Option<ProcedureId>,
+    /// Context associated with the root submission.
+    context: ProcedureContext,
     /// Notify to wait for subprocedures.
     child_notify: Notify,
     /// Lock required by this procedure.
@@ -105,6 +107,7 @@ impl ProcedureMeta {
         id: ProcedureId,
         procedure_state: ProcedureState,
         parent_id: Option<ProcedureId>,
+        context: ProcedureContext,
         lock_key: LockKey,
         poison_keys: PoisonKeys,
         type_name: &str,
@@ -113,6 +116,7 @@ impl ProcedureMeta {
         ProcedureMeta {
             id,
             parent_id,
+            context,
             child_notify: Notify::new(),
             lock_key,
             poison_keys,
@@ -716,6 +720,7 @@ impl LocalManager {
         procedure_state: ProcedureState,
         step: u32,
         procedure: BoxedProcedure,
+        context: ProcedureContext,
         origin: RootSubmissionOrigin,
     ) -> Result<Watcher> {
         ensure!(self.manager_ctx.running(), ManagerNotStartSnafu);
@@ -724,6 +729,7 @@ impl LocalManager {
             procedure_id,
             procedure_state,
             None,
+            context,
             procedure.lock_key(),
             procedure.poison_keys(),
             procedure.type_name(),
@@ -837,6 +843,7 @@ impl LocalManager {
                     procedure_state,
                     loaded_procedure.step,
                     loaded_procedure.procedure,
+                    message.context.clone(),
                     RootSubmissionOrigin::Recovery,
                 ) {
                     error!(e; "Failed to recover procedure {}", procedure_id);
@@ -964,6 +971,7 @@ impl ProcedureManager for LocalManager {
             ProcedureState::Running,
             0,
             procedure.procedure,
+            procedure.context,
             RootSubmissionOrigin::Fresh,
         )
     }
@@ -1021,6 +1029,7 @@ pub(crate) mod test_util {
             ProcedureId::random(),
             ProcedureState::Running,
             None,
+            ProcedureContext::default(),
             LockKey::default(),
             PoisonKeys::default(),
             "ProcedureAdapter",
@@ -1043,18 +1052,21 @@ mod tests {
 
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
-    use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
+    use common_event_recorder::{
+        Event, EventRecorder, EventTypeFilter, EventTypeFilterRef, PersistentEventContext,
+        TriggerReason,
+    };
     use common_test_util::temp_dir::create_temp_dir;
     use tokio::sync::oneshot;
     use tokio::time::{sleep, timeout};
 
     use super::*;
     use crate::error::{self, Error};
-    use crate::store::state_store::ObjectStateStore;
+    use crate::store::state_store::{ObjectStateStore, StateStore};
     use crate::test_util::InMemoryPoisonStore;
     use crate::{
-        ChildSubmissionOutcome, Context, EventRuntimeContext, EventTrigger, Procedure,
-        ProcedureEvent, Status,
+        ChildSubmissionOutcome, Context, EventContext, EventTrigger, Procedure, ProcedureEvent,
+        Status,
     };
 
     fn new_test_manager_context() -> ManagerContext {
@@ -1102,6 +1114,13 @@ mod tests {
                     (event.procedure_id, event.trigger.clone())
                 })
                 .collect()
+        }
+
+        fn procedure_context(&self, procedure_id: ProcedureId) -> Option<ProcedureContext> {
+            self.events.lock().unwrap().iter().find_map(|event| {
+                let event = event.as_any().downcast_ref::<ProcedureEvent>().unwrap();
+                (event.procedure_id == procedure_id).then(|| event.context.clone())
+            })
         }
     }
 
@@ -1296,7 +1315,7 @@ mod tests {
             self.poison_keys.clone()
         }
 
-        fn event(&self, _ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
+        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
             Some(Box::new(TestProcedureEvent))
         }
     }
@@ -1341,6 +1360,7 @@ mod tests {
                 vec![ProcedureWithId {
                     id: self.child_id,
                     procedure: Box::new(ProcedureToLoad::new("child")),
+                    context: ProcedureContext::default(),
                 }],
                 false,
             ))
@@ -1354,7 +1374,7 @@ mod tests {
             LockKey::default()
         }
 
-        fn event(&self, _ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
+        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
             Some(Box::new(TestProcedureEvent))
         }
     }
@@ -1384,6 +1404,7 @@ mod tests {
                 vec![ProcedureWithId {
                     id: self.child_id,
                     procedure: Box::new(ProcedureToLoad::new("child")),
+                    context: ProcedureContext::default(),
                 }],
                 false,
             ))
@@ -1397,7 +1418,7 @@ mod tests {
             LockKey::default()
         }
 
-        fn event(&self, _ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
+        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
             Some(Box::new(TestProcedureEvent))
         }
     }
@@ -1424,7 +1445,7 @@ mod tests {
             LockKey::default()
         }
 
-        fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
+        fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
             *self.captured_filter.lock().unwrap() = Some(ctx.event_type_filter.clone());
             Some(Box::new(TestProcedureEvent))
         }
@@ -1458,6 +1479,7 @@ mod tests {
                 procedure: Box::new(FilterCapturingProcedure {
                     captured_filter: captured_filter.clone(),
                 }),
+                context: ProcedureContext::default(),
             })
             .await
             .unwrap();
@@ -1499,6 +1521,7 @@ mod tests {
             .submit(ProcedureWithId {
                 id: ProcedureId::random(),
                 procedure: Box::new(ProcedureToLoad::new("fresh submission")),
+                context: ProcedureContext::default(),
             })
             .await
             .unwrap();
@@ -1533,6 +1556,7 @@ mod tests {
                     ProcedureState::Running,
                     0,
                     Box::new(ProcedureToLoad::new("submit root without runner")),
+                    ProcedureContext::default(),
                     RootSubmissionOrigin::Fresh,
                 )
             });
@@ -1584,6 +1608,9 @@ mod tests {
                     child_id,
                     child_submitted: false,
                 }),
+                context: ProcedureContext::from_event_context(PersistentEventContext::new(
+                    TriggerReason::AutoRepartition,
+                )),
             })
             .await
             .unwrap();
@@ -1604,6 +1631,15 @@ mod tests {
             },
         )));
         assert!(procedure_events.contains(&(child_id, EventTrigger::Submitted)));
+        assert_eq!(
+            event_recorder
+                .procedure_context(child_id)
+                .unwrap()
+                .event_context
+                .unwrap()
+                .reason,
+            TriggerReason::AutoRepartition
+        );
     }
 
     #[tokio::test]
@@ -1637,6 +1673,7 @@ mod tests {
                     proceed: Some(proceed_rx),
                     child_submitted: false,
                 }),
+                context: ProcedureContext::default(),
             })
             .await
             .unwrap();
@@ -1684,7 +1721,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recovery_emits_recovered_event() {
+    async fn test_recovery_loads_legacy_procedure_message() {
+        let dir = create_temp_dir("legacy_procedure_message_recovery");
+        let object_store = test_util::new_object_store(&dir);
+        let state_store = Arc::new(ObjectStateStore::new(object_store));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let manager = LocalManager::new(
+            ManagerConfig {
+                parent_path: "data/".to_string(),
+                ..Default::default()
+            },
+            state_store.clone(),
+            poison_manager,
+            None,
+            None,
+        );
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone());
+        manager.manager_ctx.start();
+        manager
+            .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
+            .unwrap();
+
+        let procedure = ProcedureToLoad::new("legacy recovered submission");
+        let procedure_id = ProcedureId::random();
+        let key = format!("data/procedure/{procedure_id}/0000000000.step");
+        // This is the persisted JSON shape written before ProcedureMessage had `context`.
+        let legacy_message = serde_json::json!({
+            "type_name": procedure.type_name(),
+            "data": procedure.dump().unwrap(),
+            "parent_id": null,
+            "step": 0,
+        });
+        state_store
+            .put(&key, serde_json::to_vec(&legacy_message).unwrap())
+            .await
+            .unwrap();
+
+        manager.recover().await.unwrap();
+
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        wait_for_trigger(&event_recorder, EventTrigger::Recovered).await;
+        assert_eq!(
+            event_recorder.procedure_context(procedure_id),
+            Some(ProcedureContext::default())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recovery_preserves_procedure_context() {
         let dir = create_temp_dir("recovery_submission_event");
         let object_store = test_util::new_object_store(&dir);
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
@@ -1710,13 +1803,24 @@ mod tests {
 
         let procedure = ProcedureToLoad::new("recovered submission");
         let procedure_id = ProcedureId::random();
+        let mut event_context =
+            PersistentEventContext::new(TriggerReason::AutoRebalance).with_protocol("mysql");
+        event_context.extensions.insert(
+            "source".to_string(),
+            serde_json::Value::String("test".to_string()),
+        );
+        let procedure_context = ProcedureContext {
+            actor: Some("alice".to_string()),
+            event_context: Some(event_context),
+        };
         ProcedureStore::from_object_store(object_store)
-            .store_procedure(
+            .store_procedure_with_context(
                 procedure_id,
                 0,
                 procedure.type_name().to_string(),
                 procedure.dump().unwrap(),
                 None,
+                procedure_context.clone(),
             )
             .await
             .unwrap();
@@ -1732,6 +1836,10 @@ mod tests {
         );
         wait_for_trigger(&event_recorder, EventTrigger::Recovered).await;
         assert!(!event_recorder.triggers().contains(&EventTrigger::Submitted));
+        assert_eq!(
+            event_recorder.procedure_context(procedure_id),
+            Some(procedure_context)
+        );
     }
 
     #[tokio::test]
@@ -1813,6 +1921,7 @@ mod tests {
             .submit(ProcedureWithId {
                 id: procedure_id,
                 procedure: Box::new(procedure),
+                context: ProcedureContext::default(),
             })
             .await
             .unwrap();
@@ -1965,6 +2074,7 @@ mod tests {
                 .submit(ProcedureWithId {
                     id: procedure_id,
                     procedure: Box::new(procedure),
+                    context: ProcedureContext::default(),
                 })
                 .await
                 .is_ok()
@@ -1986,6 +2096,7 @@ mod tests {
             .submit(ProcedureWithId {
                 id: procedure_id,
                 procedure: Box::new(ProcedureToLoad::new("submit")),
+                context: ProcedureContext::default(),
             })
             .await
             .unwrap_err();
@@ -2054,6 +2165,7 @@ mod tests {
                 .submit(ProcedureWithId {
                     id: procedure_id,
                     procedure: Box::new(procedure),
+                    context: ProcedureContext::default(),
                 })
                 .await
                 .unwrap()
@@ -2094,6 +2206,7 @@ mod tests {
                 .submit(ProcedureWithId {
                     id: procedure_id,
                     procedure: Box::new(procedure),
+                    context: ProcedureContext::default(),
                 })
                 .await
                 .unwrap_err(),
@@ -2126,6 +2239,7 @@ mod tests {
                 .submit(ProcedureWithId {
                     id: procedure_id,
                     procedure: Box::new(procedure),
+                    context: ProcedureContext::default(),
                 })
                 .await
                 .is_ok()
@@ -2164,6 +2278,7 @@ mod tests {
                 .submit(ProcedureWithId {
                     id: procedure_id,
                     procedure: Box::new(procedure),
+                    context: ProcedureContext::default(),
                 })
                 .await
                 .is_ok()
@@ -2193,6 +2308,7 @@ mod tests {
                 .submit(ProcedureWithId {
                     id: procedure_id,
                     procedure: Box::new(procedure),
+                    context: ProcedureContext::default(),
                 })
                 .await
                 .is_ok()
@@ -2217,6 +2333,7 @@ mod tests {
                 .submit(ProcedureWithId {
                     id: procedure_id,
                     procedure: Box::new(procedure),
+                    context: ProcedureContext::default(),
                 })
                 .await
                 .is_ok()
@@ -2265,6 +2382,7 @@ mod tests {
             .submit(ProcedureWithId {
                 id: procedure_id,
                 procedure: Box::new(procedure),
+                context: ProcedureContext::default(),
             })
             .await
             .unwrap_err();
@@ -2285,6 +2403,7 @@ mod tests {
                 .submit(ProcedureWithId {
                     id: procedure_id,
                     procedure: Box::new(procedure),
+                    context: ProcedureContext::default(),
                 })
                 .await
                 .is_ok()

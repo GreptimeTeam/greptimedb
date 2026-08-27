@@ -30,6 +30,8 @@
 //! [`crate::requests::validate_table_option`], so they are accepted both on the
 //! ingestion auto-create path and on explicit `CREATE TABLE ... WITH (...)` DDL.
 
+use datatypes::prelude::ConcreteDataType;
+
 /// Reserved prefix for every public semantic table-option key.
 pub const SEMANTIC_PREFIX: &str = "greptime.semantic.";
 
@@ -90,10 +92,16 @@ pub const SEMANTIC_ENTITY_PREFIX: &str = "greptime.semantic.entity.";
 /// is the `service_name` tag column, declaring the logical `service` entity.
 pub const SEMANTIC_ENTITY_SERVICE_ID: &str = "greptime.semantic.entity.service.id";
 
-/// The role a set of columns plays for an entity: `id` (identifying attributes,
-/// must be tag columns — enforced at DDL time), `descriptive`, or `scope`.
+/// The role a set of columns plays for an entity: `id` (identifying
+/// attributes), `descriptive`, or `scope`. Columns may be tags or fields; DDL
+/// validation only requires that they exist and render as stable strings
+/// ([`has_stable_string_form`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityRole {
+    /// Identifying columns. Their **order is part of the identity**: the
+    /// entity id is their values joined in the declared order, so two tables
+    /// naming the same entity must list them the same way (broad to narrow)
+    /// or they name two entities.
     Id,
     Descriptive,
     Scope,
@@ -182,6 +190,24 @@ pub fn is_entity_option_key(key: &str) -> bool {
     parse_entity_option_key(key).is_some()
 }
 
+/// Returns true if a column of `data_type` renders as a stable string — the
+/// requirement for entity id/descriptive/scope columns. The read-time
+/// derivation casts them to strings, so a type without a stable string form
+/// would fail only when the graph is scanned; DDL validation rejects it up
+/// front instead.
+pub fn has_stable_string_form(data_type: &ConcreteDataType) -> bool {
+    !matches!(
+        data_type,
+        ConcreteDataType::Binary(_)
+            | ConcreteDataType::Json(_)
+            | ConcreteDataType::Vector(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
+            | ConcreteDataType::Dictionary(_)
+            | ConcreteDataType::Null(_)
+    )
+}
+
 /// Tokenizes an entity option's comma-separated column list (trimmed, empty
 /// tokens dropped). [`validate_semantic_option`] rejects empty tokens at DDL
 /// time, so readers only ever drop what validation already refused.
@@ -209,9 +235,9 @@ pub fn is_semantic_option_key(key: &str) -> bool {
 /// non-empty string. Closed-domain keys accept a fixed set, plus the `unknown`
 /// sentinel, plus `mixed` for the keys where one long-lived table can
 /// legitimately see multiple values. Entity keys ([`is_entity_option_key`]) take a
-/// comma-separated column-name list (each token non-empty); the "id columns must
-/// be tag columns" invariant is enforced later against the table schema at DDL
-/// time, not here. Keys that are neither whitelisted nor a well-formed entity key
+/// comma-separated column-name list (each token non-empty); column existence and
+/// the stable-string-form rule for entity columns are enforced later against
+/// the table schema at DDL time, not here. Keys that are neither whitelisted nor a well-formed entity key
 /// are rejected.
 pub fn validate_semantic_option(key: &str, value: &str) -> bool {
     if is_entity_option_key(key) {

@@ -30,8 +30,8 @@ pub use crate::error::{Error, Result};
 pub use crate::event::ProcedureEvent;
 pub use crate::procedure::{
     BoxedProcedure, BoxedProcedureLoader, ChildSubmissionOutcome, Context, ContextProvider,
-    ContextProviderRef, EventRuntimeContext, EventTrigger, LockKey, Output, ParseIdError,
-    PoisonKey, PoisonKeys, Procedure, ProcedureId, ProcedureInfo, ProcedureManager,
+    ContextProviderRef, EventContext, EventTrigger, LockKey, Output, ParseIdError, PoisonKey,
+    PoisonKeys, Procedure, ProcedureContext, ProcedureId, ProcedureInfo, ProcedureManager,
     ProcedureManagerRef, ProcedureState, ProcedureWithId, RetryPhase, Status, StringKey,
 };
 pub use crate::watcher::Watcher;

@@ -37,6 +37,11 @@ use crate::prom_remote_write::row_builder::TablesBuilder;
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_store::{snappy_decompress, zstd_decompress};
 
+/// Prometheus remote write protocol versions, also used as the `version` label
+/// of the remote write metrics.
+pub const REMOTE_WRITE_V1_VERSION: &str = "1.0";
+pub const REMOTE_WRITE_V2_VERSION: &str = "2.0";
+
 lazy_static! {
     static ref PROM_WRITE_REQUEST_POOL: Pool<PromWriteRequest<'static>> =
         Pool::new(256, PromWriteRequest::default);
@@ -56,7 +61,9 @@ pub fn decode_remote_write_request(
     prom_validation_mode: PromValidationMode,
     processor: &mut PromSeriesProcessor,
 ) -> crate::error::Result<TablesBuilder<'static>> {
-    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
+        .with_label_values(&["decode", REMOTE_WRITE_V1_VERSION])
+        .start_timer();
 
     // due to vmagent's limitation, there is a chance that vmagent is
     // sending content type wrong so we have to apply a fallback with decoding

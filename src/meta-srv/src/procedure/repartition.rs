@@ -44,12 +44,11 @@ use common_meta::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::region_registry::LeaderRegionRegistryRef;
-use common_meta::rpc::ddl::EventContext;
 use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext,
+    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, EventContext,
     EventTrigger, LockKey, Procedure, ProcedureManagerRef, Result as ProcedureResult, Status,
     StringKey,
 };
@@ -104,8 +103,6 @@ pub struct PersistentContext {
     #[serde(default)]
     /// Records table-level partition metadata updated by this repartition.
     pub partition_metadata_update: Option<PartitionMetadataUpdate>,
-    #[serde(default)]
-    pub event_context: EventContext,
 }
 
 fn default_timeout() -> Duration {
@@ -113,7 +110,7 @@ fn default_timeout() -> Duration {
 }
 
 impl PersistentContext {
-    /// Creates a new [PersistentContext] with the table, timeout and event context.
+    /// Creates a new [PersistentContext] with the given table name, table id and timeout.
     ///
     /// If the timeout is not provided, the default timeout will be used.
     pub fn new(
@@ -124,7 +121,6 @@ impl PersistentContext {
         }: TableName,
         table_id: TableId,
         timeout: Option<Duration>,
-        event_context: EventContext,
     ) -> Self {
         Self {
             catalog_name,
@@ -136,7 +132,6 @@ impl PersistentContext {
             unknown_procedures: vec![],
             timeout: timeout.unwrap_or_else(default_timeout),
             partition_metadata_update: None,
-            event_context,
         }
     }
 
@@ -797,10 +792,7 @@ impl Procedure for RepartitionProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(REPARTITION_EVENT_TYPE) {
             return None;
         }
@@ -809,7 +801,7 @@ impl Procedure for RepartitionProcedure {
             let start = self.state.as_any().downcast_ref::<RepartitionStart>()?;
             RepartitionEvent::submitted(&self.context.persistent_ctx, start)
         } else {
-            RepartitionEvent::lifecycle()
+            RepartitionEvent::lifecycle(&self.context.persistent_ctx)
         };
         Some(Box::new(event))
     }
@@ -869,7 +861,6 @@ impl RepartitionProcedureFactory for GcDisabledRepartitionProcedureFactory {
         _source: RepartitionSource,
         _to_exprs: Vec<String>,
         _timeout: Option<Duration>,
-        _event_context: EventContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
         Err(BoxedError::new(
             error::InvalidArgumentsSnafu {
@@ -908,9 +899,8 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
         source: RepartitionSource,
         to_exprs: Vec<String>,
         timeout: Option<Duration>,
-        event_context: EventContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
-        let persistent_ctx = PersistentContext::new(table_name, table_id, timeout, event_context);
+        let persistent_ctx = PersistentContext::new(table_name, table_id, timeout);
         let from = match source {
             RepartitionSource::Partitioned {
                 exprs,
@@ -1143,7 +1133,6 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            EventContext::default(),
         );
 
         Context::new(
@@ -1175,7 +1164,6 @@ mod tests {
                 },
                 vec![],
                 None,
-                EventContext::default(),
             )
             .err()
             .expect("GC-disabled factory must reject repartition");
@@ -1277,53 +1265,58 @@ mod tests {
         let all = Arc::new(EventTypeFilter::All);
 
         let submitted = procedure
-            .event(&EventRuntimeContext {
+            .event(&EventContext {
                 procedure_id: ProcedureId::random(),
                 lifecycle_state: &state,
                 trigger: EventTrigger::Submitted,
                 event_type_filter: all.clone(),
+                event_context: None,
             })
             .unwrap();
         assert_eq!(submitted.event_type(), REPARTITION_EVENT_TYPE);
         assert_ne!(submitted.json_payload().unwrap(), serde_json::Value::Null);
 
         let allowed = procedure
-            .event(&EventRuntimeContext {
+            .event(&EventContext {
                 procedure_id: ProcedureId::random(),
                 lifecycle_state: &state,
                 trigger: EventTrigger::Submitted,
                 event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
                     REPARTITION_EVENT_TYPE.to_string(),
                 ]))),
+                event_context: None,
             })
             .unwrap();
         assert_eq!(allowed.event_type(), REPARTITION_EVENT_TYPE);
 
         let succeeded = procedure
-            .event(&EventRuntimeContext {
+            .event(&EventContext {
                 procedure_id: ProcedureId::random(),
                 lifecycle_state: &state,
                 trigger: EventTrigger::Succeeded,
                 event_type_filter: all,
+                event_context: None,
             })
             .unwrap();
         assert_eq!(succeeded.json_payload().unwrap(), serde_json::Value::Null);
 
-        let filtered = procedure.event(&EventRuntimeContext {
+        let filtered = procedure.event(&EventContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
             event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
                 "another_event".to_string()
             ]))),
+            event_context: None,
         });
         assert!(filtered.is_none());
 
-        let empty = procedure.event(&EventRuntimeContext {
+        let empty = procedure.event(&EventContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
             event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+            event_context: None,
         });
         assert!(empty.is_none());
     }
@@ -1382,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_persistent_context_serde_defaults_for_new_fields() {
+    fn test_persistent_context_partition_metadata_update_serde_default() {
         let json = r#"{
             "catalog_name":"test_catalog",
             "schema_name":"test_schema",
@@ -1394,10 +1387,7 @@ mod tests {
 
         let persistent_ctx: PersistentContext = serde_json::from_str(json).unwrap();
 
-        assert!(persistent_ctx.failed_procedures.is_empty());
-        assert!(persistent_ctx.unknown_procedures.is_empty());
         assert!(persistent_ctx.partition_metadata_update.is_none());
-        assert_eq!(persistent_ctx.event_context, EventContext::default());
     }
 
     #[tokio::test]
@@ -1474,7 +1464,6 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            EventContext::default(),
         );
         persistent_ctx.plans = vec![with_rollback_metadata(
             test_plan(table_id),
@@ -1541,7 +1530,6 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            EventContext::default(),
         );
         persistent_ctx.plans = vec![test_plan(table_id)];
         let context = Context::new(
@@ -1595,7 +1583,6 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            EventContext::default(),
         );
         let failed_plan = test_plan(table_id);
         let failed_plan = with_rollback_metadata(
@@ -1729,7 +1716,6 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            EventContext::default(),
         );
         persistent_ctx.plans = vec![failed_plan, succeeded_plan.clone()];
         persistent_ctx.failed_procedures = vec![ProcedureMeta {
@@ -1839,7 +1825,6 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            EventContext::default(),
         );
         persistent_ctx.plans = vec![plan.clone()];
         persistent_ctx.unknown_procedures = vec![ProcedureMeta {
@@ -1901,7 +1886,6 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            EventContext::default(),
         );
         persistent_ctx.plans = vec![with_rollback_metadata(
             test_plan(table_id),
@@ -2030,7 +2014,6 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            EventContext::default(),
         );
         persistent_ctx.plans = vec![failed_merge_plan, succeeded_split_plan.clone()];
         persistent_ctx.failed_procedures = vec![ProcedureMeta {

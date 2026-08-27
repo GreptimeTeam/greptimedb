@@ -52,7 +52,7 @@ on:
         default: true
       build_linux_artifacts:
         type: boolean
-        description: Build linux artifacts (both amd64 and arm64)
+        description: Build linux artifacts (amd64, arm64, and riscv64)
         required: false
         default: false
       build_macos_artifacts:
@@ -224,6 +224,52 @@ jobs:
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
           large-page-size: true
+
+  build-linux-riscv64-artifacts:
+    name: Build linux-riscv64 artifacts
+    if: ${{ inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+    ]
+    runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare riscv64 dev-builder image
+        shell: bash
+        env:
+          IMAGE_REGISTRY: ${{ vars.ECR_IMAGE_REGISTRY }}
+          IMAGE_NAMESPACE: ${{ vars.ECR_IMAGE_NAMESPACE }}
+        run: |
+          builder_tag=$(grep '^DEV_BUILDER_IMAGE_TAG ?=' Makefile | awk '{print $3}')
+          builder_image="${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-riscv64:${builder_tag}"
+          if ! docker pull "${builder_image}"; then
+            make dev-builder-riscv64 \
+              IMAGE_REGISTRY="${IMAGE_REGISTRY}" \
+              IMAGE_NAMESPACE="${IMAGE_NAMESPACE}"
+          fi
+
+      # Cross-compile greptime for riscv64gc-unknown-linux-gnu on the amd64 runner
+      # with the riscv64 cross dev-builder image. Integration tests are skipped
+      # because the cross-compiled binary cannot run on the amd64 host.
+      - name: Build greptime riscv64 binary
+        shell: bash
+        run: |
+          make build-riscv64-bin \
+            CARGO_PROFILE=${{ env.CARGO_PROFILE }} \
+            FEATURES=servers/dashboard \
+            IMAGE_REGISTRY=${{ vars.ECR_IMAGE_REGISTRY }} \
+            IMAGE_NAMESPACE=${{ vars.ECR_IMAGE_NAMESPACE }}
+
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: greptime-linux-riscv64-${{ needs.allocate-runners.outputs.version }}
+          target-files: ./target/riscv64gc-unknown-linux-gnu/${{ env.CARGO_PROFILE }}/greptime
+          version: ${{ needs.allocate-runners.outputs.version }}
 
   build-macos-artifacts:
     name: Build macOS artifacts
@@ -464,7 +510,7 @@ jobs:
       base_ref: ${{ needs.prepare-release-validation.outputs.previous-release-tag }}
       candidate_ref: ${{ needs.prepare-release-validation.outputs.candidate-ref }}
       cargo_profile: nightly
-      runner: perf-regression-8-cores
+      runner: aliyun-ecs
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
@@ -520,6 +566,7 @@ jobs:
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
       build-macos-artifacts,
+      build-linux-riscv64-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
     ]
@@ -568,6 +615,7 @@ jobs:
        (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-release.result == 'skipped')) &&
       needs.build-linux-amd64-artifacts.result == 'success' &&
       needs.build-linux-arm64-artifacts.result == 'success' &&
+      needs.build-linux-riscv64-artifacts.result == 'success' &&
       (needs.build-macos-artifacts.result == 'success' || needs.build-macos-artifacts.result == 'skipped') &&
       (needs.build-windows-artifacts.result == 'success' || needs.build-windows-artifacts.result == 'skipped') &&
       (needs.release-images-to-dockerhub.result == 'success' ||
@@ -581,6 +629,7 @@ jobs:
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
       build-macos-artifacts,
+      build-linux-riscv64-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
       prepare-release-validation,
@@ -619,6 +668,7 @@ jobs:
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
+      build-linux-riscv64-artifacts,
     ]
     steps:
       - name: Checkout

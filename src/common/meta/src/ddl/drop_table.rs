@@ -22,8 +22,8 @@ use common_error::ext::BoxedError;
 use common_event_recorder::Event;
 use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext, EventTrigger,
-    LockKey, Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
@@ -48,7 +48,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
-use crate::rpc::ddl::{DropTableTask, EventContext};
+use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 #[cfg(feature = "enterprise")]
@@ -74,12 +74,11 @@ pub struct DropTableProcedure {
 impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
-    pub fn new(task: DropTableTask, context: DdlContext, event_context: EventContext) -> Self {
+    pub fn new(task: DropTableTask, context: DdlContext) -> Self {
         let data = DropTableData::new(
             task,
             cfg!(feature = "enterprise") && context.soft_drop_enabled,
             context.soft_drop_retention,
-            event_context,
         );
         let executor = data.build_executor();
         Self {
@@ -414,25 +413,21 @@ impl Procedure for DropTableProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::DropTable.as_str())
         {
             return None;
         }
+        let task = &self.data.task;
+        let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
+            .with_table_id(task.table_id);
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
-                let task = &self.data.task;
-                let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
-                    .with_table_id(task.table_id);
-                TableDdlEvent::drop_table_submitted(
-                    locator,
-                    task.drop_if_exists,
-                    self.data.event_context.clone(),
-                )
+                TableDdlEvent::drop_table_submitted(locator, task.drop_if_exists)
             }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::DropTable),
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::DropTable, [locator]),
         };
 
         Some(Box::new(event))
@@ -488,8 +483,6 @@ pub struct DropTableData {
     pub soft_drop_retention_millis: Option<i64>,
     #[serde(default)]
     pub drop_generation: Option<String>,
-    #[serde(default)]
-    pub event_context: EventContext,
 }
 
 impl DropTableData {
@@ -497,7 +490,6 @@ impl DropTableData {
         task: DropTableTask,
         soft_drop_enabled: bool,
         soft_drop_retention: Option<std::time::Duration>,
-        event_context: EventContext,
     ) -> Self {
         Self {
             state: DropTableState::Prepare,
@@ -511,7 +503,6 @@ impl DropTableData {
             retention_expires_at: None,
             soft_drop_retention_millis: soft_drop_retention_millis(soft_drop_retention),
             drop_generation: None,
-            event_context,
         }
     }
 

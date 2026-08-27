@@ -16,8 +16,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use common_event_recorder::PersistentEventContext;
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::{EventContext, TriggerReason};
+use common_meta::rpc::ddl::TriggerReason;
+use common_procedure::ProcedureContext;
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
@@ -36,7 +38,7 @@ async fn test_parallel_process_datanodes_empty() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
-            EventContext::default(),
+            ProcedureContext::default(),
         )
         .await;
 
@@ -105,7 +107,7 @@ async fn test_parallel_process_datanodes_with_candidates() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            EventContext::default(),
+            ProcedureContext::default(),
         )
         .await;
 
@@ -189,7 +191,7 @@ async fn test_handle_tick() {
     assert_eq!(*ctx.gc_regions_calls.lock().unwrap(), 1);
     assert_eq!(
         ctx.gc_event_contexts.lock().unwrap().as_slice(),
-        &[EventContext::new(TriggerReason::ScheduledGc)]
+        &[PersistentEventContext::new(TriggerReason::ScheduledGc)]
     );
 
     let tracker = scheduler.region_gc_tracker.lock().await;
@@ -245,10 +247,21 @@ async fn test_handle_manual_gc_without_regions_records_manual_event_context() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    scheduler.handle_manual_gc(None, None, None).await.unwrap();
+    scheduler
+        .handle_manual_gc(
+            None,
+            None,
+            None,
+            ProcedureContext {
+                event_context: Some(PersistentEventContext::new(TriggerReason::Manual)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
     assert_eq!(
         ctx.gc_event_contexts.lock().unwrap().as_slice(),
-        &[EventContext::new(TriggerReason::Manual)]
+        &[PersistentEventContext::new(TriggerReason::Manual)]
     );
 }

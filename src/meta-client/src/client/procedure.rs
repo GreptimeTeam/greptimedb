@@ -20,11 +20,13 @@ use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
     DdlTaskRequest, DdlTaskResponse, GcRegionsRequest, GcRegionsResponse, GcTableRequest,
-    GcTableResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureDetailRequest,
-    ProcedureDetailResponse, ProcedureId, ProcedureStateResponse, QueryProcedureRequest,
-    ReconcileRequest, ReconcileResponse, RequestHeader, ResponseHeader, Role,
+    GcTableResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureActor,
+    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureEventContext, ProcedureId,
+    ProcedureStateResponse, QueryProcedureRequest, ReconcileRequest, ReconcileResponse,
+    RequestHeader, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
 };
@@ -42,6 +44,29 @@ use tonic::{Request, Status};
 use crate::client::{Id, LeaderProviderRef, util};
 use crate::error;
 use crate::error::Result;
+
+/// Builds the event context transported by a procedure RPC.
+///
+/// The caller can only supply reason/extensions. Protocol is derived here from
+/// the trusted, typed query channel held locally in the executor context.
+pub(crate) fn procedure_event_context(context: &ExecutorContext) -> Option<ProcedureEventContext> {
+    context.event_input.as_ref().map(|input| {
+        let mut event_context = ProcedureEventContext::from(input);
+        event_context.protocol = context
+            .query_context
+            .as_ref()
+            .and_then(|query_context| query_context.protocol())
+            .unwrap_or_default();
+        event_context
+    })
+}
+
+/// Builds the optional procedure actor transported by a procedure RPC.
+pub(crate) fn procedure_actor(context: &ExecutorContext) -> Option<ProcedureActor> {
+    context.actor.as_ref().map(|username| ProcedureActor {
+        username: username.clone(),
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct Client {
@@ -92,6 +117,7 @@ impl Client {
     /// - `timeout`: timeout for downgrading region and upgrading region operations
     pub async fn migrate_region(
         &self,
+        context: &ExecutorContext,
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
@@ -99,7 +125,7 @@ impl Client {
     ) -> Result<MigrateRegionResponse> {
         let inner = self.inner.read().await;
         inner
-            .migrate_region(region_id, from_peer, to_peer, timeout)
+            .migrate_region(context, region_id, from_peer, to_peer, timeout)
             .await
     }
 
@@ -114,14 +140,22 @@ impl Client {
         inner.list_procedures().await
     }
 
-    pub async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse> {
+    pub async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcRegionsRequest,
+    ) -> Result<MetaGcResponse> {
         let inner = self.inner.read().await;
-        inner.gc_regions(request).await
+        inner.gc_regions(context, request).await
     }
 
-    pub async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse> {
+    pub async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcTableRequest,
+    ) -> Result<MetaGcResponse> {
         let inner = self.inner.read().await;
-        inner.gc_table(request).await
+        inner.gc_table(context, request).await
     }
 }
 
@@ -225,6 +259,7 @@ impl Inner {
 
     async fn migrate_region(
         &self,
+        context: &ExecutorContext,
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
@@ -235,6 +270,8 @@ impl Inner {
             from_peer,
             to_peer,
             timeout_secs: timeout.as_secs() as u32,
+            event_context: procedure_event_context(context),
+            actor: procedure_actor(context),
             ..Default::default()
         };
 
@@ -278,7 +315,11 @@ impl Inner {
         .await
     }
 
-    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse> {
+    async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcRegionsRequest,
+    ) -> Result<MetaGcResponse> {
         let timeout = request.timeout;
         let req = GcRegionsRequest {
             header: Some(RequestHeader {
@@ -290,6 +331,8 @@ impl Inner {
             region_ids: request.region_ids,
             full_file_listing: request.full_file_listing,
             timeout_secs: gc_timeout_secs(timeout),
+            event_context: procedure_event_context(context),
+            actor: procedure_actor(context),
         };
 
         let resp: GcRegionsResponse = self
@@ -315,7 +358,11 @@ impl Inner {
         })
     }
 
-    async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse> {
+    async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcTableRequest,
+    ) -> Result<MetaGcResponse> {
         let timeout = request.timeout;
         let req = GcTableRequest {
             header: Some(RequestHeader {
@@ -329,6 +376,8 @@ impl Inner {
             table_name: request.table_name,
             full_file_listing: request.full_file_listing,
             timeout_secs: gc_timeout_secs(timeout),
+            event_context: procedure_event_context(context),
+            actor: procedure_actor(context),
         };
 
         let resp: GcTableResponse = self
@@ -460,11 +509,14 @@ mod tests {
         ReconcileResponse, ResponseHeader, Role,
     };
     use async_trait::async_trait;
+    use common_base::protocol::Channel;
     use common_error::status_code::StatusCode;
+    use common_event_recorder::{PersistentEventContext, ProcedureEventInput};
+    use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
     use common_meta::rpc::ddl::{
         CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
         CommentObjectType, CommentOnTask, CreatorGrantIntent, DdlTask, QueryContext,
-        SubmitDdlTaskRequest,
+        SubmitDdlTaskRequest, TriggerReason,
     };
     use common_telemetry::common_error::ext::ErrorExt;
     use common_telemetry::info;
@@ -474,8 +526,8 @@ mod tests {
     use tonic::codec::CompressionEncoding;
     use tonic::{Request, Response, Status};
 
-    use super::gc_timeout_secs;
     use crate::client::MetaClientBuilder;
+    use crate::client::procedure::{gc_timeout_secs, procedure_event_context};
 
     #[test]
     fn test_gc_timeout_secs() {
@@ -484,6 +536,42 @@ mod tests {
         assert_eq!(gc_timeout_secs(Some(Duration::from_millis(999))), 1);
         assert_eq!(gc_timeout_secs(Some(Duration::from_secs(1))), 1);
         assert_eq!(gc_timeout_secs(Some(Duration::from_secs(10))), 10);
+    }
+
+    #[test]
+    fn test_procedure_event_context_derives_protocol_from_query_context() {
+        let context = ExecutorContext {
+            query_context: Some(QueryContext {
+                channel: Channel::Postgres as u8,
+                ..Default::default()
+            }),
+            event_input: Some(ProcedureEventInput::new(TriggerReason::Manual)),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            procedure_event_context(&context).map(PersistentEventContext::from),
+            Some(PersistentEventContext::new(TriggerReason::Manual).with_protocol("postgres"))
+        );
+
+        let automatic_context = ExecutorContext {
+            event_input: Some(ProcedureEventInput::new(TriggerReason::ScheduledGc)),
+            ..Default::default()
+        };
+        assert_eq!(
+            procedure_event_context(&automatic_context).map(PersistentEventContext::from),
+            Some(PersistentEventContext::new(TriggerReason::ScheduledGc))
+        );
+
+        let unknown_channel_context = ExecutorContext {
+            query_context: Some(QueryContext::default()),
+            event_input: Some(ProcedureEventInput::new(TriggerReason::Manual)),
+            ..Default::default()
+        };
+        assert_eq!(
+            procedure_event_context(&unknown_channel_context).map(PersistentEventContext::from),
+            Some(PersistentEventContext::new(TriggerReason::Manual))
+        );
     }
 
     #[derive(Clone)]
@@ -621,19 +709,28 @@ mod tests {
             username: "alice".to_string(),
             created_at_ns: 42,
         };
-        client
-            .submit_ddl_task(SubmitDdlTaskRequest::new(
-                QueryContext::default(),
-                DdlTask::new_create_database(
-                    "greptime".to_string(),
-                    "metrics".to_string(),
-                    false,
-                    Default::default(),
-                    Some(creator.clone()),
-                ),
-            ))
-            .await
-            .unwrap();
+        let executor_context = ExecutorContext {
+            query_context: Some(QueryContext {
+                channel: Channel::Postgres as u8,
+                ..Default::default()
+            }),
+            actor: Some("effective-user".to_string()),
+            event_input: Some(ProcedureEventInput::new(TriggerReason::Manual)),
+            ..Default::default()
+        };
+        ProcedureExecutor::submit_ddl_task(
+            &client,
+            executor_context,
+            SubmitDdlTaskRequest::new(DdlTask::new_create_database(
+                "greptime".to_string(),
+                "metrics".to_string(),
+                false,
+                Default::default(),
+                Some(creator.clone()),
+            )),
+        )
+        .await
+        .unwrap();
 
         let request = request_rx.recv().await.unwrap();
         let encoded = serde_json::to_string(&creator).unwrap();
@@ -647,7 +744,13 @@ mod tests {
                 .as_ref(),
             encoded.as_bytes()
         );
-        let extensions = &request.into_inner().query_context.unwrap().extensions;
+        let request = request.into_inner();
+        assert_eq!(request.actor.unwrap().username, "effective-user");
+        assert_eq!(
+            PersistentEventContext::from(request.event_context.unwrap()),
+            PersistentEventContext::new(TriggerReason::Manual).with_protocol("postgres")
+        );
+        let extensions = &request.query_context.unwrap().extensions;
         assert_eq!(extensions[CREATE_DATABASE_CREATOR_EXTENSION_KEY], encoded);
 
         server_handle.abort();
@@ -689,22 +792,28 @@ mod tests {
             .build();
         client.start(&[addr_str.as_str()]).await.unwrap();
 
-        let mut request = SubmitDdlTaskRequest::new(
-            QueryContext::default(),
-            DdlTask::new_comment_on(CommentOnTask {
-                catalog_name: "greptime".to_string(),
-                schema_name: "public".to_string(),
-                object_type: CommentObjectType::Table,
-                object_name: "test_table".to_string(),
-                column_name: None,
-                object_id: None,
-                comment: Some("timeout".to_string()),
-            }),
-        );
+        let mut request = SubmitDdlTaskRequest::new(DdlTask::new_comment_on(CommentOnTask {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            object_type: CommentObjectType::Table,
+            object_name: "test_table".to_string(),
+            column_name: None,
+            object_id: None,
+            comment: Some("timeout".to_string()),
+        }));
         request.timeout = Duration::from_secs(1);
 
         let now = Instant::now();
-        let err = client.submit_ddl_task(request).await.unwrap_err();
+        let err = client
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                request,
+            )
+            .await
+            .unwrap_err();
         let elapsed = now.elapsed();
         // The request should be cancelled within 1 second.
         assert!(elapsed < Duration::from_secs(2));

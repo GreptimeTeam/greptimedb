@@ -36,7 +36,8 @@ use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::{
-    AutoCreateTableType, InserterRef, build_create_table_expr, fill_table_options_for_create,
+    AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
+    build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -46,7 +47,7 @@ use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF, coll
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
 use servers::pending_rows_batcher::PendingRowsSchemaAlterer;
-use servers::prom_store::{self, Metrics};
+use servers::prom_store;
 use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
 };
@@ -313,6 +314,7 @@ impl PendingRowsSchemaAlterer for Instance {
         // Check which tables actually still need to be created (may have been
         // concurrently created by another request).
         let mut create_exprs: Vec<CreateTableExpr> = Vec::with_capacity(tables.len());
+        let mut per_table_semantics: Option<Option<PerTableSemanticIndex>> = None;
         for &(table_name, request_schema) in tables {
             let existing = self
                 .catalog_manager()
@@ -331,6 +333,17 @@ impl PendingRowsSchemaAlterer for Instance {
 
             let mut table_options = std::collections::HashMap::with_capacity(4);
             fill_table_options_for_create(&mut table_options, &create_type, &ctx);
+            // The batched create path bypasses the operator's auto-create, so
+            // fold the per-table semantic index in here too.
+            let semantic_index = per_table_semantics
+                .get_or_insert_with(|| parse_per_table_semantic_index(&ctx))
+                .as_ref();
+            apply_per_table_semantic_options(
+                &mut table_options,
+                semantic_index,
+                schema,
+                table_name,
+            );
             create_table_expr.table_options.extend(table_options);
             create_exprs.push(create_table_expr);
         }
@@ -635,10 +648,6 @@ impl PromStoreProtocolHandler for Instance {
             .fail(),
         }
     }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
-        todo!();
-    }
 }
 
 impl Instance {
@@ -776,10 +785,6 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
         _request: ReadRequest,
         _ctx: QueryContextRef,
     ) -> ServerResult<PromStoreResponse> {
-        unreachable!();
-    }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
         unreachable!();
     }
 }

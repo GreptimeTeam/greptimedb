@@ -21,7 +21,6 @@
 use std::sync::Arc;
 
 use common_query::prelude::*;
-use common_telemetry::trace;
 use datafusion::common::cast::{as_binary_array, as_primitive_array};
 use datafusion::common::not_impl_err;
 use datafusion::error::{DataFusionError, Result as DfResult};
@@ -29,27 +28,40 @@ use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
 use datafusion::physical_plan::expressions::Literal;
 use datafusion::prelude::create_udaf;
-use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::{DataType, Float64Type};
-use serde::{Deserialize, Serialize};
-use uddsketch::{SketchHashKey, UDDSketch};
+use uddsketch::{BatchWorkspace, UddSketch};
+
+use crate::uddsketch_compat;
 
 pub const UDDSKETCH_STATE_NAME: &str = "uddsketch_state";
 
 pub const UDDSKETCH_MERGE_NAME: &str = "uddsketch_merge";
 
-#[derive(Debug, Serialize, Deserialize)]
+const MAX_BUCKETS: u32 = 1_000_000;
+
+#[derive(Debug)]
 pub struct UddSketchState {
-    uddsketch: UDDSketch,
-    error_rate: f64,
+    uddsketch: UddSketch,
+    workspace: BatchWorkspace,
+    values: Vec<f64>,
 }
 
 impl UddSketchState {
-    pub fn new(bucket_size: u64, error_rate: f64) -> Self {
-        Self {
-            uddsketch: UDDSketch::new(bucket_size, error_rate),
-            error_rate,
+    pub fn new(bucket_size: u32, error_rate: f64) -> DfResult<Self> {
+        if bucket_size > MAX_BUCKETS {
+            return Err(DataFusionError::Plan(format!(
+                "UDDSketch bucket size exceeds the maximum of {}",
+                MAX_BUCKETS
+            )));
         }
+        let uddsketch = UddSketch::new(bucket_size, error_rate)
+            .map_err(|e| DataFusionError::Plan(e.to_string()))?;
+        Ok(Self {
+            uddsketch,
+            workspace: BatchWorkspace::default(),
+            values: Vec::new(),
+        })
     }
 
     pub fn state_udf_impl() -> AggregateUDF {
@@ -60,7 +72,7 @@ impl UddSketchState {
             Volatility::Immutable,
             Arc::new(|args| {
                 let (bucket_size, error_rate) = downcast_accumulator_args(args)?;
-                Ok(Box::new(UddSketchState::new(bucket_size, error_rate)))
+                Ok(Box::new(UddSketchState::new(bucket_size, error_rate)?))
             }),
             Arc::new(vec![DataType::Binary]),
         )
@@ -80,51 +92,44 @@ impl UddSketchState {
             Volatility::Immutable,
             Arc::new(|args| {
                 let (bucket_size, error_rate) = downcast_accumulator_args(args)?;
-                Ok(Box::new(UddSketchState::new(bucket_size, error_rate)))
+                Ok(Box::new(UddSketchState::new(bucket_size, error_rate)?))
             }),
             Arc::new(vec![DataType::Binary]),
         )
     }
 
-    fn update(&mut self, value: f64) {
-        self.uddsketch.add_value(value);
-    }
-
     fn merge(&mut self, raw: &[u8]) -> DfResult<()> {
-        if let Ok(uddsketch) = bincode::deserialize::<Self>(raw) {
-            if uddsketch.uddsketch.count() != 0 {
-                if self.uddsketch.max_allowed_buckets() != uddsketch.uddsketch.max_allowed_buckets()
-                    || (self.error_rate - uddsketch.error_rate).abs() >= 1e-9
-                {
-                    return Err(DataFusionError::Plan(format!(
-                        "Merging UDDSketch with different parameters: arguments={:?} vs actual input={:?}",
-                        (self.uddsketch.max_allowed_buckets(), self.error_rate),
-                        (
-                            uddsketch.uddsketch.max_allowed_buckets(),
-                            uddsketch.error_rate
-                        )
-                    )));
-                }
-                self.uddsketch.merge_sketch(&uddsketch.uddsketch);
-            }
-        } else {
-            trace!("Warning: Failed to deserialize UDDSketch from {:?}", raw);
-            return Err(DataFusionError::Plan(
-                "Failed to deserialize UDDSketch from binary".to_string(),
-            ));
+        let uddsketch = uddsketch_compat::decode(raw).map_err(|e| {
+            common_telemetry::trace!("Failed to deserialize UDDSketch: {}", e);
+            DataFusionError::Plan("Failed to deserialize UDDSketch from binary".to_string())
+        })?;
+        if uddsketch.count() == 0 {
+            return Ok(());
         }
-
-        Ok(())
+        if self.uddsketch.max_buckets() != uddsketch.max_buckets()
+            || self.uddsketch.initial_error().to_bits() != uddsketch.initial_error().to_bits()
+        {
+            return Err(DataFusionError::Plan(format!(
+                "Merging UDDSketch with different parameters: arguments={:?} vs actual input={:?}",
+                (self.uddsketch.max_buckets(), self.uddsketch.initial_error()),
+                (uddsketch.max_buckets(), uddsketch.initial_error())
+            )));
+        }
+        self.uddsketch
+            .merge(&uddsketch)
+            .map_err(|e| DataFusionError::Plan(e.to_string()))
     }
 }
 
-fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u64, f64)> {
+fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u32, f64)> {
     let bucket_size = match args.exprs[0]
         .as_any()
         .downcast_ref::<Literal>()
         .map(|lit| lit.value())
     {
-        Some(ScalarValue::Int64(Some(value))) => *value as u64,
+        Some(ScalarValue::Int64(Some(value))) => u32::try_from(*value).map_err(|_| {
+            DataFusionError::Plan(format!("Invalid UDDSketch bucket size: {}", value))
+        })?,
         _ => {
             return not_impl_err!(
                 "{} not supported for bucket size: {}",
@@ -158,9 +163,16 @@ impl DfAccumulator for UddSketchState {
         match array.data_type() {
             DataType::Float64 => {
                 let f64_array = as_primitive_array::<Float64Type>(array)?;
-                for v in f64_array.iter().flatten() {
-                    self.update(v);
-                }
+                let values: &[f64] = if f64_array.null_count() == 0 {
+                    f64_array.values().as_ref()
+                } else {
+                    self.values.clear();
+                    self.values.extend(f64_array.iter().flatten());
+                    self.values.as_slice()
+                };
+                self.uddsketch
+                    .add_batch_with_workspace(values, &mut self.workspace)
+                    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
             }
             // meaning instantiate as `uddsketch_merge`
             DataType::Binary => self.merge_batch(std::slice::from_ref(array))?,
@@ -176,35 +188,21 @@ impl DfAccumulator for UddSketchState {
     }
 
     fn evaluate(&mut self) -> DfResult<ScalarValue> {
-        Ok(ScalarValue::Binary(Some(
-            bincode::serialize(&self).map_err(|e| {
-                DataFusionError::Internal(format!("Failed to serialize UDDSketch: {}", e))
-            })?,
-        )))
+        Ok(ScalarValue::Binary(Some(self.uddsketch.encode().map_err(
+            |e| DataFusionError::Internal(format!("Failed to serialize UDDSketch: {}", e)),
+        )?)))
     }
 
     fn size(&self) -> usize {
-        // Base size of UDDSketch struct fields
-        let mut total_size = std::mem::size_of::<f64>() * 3 + // alpha, gamma, values_sum
-                            std::mem::size_of::<u32>() +      // compactions
-                            std::mem::size_of::<u64>() * 2; // max_buckets, num_values
-
-        // Size of buckets (SketchHashMap)
-        // Each bucket entry contains:
-        // - SketchHashKey (enum with i64/Zero/Invalid variants)
-        // - SketchHashEntry (count: u64, next: SketchHashKey)
-        let bucket_entry_size = std::mem::size_of::<SketchHashKey>() + // key
-                               std::mem::size_of::<u64>() +            // count
-                               std::mem::size_of::<SketchHashKey>(); // next
-
-        total_size += self.uddsketch.current_buckets_count() * bucket_entry_size;
-
-        total_size
+        std::mem::size_of::<Self>() - std::mem::size_of::<UddSketch>()
+            + self.uddsketch.allocated_size()
+            + self.workspace.allocated_size()
+            + self.values.capacity() * std::mem::size_of::<f64>()
     }
 
     fn state(&mut self) -> DfResult<Vec<ScalarValue>> {
         Ok(vec![ScalarValue::Binary(Some(
-            bincode::serialize(&self).map_err(|e| {
+            self.uddsketch.encode().map_err(|e| {
                 DataFusionError::Internal(format!("Failed to serialize UDDSketch: {}", e))
             })?,
         ))])
@@ -224,20 +222,21 @@ impl DfAccumulator for UddSketchState {
 #[cfg(test)]
 mod tests {
     use datafusion::arrow::array::{BinaryArray, Float64Array};
+    use uddsketch::UddSketchRef;
 
     use super::*;
 
     #[test]
     fn test_uddsketch_state_basic() {
-        let mut state = UddSketchState::new(10, 0.01);
-        state.update(1.0);
-        state.update(2.0);
-        state.update(3.0);
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        state.uddsketch.add(1.0).unwrap();
+        state.uddsketch.add(2.0).unwrap();
+        state.uddsketch.add(3.0).unwrap();
 
         let result = state.evaluate().unwrap();
         if let ScalarValue::Binary(Some(bytes)) = result {
-            let deserialized: UddSketchState = bincode::deserialize(&bytes).unwrap();
-            assert_eq!(deserialized.uddsketch.count(), 3);
+            let encoded = UddSketchRef::parse(&bytes).unwrap();
+            assert_eq!(encoded.count(), 3);
         } else {
             panic!("Expected binary scalar value");
         }
@@ -245,39 +244,38 @@ mod tests {
 
     #[test]
     fn test_uddsketch_state_roundtrip() {
-        let mut state = UddSketchState::new(10, 0.01);
-        state.update(1.0);
-        state.update(2.0);
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        state.uddsketch.add(1.0).unwrap();
+        state.uddsketch.add(2.0).unwrap();
 
         // Serialize
         let serialized = state.evaluate().unwrap();
 
         // Create new state and merge the serialized data
-        let mut new_state = UddSketchState::new(10, 0.01);
+        let mut new_state = UddSketchState::new(10, 0.01).unwrap();
         if let ScalarValue::Binary(Some(bytes)) = &serialized {
             new_state.merge(bytes).unwrap();
 
-            // Verify the merged state matches original by comparing deserialized values
-            let original_sketch: UddSketchState = bincode::deserialize(bytes).unwrap();
-            let original_sketch = original_sketch.uddsketch;
+            let original_sketch = UddSketchRef::parse(bytes).unwrap();
             let new_result = new_state.evaluate().unwrap();
             if let ScalarValue::Binary(Some(new_bytes)) = new_result {
-                let new_sketch: UddSketchState = bincode::deserialize(&new_bytes).unwrap();
-                let new_sketch = new_sketch.uddsketch;
+                let new_sketch = UddSketchRef::parse(&new_bytes).unwrap();
                 assert_eq!(original_sketch.count(), new_sketch.count());
                 assert_eq!(original_sketch.sum(), new_sketch.sum());
-                assert_eq!(original_sketch.mean(), new_sketch.mean());
-                assert_eq!(original_sketch.max_error(), new_sketch.max_error());
+                assert_eq!(
+                    original_sketch.max_error().unwrap(),
+                    new_sketch.max_error().unwrap()
+                );
                 // Compare a few quantiles to ensure statistical equivalence
                 for q in [0.1, 0.5, 0.9].iter() {
+                    let original = original_sketch.quantile(*q).unwrap().unwrap();
+                    let merged = new_sketch.quantile(*q).unwrap().unwrap();
                     assert!(
-                        (original_sketch.estimate_quantile(*q) - new_sketch.estimate_quantile(*q))
-                            .abs()
-                            < 1e-10,
+                        (original - merged).abs() < 1e-10,
                         "Quantile {} mismatch: original={}, new={}",
                         q,
-                        original_sketch.estimate_quantile(*q),
-                        new_sketch.estimate_quantile(*q)
+                        original,
+                        merged
                     );
                 }
             } else {
@@ -289,9 +287,40 @@ mod tests {
     }
 
     #[test]
+    fn test_uddsketch_state_merges_legacy_state() {
+        let mut state = UddSketchState::new(128, 0.01).unwrap();
+
+        state.merge(uddsketch_compat::LEGACY_STATE).unwrap();
+
+        let ScalarValue::Binary(Some(encoded)) = state.evaluate().unwrap() else {
+            panic!("Expected binary scalar value");
+        };
+        let sketch = UddSketchRef::parse(&encoded).unwrap();
+        assert_eq!(sketch.count(), 4);
+        assert_eq!(sketch.sum(), 1.0);
+        assert_eq!(sketch.quantile(0.5).unwrap(), Some(0.9900000000000001));
+    }
+
+    #[test]
+    fn test_uddsketch_state_merges_compacted_legacy_state() {
+        let mut legacy_state = uddsketch_compat::COMPACTED_LEGACY_SKETCH.to_vec();
+        legacy_state.extend_from_slice(&0.01_f64.to_le_bytes());
+        let mut state = UddSketchState::new(7, 0.01).unwrap();
+
+        state.merge(&legacy_state).unwrap();
+
+        let ScalarValue::Binary(Some(encoded)) = state.evaluate().unwrap() else {
+            panic!("Expected binary scalar value");
+        };
+        let sketch = UddSketchRef::parse(&encoded).unwrap();
+        assert_eq!(sketch.count(), 201);
+        assert_eq!(sketch.times_compacted(), 12);
+    }
+
+    #[test]
     fn test_uddsketch_state_batch_update() {
-        let mut state = UddSketchState::new(10, 0.01);
-        let values = vec![1.0f64, 2.0, 3.0];
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        let values = vec![Some(1.0f64), None, Some(2.0), Some(3.0)];
         let array = Arc::new(Float64Array::from(values)) as ArrayRef;
 
         state
@@ -300,25 +329,52 @@ mod tests {
 
         let result = state.evaluate().unwrap();
         if let ScalarValue::Binary(Some(bytes)) = result {
-            let deserialized: UddSketchState = bincode::deserialize(&bytes).unwrap();
-            let deserialized = deserialized.uddsketch;
-            assert_eq!(deserialized.count(), 3);
+            let encoded = UddSketchRef::parse(&bytes).unwrap();
+            assert_eq!(encoded.count(), 3);
         } else {
             panic!("Expected binary scalar value");
         }
     }
 
     #[test]
+    fn test_uddsketch_state_non_null_batch_avoids_values_buffer() {
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        let array = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;
+
+        state
+            .update_batch(&[array.clone(), array.clone(), array])
+            .unwrap();
+
+        assert_eq!(state.uddsketch.count(), 3);
+        assert_eq!(state.values.capacity(), 0);
+    }
+
+    #[test]
+    fn test_uddsketch_state_non_null_sliced_batch() {
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        let array = Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]);
+        let array = array.slice(1, 2);
+        let array = Arc::new(array) as ArrayRef;
+
+        state
+            .update_batch(&[array.clone(), array.clone(), array])
+            .unwrap();
+
+        assert_eq!(state.uddsketch.count(), 2);
+        assert_eq!(state.uddsketch.sum(), 5.0);
+    }
+
+    #[test]
     fn test_uddsketch_state_merge_batch() {
-        let mut state1 = UddSketchState::new(10, 0.01);
-        state1.update(1.0);
+        let mut state1 = UddSketchState::new(10, 0.01).unwrap();
+        state1.uddsketch.add(1.0).unwrap();
         let state1_binary = state1.evaluate().unwrap();
 
-        let mut state2 = UddSketchState::new(10, 0.01);
-        state2.update(2.0);
+        let mut state2 = UddSketchState::new(10, 0.01).unwrap();
+        state2.uddsketch.add(2.0).unwrap();
         let state2_binary = state2.evaluate().unwrap();
 
-        let mut merged_state = UddSketchState::new(10, 0.01);
+        let mut merged_state = UddSketchState::new(10, 0.01).unwrap();
         if let (ScalarValue::Binary(Some(bytes1)), ScalarValue::Binary(Some(bytes2))) =
             (&state1_binary, &state2_binary)
         {
@@ -330,9 +386,8 @@ mod tests {
 
             let result = merged_state.evaluate().unwrap();
             if let ScalarValue::Binary(Some(bytes)) = result {
-                let deserialized: UddSketchState = bincode::deserialize(&bytes).unwrap();
-                let deserialized = deserialized.uddsketch;
-                assert_eq!(deserialized.count(), 2);
+                let encoded = UddSketchRef::parse(&bytes).unwrap();
+                assert_eq!(encoded.count(), 2);
             } else {
                 panic!("Expected binary scalar value");
             }
@@ -343,13 +398,14 @@ mod tests {
 
     #[test]
     fn test_uddsketch_state_size() {
-        let mut state = UddSketchState::new(10, 0.01);
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
         let initial_size = state.size();
 
         // Add some values to create buckets
-        state.update(1.0);
-        state.update(2.0);
-        state.update(3.0);
+        let array = Arc::new(Float64Array::from_iter_values((0..64).map(f64::from))) as ArrayRef;
+        state
+            .update_batch(&[array.clone(), array.clone(), array])
+            .unwrap();
 
         let size_with_values = state.size();
         assert!(
@@ -358,14 +414,29 @@ mod tests {
             initial_size,
             size_with_values
         );
+    }
 
-        // Verify size increases with more buckets
-        state.update(10.0); // This should create a new bucket
-        assert!(
-            state.size() > size_with_values,
-            "Size should increase after adding new bucket: prev={}, new={}",
-            size_with_values,
-            state.size()
-        );
+    #[test]
+    fn test_uddsketch_state_rejects_invalid_config() {
+        assert!(UddSketchState::new(6, 0.01).is_err());
+        assert!(UddSketchState::new(10, 1.0).is_err());
+
+        let mut maximum = UddSketchState::new(1_000_000, 0.01).unwrap();
+        let ScalarValue::Binary(Some(encoded)) = maximum.evaluate().unwrap() else {
+            panic!("Expected binary scalar value");
+        };
+        UddSketchRef::parse(&encoded).unwrap();
+        assert!(UddSketchState::new(1_000_001, 0.01).is_err());
+    }
+
+    #[test]
+    fn test_uddsketch_state_rejects_nan_batch() {
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        let array = Arc::new(Float64Array::from(vec![1.0, f64::NAN])) as ArrayRef;
+
+        let error = state
+            .update_batch(&[array.clone(), array.clone(), array])
+            .unwrap_err();
+        assert!(error.to_string().contains("NaN values are not supported"));
     }
 }

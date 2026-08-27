@@ -24,7 +24,7 @@ use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlowConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::service_config::{
-    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
     PromStoreOptions,
 };
 use mito2::config::MitoConfig;
@@ -56,6 +56,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub jaeger: JaegerOptions,
+    pub otlp: OtlpOptions,
     pub prom_store: PromStoreOptions,
     pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
@@ -94,6 +95,7 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             jaeger: JaegerOptions::default(),
+            otlp: OtlpOptions::default(),
             prom_store: PromStoreOptions::default(),
             wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
@@ -153,10 +155,12 @@ impl StandaloneOptions {
             opentsdb: cloned_opts.opentsdb,
             influxdb: cloned_opts.influxdb,
             jaeger: cloned_opts.jaeger,
+            otlp: cloned_opts.otlp,
             prom_store: cloned_opts.prom_store,
             meta_client: None,
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
+            query: cloned_opts.query,
             slow_query: cloned_opts.slow_query,
             event_recorder: cloned_opts.event_recorder,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
@@ -226,5 +230,14 @@ mod tests {
             &selected.event_recorder.event_types,
             &frontend_options.event_recorder.event_types,
         ));
+    }
+
+    #[test]
+    fn test_query_options_propagated_to_components() {
+        let mut options = StandaloneOptions::default();
+        options.query.parallelism = 4;
+
+        assert_eq!(options.frontend_options().query.parallelism, 4);
+        assert_eq!(options.datanode_options().query.parallelism, 4);
     }
 }

@@ -60,7 +60,6 @@ use flow::{
     FrontendInvoker, GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
-use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
@@ -72,7 +71,10 @@ use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
 use snafu::{OptionExt, ResultExt};
 use standalone::options::StandaloneOptions;
-use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
+use standalone::{
+    StandaloneDatanodeManager, StandaloneInformationExtension,
+    StandaloneRepartitionProcedureFactory,
+};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
@@ -393,8 +395,6 @@ impl StartCommand {
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
     pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -402,6 +402,8 @@ impl StartCommand {
             None,
             Some(&opts.component.slow_query),
         );
+
+        common_runtime::init_global_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
@@ -1127,7 +1129,9 @@ mod tests {
     fn test_toml() {
         let opts = StandaloneOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+        assert!(toml_string.contains("experimental_enable_exponential_histogram = false"));
+        let parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed.otlp, opts.otlp);
     }
 
     #[test]
