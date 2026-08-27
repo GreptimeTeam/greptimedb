@@ -96,27 +96,6 @@ restores these fields to its baseline values, or deletes them when the baseline
 has no value. It warns about protected-field overrides without printing their
 values.
 
-### Old-Stage Persisted Procedure Snapshot
-
-To verify recovery of a procedure state written by the old binary, add this
-strict optional table to `case.toml`:
-
-```toml
-[old_procedure]
-type_name = "metasrv-procedure::ReconcileTable"
-```
-
-The distributed runner starts watching the procedure store before `setup.sql`,
-captures the first persisted root-procedure step with the exact type name, and
-clones that old-binary message under a fresh procedure ID. The current binary
-must then recover the cloned snapshot after restart. This avoids
-timing-dependent process kills while preserving the old binary's actual
-serialized procedure data.
-
-This option requires the distributed topology and the runner-owned Docker etcd.
-The setup SQL must submit a root procedure of the configured type and allow it to
-reach a persisted step within 30 seconds.
-
 ### Version-Range Filtering
 
 `from_range` and `to_range` control which binary versions a case applies to:

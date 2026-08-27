@@ -59,8 +59,7 @@ pub struct ReconcileTableContext {
     pub volatile_ctx: VolatileContext,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy)]
 enum TablePhase {
     Start,
     ResolveColumnMetadata,
@@ -79,8 +78,7 @@ impl TablePhase {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy)]
 enum TableMetadataState {
     Consistent,
     Inconsistent,
@@ -95,7 +93,7 @@ impl TableMetadataState {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default)]
 struct ReconcileTableResultSummary {
     metadata_state: Option<TableMetadataState>,
     resolution_strategy_applied: Option<ResolveStrategy>,
@@ -149,44 +147,6 @@ impl ReconcileTableResultSummary {
 
     fn mark_table_info_phase_completed(&mut self) {
         self.last_completed_phase = Some(TablePhase::UpdateTableInfo);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.metadata_state.is_none()
-            && self.resolution_strategy_applied.is_none()
-            && self.resolved_column_count.is_none()
-            && self.scanned_region_count == 0
-            && self.updated_region_count == 0
-            && !self.table_info_updated
-            && self.last_completed_phase.is_none()
-    }
-
-    fn reset_replayed_resolution(&mut self) {
-        self.metadata_state = None;
-        self.resolution_strategy_applied = None;
-        self.resolved_column_count = None;
-        self.updated_region_count = 0;
-        self.table_info_updated = false;
-        self.last_completed_phase = (self.scanned_region_count > 0).then_some(TablePhase::Start);
-    }
-
-    fn reset_replayed_regions(&mut self) {
-        if self.is_empty() {
-            return;
-        }
-
-        self.updated_region_count = 0;
-        self.table_info_updated = false;
-        self.last_completed_phase = Some(TablePhase::ResolveColumnMetadata);
-    }
-
-    fn reset_replayed_table_info(&mut self) {
-        if self.is_empty() {
-            return;
-        }
-
-        self.table_info_updated = false;
-        self.last_completed_phase = Some(TablePhase::ReconcileRegions);
     }
 
     fn metadata_state(&self) -> Option<&'static str> {
@@ -265,8 +225,6 @@ pub(crate) struct PersistentContext {
     pub(crate) physical_table_route: Option<PhysicalTableRouteValue>,
     // Whether the procedure is a subprocedure.
     pub(crate) is_subprocedure: bool,
-    #[serde(default)]
-    result_summary: ReconcileTableResultSummary,
 }
 
 impl PersistentContext {
@@ -283,7 +241,6 @@ impl PersistentContext {
             table_info_value: None,
             physical_table_route: None,
             is_subprocedure,
-            result_summary: ReconcileTableResultSummary::default(),
         }
     }
 }
@@ -292,6 +249,7 @@ impl PersistentContext {
 pub(crate) struct VolatileContext {
     pub(crate) table_meta: Option<TableMeta>,
     pub(crate) metrics: ReconcileTableMetrics,
+    result_summary: ReconcileTableResultSummary,
 }
 
 pub struct ReconcileTableProcedure {
@@ -384,24 +342,6 @@ impl Procedure for ReconcileTableProcedure {
         serde_json::to_string(&data).context(ToJsonSnafu)
     }
 
-    fn recover(&mut self) -> ProcedureResult<()> {
-        use crate::reconciliation::reconcile_table::reconcile_regions::ReconcileRegions;
-        use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveColumnMetadata;
-        use crate::reconciliation::reconcile_table::update_table_info::UpdateTableInfo;
-
-        let summary = &mut self.context.persistent_ctx.result_summary;
-        if self.state.as_any().is::<ReconciliationStart>() {
-            *summary = Default::default();
-        } else if self.state.as_any().is::<ResolveColumnMetadata>() {
-            summary.reset_replayed_resolution();
-        } else if self.state.as_any().is::<ReconcileRegions>() {
-            summary.reset_replayed_regions();
-        } else if self.state.as_any().is::<UpdateTableInfo>() {
-            summary.reset_replayed_table_info();
-        }
-        Ok(())
-    }
-
     fn lock_key(&self) -> LockKey {
         let table_ref = &self.context.table_name().table_ref();
 
@@ -439,9 +379,11 @@ impl Procedure for ReconcileTableProcedure {
                 persistent_ctx.resolve_strategy,
                 persistent_ctx.is_subprocedure,
             ),
-            EventTrigger::Succeeded => Self::result_event(locator, persistent_ctx, true),
+            EventTrigger::Succeeded => {
+                Self::result_event(locator, &self.context.volatile_ctx.result_summary, true)
+            }
             EventTrigger::Failed | EventTrigger::Poisoned => {
-                Self::result_event(locator, persistent_ctx, false)
+                Self::result_event(locator, &self.context.volatile_ctx.result_summary, false)
             }
             _ => ReconciliationEvent::table_lifecycle(locator),
         };
@@ -452,10 +394,9 @@ impl Procedure for ReconcileTableProcedure {
 impl ReconcileTableProcedure {
     fn result_event(
         locator: ReconciliationLocator,
-        persistent_ctx: &PersistentContext,
+        summary: &ReconcileTableResultSummary,
         complete: bool,
     ) -> ReconciliationEvent {
-        let summary = &persistent_ctx.result_summary;
         ReconciliationEvent::table_result(
             locator,
             complete,
@@ -506,12 +447,9 @@ mod tests {
     use crate::key::DeserializedValueWithBytes;
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_route::PhysicalTableRouteValue;
-    use crate::key::test_utils::{new_test_table_info, new_test_table_info_with_name};
+    use crate::key::test_utils::new_test_table_info_with_name;
     use crate::peer::Peer;
     use crate::reconciliation::reconcile_table::reconcile_regions::ReconcileRegions;
-    use crate::reconciliation::reconcile_table::reconciliation_end::ReconciliationEnd;
-    use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveColumnMetadata;
-    use crate::reconciliation::reconcile_table::update_table_info::UpdateTableInfo;
     use crate::reconciliation::utils::build_column_metadata_from_table_info;
     use crate::rpc::router::{Region, RegionRoute};
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -578,7 +516,7 @@ mod tests {
     fn table_non_terminal_lifecycle_events_have_null_payloads() {
         let events = TableEventHarness::all();
         let mut procedure = test_procedure(true);
-        procedure.context.persistent_ctx.result_summary = populated_summary();
+        procedure.context.volatile_ctx.result_summary = populated_summary();
 
         for trigger in [
             EventTrigger::Recovered,
@@ -607,7 +545,7 @@ mod tests {
     fn table_terminal_events_report_bounded_results() {
         let events = TableEventHarness::all();
         let mut procedure = test_procedure(true);
-        procedure.context.persistent_ctx.result_summary = populated_summary();
+        procedure.context.volatile_ctx.result_summary = populated_summary();
 
         for (trigger, complete) in [
             (EventTrigger::Succeeded, true),
@@ -656,14 +594,12 @@ mod tests {
     }
 
     #[test]
-    fn table_old_json_without_result_summary_still_deserializes() {
+    fn table_result_summary_is_not_persisted() {
         let events = TableEventHarness::all();
-        let procedure = test_procedure(false);
-        let mut value: Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
-        value["persistent_ctx"]
-            .as_object_mut()
-            .unwrap()
-            .remove("result_summary");
+        let mut procedure = test_procedure(false);
+        procedure.context.volatile_ctx.result_summary = populated_summary();
+        let value: Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+        assert!(value["persistent_ctx"].get("result_summary").is_none());
 
         let loaded = ReconcileTableProcedure::from_json(
             test_context(),
@@ -694,7 +630,7 @@ mod tests {
     fn table_partial_summary_preserves_completed_work_without_advancing_phases() {
         let events = TableEventHarness::all();
         let mut procedure = test_procedure(false);
-        let summary = &mut procedure.context.persistent_ctx.result_summary;
+        let summary = &mut procedure.context.volatile_ctx.result_summary;
         summary.record_scanned_regions(2);
 
         assert_eq!(
@@ -716,7 +652,7 @@ mod tests {
             })
         );
 
-        let summary = &mut procedure.context.persistent_ctx.result_summary;
+        let summary = &mut procedure.context.volatile_ctx.result_summary;
         summary.mark_start_completed();
         summary.record_metadata_state(TableMetadataState::Inconsistent);
         assert_eq!(
@@ -738,7 +674,7 @@ mod tests {
             })
         );
 
-        let summary = &mut procedure.context.persistent_ctx.result_summary;
+        let summary = &mut procedure.context.volatile_ctx.result_summary;
         summary.record_resolved_columns(
             TableMetadataState::Inconsistent,
             Some(ResolveStrategy::UseLatest),
@@ -810,7 +746,7 @@ mod tests {
                 },
             ]));
 
-        let summary = &mut procedure.context.persistent_ctx.result_summary;
+        let summary = &mut procedure.context.volatile_ctx.result_summary;
         summary.record_scanned_regions(region_ids.len());
         summary.mark_start_completed();
         summary.record_resolved_columns(
@@ -847,84 +783,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn table_recovery_resets_only_the_state_that_will_be_replayed() {
-        let mut procedure = test_procedure(false);
-        procedure.context.persistent_ctx.result_summary = populated_summary();
-        procedure.recover().unwrap();
-        assert_summary_is_empty(&procedure.context.persistent_ctx.result_summary);
-
-        procedure.context.persistent_ctx.result_summary = populated_summary();
-        procedure.state = Box::new(ResolveColumnMetadata::new(
-            ResolveStrategy::UseLatest,
-            vec![],
-        ));
-        procedure.recover().unwrap();
-        let summary = &procedure.context.persistent_ctx.result_summary;
-        assert_eq!(summary.scanned_region_count, 2);
-        assert!(summary.metadata_state.is_none());
-        assert!(summary.resolution_strategy_applied.is_none());
-        assert!(summary.resolved_column_count.is_none());
-        assert!(matches!(
-            summary.last_completed_phase,
-            Some(TablePhase::Start)
-        ));
-
-        procedure.context.persistent_ctx.result_summary = populated_summary();
-        procedure.state = Box::new(ReconcileRegions::new(vec![], vec![]));
-        procedure.recover().unwrap();
-        let summary = &procedure.context.persistent_ctx.result_summary;
-        assert_eq!(summary.scanned_region_count, 2);
-        assert_eq!(summary.updated_region_count, 0);
-        assert!(!summary.table_info_updated);
-        assert!(matches!(
-            summary.last_completed_phase,
-            Some(TablePhase::ResolveColumnMetadata)
-        ));
-
-        procedure.context.persistent_ctx.result_summary = populated_summary();
-        let table_info =
-            DeserializedValueWithBytes::from_inner(TableInfoValue::new(new_test_table_info(42)));
-        procedure.state = Box::new(UpdateTableInfo::new(table_info, vec![]));
-        procedure.recover().unwrap();
-        let summary = &procedure.context.persistent_ctx.result_summary;
-        assert_eq!(summary.updated_region_count, 1);
-        assert!(!summary.table_info_updated);
-        assert!(matches!(
-            summary.last_completed_phase,
-            Some(TablePhase::ReconcileRegions)
-        ));
-
-        procedure.context.persistent_ctx.result_summary = populated_summary();
-        procedure.state = Box::new(ReconciliationEnd);
-        procedure.recover().unwrap();
-        let summary = &procedure.context.persistent_ctx.result_summary;
-        assert_eq!(summary.updated_region_count, 1);
-        assert!(summary.table_info_updated);
-        assert!(matches!(
-            summary.last_completed_phase,
-            Some(TablePhase::UpdateTableInfo)
-        ));
-    }
-
-    #[test]
-    fn table_recovery_preserves_empty_legacy_summary_for_advanced_states() {
-        let mut procedure = test_procedure(false);
-        procedure.state = Box::new(ReconcileRegions::new(vec![], vec![]));
-        let mut loaded = load_without_result_summary(&procedure);
-        loaded.recover().unwrap();
-        assert_summary_is_empty(&loaded.context.persistent_ctx.result_summary);
-        assert_empty_failed_event(&loaded);
-
-        let table_info =
-            DeserializedValueWithBytes::from_inner(TableInfoValue::new(new_test_table_info(42)));
-        procedure.state = Box::new(UpdateTableInfo::new(table_info, vec![]));
-        let mut loaded = load_without_result_summary(&procedure);
-        loaded.recover().unwrap();
-        assert_summary_is_empty(&loaded.context.persistent_ctx.result_summary);
-        assert_empty_failed_event(&loaded);
-    }
-
     fn populated_summary() -> ReconcileTableResultSummary {
         ReconcileTableResultSummary {
             metadata_state: Some(TableMetadataState::Inconsistent),
@@ -935,48 +793,6 @@ mod tests {
             table_info_updated: true,
             last_completed_phase: Some(TablePhase::UpdateTableInfo),
         }
-    }
-
-    fn assert_summary_is_empty(summary: &ReconcileTableResultSummary) {
-        assert!(summary.metadata_state.is_none());
-        assert!(summary.resolution_strategy_applied.is_none());
-        assert!(summary.resolved_column_count.is_none());
-        assert_eq!(summary.scanned_region_count, 0);
-        assert_eq!(summary.updated_region_count, 0);
-        assert!(!summary.table_info_updated);
-        assert!(summary.last_completed_phase.is_none());
-    }
-
-    fn assert_empty_failed_event(procedure: &ReconcileTableProcedure) {
-        assert_eq!(
-            TableEventHarness::all()
-                .event(procedure, EventTrigger::Failed)
-                .unwrap()
-                .json_payload()
-                .unwrap(),
-            json!({
-                "version": 1,
-                "complete": false,
-                "metadata_state": null,
-                "resolution_strategy_applied": null,
-                "resolved_column_count": null,
-                "scanned_region_count": 0,
-                "updated_region_count": 0,
-                "table_info_updated": false,
-                "last_completed_phase": null,
-            })
-        );
-    }
-
-    fn load_without_result_summary(procedure: &ReconcileTableProcedure) -> ReconcileTableProcedure {
-        let mut value: Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
-        value["persistent_ctx"]
-            .as_object_mut()
-            .unwrap()
-            .remove("result_summary");
-
-        ReconcileTableProcedure::from_json(test_context(), &serde_json::to_string(&value).unwrap())
-            .unwrap()
     }
 
     fn test_procedure(is_subprocedure: bool) -> ReconcileTableProcedure {

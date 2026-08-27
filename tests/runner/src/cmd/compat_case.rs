@@ -46,9 +46,6 @@ pub struct CaseMetadata {
     /// Optional old-stage server configuration sidecars.
     #[serde(default)]
     pub old_config: Option<OldConfigMetadata>,
-    /// Optional old-stage persisted-procedure snapshot to clone for recovery.
-    #[serde(default)]
-    pub old_procedure: Option<OldProcedureMetadata>,
 }
 
 /// Optional configuration sidecars for the old compatibility stage.
@@ -57,14 +54,6 @@ pub struct CaseMetadata {
 pub struct OldConfigMetadata {
     /// Datanode TOML sidecar, resolved relative to the compatibility case directory.
     pub datanode: PathBuf,
-}
-
-/// An old-binary procedure snapshot that the current binary must recover.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OldProcedureMetadata {
-    /// Exact persisted procedure type name to capture.
-    pub type_name: String,
 }
 
 impl CaseMetadata {
@@ -81,11 +70,6 @@ impl CaseMetadata {
         self.old_config
             .as_ref()
             .map(|config| config.datanode.as_path())
-    }
-
-    /// Returns the old procedure snapshot configuration, if any.
-    pub fn old_procedure(&self) -> Option<&OldProcedureMetadata> {
-        self.old_procedure.as_ref()
     }
 }
 
@@ -256,31 +240,6 @@ pub fn validate_cases_metadata(cases: &[CompatCase]) -> Result<(), String> {
         validate_version_constraints(&case.metadata.name, "to_range", &case.metadata.to_range)?;
         if case.metadata.features.is_empty() {
             return Err(format!("Case '{}' has empty features", case.metadata.name));
-        }
-        if let Some(procedure) = case.metadata.old_procedure() {
-            if procedure.type_name.trim().is_empty() {
-                return Err(format!(
-                    "Case '{}' has an empty old_procedure.type_name",
-                    case.metadata.name
-                ));
-            }
-            if procedure.type_name.trim() != procedure.type_name {
-                return Err(format!(
-                    "Case '{}' has surrounding whitespace in old_procedure.type_name",
-                    case.metadata.name
-                ));
-            }
-            if case
-                .metadata
-                .topologies
-                .iter()
-                .any(|topology| topology != "distributed")
-            {
-                return Err(format!(
-                    "Case '{}' uses old_procedure outside the distributed topology",
-                    case.metadata.name
-                ));
-            }
         }
     }
 
@@ -597,89 +556,6 @@ mod tests {
     }
 
     #[test]
-    fn test_case_metadata_parses_old_procedure_snapshot() {
-        let metadata: CaseMetadata = toml::from_str(
-            r#"
-            name = "case"
-            reason = "reason"
-            introduced_by = "test"
-            topologies = ["distributed"]
-            from_range = ["*"]
-            to_range = ["*"]
-            features = ["procedure"]
-            owner = "team"
-
-            [old_procedure]
-            type_name = "metasrv-procedure::ReconcileTable"
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            metadata
-                .old_procedure()
-                .map(|value| value.type_name.as_str()),
-            Some("metasrv-procedure::ReconcileTable")
-        );
-    }
-
-    #[test]
-    fn test_case_metadata_rejects_unknown_old_procedure_fields() {
-        let error = toml::from_str::<CaseMetadata>(
-            r#"
-            name = "case"
-            reason = "reason"
-            introduced_by = "test"
-            topologies = ["distributed"]
-            from_range = ["*"]
-            to_range = ["*"]
-            features = ["procedure"]
-            owner = "team"
-
-            [old_procedure]
-            type_name = "metasrv-procedure::ReconcileTable"
-            unsupported = true
-            "#,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("unknown field `unsupported`"));
-    }
-
-    fn old_procedure_case(type_name: &str, topology: &str) -> CompatCase {
-        CompatCase {
-            metadata: CaseMetadata {
-                name: "case".to_string(),
-                reason: "reason".to_string(),
-                introduced_by: "test".to_string(),
-                topologies: vec![topology.to_string()],
-                from_range: vec!["*".to_string()],
-                to_range: vec!["*".to_string()],
-                features: vec!["procedure".to_string()],
-                owner: "team".to_string(),
-                namespace: None,
-                old_config: None,
-                old_procedure: Some(OldProcedureMetadata {
-                    type_name: type_name.to_string(),
-                }),
-            },
-            dir: PathBuf::from("case"),
-            namespace: "case".to_string(),
-        }
-    }
-
-    #[test]
-    fn test_validate_cases_metadata_rejects_invalid_old_procedure() {
-        for case in [
-            old_procedure_case("", "distributed"),
-            old_procedure_case(" ReconcileTable", "distributed"),
-            old_procedure_case("ReconcileTable", "standalone"),
-        ] {
-            assert!(validate_cases_metadata(&[case]).is_err());
-        }
-    }
-
-    #[test]
     fn test_validate_cases_metadata_rejects_empty_required_vectors() {
         let case = CompatCase {
             metadata: CaseMetadata {
@@ -693,7 +569,6 @@ mod tests {
                 owner: "team".to_string(),
                 namespace: None,
                 old_config: None,
-                old_procedure: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -716,7 +591,6 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
-                old_procedure: None,
             },
             dir: PathBuf::from("bad_constraint"),
             namespace: "bad_constraint".to_string(),
@@ -739,7 +613,6 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
-                old_procedure: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -756,7 +629,6 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
-                old_procedure: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -782,7 +654,6 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
                 old_config: None,
-                old_procedure: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -799,7 +670,6 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
                 old_config: None,
-                old_procedure: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -822,7 +692,6 @@ mod tests {
                 owner: "team".to_string(),
                 namespace: None,
                 old_config: None,
-                old_procedure: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),

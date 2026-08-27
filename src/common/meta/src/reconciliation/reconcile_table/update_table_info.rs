@@ -81,7 +81,7 @@ impl State for UpdateTableInfo {
                 ctx.table_name(),
                 ctx.table_id()
             );
-            ctx.persistent_ctx
+            ctx.volatile_ctx
                 .result_summary
                 .mark_table_info_phase_completed();
             return Ok((Box::new(ReconciliationEnd), Status::executing(true)));
@@ -101,7 +101,7 @@ impl State for UpdateTableInfo {
                 new_table_info,
             )
             .await?;
-        ctx.persistent_ctx.result_summary.mark_table_info_updated();
+        ctx.volatile_ctx.result_summary.mark_table_info_updated();
 
         let table_ref = ctx.table_name().table_ref();
         let table_id = ctx.table_id();
@@ -123,7 +123,7 @@ impl State for UpdateTableInfo {
         // Update metrics.
         let metrics = ctx.mut_metrics();
         metrics.update_table_info = true;
-        ctx.persistent_ctx
+        ctx.volatile_ctx
             .result_summary
             .mark_table_info_phase_completed();
 

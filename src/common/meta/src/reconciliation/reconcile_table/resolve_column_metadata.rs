@@ -101,7 +101,7 @@ impl State for ResolveColumnMetadata {
                 table_name, table_id
             );
 
-            ctx.persistent_ctx.result_summary.record_resolved_columns(
+            ctx.volatile_ctx.result_summary.record_resolved_columns(
                 TableMetadataState::Consistent,
                 None,
                 Some(column_metadatas.len()),
@@ -116,7 +116,7 @@ impl State for ResolveColumnMetadata {
             ));
         };
 
-        ctx.persistent_ctx
+        ctx.volatile_ctx
             .result_summary
             .record_metadata_state(TableMetadataState::Inconsistent);
 
@@ -136,7 +136,7 @@ impl State for ResolveColumnMetadata {
                 let region_ids =
                     resolve_column_metadatas_with_metasrv(&column_metadata, &self.region_metadata)?;
 
-                ctx.persistent_ctx.result_summary.record_resolved_columns(
+                ctx.volatile_ctx.result_summary.record_resolved_columns(
                     TableMetadataState::Inconsistent,
                     Some(self.strategy),
                     Some(column_metadata.len()),
@@ -155,7 +155,7 @@ impl State for ResolveColumnMetadata {
                 let (column_metadatas, region_ids) =
                     resolve_column_metadatas_with_latest(&self.region_metadata)?;
 
-                ctx.persistent_ctx.result_summary.record_resolved_columns(
+                ctx.volatile_ctx.result_summary.record_resolved_columns(
                     TableMetadataState::Inconsistent,
                     Some(self.strategy),
                     Some(column_metadatas.len()),
@@ -173,7 +173,7 @@ impl State for ResolveColumnMetadata {
             ResolveStrategy::AbortOnConflict => {
                 let table_name = table_name.to_string();
 
-                ctx.persistent_ctx
+                ctx.volatile_ctx
                     .result_summary
                     .record_resolution_strategy(self.strategy);
 

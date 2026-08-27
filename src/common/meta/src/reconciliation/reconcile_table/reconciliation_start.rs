@@ -81,7 +81,7 @@ impl State for ReconciliationStart {
                 .list(physical_table_id, &physical_table_route.region_routes)
                 .await?
         };
-        ctx.persistent_ctx
+        ctx.volatile_ctx
             .result_summary
             .record_scanned_regions(region_metadatas.len());
 
@@ -121,7 +121,7 @@ impl State for ReconciliationStart {
             }
         });
 
-        ctx.persistent_ctx.result_summary.mark_start_completed();
+        ctx.volatile_ctx.result_summary.mark_start_completed();
 
         // Persist the physical table route.
         // TODO(weny): refetch the physical table route if repair is needed.

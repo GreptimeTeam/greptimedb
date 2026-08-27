@@ -127,7 +127,7 @@ impl State for ReconcileRegions {
 
         let results = future::join_all(sync_column_tsks).await;
         let updated_region_count = results.iter().filter(|result| result.is_ok()).count();
-        ctx.persistent_ctx
+        ctx.volatile_ctx
             .result_summary
             .record_updated_regions(updated_region_count);
         let mut results = results.into_iter().collect::<Result<Vec<_>>>()?;
@@ -144,7 +144,7 @@ impl State for ReconcileRegions {
                 },
             )?;
 
-        ctx.persistent_ctx
+        ctx.volatile_ctx
             .result_summary
             .mark_region_phase_completed();
 

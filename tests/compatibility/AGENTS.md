@@ -51,21 +51,6 @@ This file is intended for AI agents editing compat cases or the compat runner. F
   restores or deletes them according to its baseline and warns without showing
   values.
 
-## Old-Stage Persisted Procedure Snapshots
-
-- Declare a recovery snapshot only as:
-
-  ```toml
-  [old_procedure]
-  type_name = "metasrv-procedure::ReconcileTable"
-  ```
-
-- `type_name` must be the exact persisted procedure type and cannot be empty.
-- This option requires distributed topology with the runner-owned Docker etcd.
-- `setup.sql` must submit the target root procedure. The runner captures and clones
-  the old binary's real persisted step, so do not add timing-based queues or
-  process-kill assumptions to the SQL case.
-
 ## Phase Semantics
 
 - `setup.sql` runs on the **old (from)** binary. Only success is required;
