@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::extract::rejection::FormRejection;
@@ -308,12 +309,13 @@ pub async fn sql_analyze_stream(
     let (cancel_tx, mut cancel_rx) = watch::channel(false);
     let worker_notify = notify.clone();
     let panic_notify = notify.clone();
+    let sequence = Arc::new(AtomicU64::new(0));
+    let worker_sequence = sequence.clone();
     let worker_terminal_tx = terminal_tx.clone();
     let worker = common_runtime::spawn_global(async move {
         let worker_result = AssertUnwindSafe(async move {
             let mut stream = stream;
             let mut batches = Vec::new();
-            let mut seq = 0;
             let mut current_interval_ms = interval_ms;
             let tick = tokio::time::sleep(Duration::from_millis(current_interval_ms));
             tokio::pin!(tick);
@@ -328,7 +330,7 @@ pub async fn sql_analyze_stream(
                                 let status = err.status_code();
                                 let event_name = if status == StatusCode::Cancelled { "canceled" } else { "error" };
                                 let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
-                                    seq,
+                                    seq: worker_sequence.load(Ordering::Relaxed),
                                     state: event_name,
                                     partial: false,
                                     start,
@@ -345,7 +347,7 @@ pub async fn sql_analyze_stream(
                                     .map(GreptimeQueryOutput::Records);
                                 let (event_name, payload) = make_final_analyze_event(
                                     output.map_err(|err| (err.output_msg(), err.status_code() as u32)),
-                                    seq,
+                                    worker_sequence.load(Ordering::Relaxed),
                                     start,
                                     plan.as_ref(),
                                 );
@@ -356,7 +358,7 @@ pub async fn sql_analyze_stream(
                     }
                     _ = &mut tick, if plan.is_some() => {
                         let (payload, payload_bytes) = make_analyze_payload(AnalyzePayloadArgs {
-                            seq,
+                            seq: worker_sequence.load(Ordering::Relaxed),
                             state: "metrics",
                             partial: true,
                             start,
@@ -366,7 +368,7 @@ pub async fn sql_analyze_stream(
                             code: None,
                         });
                         current_interval_ms = adaptive_interval_ms(payload_bytes, interval_ms);
-                        seq += 1;
+                        worker_sequence.fetch_add(1, Ordering::Relaxed);
                         if metrics_tx.send(Some(payload)).is_err() {
                             return;
                         }
@@ -381,7 +383,7 @@ pub async fn sql_analyze_stream(
 
         if worker_result.is_err() {
             let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
-                seq: 0,
+                seq: sequence.load(Ordering::Relaxed),
                 state: "error",
                 partial: false,
                 start,
