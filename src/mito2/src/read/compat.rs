@@ -639,7 +639,7 @@ mod tests {
     use api::v1::{OpType, SemanticType};
     use datatypes::arrow::array::{
         ArrayRef, BinaryArray, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        TimestampMicrosecondArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::arrow::record_batch::RecordBatch;
@@ -1055,6 +1055,191 @@ mod tests {
         let result = result.as_any().downcast_ref::<BinaryArray>().unwrap();
         assert_eq!(result.value(0), sparse_key);
         assert_eq!(result.value(1), sparse_key);
+    }
+
+    /// A widened time index unit must be cast on compat (values rescaled to
+    /// the expected unit), and identical units must skip compat entirely.
+    #[test]
+    fn test_flat_compat_batch_with_time_index_unit_change() {
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let mut expected_metadata = (*actual_metadata).clone();
+        for column in expected_metadata.column_metadatas.iter_mut() {
+            if column.semantic_type == SemanticType::Timestamp {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        // Keep the schema consistent with the column metadata.
+        let expected_metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(expected_metadata)
+                .build()
+                .unwrap(),
+        );
+
+        // Same units: nothing to compat.
+        let same_unit_metadata = Arc::new((*actual_metadata).clone());
+        let mapper = FlatProjectionMapper::all(&same_unit_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::new([0, 1, 2]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert!(
+            FlatCompatBatch::try_new(&mapper, &read_format, false)
+                .unwrap()
+                .is_none()
+        );
+
+        // Widened unit: the time index column is rescaled, others pass through.
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::new([0, 1, 2]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .unwrap();
+
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        tag_builder.append_value("tag1");
+        tag_builder.append_value("tag1");
+        let tag_dict_array = Arc::new(tag_builder.finish());
+
+        let k1 = encode_key(&[Some("tag1")]);
+        let input_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        let expected_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            // Rescaled, not reinterpreted: 1000ms -> 1_000_000us.
+            Arc::new(TimestampMicrosecondArray::from_iter_values([
+                1_000_000, 2_000_000,
+            ])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let expected_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
+    }
+
+    /// The sparse compaction compat path must also rescale a widened time
+    /// index unit (metric-engine regions compact with sparse encoding).
+    #[test]
+    fn test_flat_compat_batch_compact_sparse_time_index_unit_change() {
+        let mut actual_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[],
+        );
+        actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let actual_metadata = Arc::new(actual_metadata);
+
+        let mut expected_metadata = (*actual_metadata).clone();
+        for column in expected_metadata.column_metadatas.iter_mut() {
+            if column.semantic_type == SemanticType::Timestamp {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let expected_metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(expected_metadata)
+                .build()
+                .unwrap(),
+        );
+
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::new([0, 2]),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, true)
+            .unwrap()
+            .unwrap();
+
+        let sparse_k1 = encode_sparse_key(&[]);
+        let input_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&sparse_k1, &sparse_k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMicrosecondArray::from_iter_values([
+                1_000_000, 2_000_000,
+            ])),
+            build_flat_test_pk_array(&[&sparse_k1, &sparse_k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let output_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
     }
 
     #[test]
