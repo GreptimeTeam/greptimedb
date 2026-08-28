@@ -167,18 +167,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Attempt to combine two tables with different column sets, left: {:?}, right: {:?}",
-        left,
-        right
-    ))]
-    CombineTableColumnMismatch {
-        left: Vec<String>,
-        right: Vec<String>,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Multi fields calculation is not supported in {}", operator))]
     MultiFieldsNotSupported {
         operator: String,
@@ -238,7 +226,6 @@ impl ErrorExt for Error {
             | ColumnNotFound { .. }
             | FunctionInvalidArgument { .. }
             | UnsupportedVectorMatch { .. }
-            | CombineTableColumnMismatch { .. }
             | UnexpectedPlanExpr { .. }
             | UnsupportedMatcherOp { .. }
             | SameLabelSet { .. }
