@@ -285,6 +285,7 @@ mod tests {
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::execution::TaskContext;
     use datafusion::physical_expr::expressions::{col, lit};
+    use datafusion::physical_optimizer::combine_partial_final_agg::CombinePartialFinalAggregate;
     use datafusion::physical_plan::aggregates::{
         AggregateExec, AggregateMode, LimitOptions, PhysicalGroupBy,
     };
@@ -418,23 +419,55 @@ mod tests {
         assert_eq!(values, vec![1]);
     }
 
-    #[test]
-    fn adds_global_limit_for_single_partitioned_aggregate_soft_limit() {
-        // CombinePartialFinalAggregate rewrites FinalPartitioned into
-        // SinglePartitioned while preserving limit_options; its output can
-        // still have multiple partitions.
-        let agg = agg_with_limit_options(
-            unordered_input(),
-            AggregateMode::SinglePartitioned,
-            LimitOptions::new(1),
+    #[tokio::test]
+    async fn single_partitioned_soft_limit_returns_one_row_globally() {
+        // Production-like shape: CombinePartialFinalAggregate rewrites
+        // FinalPartitioned + Partial into SinglePartitioned while preserving
+        // limit_options, when the Partial's output is already hash-partitioned
+        // by the group key. The duplicate key across raw partitions exercises
+        // the hash merge.
+        let schema = schema();
+        let first = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+        let second = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![1, 4, 5]))],
+        )
+        .unwrap();
+        let scan = Arc::new(
+            TestMemoryExec::try_new(&[vec![first], vec![second]], schema.clone(), None).unwrap(),
         );
+        let repartition = hash_repartition(scan);
+        let partial = agg_with_limit(repartition, AggregateMode::Partial, 1);
+        let final_agg = agg_with_limit(partial, AggregateMode::FinalPartitioned, 1);
+
+        let combined = CombinePartialFinalAggregate::new()
+            .optimize(final_agg, &ConfigOptions::new())
+            .unwrap();
+        let agg = combined.as_any().downcast_ref::<AggregateExec>().unwrap();
+        assert!(matches!(agg.mode(), AggregateMode::SinglePartitioned));
+        assert_eq!(agg.limit_options().map(|options| options.limit()), Some(1));
+        assert_eq!(combined.output_partitioning().partition_count(), 3);
 
         let optimized =
-            EnsureGlobalLimitForFetch::optimize_plan(agg, ParentContext::default()).unwrap();
+            EnsureGlobalLimitForFetch::optimize_plan(combined, ParentContext::default()).unwrap();
 
+        // A global fetch must be installed above the multi-partition
+        // SinglePartitioned aggregate...
         assert!(optimized.as_any().is::<CoalescePartitionsExec>());
         assert_eq!(optimized.fetch(), Some(1));
-        assert_eq!(optimized.output_partitioning().partition_count(), 1);
+
+        // ...and the executed plan must return one row globally, not one row
+        // per partition.
+        let batches =
+            datafusion::physical_plan::collect(optimized, Arc::new(TaskContext::default()))
+                .await
+                .unwrap();
+        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(rows, 1);
     }
 
     #[test]
