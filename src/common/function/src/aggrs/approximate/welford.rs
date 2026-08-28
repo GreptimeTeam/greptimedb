@@ -297,17 +297,24 @@ mod tests {
     }
 
     #[test]
-    fn test_welford_state_roundtrip() {
+    fn test_welford_state_encoding_contract() {
         let state = WelfordState {
             count: 3,
             mean: 2.0,
-            m2: 2.0,
+            m2: 6.0,
         };
 
         let encoded = state.encode();
 
-        assert_eq!(encoded.len(), 28);
-        assert_eq!(&encoded[..4], b"WLF1");
+        assert_eq!(
+            encoded,
+            [
+                b'W', b'L', b'F', b'1', // magic
+                3, 0, 0, 0, 0, 0, 0, 0, // count
+                0, 0, 0, 0, 0, 0, 0, 64, // mean
+                0, 0, 0, 0, 0, 0, 24, 64, // m2
+            ]
+        );
         assert_eq!(WelfordState::decode(&encoded).unwrap(), state);
     }
 
