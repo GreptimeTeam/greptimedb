@@ -473,6 +473,81 @@ impl FrontendClient {
         }
     }
 
+    /// Handle an insert request with one attempt.
+    ///
+    /// Unlike [`Self::handle`], this does not use the batching retry policy. It
+    /// is intended for stateless streaming sinks, where retrying an insert can
+    /// duplicate rows.
+    pub(crate) async fn handle_insert_once(
+        &self,
+        req: api::v1::greptime_request::Request,
+        catalog: &str,
+        schema: &str,
+        peer_desc: &mut Option<PeerDesc>,
+    ) -> Result<u32, Error> {
+        match self {
+            FrontendClient::Distributed { .. } => {
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+
+                *peer_desc = Some(PeerDesc::Dist {
+                    peer: db.peer.clone(),
+                });
+
+                db.database
+                    .handle(req.clone())
+                    .await
+                    .with_context(|_| InvalidRequestSnafu {
+                        context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),
+                    })
+            }
+            FrontendClient::Standalone {
+                database_client,
+                query,
+            } => {
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .extensions(HashMap::from([(
+                        QUERY_PARALLELISM_HINT.to_string(),
+                        query.parallelism.to_string(),
+                    )]))
+                    .build();
+                let ctx = Arc::new(ctx);
+                let database_client = {
+                    database_client
+                        .handler
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .context(UnexpectedSnafu {
+                            reason: "Standalone's frontend instance is not set",
+                        })?
+                        .upgrade()
+                        .context(UnexpectedSnafu {
+                            reason: "Failed to upgrade database client",
+                        })?
+                };
+                let resp: common_query::Output = database_client
+                    .do_query(req, ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                match resp.data {
+                    common_query::OutputData::AffectedRows(rows) => rows.try_into().map_err(|_| {
+                        UnexpectedSnafu {
+                            reason: format!("Failed to convert rows to u32: {}", rows),
+                        }
+                        .build()
+                    }),
+                    _ => UnexpectedSnafu {
+                        reason: "Unexpected output data",
+                    }
+                    .fail(),
+                }
+            }
+        }
+    }
+
     /// Handle a request to frontend
     pub(crate) async fn handle(
         &self,
@@ -620,6 +695,7 @@ impl std::fmt::Display for PeerDesc {
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
     use std::time::Duration;
 
@@ -691,6 +767,11 @@ mod tests {
     struct MetricsHandler;
 
     #[derive(Debug)]
+    struct InsertOnceHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
     struct ExtensionAwareHandler;
 
     #[derive(Debug)]
@@ -714,6 +795,18 @@ mod tests {
             _ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             Ok(Output::new_with_affected_rows(0))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for InsertOnceHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            _ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Output::new_with_affected_rows(1))
         }
     }
 
@@ -867,6 +960,31 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_insert_once_calls_standalone_handler_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(InsertOnceHandler {
+            calls: calls.clone(),
+        });
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        let mut peer_desc = None;
+
+        let affected_rows = client
+            .handle_insert_once(
+                Request::RowInserts(api::v1::RowInsertRequests { inserts: vec![] }),
+                "greptime",
+                "public",
+                &mut peer_desc,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(affected_rows, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(peer_desc, None));
     }
 
     #[tokio::test]
