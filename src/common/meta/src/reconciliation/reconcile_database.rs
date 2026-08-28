@@ -25,8 +25,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, Result as ProcedureResult, Status,
 };
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,9 @@ use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};
 use crate::metrics;
 use crate::node_manager::NodeManagerRef;
+use crate::reconciliation::event::{
+    RECONCILE_DATABASE_EVENT_TYPE, ReconciliationEvent, ReconciliationLocator,
+};
 use crate::reconciliation::reconcile_database::start::ReconcileDatabaseStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::{
@@ -68,9 +71,10 @@ impl ReconcileDatabaseContext {
     }
 
     /// Waits for inflight subprocedures to complete.
-    pub(crate) async fn wait_for_inflight_subprocedures(
+    async fn wait_for_inflight_subprocedures(
         &mut self,
         procedure_ctx: &ProcedureContext,
+        phase: DatabasePhase,
     ) -> Result<()> {
         if !self.volatile_ctx.inflight_subprocedures.is_empty() {
             let result = wait_for_inflight_subprocedures(
@@ -81,8 +85,9 @@ impl ReconcileDatabaseContext {
             .await?;
 
             // Collects result into metrics
-            let metrics = result.into();
+            let metrics: ReconcileDatabaseMetrics = result.into();
             self.volatile_ctx.inflight_subprocedures.clear();
+            self.persistent_ctx.result_summary.record(phase, &metrics);
             self.volatile_ctx.metrics += metrics;
         }
 
@@ -95,6 +100,95 @@ impl ReconcileDatabaseContext {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DatabasePhase {
+    Start,
+    PhysicalTables,
+    LogicalTables,
+}
+
+impl DatabasePhase {
+    const fn as_event_value(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::PhysicalTables => "physical_tables",
+            Self::LogicalTables => "logical_tables",
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ReconcileDatabasePhaseSummary {
+    succeeded_table_count: usize,
+    failed_table_count: usize,
+    succeeded_subprocedure_count: usize,
+    failed_subprocedure_count: usize,
+}
+
+impl ReconcileDatabasePhaseSummary {
+    fn record(&mut self, metrics: &ReconcileDatabaseMetrics) {
+        self.succeeded_table_count += metrics.succeeded_tables;
+        self.failed_table_count += metrics.failed_tables;
+        self.succeeded_subprocedure_count += metrics.succeeded_procedures;
+        self.failed_subprocedure_count += metrics.failed_procedures;
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ReconcileDatabaseResultSummary {
+    physical_tables: ReconcileDatabasePhaseSummary,
+    logical_tables: ReconcileDatabasePhaseSummary,
+    last_completed_phase: Option<DatabasePhase>,
+}
+
+impl ReconcileDatabaseResultSummary {
+    fn record(&mut self, phase: DatabasePhase, metrics: &ReconcileDatabaseMetrics) {
+        match phase {
+            DatabasePhase::PhysicalTables => self.physical_tables.record(metrics),
+            DatabasePhase::LogicalTables => self.logical_tables.record(metrics),
+            DatabasePhase::Start => {}
+        }
+    }
+
+    fn mark_phase_completed(&mut self, phase: DatabasePhase) {
+        self.last_completed_phase = Some(phase);
+    }
+
+    fn reset_replayed_physical_tables(&mut self) {
+        self.physical_tables = Default::default();
+        self.logical_tables = Default::default();
+        self.last_completed_phase = Some(DatabasePhase::Start);
+    }
+
+    fn reset_replayed_logical_tables(&mut self) {
+        self.logical_tables = Default::default();
+        self.last_completed_phase = Some(DatabasePhase::PhysicalTables);
+    }
+
+    fn succeeded_table_count(&self) -> usize {
+        self.physical_tables.succeeded_table_count + self.logical_tables.succeeded_table_count
+    }
+
+    fn failed_table_count(&self) -> usize {
+        self.physical_tables.failed_table_count + self.logical_tables.failed_table_count
+    }
+
+    fn succeeded_subprocedure_count(&self) -> usize {
+        self.physical_tables.succeeded_subprocedure_count
+            + self.logical_tables.succeeded_subprocedure_count
+    }
+
+    fn failed_subprocedure_count(&self) -> usize {
+        self.physical_tables.failed_subprocedure_count
+            + self.logical_tables.failed_subprocedure_count
+    }
+
+    fn last_completed_phase(&self) -> Option<&'static str> {
+        self.last_completed_phase.map(DatabasePhase::as_event_value)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct PersistentContext {
     catalog: String,
@@ -103,6 +197,8 @@ pub(crate) struct PersistentContext {
     parallelism: usize,
     resolve_strategy: ResolveStrategy,
     is_subprocedure: bool,
+    #[serde(default)]
+    result_summary: ReconcileDatabaseResultSummary,
 }
 
 impl PersistentContext {
@@ -121,6 +217,7 @@ impl PersistentContext {
             parallelism,
             resolve_strategy,
             is_subprocedure,
+            result_summary: ReconcileDatabaseResultSummary::default(),
         }
     }
 }
@@ -251,6 +348,26 @@ impl Procedure for ReconcileDatabaseProcedure {
         serde_json::to_string(&data).context(ToJsonSnafu)
     }
 
+    fn recover(&mut self) -> ProcedureResult<()> {
+        use crate::reconciliation::reconcile_database::reconcile_logical_tables::ReconcileLogicalTables;
+        use crate::reconciliation::reconcile_database::reconcile_tables::ReconcileTables;
+
+        if self.state.as_any().is::<ReconcileDatabaseStart>() {
+            self.context.persistent_ctx.result_summary = Default::default();
+        } else if self.state.as_any().is::<ReconcileTables>() {
+            self.context
+                .persistent_ctx
+                .result_summary
+                .reset_replayed_physical_tables();
+        } else if self.state.as_any().is::<ReconcileLogicalTables>() {
+            self.context
+                .persistent_ctx
+                .result_summary
+                .reset_replayed_logical_tables();
+        }
+        Ok(())
+    }
+
     fn lock_key(&self) -> LockKey {
         let catalog = &self.context.persistent_ctx.catalog;
         let schema = &self.context.persistent_ctx.schema;
@@ -263,6 +380,50 @@ impl Procedure for ReconcileDatabaseProcedure {
             CatalogLock::Read(catalog).into(),
             SchemaLock::write(catalog, schema).into(),
         ])
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx.event_type_filter.allows(RECONCILE_DATABASE_EVENT_TYPE) {
+            return None;
+        }
+
+        let persistent_ctx = &self.context.persistent_ctx;
+        let locator =
+            ReconciliationLocator::database(&persistent_ctx.catalog, &persistent_ctx.schema);
+        let event = match ctx.trigger {
+            EventTrigger::Submitted => ReconciliationEvent::database_submitted(
+                locator,
+                persistent_ctx.resolve_strategy,
+                persistent_ctx.fail_fast,
+                persistent_ctx.parallelism,
+                persistent_ctx.is_subprocedure,
+            ),
+            EventTrigger::Succeeded => Self::result_event(locator, persistent_ctx, true),
+            EventTrigger::Failed | EventTrigger::Poisoned => {
+                Self::result_event(locator, persistent_ctx, false)
+            }
+            _ => ReconciliationEvent::database_lifecycle(locator),
+        };
+        Some(Box::new(event))
+    }
+}
+
+impl ReconcileDatabaseProcedure {
+    fn result_event(
+        locator: ReconciliationLocator,
+        persistent_ctx: &PersistentContext,
+        complete: bool,
+    ) -> ReconciliationEvent {
+        let summary = &persistent_ctx.result_summary;
+        ReconciliationEvent::database_result(
+            locator,
+            complete,
+            summary.succeeded_table_count(),
+            summary.failed_table_count(),
+            summary.succeeded_subprocedure_count(),
+            summary.failed_subprocedure_count(),
+            summary.last_completed_phase(),
+        )
     }
 }
 
@@ -282,4 +443,280 @@ pub(crate) trait State: Sync + Send + Debug {
     ) -> Result<(Box<dyn State>, Status)>;
 
     fn as_any(&self) -> &dyn Any;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use common_event_recorder::{EventTypeFilter, EventTypeFilterRef};
+    use common_procedure::{
+        ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
+        RetryPhase,
+    };
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::reconciliation::event::RECONCILE_CATALOG_EVENT_TYPE;
+    use crate::reconciliation::reconcile_database::reconcile_logical_tables::ReconcileLogicalTables;
+    use crate::reconciliation::reconcile_database::reconcile_tables::ReconcileTables;
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
+
+    #[test]
+    fn database_event_hook_covers_root_child_filters_and_lifecycle_payloads() {
+        let root = test_procedure(false);
+        let child = test_procedure(true);
+        let running = ProcedureState::Running;
+        for (procedure, is_subprocedure) in [(&root, false), (&child, true)] {
+            let submitted =
+                event_for(procedure, EventTrigger::Submitted, all_events(), &running).unwrap();
+            assert_eq!(submitted.event_type(), RECONCILE_DATABASE_EVENT_TYPE);
+            assert_eq!(
+                submitted.json_payload().unwrap(),
+                json!({
+                    "version": 1,
+                    "resolve_strategy": "use_metasrv",
+                    "fail_fast": false,
+                    "parallelism": 8,
+                    "is_subprocedure": is_subprocedure,
+                })
+            );
+        }
+
+        let mut procedure = test_procedure(true);
+        procedure.context.persistent_ctx.result_summary = ReconcileDatabaseResultSummary {
+            physical_tables: ReconcileDatabasePhaseSummary {
+                succeeded_table_count: 2,
+                failed_table_count: 1,
+                succeeded_subprocedure_count: 2,
+                failed_subprocedure_count: 1,
+            },
+            logical_tables: ReconcileDatabasePhaseSummary {
+                succeeded_table_count: 3,
+                failed_table_count: 2,
+                succeeded_subprocedure_count: 1,
+                failed_subprocedure_count: 1,
+            },
+            last_completed_phase: Some(DatabasePhase::LogicalTables),
+        };
+
+        for trigger in [
+            EventTrigger::Recovered,
+            EventTrigger::ChildSubmitted {
+                procedure_id: ProcedureId::random(),
+                outcome: ChildSubmissionOutcome::Accepted,
+            },
+            EventTrigger::Retrying {
+                phase: RetryPhase::Execute,
+                attempt: 2,
+            },
+            EventTrigger::RollingBack,
+        ] {
+            assert_eq!(
+                event_for(&procedure, trigger, all_events(), &running)
+                    .unwrap()
+                    .json_payload()
+                    .unwrap(),
+                Value::Null
+            );
+        }
+
+        for (trigger, complete) in [
+            (EventTrigger::Succeeded, true),
+            (EventTrigger::Failed, false),
+            (EventTrigger::Poisoned, false),
+        ] {
+            assert_eq!(
+                event_for(&procedure, trigger, all_events(), &running)
+                    .unwrap()
+                    .json_payload()
+                    .unwrap(),
+                json!({
+                    "version": 1,
+                    "complete": complete,
+                    "processed_table_count": 8,
+                    "succeeded_table_count": 5,
+                    "failed_table_count": 3,
+                    "succeeded_subprocedure_count": 3,
+                    "failed_subprocedure_count": 2,
+                    "last_completed_phase": "logical_tables",
+                })
+            );
+        }
+
+        assert!(
+            event_for(
+                &procedure,
+                EventTrigger::Submitted,
+                selected_events(RECONCILE_DATABASE_EVENT_TYPE),
+                &running,
+            )
+            .is_some()
+        );
+        assert!(
+            event_for(
+                &procedure,
+                EventTrigger::Submitted,
+                selected_events(RECONCILE_CATALOG_EVENT_TYPE),
+                &running,
+            )
+            .is_none()
+        );
+        assert!(
+            event_for(
+                &procedure,
+                EventTrigger::Submitted,
+                Arc::new(EventTypeFilter::Only(HashSet::new())),
+                &running,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn database_old_json_without_result_summary_still_deserializes() {
+        let procedure = test_procedure(false);
+        let mut value: Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+        value["persistent_ctx"]
+            .as_object_mut()
+            .unwrap()
+            .remove("result_summary");
+
+        let loaded = ReconcileDatabaseProcedure::from_json(
+            test_context(),
+            &serde_json::to_string(&value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            event_for(
+                &loaded,
+                EventTrigger::Succeeded,
+                all_events(),
+                &ProcedureState::Running,
+            )
+            .unwrap()
+            .json_payload()
+            .unwrap(),
+            json!({
+                "version": 1,
+                "complete": true,
+                "processed_table_count": 0,
+                "succeeded_table_count": 0,
+                "failed_table_count": 0,
+                "succeeded_subprocedure_count": 0,
+                "failed_subprocedure_count": 0,
+                "last_completed_phase": null,
+            })
+        );
+    }
+
+    #[test]
+    fn database_recovery_resets_only_the_phase_that_will_be_replayed() {
+        let mut procedure = test_procedure(false);
+        procedure.context.persistent_ctx.result_summary = populated_summary();
+        procedure.state = Box::new(ReconcileTables);
+        procedure.recover().unwrap();
+        assert_eq!(
+            summary_counts(&procedure.context.persistent_ctx.result_summary),
+            (0, 0, 0, 0)
+        );
+        assert!(matches!(
+            procedure
+                .context
+                .persistent_ctx
+                .result_summary
+                .last_completed_phase,
+            Some(DatabasePhase::Start)
+        ));
+
+        procedure.context.persistent_ctx.result_summary = populated_summary();
+        procedure.state = Box::new(ReconcileLogicalTables);
+        procedure.recover().unwrap();
+        assert_eq!(
+            summary_counts(&procedure.context.persistent_ctx.result_summary),
+            (2, 1, 2, 1)
+        );
+        assert!(matches!(
+            procedure
+                .context
+                .persistent_ctx
+                .result_summary
+                .last_completed_phase,
+            Some(DatabasePhase::PhysicalTables)
+        ));
+    }
+
+    fn populated_summary() -> ReconcileDatabaseResultSummary {
+        ReconcileDatabaseResultSummary {
+            physical_tables: ReconcileDatabasePhaseSummary {
+                succeeded_table_count: 2,
+                failed_table_count: 1,
+                succeeded_subprocedure_count: 2,
+                failed_subprocedure_count: 1,
+            },
+            logical_tables: ReconcileDatabasePhaseSummary {
+                succeeded_table_count: 3,
+                failed_table_count: 2,
+                succeeded_subprocedure_count: 1,
+                failed_subprocedure_count: 1,
+            },
+            last_completed_phase: Some(DatabasePhase::LogicalTables),
+        }
+    }
+
+    fn summary_counts(summary: &ReconcileDatabaseResultSummary) -> (usize, usize, usize, usize) {
+        (
+            summary.succeeded_table_count(),
+            summary.failed_table_count(),
+            summary.succeeded_subprocedure_count(),
+            summary.failed_subprocedure_count(),
+        )
+    }
+
+    fn test_procedure(is_subprocedure: bool) -> ReconcileDatabaseProcedure {
+        ReconcileDatabaseProcedure::new(
+            test_context(),
+            "greptime".to_string(),
+            "public".to_string(),
+            false,
+            8,
+            ResolveStrategy::UseMetasrv,
+            is_subprocedure,
+        )
+    }
+
+    fn test_context() -> Context {
+        let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        Context {
+            node_manager: ddl_context.node_manager,
+            table_metadata_manager: ddl_context.table_metadata_manager,
+            cache_invalidator: ddl_context.cache_invalidator,
+        }
+    }
+
+    fn event_for(
+        procedure: &dyn Procedure,
+        trigger: EventTrigger,
+        event_type_filter: EventTypeFilterRef,
+        lifecycle_state: &ProcedureState,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
+        procedure.event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state,
+            trigger,
+            event_type_filter,
+            event_context: None,
+        })
+    }
+
+    fn all_events() -> EventTypeFilterRef {
+        Arc::new(EventTypeFilter::All)
+    }
+
+    fn selected_events(event_type: &str) -> EventTypeFilterRef {
+        Arc::new(EventTypeFilter::Only(HashSet::from([
+            event_type.to_string()
+        ])))
+    }
 }

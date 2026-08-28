@@ -27,7 +27,7 @@ use table::table_reference::TableReference;
 use crate::error::{Result, TableInfoNotFoundSnafu};
 use crate::key::table_route::TableRouteValue;
 use crate::reconciliation::reconcile_database::end::ReconcileDatabaseEnd;
-use crate::reconciliation::reconcile_database::{ReconcileDatabaseContext, State};
+use crate::reconciliation::reconcile_database::{DatabasePhase, ReconcileDatabaseContext, State};
 use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
 use crate::reconciliation::utils::{Context, SubprocedureMeta};
 
@@ -49,7 +49,8 @@ impl State for ReconcileLogicalTables {
             ctx.volatile_ctx.inflight_subprocedures.len()
         );
         // Waits for inflight subprocedures first.
-        ctx.wait_for_inflight_subprocedures(procedure_ctx).await?;
+        ctx.wait_for_inflight_subprocedures(procedure_ctx, DatabasePhase::LogicalTables)
+            .await?;
 
         let catalog = &ctx.persistent_ctx.catalog;
         let schema = &ctx.persistent_ctx.schema;
@@ -117,6 +118,9 @@ impl State for ReconcileLogicalTables {
         }
 
         ctx.volatile_ctx.tables.take();
+        ctx.persistent_ctx
+            .result_summary
+            .mark_phase_completed(DatabasePhase::LogicalTables);
         Ok((Box::new(ReconcileDatabaseEnd), Status::executing(true)))
     }
 
@@ -244,5 +248,60 @@ impl ReconcileLogicalTables {
                 .or_default()
                 .push((table_id, table_ref.into()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::reconciliation::ResolveStrategy;
+    use crate::reconciliation::reconcile_database::ReconcileDatabaseProcedure;
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
+
+    #[test]
+    fn scheduling_children_does_not_persist_partially_mutated_parent() {
+        let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        let context = Context {
+            node_manager: ddl_context.node_manager,
+            table_metadata_manager: ddl_context.table_metadata_manager,
+            cache_invalidator: ddl_context.cache_invalidator,
+        };
+        let mut procedure = ReconcileDatabaseProcedure::new(
+            context.clone(),
+            "greptime".to_string(),
+            "public".to_string(),
+            false,
+            1,
+            ResolveStrategy::UseLatest,
+            false,
+        );
+        let physical_table_name = TableName::new("greptime", "public", "metrics");
+        let logical_tables = vec![(43, TableName::new("greptime", "public", "logical_metrics"))];
+        let child = ReconcileLogicalTablesProcedure::new(
+            context,
+            42,
+            physical_table_name.clone(),
+            logical_tables.clone(),
+            true,
+        );
+        let child = ProcedureWithId::with_random_id(Box::new(child));
+        let child_meta =
+            SubprocedureMeta::new_logical_table(child.id, 42, physical_table_name, logical_tables);
+        let mut buffer = vec![(child, child_meta)];
+
+        let (_, status) = ReconcileLogicalTables::schedule_reconcile_logical_tables(
+            &mut procedure.context,
+            &mut buffer,
+        )
+        .unwrap();
+
+        assert!(!status.need_persist());
+        assert!(buffer.is_empty());
+        assert_eq!(
+            procedure.context.volatile_ctx.inflight_subprocedures.len(),
+            1
+        );
     }
 }

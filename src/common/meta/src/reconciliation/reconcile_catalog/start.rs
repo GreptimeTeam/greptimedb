@@ -21,7 +21,7 @@ use snafu::ensure;
 use crate::error::{self, Result};
 use crate::key::catalog_name::CatalogNameKey;
 use crate::reconciliation::reconcile_catalog::reconcile_databases::ReconcileDatabases;
-use crate::reconciliation::reconcile_catalog::{ReconcileCatalogContext, State};
+use crate::reconciliation::reconcile_catalog::{CatalogPhase, ReconcileCatalogContext, State};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReconcileCatalogStart;
@@ -48,6 +48,10 @@ impl State for ReconcileCatalogStart {
                 catalog: &ctx.persistent_ctx.catalog
             },
         );
+
+        ctx.persistent_ctx
+            .result_summary
+            .mark_phase_completed(CatalogPhase::Start);
 
         Ok((Box::new(ReconcileDatabases), Status::executing(true)))
     }
