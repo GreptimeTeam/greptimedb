@@ -28,6 +28,7 @@ use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
+use operator::statement::admin_output_schema;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
@@ -43,6 +44,7 @@ use pgwire::messages::data::DataRow;
 use query::dist_analyze_output_schema;
 use query::planner::DfLogicalPlanner;
 use query::query_engine::DescribeResult;
+use query::sql::DESCRIBE_TABLE_OUTPUT_SCHEMA;
 use session::Session;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -688,6 +690,44 @@ fn describe_fields(
             } else {
                 // fallback to NoData
                 Ok(vec![])
+            }
+        }
+        // DESCRIBE TABLE: mirror the fixed output schema of
+        // `query::sql::describe_table` (all string columns).
+        SqlPlan::Statement(Statement::DescribeTable(_), _) => {
+            schema_to_pg(&DESCRIBE_TABLE_OUTPUT_SCHEMA, format, None).map_err(convert_err)
+        }
+        // SHOW DATABASES: a single `Database` column, plus `Options` when FULL.
+        // Both are string columns (see `query::sql::show_databases`).
+        SqlPlan::Statement(Statement::ShowDatabases(show), _) => {
+            let mut fields = vec![FieldInfo::new(
+                "Database".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(0),
+            )];
+            if show.full {
+                fields.push(FieldInfo::new(
+                    "Options".to_string(),
+                    None,
+                    None,
+                    Type::TEXT,
+                    format.format_for(1),
+                ));
+            }
+            Ok(fields)
+        }
+        // ADMIN function: a single column named after the statement text and
+        // typed with the admin function's return type (see
+        // `operator::statement::admin_output_schema`).
+        SqlPlan::Statement(Statement::Admin(admin), _) => {
+            let query_ctx = session.new_query_context();
+            match admin_output_schema(admin, &query_ctx) {
+                Some(schema) => schema_to_pg(&schema, format, None).map_err(convert_err),
+                // Function or arguments unresolvable; execution will surface
+                // the underlying error.
+                None => Ok(vec![]),
             }
         }
         // FETCH cursor: return the cursor's schema so the RowDescription

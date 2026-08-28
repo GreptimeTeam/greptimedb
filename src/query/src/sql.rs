@@ -109,7 +109,7 @@ const INDEX_KEY_NAME_COLUMN: &str = "Key_name";
 const INDEX_SEQ_IN_INDEX_COLUMN: &str = "Seq_in_index";
 const INDEX_COLUMN_NAME_COLUMN: &str = "Column_name";
 
-static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+pub static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
         ColumnSchema::new(
             COLUMN_NAME_COLUMN,

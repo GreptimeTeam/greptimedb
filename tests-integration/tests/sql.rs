@@ -91,6 +91,8 @@ macro_rules! sql_tests {
                 test_mysql_prepare_stmt_insert_timestamp,
                 test_mysql_prepare_stmt_timezone,
                 test_mysql_federated_prepare_stmt,
+                test_mysql_prepare_tql,
+                test_postgres_extended_query_row_returning_statements,
                 test_declare_fetch_close_cursor,
                 test_alter_update_on,
             );
@@ -1487,6 +1489,135 @@ fn assert_pg_numeric_range_error(error: tokio_postgres::Error) {
     assert_eq!("numeric_value_out_of_range", error.message());
 }
 
+pub async fn test_postgres_extended_query_row_returning_statements(store_type: StorageType) {
+    // Regression test for the tokio-postgres >= 0.7.14 DataRow/RowDescription
+    // mismatch: statements answered with NoData at Describe but emitting
+    // DataRows at Execute must describe their real output schema.
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_pg_extended_row_stmts").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    client
+        .execute(
+            "CREATE TABLE demo_metrics (ts timestamp time index, val double, host string primary key)",
+            &[],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO demo_metrics (ts, host, val) VALUES (1000, 'host-a', 1.0), (2000, 'host-b', 2.0)",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    // ---- SHOW DATABASES: single `Database` column ----
+    let rows = client.query("SHOW DATABASES", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(1, rows[0].columns().len());
+    assert_eq!("Database", rows[0].columns()[0].name());
+    assert!(rows.iter().any(|r| r.get::<_, String>(0) == "public"));
+
+    // ---- SHOW FULL DATABASES: `Database` + `Options` columns ----
+    let rows = client.query("SHOW FULL DATABASES", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(2, rows[0].columns().len());
+    assert_eq!("Database", rows[0].columns()[0].name());
+    assert_eq!("Options", rows[0].columns()[1].name());
+    assert!(rows.iter().any(|r| r.get::<_, String>(0) == "public"));
+
+    // ---- DESCRIBE TABLE: fixed six-column string schema ----
+    let rows = client
+        .query("DESCRIBE TABLE demo_metrics", &[])
+        .await
+        .unwrap();
+    assert_eq!(3, rows.len());
+    let names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert_eq!(
+        vec!["Column", "Type", "Key", "Null", "Default", "Semantic Type"],
+        names
+    );
+    // first column of each row is the column name; ensure values decode as TEXT
+    let columns: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    assert!(columns.contains(&"ts".to_string()));
+    assert!(columns.contains(&"val".to_string()));
+    assert!(columns.contains(&"host".to_string()));
+
+    // ---- ADMIN function: single column named after the statement ----
+    let rows = client
+        .query("ADMIN flush_table('demo_metrics')", &[])
+        .await
+        .unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(1, rows[0].columns().len());
+    assert!(rows[0].columns()[0].name().contains("flush_table"));
+
+    // ---- TQL EVAL / EXPLAIN / ANALYZE: described from the planned query ----
+    let rows = client
+        .query("TQL EVAL (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    let names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert_eq!(vec!["ts", "val", "host"], names);
+
+    let rows = client
+        .query("TQL EXPLAIN (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(2, rows[0].columns().len());
+
+    let rows = client
+        .query("TQL ANALYZE (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(3, rows[0].columns().len());
+
+    // FORMAT JSON variants keep working through the plan-based execution path
+    let rows = client
+        .query("TQL EXPLAIN FORMAT JSON (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    let rows = client
+        .query("TQL ANALYZE FORMAT JSON (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+
+    // ---- the same statements also work over the simple query protocol ----
+    for sql in [
+        "SHOW DATABASES",
+        "DESCRIBE TABLE demo_metrics",
+        "ADMIN flush_table('demo_metrics')",
+        "TQL EVAL (0, 3000, '1s') demo_metrics",
+    ] {
+        let msgs = client.simple_query(sql).await.unwrap();
+        assert!(
+            msgs.iter().any(|m| matches!(m, SimpleQueryMessage::Row(_))),
+            "simple query {sql} should return rows"
+        );
+    }
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_postgres_explain_bind_parameter(store_type: StorageType) {
     // Regression test for #8029: EXPLAIN / EXPLAIN ANALYZE must accept bind
     // parameters over the Postgres extended query protocol.
@@ -1885,6 +2016,52 @@ pub async fn test_mysql_federated_prepare_stmt(store_type: StorageType) {
     assert_eq!(rows.len(), 1);
     let val: String = rows[0].get(0);
     assert_eq!(val, "REPEATABLE-READ");
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_prepare_tql(store_type: StorageType) {
+    // `do_describe` now plans TQL statements, so MySQL prepared statements
+    // derive their column metadata from the planned query and execute the
+    // plan directly. This exercises that path end-to-end.
+    common_telemetry::init_default_ut_logging();
+
+    let (mut guard, fe_mysql_server) =
+        setup_mysql_server(store_type, "test_mysql_prepare_tql").await;
+    let addr = fe_mysql_server.bind_addr().unwrap().to_string();
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "CREATE TABLE demo_metrics (ts timestamp time index, val double, host string primary key)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO demo_metrics (ts, host, val) VALUES (1000, 'host-a', 1.0), (2000, 'host-b', 2.0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // sqlx::query uses the binary prepared statement protocol
+    // (COM_STMT_PREPARE + COM_STMT_EXECUTE).
+    let rows = sqlx::query("TQL EVAL (0, 3000, '1s') demo_metrics")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(3, rows[0].columns().len());
+
+    let rows = sqlx::query("TQL ANALYZE (0, 3000, '1s') demo_metrics")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
 
     let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;

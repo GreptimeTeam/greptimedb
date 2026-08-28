@@ -847,6 +847,21 @@ impl Instance {
 
         query_interceptor.pre_execute(stmt.as_ref(), Some(&plan), query_ctx.clone())?;
 
+        // TQL EXPLAIN/ANALYZE formats are consumed from the query context at
+        // execution time (see `optimize_physical_plan`). When the plan was
+        // already built during Describe, the context side effect of
+        // `plan_tql` is lost, so re-apply it from the statement here.
+        if let Some(Statement::Tql(tql)) = &stmt {
+            let format = match tql {
+                Tql::Explain(explain) => explain.format.as_ref(),
+                Tql::Analyze(analyze) => analyze.format.as_ref(),
+                Tql::Eval(_) => None,
+            };
+            if let Some(format) = format {
+                query_ctx.set_explain_format(format.to_string());
+            }
+        }
+
         let query = stmt
             .as_ref()
             .map(|s| s.to_string())
@@ -946,6 +961,20 @@ impl Instance {
         };
         let plannable = is_inner_plannable(&stmt)
             || matches!(&stmt, Statement::Explain(explain) if is_inner_plannable(explain.statement.as_ref()));
+
+        if let Statement::Tql(tql) = stmt {
+            // TQL produces a logical plan; describe it from the plan so the
+            // extended-protocol RowDescription matches the executed DataRows.
+            self.check_sql_permission(&Statement::Tql(tql.clone()), &query_ctx)
+                .await?;
+            let plan = self.statement_executor.plan_tql(tql, &query_ctx).await?;
+            return self
+                .query_engine
+                .describe(plan, query_ctx)
+                .await
+                .map(Some)
+                .context(error::DescribeStatementSnafu);
+        }
 
         if plannable {
             self.check_sql_permission(&stmt, &query_ctx).await?;
