@@ -6,17 +6,24 @@ CREATE TABLE distinct_basic (
     TIME INDEX(ts)
 )WITH ('ttl' = 'instant');
 
--- should fallback to streaming mode
+-- stateless projection is supported in streaming mode
 -- SQLNESS REPLACE id=\d+ id=REDACTED
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
 SELECT
-    DISTINCT number as dis
+    number as dis
 FROM
     distinct_basic;
 
 -- flow_options should have a flow_type:streaming
--- since source table's ttl=instant
+-- since source table's ttl=instant and the query is stateless
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
+
+-- instant-TTL sources reject DISTINCT because it is not stateless
+CREATE FLOW test_distinct_instant_rejected SINK TO out_distinct_instant_rejected EVAL INTERVAL '1m' AS
+SELECT
+    DISTINCT number
+FROM
+    distinct_basic;
 
 SHOW CREATE TABLE distinct_basic;
 
@@ -78,7 +85,7 @@ FROM
     distinct_basic;
 
 -- flow_options should have a flow_type:batching
--- since source table's ttl=instant
+-- ordinary persisted source keeps DISTINCT in batching mode
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 -- SQLNESS ARG restart=true
