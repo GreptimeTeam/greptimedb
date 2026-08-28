@@ -227,7 +227,7 @@ pub(crate) async fn execute(
     });
     let mut peer = None;
     frontend_client
-        .handle(
+        .handle_insert_once(
             request,
             &flow.sink_table_name[0],
             &flow.sink_table_name[1],
