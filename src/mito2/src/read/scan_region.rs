@@ -1700,7 +1700,6 @@ pub(crate) fn files_allow_exact_sequence_range(
     Ok(true)
 }
 
-/// Returns SST files matching the request's time predicate.
 fn files_in_time_range<'a>(
     ssts: &'a SstVersion,
     time_range: &'a TimestampRange,

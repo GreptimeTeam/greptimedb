@@ -411,7 +411,6 @@ async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
         "source files must keep the preserve_row_sequence marker"
     );
 
-    // Create a preserve-enabled target and copy the source files into it.
     let target_region_id = RegionId::new(1, 2);
     engine
         .handle_request(target_region_id, RegionRequest::Create(request))
