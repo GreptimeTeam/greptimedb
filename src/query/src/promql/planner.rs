@@ -24,6 +24,7 @@ use common_error::status_code::StatusCode;
 use common_function::function::FunctionContext;
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::{greptime_native_histogram, greptime_value};
+use common_query::prometheus::{GREPTIME_TEMPORALITY_DELTA, GREPTIME_TEMPORALITY_LABEL};
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
@@ -102,14 +103,13 @@ use crate::parser::{
     EXPLAIN_VERBOSE_NODE_NAME,
 };
 use crate::promql::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu,
-    InvalidRegularExpressionSnafu, InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu,
-    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
-    Result, SameLabelSetSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
-    ZeroRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
+    FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
+    InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, SameLabelSetSnafu,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
+    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -1062,14 +1062,12 @@ impl PromPlanner {
         first_leaf: &PlannedIslandLeaf,
         right_leaf: &PlannedIslandLeaf,
     ) -> Result<LogicalPlan> {
-        let only_join_time_index =
-            first_leaf.ctx.tag_columns.is_empty() || right_leaf.ctx.tag_columns.is_empty();
         let (mut left_keys, mut right_keys, force_empty_join) = self.binary_join_key_columns(
             left.schema(),
             right_leaf.plan.schema(),
             &first_leaf.ctx,
             &right_leaf.ctx,
-            only_join_time_index,
+            false,
             &None,
         )?;
 
@@ -1585,9 +1583,7 @@ impl PromPlanner {
                     right_table_ref.clone(),
                     left_time_index_column,
                     right_time_index_column,
-                    // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
-                    // under this case we only join on time index
-                    left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
+                    lhs.value_type() == ValueType::Scalar || rhs.value_type() == ValueType::Scalar,
                     modifier,
                     &left_context,
                     &right_context,
@@ -2572,9 +2568,30 @@ impl PromPlanner {
                 continue;
             }
 
+            let accepts_empty = matcher.is_match("");
             let column_name = Self::find_case_sensitive_column(table_schema, matcher.name.as_str());
             let col = if let Some(column_name) = column_name {
-                DfExpr::Column(Column::from_name(column_name))
+                let column = DfExpr::Column(Column::from_name(&column_name));
+                let field = table_schema
+                    .index_of_column_by_name(None, &column_name)
+                    .map(|index| table_schema.field(index));
+                if accepts_empty
+                    && let Some(data_type) = field
+                        .filter(|field| {
+                            field.is_nullable()
+                                && Self::string_value_data_type(field.data_type()).is_some()
+                        })
+                        .map(|field| field.data_type())
+                {
+                    let empty = Self::string_scalar_value(data_type, Some(String::new()))
+                        .expect("nullable label has a string type");
+                    DfExpr::ScalarFunction(ScalarFunction {
+                        func: coalesce(),
+                        args: vec![column, DfExpr::Literal(empty, None)],
+                    })
+                } else {
+                    column
+                }
             } else {
                 DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
                     .alias(matcher.name.clone())
@@ -3248,6 +3265,7 @@ impl PromPlanner {
         mut other_input_exprs: VecDeque<DfExpr>,
         float_field: &str,
         histogram_field: &str,
+        input_schema: &DFSchemaRef,
     ) -> Result<Option<Vec<DfExpr>>> {
         let returns_histogram = matches!(
             func.name,
@@ -3304,10 +3322,24 @@ impl PromPlanner {
             args.push(lit(self.ctx.range.context(ExpectRangeSelectorSnafu)?));
         }
 
-        let float_expr = DfExpr::ScalarFunction(ScalarFunction {
+        let mut float_expr = DfExpr::ScalarFunction(ScalarFunction {
             func: Arc::new(MixedRange::float_udf(self.promql_annotations.clone())),
             args: args.clone(),
         });
+        if matches!(func.name, "rate" | "increase") {
+            float_expr = self.select_delta_range_math(
+                func.name,
+                input_schema,
+                DfExpr::Column(Column::from_name(
+                    RangeManipulate::build_timestamp_range_name(
+                        self.ctx.time_index_column.as_ref().unwrap(),
+                    ),
+                )),
+                DfExpr::Column(Column::from_name(float_field)),
+                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                float_expr,
+            )?;
+        }
         let exprs = if returns_histogram {
             self.ctx.field_columns = vec![float_field.to_string(), histogram_field.to_string()];
             vec![
@@ -3348,6 +3380,7 @@ impl PromPlanner {
                 other_input_exprs.clone(),
                 &float_field,
                 &histogram_field,
+                input_schema,
             )?
         {
             return Ok((exprs, vec![]));
@@ -3870,21 +3903,35 @@ impl PromPlanner {
                     let _ = other_input_exprs.remove(field_column_pos + 1);
                     let _ = other_input_exprs.remove(field_column_pos);
                 }
-                ScalarFunc::ExtrapolateUdf(func, range_length) => {
+                ScalarFunc::ExtrapolateUdf(udf, range_length) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
                         RangeManipulate::build_timestamp_range_name(
                             self.ctx.time_index_column.as_ref().unwrap(),
                         ),
                     ));
-                    other_input_exprs.insert(field_column_pos, ts_range_expr);
-                    other_input_exprs.insert(field_column_pos + 1, col_expr);
+                    other_input_exprs.insert(field_column_pos, ts_range_expr.clone());
+                    other_input_exprs.insert(field_column_pos + 1, col_expr.clone());
                     other_input_exprs
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
                     other_input_exprs.push_back(lit(range_length));
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
-                        func,
+                        func: udf,
                         args: other_input_exprs.clone().into(),
                     });
+                    let fn_expr = if matches!(func.name, "rate" | "increase")
+                        && !all_field_columns_are_native_histogram_ranges
+                    {
+                        self.select_delta_range_math(
+                            func.name,
+                            input_schema,
+                            ts_range_expr,
+                            col_expr,
+                            range_length,
+                            fn_expr,
+                        )?
+                    } else {
+                        fn_expr
+                    };
                     exprs.push(fn_expr);
                     let _ = other_input_exprs.pop_back();
                     let _ = other_input_exprs.remove(field_column_pos + 2);
@@ -3915,6 +3962,54 @@ impl PromPlanner {
         }
 
         Ok((exprs, new_tags))
+    }
+
+    fn select_delta_range_math(
+        &self,
+        function: &str,
+        input_schema: &DFSchemaRef,
+        timestamp_range: DfExpr,
+        value_range: DfExpr,
+        range_length: Millisecond,
+        cumulative: DfExpr,
+    ) -> Result<DfExpr> {
+        let marker_is_delta = if self
+            .ctx
+            .tag_columns
+            .iter()
+            .any(|tag| tag == GREPTIME_TEMPORALITY_LABEL)
+        {
+            Self::field_column_type(input_schema, GREPTIME_TEMPORALITY_LABEL)
+                .filter(|data_type| Self::string_value_data_type(data_type).is_some())
+                .map(|_| {
+                    DfExpr::Column(Column::from_name(GREPTIME_TEMPORALITY_LABEL))
+                        .eq(lit(GREPTIME_TEMPORALITY_DELTA))
+                })
+        } else {
+            None
+        };
+        let Some(marker_is_delta) = marker_is_delta else {
+            return Ok(cumulative);
+        };
+
+        let delta_sum = DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(SumOverTime::scalar_udf()),
+            args: vec![timestamp_range, value_range],
+        });
+        let delta = if function == "rate" {
+            DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(delta_sum),
+                op: Operator::Divide,
+                right: Box::new(lit(range_length as f64 / 1000.0)),
+            })
+        } else {
+            delta_sum
+        };
+        let display_name = cumulative.schema_name().to_string();
+        when(marker_is_delta, delta)
+            .otherwise(cumulative)
+            .context(DataFusionPlanningSnafu)
+            .map(|expr| expr.alias(display_name))
     }
 
     /// Validate label name according to Prometheus specification.
@@ -5715,6 +5810,33 @@ impl PromPlanner {
                 only_join_time_index,
                 modifier,
             )?;
+        let use_tsid_join = !only_join_time_index
+            && !force_empty_join
+            && left_tag_columns == BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()])
+            && right_tag_columns == BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]);
+        let normalize_match_keys = !only_join_time_index
+            && !use_tsid_join
+            && Self::binary_match_keys_need_normalization(
+                &left,
+                &right,
+                left_context,
+                right_context,
+                modifier,
+            );
+        let (left, right, force_empty_join) = if normalize_match_keys {
+            let (left, right, match_keys) = Self::add_normalized_match_keys(
+                left,
+                right,
+                left_context,
+                right_context,
+                modifier,
+            )?;
+            left_tag_columns = match_keys.iter().cloned().collect();
+            right_tag_columns = match_keys.into_iter().collect();
+            (left, right, false)
+        } else {
+            (left, right, force_empty_join)
+        };
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
@@ -5755,6 +5877,185 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)
     }
 
+    fn selected_binary_match_labels(
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
+        modifier: &Option<BinModifier>,
+    ) -> BTreeSet<String> {
+        let mut labels = left_context
+            .tag_columns
+            .iter()
+            .chain(&right_context.tag_columns)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(matching) = modifier
+            .as_ref()
+            .and_then(|modifier| modifier.matching.as_ref())
+        {
+            match matching {
+                LabelModifier::Include(on) => {
+                    labels = on
+                        .labels
+                        .iter()
+                        .filter(|label| {
+                            left_context.tag_columns.contains(label)
+                                || right_context.tag_columns.contains(label)
+                        })
+                        .cloned()
+                        .collect();
+                }
+                LabelModifier::Exclude(ignoring) => {
+                    for label in &ignoring.labels {
+                        labels.remove(label);
+                    }
+                }
+            }
+        }
+        labels
+    }
+
+    fn binary_match_keys_need_normalization(
+        left: &LogicalPlan,
+        right: &LogicalPlan,
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
+        modifier: &Option<BinModifier>,
+    ) -> bool {
+        Self::selected_binary_match_labels(left_context, right_context, modifier)
+            .into_iter()
+            .any(|label| {
+                let nullable = |plan: &LogicalPlan, context: &PromPlannerContext| {
+                    context.tag_columns.contains(&label).then(|| {
+                        plan.schema()
+                            .fields()
+                            .iter()
+                            .find(|field| field.name() == &label)
+                            .is_none_or(|field| field.is_nullable())
+                    })
+                };
+                match (nullable(left, left_context), nullable(right, right_context)) {
+                    (Some(left), Some(right)) => left || right,
+                    (Some(_), None) | (None, Some(_)) => true,
+                    (None, None) => false,
+                }
+            })
+    }
+
+    fn normalized_match_key_expr(
+        label: &str,
+        field: Option<(Option<TableReference>, ArrowDataType)>,
+        value_type: &ArrowDataType,
+        internal_name: &str,
+    ) -> DfExpr {
+        let empty = Self::string_scalar_value(value_type, Some(String::new()))
+            .expect("match label value type is a string");
+        let expr = if let Some((qualifier, data_type)) = field {
+            let column = DfExpr::Column(Column::new(qualifier, label));
+            let column = if &data_type == value_type {
+                column
+            } else {
+                DfExpr::Cast(Cast {
+                    expr: Box::new(column),
+                    data_type: value_type.clone(),
+                })
+            };
+            DfExpr::ScalarFunction(ScalarFunction {
+                func: coalesce(),
+                args: vec![column, DfExpr::Literal(empty, None)],
+            })
+        } else {
+            DfExpr::Literal(empty, None)
+        };
+        expr.alias(internal_name)
+    }
+
+    fn add_normalized_match_keys(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
+        modifier: &Option<BinModifier>,
+    ) -> Result<(LogicalPlan, LogicalPlan, Vec<String>)> {
+        let match_labels =
+            Self::selected_binary_match_labels(left_context, right_context, modifier);
+        let left_tags = left_context.tag_columns.iter().collect::<HashSet<_>>();
+        let right_tags = right_context.tag_columns.iter().collect::<HashSet<_>>();
+        let mut occupied = left
+            .schema()
+            .fields()
+            .iter()
+            .chain(right.schema().fields().iter())
+            .map(|field| field.name().clone())
+            .collect::<HashSet<_>>();
+        let mut left_keys = Vec::with_capacity(match_labels.len());
+        let mut right_keys = Vec::with_capacity(match_labels.len());
+        let mut key_names = Vec::with_capacity(match_labels.len());
+
+        for label in match_labels {
+            let find_field = |plan: &LogicalPlan, tags: &HashSet<&String>| {
+                tags.contains(&label).then(|| {
+                    plan.schema()
+                        .iter()
+                        .find(|(_, field)| field.name() == &label)
+                        .map(|(qualifier, field)| (qualifier.cloned(), field.data_type().clone()))
+                        .with_context(|| ColumnNotFoundSnafu { col: label.clone() })
+                })
+            };
+            let left_field = find_field(&left, &left_tags).transpose()?;
+            let right_field = find_field(&right, &right_tags).transpose()?;
+            let data_type = Self::common_label_data_type(
+                left_field.as_ref().map(|(_, data_type)| data_type),
+                right_field.as_ref().map(|(_, data_type)| data_type),
+            )
+            .with_context(|| UnexpectedPlanExprSnafu {
+                desc: format!("binary match label {label} must be a string"),
+            })?;
+            let mut index = key_names.len();
+            let internal_name = loop {
+                let name = format!("__promql_match_{index}");
+                index += 1;
+                if occupied.insert(name.clone()) {
+                    break name;
+                }
+            };
+            left_keys.push(Self::normalized_match_key_expr(
+                &label,
+                left_field,
+                &data_type,
+                &internal_name,
+            ));
+            right_keys.push(Self::normalized_match_key_expr(
+                &label,
+                right_field,
+                &data_type,
+                &internal_name,
+            ));
+            key_names.push(internal_name);
+        }
+
+        let visible_exprs = |plan: &LogicalPlan| {
+            plan.schema()
+                .iter()
+                .map(|(qualifier, field)| {
+                    DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let left_visible = visible_exprs(&left);
+        let right_visible = visible_exprs(&right);
+        let left = LogicalPlanBuilder::from(left)
+            .project(left_visible.into_iter().chain(left_keys))
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        let right = LogicalPlanBuilder::from(right)
+            .project(right_visible.into_iter().chain(right_keys))
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        Ok((left, right, key_names))
+    }
+
     fn is_zero_row_empty_relation(plan: &LogicalPlan) -> bool {
         // `produce_one_row` is used for input-free plans that still emit one row;
         // only the false case is a statically proven empty vector.
@@ -5771,12 +6072,12 @@ impl PromPlanner {
         op: TokenType,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
-        let mut left_tag_col_set = left_context
+        let left_tag_col_set = left_context
             .tag_columns
             .iter()
             .cloned()
             .collect::<HashSet<_>>();
-        let mut right_tag_col_set = right_context
+        let right_tag_col_set = right_context
             .tag_columns
             .iter()
             .cloned()
@@ -5794,9 +6095,7 @@ impl PromPlanner {
             );
         }
 
-        // apply modifier
         if let Some(modifier) = modifier {
-            // one-to-many and many-to-one are not supported
             ensure!(
                 matches!(
                     modifier.card,
@@ -5806,44 +6105,9 @@ impl PromPlanner {
                     name: modifier.card.clone(),
                 },
             );
-            // apply label modifier
-            if let Some(matching) = &modifier.matching {
-                match matching {
-                    // keeps columns mentioned in `on`
-                    LabelModifier::Include(on) => {
-                        let mask = on.labels.iter().cloned().collect::<HashSet<_>>();
-                        left_tag_col_set = left_tag_col_set.intersection(&mask).cloned().collect();
-                        right_tag_col_set =
-                            right_tag_col_set.intersection(&mask).cloned().collect();
-                    }
-                    // removes columns memtioned in `ignoring`
-                    LabelModifier::Exclude(ignoring) => {
-                        // doesn't check existence of label
-                        for label in &ignoring.labels {
-                            let _ = left_tag_col_set.remove(label);
-                            let _ = right_tag_col_set.remove(label);
-                        }
-                    }
-                }
-            }
         }
-        // ensure two sides have the same tag columns
-        if !matches!(op.id(), token::T_LOR) {
-            ensure!(
-                left_tag_col_set == right_tag_col_set,
-                CombineTableColumnMismatchSnafu {
-                    left: left_tag_col_set.into_iter().collect::<Vec<_>>(),
-                    right: right_tag_col_set.into_iter().collect::<Vec<_>>(),
-                }
-            )
-        };
         let left_time_index = left_context.time_index_column.clone().unwrap();
         let right_time_index = right_context.time_index_column.clone().unwrap();
-        let join_keys = left_tag_col_set
-            .iter()
-            .cloned()
-            .chain([left_time_index.clone()])
-            .collect::<Vec<_>>();
 
         // alias right time index column if necessary
         if left_context.time_index_column != right_context.time_index_column {
@@ -5866,6 +6130,24 @@ impl PromPlanner {
                 .build()
                 .context(DataFusionPlanningSnafu)?;
         }
+
+        let visible_left_schema = left.schema().clone();
+        let normalize_match_keys = Self::binary_match_keys_need_normalization(
+            &left,
+            &right,
+            &left_context,
+            &right_context,
+            modifier,
+        );
+        let (left, right, mut join_keys) = if normalize_match_keys {
+            Self::add_normalized_match_keys(left, right, &left_context, &right_context, modifier)?
+        } else {
+            let keys = Self::selected_binary_match_labels(&left_context, &right_context, modifier)
+                .into_iter()
+                .collect();
+            (left, right, keys)
+        };
+        join_keys.push(left_time_index);
 
         ensure!(
             left_context.field_columns.len() == 1
@@ -5913,6 +6195,13 @@ impl PromPlanner {
             }
             _ => UnexpectedTokenSnafu { token: op }.fail(),
         }?;
+        let result = LogicalPlanBuilder::from(result)
+            .project(visible_left_schema.iter().map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            }))
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
 
         // AND/UNLESS preserve the complete left operand schema and metadata.
         self.ctx = left_context;
@@ -6492,8 +6781,6 @@ impl PromPlanner {
                 }
                 .fail();
             };
-            let empty = Self::string_scalar_value(&value_type, Some(String::new()))
-                .expect("match label value type is a string");
             let internal_name = loop {
                 let name = format!("__promql_or_match_{next_internal_column}");
                 next_internal_column += 1;
@@ -6501,28 +6788,18 @@ impl PromPlanner {
                     break name;
                 }
             };
-            let normalize = |field: Option<(Option<TableReference>, ArrowDataType)>| {
-                let expr = if let Some((qualifier, data_type)) = field {
-                    let column = DfExpr::Column(Column::new(qualifier, label.clone()));
-                    let column = if data_type == value_type {
-                        column
-                    } else {
-                        DfExpr::Cast(Cast {
-                            expr: Box::new(column),
-                            data_type: value_type.clone(),
-                        })
-                    };
-                    DfExpr::ScalarFunction(ScalarFunction {
-                        func: coalesce(),
-                        args: vec![column, DfExpr::Literal(empty.clone(), None)],
-                    })
-                } else {
-                    DfExpr::Literal(empty.clone(), None)
-                };
-                expr.alias(internal_name.clone())
-            };
-            left_match_exprs.push(normalize(left_field));
-            right_match_exprs.push(normalize(right_field));
+            left_match_exprs.push(Self::normalized_match_key_expr(
+                label,
+                left_field,
+                &value_type,
+                &internal_name,
+            ));
+            right_match_exprs.push(Self::normalized_match_key_expr(
+                label,
+                right_field,
+                &value_type,
+                &internal_name,
+            ));
         }
 
         let left_augmented = LogicalPlanBuilder::from(left_projected)
@@ -6849,6 +7126,8 @@ mod test {
     use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
     use crate::query_engine::DefaultSerializer;
+
+    mod delta;
 
     fn find_instant_manipulate(plan: &LogicalPlan) -> Option<&InstantManipulate> {
         if let LogicalPlan::Extension(Extension { node }) = plan
@@ -7757,8 +8036,15 @@ mod test {
     }
 
     async fn build_test_native_histogram_table_provider(table_name: &str) -> DfTableSourceProvider {
+        build_test_native_histogram_table_provider_with_marker(table_name, false).await
+    }
+
+    async fn build_test_native_histogram_table_provider_with_marker(
+        table_name: &str,
+        temporality_marker: bool,
+    ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
-        let columns = vec![
+        let mut columns = vec![
             ColumnSchema::new(
                 "tag_0".to_string(),
                 ConcreteDataType::string_datatype(),
@@ -7769,6 +8055,16 @@ mod test {
                 ConcreteDataType::string_datatype(),
                 true,
             ),
+        ];
+        if temporality_marker {
+            columns.push(ColumnSchema::new(
+                GREPTIME_TEMPORALITY_LABEL.to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ));
+        }
+        let tag_count = columns.len();
+        columns.extend([
             ColumnSchema::new(
                 "timestamp".to_string(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
@@ -7780,12 +8076,12 @@ mod test {
                 native_histogram_value_type().clone(),
                 true,
             ),
-        ];
+        ]);
         let schema = Arc::new(Schema::new(columns));
         let table_meta = TableMetaBuilder::empty()
             .schema(schema)
-            .primary_key_indices(vec![0, 1])
-            .value_indices(vec![3])
+            .primary_key_indices((0..tag_count).collect())
+            .value_indices(vec![tag_count + 1])
             .next_column_id(1024)
             .build()
             .unwrap();
@@ -7881,13 +8177,28 @@ mod test {
     async fn build_test_mixed_native_histogram_table_provider(
         table_name: &str,
     ) -> DfTableSourceProvider {
+        build_test_mixed_native_histogram_table_provider_with_marker(table_name, false).await
+    }
+
+    async fn build_test_mixed_native_histogram_table_provider_with_marker(
+        table_name: &str,
+        temporality_marker: bool,
+    ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
-        let columns = vec![
-            ColumnSchema::new(
-                "tag_0".to_string(),
+        let mut columns = vec![ColumnSchema::new(
+            "tag_0".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        )];
+        if temporality_marker {
+            columns.push(ColumnSchema::new(
+                GREPTIME_TEMPORALITY_LABEL.to_string(),
                 ConcreteDataType::string_datatype(),
-                false,
-            ),
+                true,
+            ));
+        }
+        let tag_count = columns.len();
+        columns.extend([
             ColumnSchema::new(
                 "timestamp".to_string(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
@@ -7904,12 +8215,12 @@ mod test {
                 ConcreteDataType::float64_datatype(),
                 true,
             ),
-        ];
+        ]);
         let schema = Arc::new(Schema::new(columns));
         let table_meta = TableMetaBuilder::empty()
             .schema(schema.clone())
-            .primary_key_indices(vec![0])
-            .value_indices(vec![2, 3])
+            .primary_key_indices((0..tag_count).collect())
+            .value_indices(vec![tag_count + 1, tag_count + 2])
             .next_column_id(1024)
             .build()
             .unwrap();
@@ -7920,16 +8231,20 @@ mod test {
                 .build()
                 .unwrap(),
         );
-        let batch = RecordBatch::try_new(
-            schema.arrow_schema().clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["float", "histogram"])),
-                Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_000])),
-                build_histogram_array(&[None, Some(direct_or_histogram())]),
-                Arc::new(Float64Array::from(vec![Some(2.0), None])),
-            ],
-        )
-        .unwrap();
+        let mut arrays: Vec<Arc<dyn Array>> =
+            vec![Arc::new(StringArray::from(vec!["float", "histogram"]))];
+        if temporality_marker {
+            arrays.push(Arc::new(StringArray::from(vec![
+                Some(GREPTIME_TEMPORALITY_DELTA),
+                Some(GREPTIME_TEMPORALITY_DELTA),
+            ])));
+        }
+        arrays.extend([
+            Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_000])) as Arc<dyn Array>,
+            build_histogram_array(&[None, Some(direct_or_histogram())]),
+            Arc::new(Float64Array::from(vec![Some(2.0), None])),
+        ]);
+        let batch = RecordBatch::try_new(schema.arrow_schema().clone(), arrays).unwrap();
         let backing = GreptimeMemTable::new_with_catalog(
             table_name,
             GreptimeRecordBatch::from_df_record_batch(schema, batch),
@@ -8781,35 +9096,6 @@ mod test {
                 "{query}: {plan_str}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn timestamp_binary_join_rejects_default_matching_on_mismatched_labels() {
-        let eval_stmt = build_eval_stmt("timestamp(left_host_job) / right_by_job");
-
-        let table_provider = build_test_table_provider_with_tsid_tag_fields(&[
-            (
-                (DEFAULT_SCHEMA_NAME.to_string(), "left_host_job".to_string()),
-                2,
-                1,
-            ),
-            (
-                (DEFAULT_SCHEMA_NAME.to_string(), "right_by_job".to_string()),
-                1,
-                1,
-            ),
-        ])
-        .await;
-        let plan =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-                .await
-                .unwrap();
-        let plan_str = plan.display_indent_schema().to_string();
-
-        assert!(
-            plan_str.contains("Boolean(false)") || plan_str.contains("false"),
-            "{plan_str}"
-        );
     }
 
     #[tokio::test]

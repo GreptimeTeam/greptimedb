@@ -6587,6 +6587,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
 
     // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD_total" (
+    //   "__greptime_temporality__" STRING NULL,
     //   "greptime_timestamp" TIMESTAMP(3) NOT NULL,
     //   "greptime_value" DOUBLE NULL,
     //   "host_arch" STRING NULL,
@@ -6602,7 +6603,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //   "terminal_type" STRING NULL,
     //   "user_id" STRING NULL,
     //   TIME INDEX ("greptime_timestamp"),
-    //   PRIMARY KEY ("host_arch", "job", "model", "os_version", "otel_scope_name", "otel_scope_schema_url", "otel_scope_version", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //   PRIMARY KEY ("__greptime_temporality__", "host_arch", "job", "model", "os_version", "otel_scope_name", "otel_scope_schema_url", "otel_scope_version", "service_name", "service_version", "session_id", "terminal_type", "user_id")
     //   )
     // ENGINE=metric
     // WITH(
@@ -6610,7 +6611,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //   on_physical_table = 'greptime_physical_table',
     //   otlp_metric_compat = 'prom'
     // )
-    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"host_arch\\\" STRING NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"host_arch\\\", \\\"job\\\", \\\"model\\\", \\\"os_version\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"__greptime_temporality__\\\" STRING NULL,\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"host_arch\\\" STRING NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"__greptime_temporality__\\\", \\\"host_arch\\\", \\\"job\\\", \\\"model\\\", \\\"os_version\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_all_show_create_table",
         &client,
@@ -6620,11 +6621,11 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
 
     // select metrics data
-    let expected = "[[1753780559836,2.244618,\"arm64\",\"claude-code\",\"claude-sonnet-4-20250514\",\"25.0.0\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,0.0052544,\"arm64\",\"claude-code\",\"claude-3-5-haiku-20241022\",\"25.0.0\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    let expected = "[[\"delta\",1753780559836,2.244618,\"arm64\",\"claude-code\",\"claude-sonnet-4-20250514\",\"25.0.0\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[\"delta\",1753780559836,0.0052544,\"arm64\",\"claude-code\",\"claude-3-5-haiku-20241022\",\"25.0.0\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
     validate_data(
         "otlp_metrics_all_select",
         &client,
-        "select * from `claude_code_cost_usage_USD_total`;",
+        "select * from `claude_code_cost_usage_USD_total` order by model desc;",
         expected,
     )
     .await;
@@ -6695,6 +6696,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD_total" (
+    //     "__greptime_temporality__" STRING NULL,
     //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
     //     "greptime_value" DOUBLE NULL,
     //     "job" STRING NULL,
@@ -6707,7 +6709,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //     "terminal_type" STRING NULL,
     //     "user_id" STRING NULL,
     //     TIME INDEX ("greptime_timestamp"),
-    //     PRIMARY KEY ("job", "model", "os_type", "os_version", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //     PRIMARY KEY ("__greptime_temporality__", "job", "model", "os_type", "os_version", "service_name", "service_version", "session_id", "terminal_type", "user_id")
     //     )
     //   ENGINE=metric
     //   WITH(
@@ -6715,7 +6717,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //     on_physical_table = 'greptime_physical_table',
     //     otlp_metric_compat = 'prom'
     //   )
-    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_type\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"os_type\\\", \\\"os_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"__greptime_temporality__\\\" STRING NULL,\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_type\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"__greptime_temporality__\\\", \\\"job\\\", \\\"model\\\", \\\"os_type\\\", \\\"os_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_show_create_table",
         &client,
@@ -6725,11 +6727,11 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
 
     // select metrics data
-    let expected = "[[1753780559836,0.0052544,\"claude-code\",\"claude-3-5-haiku-20241022\",\"darwin\",\"25.0.0\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,2.244618,\"claude-code\",\"claude-sonnet-4-20250514\",\"darwin\",\"25.0.0\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    let expected = "[[\"delta\",1753780559836,2.244618,\"claude-code\",\"claude-sonnet-4-20250514\",\"darwin\",\"25.0.0\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[\"delta\",1753780559836,0.0052544,\"claude-code\",\"claude-3-5-haiku-20241022\",\"darwin\",\"25.0.0\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
     validate_data(
         "otlp_metrics_select",
         &client,
-        "select * from `claude_code_cost_usage_USD_total`;",
+        "select * from `claude_code_cost_usage_USD_total` order by model desc;",
         expected,
     )
     .await;
@@ -6761,6 +6763,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD_total" (
+    //     "__greptime_temporality__" STRING NULL,
     //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
     //     "greptime_value" DOUBLE NULL,
     //     "job" STRING NULL,
@@ -6771,7 +6774,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //     "terminal_type" STRING NULL,
     //     "user_id" STRING NULL,
     //     TIME INDEX ("greptime_timestamp"),
-    //     PRIMARY KEY ("job", "model", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //     PRIMARY KEY ("__greptime_temporality__", "job", "model", "service_name", "service_version", "session_id", "terminal_type", "user_id")
     //     )
     //   ENGINE=metric
     //   WITH(
@@ -6779,7 +6782,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //     on_physical_table = 'greptime_physical_table',
     //     otlp_metric_compat = 'prom'
     //   )
-    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"__greptime_temporality__\\\" STRING NULL,\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"__greptime_temporality__\\\", \\\"job\\\", \\\"model\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_show_create_table_none",
         &client,
@@ -6789,11 +6792,11 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
 
     // select metrics data
-    let expected = "[[1753780559836,0.0052544,\"claude-code\",\"claude-3-5-haiku-20241022\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,2.244618,\"claude-code\",\"claude-sonnet-4-20250514\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    let expected = "[[\"delta\",1753780559836,2.244618,\"claude-code\",\"claude-sonnet-4-20250514\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[\"delta\",1753780559836,0.0052544,\"claude-code\",\"claude-3-5-haiku-20241022\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
     validate_data(
         "otlp_metrics_select_none",
         &client,
-        "select * from `claude_code_cost_usage_USD_total`;",
+        "select * from `claude_code_cost_usage_USD_total` order by model desc;",
         expected,
     )
     .await;
@@ -6855,6 +6858,105 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         &client,
         "select job from ns_gauge;",
         "[[\"shop/api\"]]",
+    )
+    .await;
+
+    let content = r#"
+{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"http.stale.sum","sum":{"dataPoints":[{"timeUnixNano":"1753780559836000000","flags":1,"asDouble":99.0}],"aggregationTemporality":1,"isMonotonic":true}},{"name":"http.stale.histogram","histogram":{"dataPoints":[{"timeUnixNano":"1753780559835000000","count":"3","sum":4.0,"bucketCounts":["1","1","1"],"explicitBounds":[1.0,2.0]},{"timeUnixNano":"1753780559836000000","flags":1,"count":"99","sum":99.0,"bucketCounts":["99"],"explicitBounds":[1.0,2.0]}],"aggregationTemporality":1}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+    assert!(body.partial_success.is_none());
+    validate_data(
+        "otlp_http_stale_sum_identity",
+        &client,
+        "select __greptime_temporality__, count(*) from http_stale_sum_total \
+         group by __greptime_temporality__;",
+        "[[\"delta\",1]]",
+    )
+    .await;
+    for (table, expected) in [
+        ("http_stale_histogram_bucket", "[[\"delta\",6]]"),
+        ("http_stale_histogram_sum", "[[\"delta\",2]]"),
+        ("http_stale_histogram_count", "[[\"delta\",2]]"),
+    ] {
+        validate_data(
+            "otlp_http_stale_histogram_identity",
+            &client,
+            &format!(
+                "select __greptime_temporality__, count(*) from {table} \
+                 group by __greptime_temporality__;"
+            ),
+            expected,
+        )
+        .await;
+    }
+
+    let content = r#"
+{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"reserved_label_gauge","gauge":{"dataPoints":[{"timeUnixNano":"1753780559836000000","asDouble":1.0,"attributes":[{"key":"__greptime_temporality__","value":{"stringValue":"user"}}]}]}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let status = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
+    assert_eq!(tonic::Code::InvalidArgument as i32, status.code);
+    assert!(status.message.contains("reserved label"));
+    validate_data(
+        "otlp_metrics_reserved_label_stores_nothing",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'reserved_label_gauge';",
+        "[[0]]",
+    )
+    .await;
+
+    let content = r#"
+{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"malformed_delta_histogram","histogram":{"dataPoints":[{"timeUnixNano":"1753780559836000000","count":"1","sum":1.0,"bucketCounts":["1"],"explicitBounds":[1.0,2.0]}],"aggregationTemporality":1}}]}]}]}
+    "#;
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let status = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
+    assert_eq!(tonic::Code::InvalidArgument as i32, status.code);
+    assert!(status.message.contains("bucket_counts length"));
+    validate_data(
+        "otlp_metrics_malformed_delta_histogram_stores_nothing",
+        &client,
+        "select count(*) from information_schema.tables where table_name in \
+         ('malformed_delta_histogram_bucket', 'malformed_delta_histogram_sum', \
+          'malformed_delta_histogram_count');",
+        "[[0]]",
     )
     .await;
 

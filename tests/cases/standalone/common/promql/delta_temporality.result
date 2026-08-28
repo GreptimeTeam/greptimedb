@@ -1,0 +1,146 @@
+CREATE TABLE delta_temporality (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    series STRING,
+    __greptime_temporality__ STRING,
+    PRIMARY KEY (series, __greptime_temporality__)
+);
+
+Affected Rows: 0
+
+INSERT INTO delta_temporality VALUES
+    (60000, 10, 'delta', 'delta'),
+    (120000, 20, 'delta', 'delta'),
+    (180000, 15, 'delta', 'delta'),
+    (180000, 7, 'single', 'delta'),
+    (60000, 10, 'cumulative', NULL),
+    (120000, 20, 'cumulative', NULL),
+    (180000, 30, 'cumulative', NULL);
+
+Affected Rows: 7
+
+-- Raw deltas are summed; untagged rows retain cumulative reset-aware math.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') increase(delta_temporality[3m]);
+
++---------------------+---------------------------------------------------------+------------+--------------------------+
+| ts                  | prom_increase(ts_range,greptime_value,ts,Int64(180000)) | series     | __greptime_temporality__ |
++---------------------+---------------------------------------------------------+------------+--------------------------+
+| 1970-01-01T00:03:00 | 30.0                                                    | cumulative |                          |
+| 1970-01-01T00:03:00 | 45.0                                                    | delta      | delta                    |
+| 1970-01-01T00:03:00 | 7.0                                                     | single     | delta                    |
++---------------------+---------------------------------------------------------+------------+--------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
+
++---------------------+-----------------------------------------------------+------------+--------------------------+
+| ts                  | prom_rate(ts_range,greptime_value,ts,Int64(180000)) | series     | __greptime_temporality__ |
++---------------------+-----------------------------------------------------+------------+--------------------------+
+| 1970-01-01T00:03:00 | 0.03888888888888889                                 | single     | delta                    |
+| 1970-01-01T00:03:00 | 0.16666666666666666                                 | cumulative |                          |
+| 1970-01-01T00:03:00 | 0.25                                                | delta      | delta                    |
++---------------------+-----------------------------------------------------+------------+--------------------------+
+
+-- Nullable tags follow Prometheus absent-label matcher semantics.
+TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__=""};
+
++---------------------+----------------+------------+--------------------------+
+| ts                  | greptime_value | series     | __greptime_temporality__ |
++---------------------+----------------+------------+--------------------------+
+| 1970-01-01T00:03:00 | 30.0           | cumulative |                          |
++---------------------+----------------+------------+--------------------------+
+
+TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__!="delta"};
+
++---------------------+----------------+------------+--------------------------+
+| ts                  | greptime_value | series     | __greptime_temporality__ |
++---------------------+----------------+------------+--------------------------+
+| 1970-01-01T00:03:00 | 30.0           | cumulative |                          |
++---------------------+----------------+------------+--------------------------+
+
+-- Aggregation preserves or deliberately removes the visible stored marker.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') sum by (series, __greptime_temporality__) (rate(delta_temporality[3m]));
+
++------------+--------------------------+---------------------+----------------------------------------------------------+
+| series     | __greptime_temporality__ | ts                  | sum(prom_rate(ts_range,greptime_value,ts,Int64(180000))) |
++------------+--------------------------+---------------------+----------------------------------------------------------+
+| cumulative |                          | 1970-01-01T00:03:00 | 0.16666666666666666                                      |
+| delta      | delta                    | 1970-01-01T00:03:00 | 0.25                                                     |
+| single     | delta                    | 1970-01-01T00:03:00 | 0.03888888888888889                                      |
++------------+--------------------------+---------------------+----------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') sum by (series) (rate(delta_temporality[3m]));
+
++------------+---------------------+----------------------------------------------------------+
+| series     | ts                  | sum(prom_rate(ts_range,greptime_value,ts,Int64(180000))) |
++------------+---------------------+----------------------------------------------------------+
+| cumulative | 1970-01-01T00:03:00 | 0.16666666666666666                                      |
+| delta      | 1970-01-01T00:03:00 | 0.25                                                     |
+| single     | 1970-01-01T00:03:00 | 0.03888888888888889                                      |
++------------+---------------------+----------------------------------------------------------+
+
+TQL EVAL (180, 180, '1m') round(sum(rate(delta_temporality[3m])), 0.000001);
+
++---------------------+----------------------------------------------------------------------------------------+
+| ts                  | prom_round(sum(prom_rate(ts_range,greptime_value,ts,Int64(180000))),Float64(0.000001)) |
++---------------------+----------------------------------------------------------------------------------------+
+| 1970-01-01T00:03:00 | 0.45555599999999996                                                                    |
++---------------------+----------------------------------------------------------------------------------------+
+
+CREATE TABLE delta_marker_only (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    __greptime_temporality__ STRING PRIMARY KEY
+);
+
+Affected Rows: 0
+
+INSERT INTO delta_marker_only VALUES
+    (180000, 1, 'delta'),
+    (180000, 2, NULL);
+
+Affected Rows: 2
+
+CREATE TABLE delta_tagless (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE
+);
+
+Affected Rows: 0
+
+INSERT INTO delta_tagless VALUES (180000, 10);
+
+Affected Rows: 1
+
+-- Missing and null labels match as empty; the concrete "delta" label does not.
+TQL EVAL (180, 180, '1m') delta_marker_only + delta_tagless;
+
++---------------------+-----------------------------------------------------------------+
+| ts                  | delta_marker_only.greptime_value + delta_tagless.greptime_value |
++---------------------+-----------------------------------------------------------------+
+| 1970-01-01T00:03:00 | 12.0                                                            |
++---------------------+-----------------------------------------------------------------+
+
+TQL EVAL (180, 180, '1m') delta_marker_only AND delta_tagless;
+
++---------------------+----------------+--------------------------+
+| ts                  | greptime_value | __greptime_temporality__ |
++---------------------+----------------+--------------------------+
+| 1970-01-01T00:03:00 | 2.0            |                          |
++---------------------+----------------+--------------------------+
+
+DROP TABLE delta_tagless;
+
+Affected Rows: 0
+
+DROP TABLE delta_marker_only;
+
+Affected Rows: 0
+
+DROP TABLE delta_temporality;
+
+Affected Rows: 0
+

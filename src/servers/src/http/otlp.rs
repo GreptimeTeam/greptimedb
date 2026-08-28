@@ -126,15 +126,24 @@ pub async fn metrics(
     }));
     let query_ctx = Arc::new(query_ctx);
 
-    handler.metrics(request, query_ctx).await.map(|outcome| {
-        if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
-            OtlpMetricsResponse::Failure(outcome)
-        } else if outcome.rejected_data_points > 0 || outcome.error_message.is_some() {
-            OtlpMetricsResponse::PartialSuccess(outcome)
-        } else {
-            OtlpMetricsResponse::FullSuccess(outcome)
+    match handler.metrics(request, query_ctx).await {
+        Ok(outcome) => {
+            if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
+                Ok(OtlpMetricsResponse::Failure(outcome))
+            } else if outcome.rejected_data_points > 0 || outcome.error_message.is_some() {
+                Ok(OtlpMetricsResponse::PartialSuccess(outcome))
+            } else {
+                Ok(OtlpMetricsResponse::FullSuccess(outcome))
+            }
         }
-    })
+        Err(error::Error::InvalidOtlpMetricInput { reason }) => {
+            Ok(OtlpMetricsResponse::Failure(MetricsIngestOutcome {
+                error_message: Some(reason),
+                ..Default::default()
+            }))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[axum_macros::debug_handler]
@@ -365,3 +374,6 @@ impl IntoResponse for OtlpTraceResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

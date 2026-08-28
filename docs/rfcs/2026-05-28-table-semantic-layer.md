@@ -78,7 +78,7 @@ concern, not query-time semantics).
 | --- | --- |
 | `greptime.semantic.metric.type` | `counter` / `gauge` / `histogram` / `summary` / `updown_counter` / `gauge_histogram` / `info` / `stateset` |
 | `greptime.semantic.metric.unit` | UCUM, e.g. `s`, `By`, `{request}` (discarded by the row encoders, so unrecoverable once ingested) |
-| `greptime.semantic.metric.temporality` | `cumulative` / `delta` (OTel only; invisible in the name) |
+| `greptime.semantic.metric.temporality` | `cumulative` / `delta` / `mixed` (OTel only; catalog-level description) |
 | `greptime.semantic.metric.metadata_quality` | `declared` (OTLP / exposition) or `inferred` (Prom RW v1, name-suffix guess) |
 | `greptime.semantic.metric.original_name` | Pre-translation OTel name when the table name was Prometheus-ised; the key a consumer uses to look the metric up in the OTel semantic conventions |
 
@@ -92,6 +92,38 @@ Two design decisions worth pinning down up front, because they constrain everyth
 
 - **Conflict.** Some table-level keys (`trace.conventions` lifted from `schema_url`, `metric.temporality`, ...) cannot represent the truth when a long-lived table sees rows from multiple sources. v1 records `mixed` or `unknown` rather than a fictitious single value. Downstream consumers must treat any single-valued semantic key as best-effort, not strong evidence.
 - **Update.** Semantic options are stamped at table creation. v1 does not specify an update path; promoting `metadata_quality` from `inferred` to `declared`, refreshing `resource.attributes_preserved`, or revising `trace.conventions` on later writes is deferred. If real usage shows update is needed, it lands as a separate RFC.
+
+OTLP delta sums and explicit histograms additionally store the query-visible
+String tag `__greptime_temporality__="delta"` on each generated row. The tag is
+part of series identity and is authoritative for per-series float `rate()` and
+`increase()` behavior; the table option is never used as a row-level
+discriminator. Native histograms retain their native algorithms. Prometheus
+metadata reports `unknown` for counter, histogram, and up/down-counter tables
+whose catalog temporality is `delta` or `mixed`. A same-request conflict can
+create `mixed`; a later write does not update an existing table option, so the
+catalog value can also be stale while the row tag remains authoritative.
+
+The marker remains in PromQL results and follows ordinary label matching and
+grouping. Nullable String tags match like absent Prometheus labels, and
+cross-table binary operations normalize a missing tag to the empty label value;
+`ignoring(__greptime_temporality__)` is available when that distinction should
+not participate in matching. Apply `rate()` or `increase()` before an
+aggregation or subquery that drops the marker. `irate()` and `resets()` are not
+temporality-aware in v1; `delta()`, `idelta()`, and `changes()` retain their
+existing raw-sample semantics.
+
+`__greptime_temporality__` is a reserved stored key for OTLP metric attributes.
+Existing float tables that already contain that exact String tag and the value
+`delta` opt into this behavior after upgrade. Producers should rename such a
+user-defined label if that was not their intent. A non-OTLP writer may opt in
+deliberately, while a namespaced OTLP scope attribute cannot collide with the
+stored key.
+
+OTLP `NoRecordedValue` sums store the canonical Prometheus stale marker.
+Classic-histogram tombstones mark the point's supplied bounds, implicit `+Inf`,
+`_count`, and `_sum` when supplied. Bounds absent from or changed on the
+tombstone can remain visible until lookback expiry; complete marking would
+require retained per-stream bound history and is outside v1.
 
 ## `information_schema.table_semantics`
 

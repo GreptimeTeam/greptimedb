@@ -1,0 +1,59 @@
+CREATE TABLE delta_temporality (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    series STRING,
+    __greptime_temporality__ STRING,
+    PRIMARY KEY (series, __greptime_temporality__)
+);
+
+INSERT INTO delta_temporality VALUES
+    (60000, 10, 'delta', 'delta'),
+    (120000, 20, 'delta', 'delta'),
+    (180000, 15, 'delta', 'delta'),
+    (180000, 7, 'single', 'delta'),
+    (60000, 10, 'cumulative', NULL),
+    (120000, 20, 'cumulative', NULL),
+    (180000, 30, 'cumulative', NULL);
+
+-- Raw deltas are summed; untagged rows retain cumulative reset-aware math.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') increase(delta_temporality[3m]);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
+
+-- Nullable tags follow Prometheus absent-label matcher semantics.
+TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__=""};
+TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__!="delta"};
+
+-- Aggregation preserves or deliberately removes the visible stored marker.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') sum by (series, __greptime_temporality__) (rate(delta_temporality[3m]));
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') sum by (series) (rate(delta_temporality[3m]));
+TQL EVAL (180, 180, '1m') round(sum(rate(delta_temporality[3m])), 0.000001);
+
+CREATE TABLE delta_marker_only (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    __greptime_temporality__ STRING PRIMARY KEY
+);
+
+INSERT INTO delta_marker_only VALUES
+    (180000, 1, 'delta'),
+    (180000, 2, NULL);
+
+CREATE TABLE delta_tagless (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE
+);
+
+INSERT INTO delta_tagless VALUES (180000, 10);
+
+-- Missing and null labels match as empty; the concrete "delta" label does not.
+TQL EVAL (180, 180, '1m') delta_marker_only + delta_tagless;
+TQL EVAL (180, 180, '1m') delta_marker_only AND delta_tagless;
+
+DROP TABLE delta_tagless;
+DROP TABLE delta_marker_only;
+DROP TABLE delta_temporality;

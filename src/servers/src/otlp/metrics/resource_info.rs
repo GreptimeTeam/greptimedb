@@ -27,13 +27,16 @@ use common_catalog::consts::SEMANTIC_GRAPH_WINDOW_NANOS;
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue;
-use otel_arrow_rust::proto::opentelemetry::metrics::v1::{ResourceMetrics, metric};
+use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+    AggregationTemporality, ResourceMetrics, metric,
+};
 use session::protocol_ctx::OtlpMetricCtx;
 
 use crate::error::Result;
 use crate::otlp::metrics::{
     INSTANCE_KEY, JOB_KEY, ServiceIdentity, exponential_histogram_gate,
-    exponential_histogram_value, scalar_value_string, service_identity,
+    exponential_histogram_value, histogram_data_point_rejection, scalar_value_string,
+    service_identity,
 };
 use crate::otlp::trace::{
     KEY_CONTAINER_ID, KEY_CONTAINER_NAME, KEY_HOST_ID, KEY_HOST_NAME, KEY_K8S_CONTAINER_NAME,
@@ -193,7 +196,19 @@ fn for_each_encoded_time(
                     visit_all(s.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
                 }
                 Some(metric::Data::Histogram(h)) => {
-                    visit_all(h.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
+                    let is_delta = matches!(
+                        AggregationTemporality::try_from(h.aggregation_temporality),
+                        Ok(AggregationTemporality::Delta)
+                    );
+                    visit_all(
+                        h.data_points
+                            .iter()
+                            .filter(|point| {
+                                histogram_data_point_rejection(point, is_delta).is_none()
+                            })
+                            .map(|point| point.time_unix_nano),
+                        &mut visit,
+                    )
                 }
                 Some(metric::Data::Summary(s)) => {
                     visit_all(s.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
@@ -226,6 +241,8 @@ mod tests {
     };
 
     use super::*;
+
+    mod delta;
 
     fn kv(key: &str, value: &str) -> KeyValue {
         KeyValue {

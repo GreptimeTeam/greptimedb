@@ -15,6 +15,11 @@
 /// Canonical Prometheus stale-marker NaN bit pattern.
 pub const PROMETHEUS_STALE_NAN_BITS: u64 = 0x7ff0_0000_0000_0002;
 
+/// Stored series label that opts ordinary float samples into raw-delta math.
+pub const GREPTIME_TEMPORALITY_LABEL: &str = "__greptime_temporality__";
+/// Authoritative raw-delta value for [`GREPTIME_TEMPORALITY_LABEL`].
+pub const GREPTIME_TEMPORALITY_DELTA: &str = "delta";
+
 /// Formats a floating-point value for the Prometheus HTTP API.
 pub fn format_prometheus_float(value: f64) -> String {
     if value == f64::INFINITY {
