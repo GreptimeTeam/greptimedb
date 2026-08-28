@@ -1509,24 +1509,19 @@ pub(crate) async fn scan_flat_file_ranges(
 /// (`__primary_key`, `__sequence`, `__op_type`), so it must be applied before any
 /// projection/compat conversion that drops internal columns.
 ///
-/// `file_preserves_sequence` is the local per-file marker. Foreign reader
+/// `file_sequence_trusted` is the per-file trust decision. Foreign reader
 /// batches have already been virtualized to the target-local file barrier, so
-/// they are always filtered using the effective batch sequence. Local
-/// untrusted files pass through because exact capability excludes them before
-/// row filtering.
+/// they are filtered using the effective batch sequence. Local untrusted files
+/// pass through because exact capability excludes them before row filtering.
 fn filter_flat_batch_by_sequence(
     record_batch: RecordBatch,
     sequence_range: Option<SequenceRange>,
-    file_preserves_sequence: bool,
-    region_id: RegionId,
-    file_region_id: RegionId,
-    _file_id: store_api::storage::FileId,
+    file_sequence_trusted: bool,
 ) -> Result<Option<RecordBatch>> {
     let Some(sequence) = sequence_range else {
         return Ok(Some(record_batch));
     };
-    let foreign = file_region_id != region_id;
-    if !foreign && !file_preserves_sequence {
+    if !file_sequence_trusted {
         return Ok(Some(record_batch));
     }
 
@@ -1599,6 +1594,9 @@ pub fn build_flat_file_range_scan_stream(
             part_metrics.inc_build_reader_cost(build_cost);
 
             let may_compat = range.compat_batch();
+            let file_sequence_trusted = range
+                .file_handle()
+                .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
 
             let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch().await? {
@@ -1609,14 +1607,10 @@ pub fn build_flat_file_range_scan_stream(
                     record_batch
                 };
 
-                let file_meta = range.file_handle().meta_ref();
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
                     stream_ctx.input.sequence_range,
-                    file_meta.preserve_row_sequence,
-                    stream_ctx.input.region_metadata().region_id,
-                    file_meta.region_id,
-                    file_meta.file_id,
+                    file_sequence_trusted,
                 )? else {
                     continue;
                 };
@@ -2114,7 +2108,7 @@ mod sequence_filter_tests {
     use datatypes::arrow::array::{Int64Array, StringArray, UInt8Array, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
-    use store_api::storage::{FileId, RegionId, SequenceRange};
+    use store_api::storage::SequenceRange;
 
     use super::filter_flat_batch_by_sequence;
 
@@ -2169,20 +2163,13 @@ mod sequence_filter_tests {
     fn test_filter_flat_batch_by_sequence_no_range_or_legacy_file() {
         let b = batch(&[1, 2, 3, 4]);
 
-        let region_id = RegionId::new(1, 1);
-        let file_id = FileId::random();
-        let out =
-            filter_flat_batch_by_sequence(b.clone(), None, true, region_id, region_id, file_id)
-                .unwrap();
+        let out = filter_flat_batch_by_sequence(b.clone(), None, true).unwrap();
         assert_eq!(remaining_tags(&out.unwrap()), vec!["0", "1", "2", "3"]);
 
         let out = filter_flat_batch_by_sequence(
             b.clone(),
             Some(SequenceRange::GtLtEq { min: 2, max: 3 }),
             false,
-            region_id,
-            region_id,
-            file_id,
         )
         .unwrap();
         assert_eq!(remaining_tags(&out.unwrap()), vec!["0", "1", "2", "3"]);
@@ -2191,16 +2178,10 @@ mod sequence_filter_tests {
     #[test]
     fn test_filter_flat_batch_by_sequence_exact_range() {
         let b = batch(&[1, 2, 3, 4]);
-        let region_id = RegionId::new(1, 1);
-        let file_id = FileId::random();
-
         let out = filter_flat_batch_by_sequence(
             b.clone(),
             Some(SequenceRange::GtLtEq { min: 2, max: 3 }),
             true,
-            region_id,
-            region_id,
-            file_id,
         )
         .unwrap();
         assert_eq!(remaining_tags(&out.unwrap()), vec!["2"]);
@@ -2209,9 +2190,6 @@ mod sequence_filter_tests {
             b.clone(),
             Some(SequenceRange::GtLtEq { min: 10, max: 20 }),
             true,
-            region_id,
-            region_id,
-            file_id,
         )
         .unwrap();
         assert!(out.is_none());
@@ -2221,9 +2199,6 @@ mod sequence_filter_tests {
             empty,
             Some(SequenceRange::GtLtEq { min: 0, max: 10 }),
             true,
-            region_id,
-            region_id,
-            file_id,
         )
         .unwrap();
         assert_eq!(out.unwrap().num_rows(), 0);
@@ -2233,10 +2208,7 @@ mod sequence_filter_tests {
         let out = filter_flat_batch_by_sequence(
             batch(&[1, 5, 9]),
             Some(SequenceRange::GtLtEq { min: 2, max: 8 }),
-            false,
-            region_id,
-            RegionId::new(1, 2),
-            file_id,
+            true,
         )
         .unwrap();
         assert_eq!(remaining_tags(&out.unwrap()), vec!["1"]);
