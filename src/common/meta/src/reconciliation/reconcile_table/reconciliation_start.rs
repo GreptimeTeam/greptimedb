@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -135,9 +133,5 @@ impl State for ReconciliationStart {
             // We don't persist the state of this step.
             Status::executing(false),
         ))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-
 use async_trait::async_trait;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
@@ -188,9 +186,5 @@ impl State for ResolveColumnMetadata {
                 .fail()
             }
         }
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

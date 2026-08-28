@@ -18,7 +18,6 @@ pub(crate) mod reconciliation_start;
 pub(crate) mod resolve_column_metadata;
 pub(crate) mod update_table_info;
 
-use std::any::Any;
 use std::fmt::Debug;
 
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -425,8 +424,6 @@ pub(crate) trait State: Sync + Send + Debug {
         ctx: &mut ReconcileTableContext,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)>;
-
-    fn as_any(&self) -> &dyn Any;
 }
 
 #[cfg(test)]

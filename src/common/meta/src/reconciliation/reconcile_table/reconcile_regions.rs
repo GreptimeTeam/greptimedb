@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 use api::v1::column_def::try_as_column_def;
@@ -164,10 +163,6 @@ impl State for ReconcileRegions {
         }
 
         Ok((Box::new(ReconciliationEnd), Status::executing(false)))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

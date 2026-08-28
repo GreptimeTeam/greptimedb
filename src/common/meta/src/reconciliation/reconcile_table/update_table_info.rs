@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -128,9 +126,5 @@ impl State for UpdateTableInfo {
             .mark_table_info_phase_completed();
 
         Ok((Box::new(ReconciliationEnd), Status::executing(true)))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
