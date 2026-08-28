@@ -660,17 +660,6 @@ fn describe_fields(
             ),
         ]),
 
-        // single column show statements
-        SqlPlan::Statement(
-            Statement::ShowTables(_) | Statement::ShowFlows(_) | Statement::ShowViews(_),
-            _,
-        ) => Ok(vec![FieldInfo::new(
-            "name".to_string(),
-            None,
-            None,
-            Type::TEXT,
-            format.format_for(0),
-        )]),
         #[cfg(feature = "enterprise")]
         SqlPlan::Statement(Statement::ShowTriggers(_), _) => Ok(vec![FieldInfo::new(
             "name".to_string(),
@@ -692,31 +681,46 @@ fn describe_fields(
                 Ok(vec![])
             }
         }
-        // DESCRIBE TABLE: mirror the fixed output schema of
-        // `query::sql::describe_table` (all string columns).
-        SqlPlan::Statement(Statement::DescribeTable(_), _) => {
-            schema_to_pg(&DESCRIBE_TABLE_OUTPUT_SCHEMA, format, None).map_err(convert_err)
-        }
-        // SHOW DATABASES: a single `Database` column, plus `Options` when FULL.
-        // Both are string columns (see `query::sql::show_databases`).
-        SqlPlan::Statement(Statement::ShowDatabases(show), _) => {
-            let mut fields = vec![FieldInfo::new(
-                "Database".to_string(),
+        // SHOW VARIABLES: a single column named after the variable (all
+        // values are strings; see `query::sql::show_variable`).
+        SqlPlan::Statement(Statement::ShowVariables(show), _) => Ok(vec![FieldInfo::new(
+            show.variable.to_string().to_uppercase(),
+            None,
+            None,
+            Type::TEXT,
+            format.format_for(0),
+        )]),
+        // SHOW STATUS: fixed two-column string schema (currently always
+        // empty; see `query::sql::show_status`).
+        SqlPlan::Statement(Statement::ShowStatus(_), _) => Ok(vec![
+            FieldInfo::new(
+                "Variable_name".to_string(),
                 None,
                 None,
                 Type::TEXT,
                 format.format_for(0),
-            )];
-            if show.full {
-                fields.push(FieldInfo::new(
-                    "Options".to_string(),
-                    None,
-                    None,
-                    Type::TEXT,
-                    format.format_for(1),
-                ));
-            }
-            Ok(fields)
+            ),
+            FieldInfo::new(
+                "Value".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(1),
+            ),
+        ]),
+        // SHOW SEARCH_PATH: single string column (see
+        // `query::sql::show_search_path`).
+        SqlPlan::Statement(Statement::ShowSearchPath(_), _) => Ok(vec![FieldInfo::new(
+            "search_path".to_string(),
+            None,
+            None,
+            Type::TEXT,
+            format.format_for(0),
+        )]),
+        // DESCRIBE TABLE: mirror the fixed output schema of
+        // `query::sql::describe_table` (all string columns).
+        SqlPlan::Statement(Statement::DescribeTable(_), _) => {
+            schema_to_pg(&DESCRIBE_TABLE_OUTPUT_SCHEMA, format, None).map_err(convert_err)
         }
         // ADMIN function: a single column named after the statement text and
         // typed with the admin function's return type (see

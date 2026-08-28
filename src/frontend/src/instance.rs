@@ -59,6 +59,7 @@ use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
 use dashmap::DashMap;
+use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt, future};
@@ -943,6 +944,69 @@ impl Instance {
         vec![result]
     }
 
+    /// Builds the [`DataFrame`] backing an information-schema-backed `SHOW`
+    /// statement, so `Describe` can derive the statement's output schema from
+    /// the same projection the executor uses. Returns `None` for statements
+    /// that are not information-schema-backed SHOWs.
+    ///
+    /// The future is boxed to keep `do_describe_inner`'s state machine small.
+    fn show_statement_dataframe<'a>(
+        &'a self,
+        stmt: &'a Statement,
+        query_ctx: &'a QueryContextRef,
+    ) -> Pin<Box<dyn Future<Output = Option<query::error::Result<DataFrame>>> + Send + 'a>> {
+        Box::pin(async move {
+            let engine = &self.query_engine;
+            let catalog_manager = self.catalog_manager();
+            let ctx = query_ctx.clone();
+            let dataframe = match stmt {
+                Statement::ShowDatabases(show) => {
+                    query::sql::show_databases_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowTables(show) => {
+                    query::sql::show_tables_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowViews(show) => {
+                    query::sql::show_views_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowFlows(show) => {
+                    query::sql::show_flows_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowColumns(show) => {
+                    query::sql::show_columns_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowTableStatus(show) => {
+                    query::sql::show_table_status_dataframe(show, engine, catalog_manager, ctx)
+                        .await
+                }
+                Statement::ShowCharset(kind) => {
+                    query::sql::show_charsets_dataframe(kind.clone(), engine, catalog_manager, ctx)
+                        .await
+                }
+                Statement::ShowCollation(kind) => {
+                    query::sql::show_collations_dataframe(
+                        kind.clone(),
+                        engine,
+                        catalog_manager,
+                        ctx,
+                    )
+                    .await
+                }
+                Statement::ShowIndex(show) => {
+                    query::sql::show_index_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowRegion(show) => {
+                    query::sql::show_region_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowProcesslist(show) => {
+                    query::sql::show_processlist_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                _ => return None,
+            };
+            Some(dataframe)
+        })
+    }
+
     async fn do_describe_inner(
         &self,
         stmt: Statement,
@@ -968,6 +1032,25 @@ impl Instance {
             self.check_sql_permission(&Statement::Tql(tql.clone()), &query_ctx)
                 .await?;
             let plan = self.statement_executor.plan_tql(tql, &query_ctx).await?;
+            return self
+                .query_engine
+                .describe(plan, query_ctx)
+                .await
+                .map(Some)
+                .context(error::DescribeStatementSnafu);
+        }
+
+        // SHOW statements are described from the same information_schema
+        // projection the executor builds, so the Describe schema always
+        // matches the executed DataRows.
+        if let Some(dataframe) = self
+            .show_statement_dataframe(&stmt, &query_ctx)
+            .await
+            .transpose()
+            .context(PlanStatementSnafu)?
+        {
+            self.check_sql_permission(&stmt, &query_ctx).await?;
+            let plan = dataframe.into_unoptimized_plan();
             return self
                 .query_engine
                 .describe(plan, query_ctx)
