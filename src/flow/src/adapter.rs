@@ -22,11 +22,13 @@ use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_options::memory::MemoryOptions;
+use common_recordbatch::map_dictionary_to_values_data_type;
 use common_stat::get_total_cpu_cores;
 use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use datatypes::schema::ColumnSchema;
-use itertools::{EitherOrBoth, Itertools};
+use datafusion_expr::{Expr, LogicalPlan};
+use datatypes::schema::{ColumnSchema, SchemaRef};
+use itertools::Itertools;
 use meta_client::MetaClientOptions;
 use query::QueryEngine;
 use query::options::QueryOptions;
@@ -56,25 +58,94 @@ pub(crate) mod table_source;
 mod tests;
 pub(crate) mod util;
 
-fn relation_desc_from_df_schema(
-    schema: &datafusion_common::DFSchema,
-) -> Result<RelationDesc, Error> {
-    let columns = schema
+/// Converts a retained plan's output to logical schemas. Only a direct source
+/// column (optionally wrapped in an alias) carries source semantics; computed
+/// expressions deliberately use the physical output field metadata instead.
+fn output_column_schemas(
+    plan: &LogicalPlan,
+    source_schema: &SchemaRef,
+) -> Result<(Vec<ColumnSchema>, Vec<Option<usize>>), Error> {
+    let expressions = match plan {
+        LogicalPlan::Projection(projection) => Some(&projection.expr),
+        _ => None,
+    };
+    let is_pass_through = matches!(plan, LogicalPlan::TableScan(_) | LogicalPlan::Filter(_));
+    let mut lineage = Vec::new();
+    let columns = plan
+        .schema()
         .fields()
         .iter()
-        .map(|field| {
-            ConcreteDataType::try_from(field.data_type())
-                .map(|data_type| {
-                    (
-                        field.name().clone(),
-                        ColumnType::new(data_type, field.is_nullable()),
-                    )
-                })
+        .enumerate()
+        .map(|(idx, field)| {
+            let mut column = ColumnSchema::try_from(field.as_ref())
                 .map_err(BoxedError::new)
-                .context(ExternalSnafu)
+                .context(ExternalSnafu)?;
+            let source_index = expressions
+                .and_then(|exprs| {
+                    let expr = exprs.get(idx)?;
+                    let expr = match expr {
+                        Expr::Column(column) => Some(column),
+                        Expr::Alias(alias) => match alias.expr.as_ref() {
+                            Expr::Column(column) => Some(column),
+                            _ => None,
+                        },
+                        _ => None,
+                    }?;
+                    source_schema.column_index_by_name(&expr.name)
+                })
+                .or_else(|| {
+                    is_pass_through
+                        .then(|| source_schema.column_index_by_name(field.name()))
+                        .flatten()
+                });
+            if let Some(source_index) = source_index {
+                let mut source = source_schema.column_schemas()[source_index].clone();
+                source.name = field.name().clone();
+                source.data_type = map_dictionary_to_values_data_type(&source.data_type);
+                column = source;
+            } else {
+                column.data_type = map_dictionary_to_values_data_type(&column.data_type);
+            }
+            lineage.push(source_index);
+            Ok(column)
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(RelationDesc::from_names_and_types(columns))
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok((columns, lineage))
+}
+
+fn relation_desc_from_output(
+    columns: &[ColumnSchema],
+    lineage: &[Option<usize>],
+    source_primary_key_indices: &[usize],
+) -> RelationDesc {
+    let keys = source_primary_key_indices
+        .iter()
+        .filter_map(|source_index| {
+            lineage
+                .iter()
+                .position(|index| index == &Some(*source_index))
+        })
+        .collect_vec();
+    let time_index = columns.iter().position(ColumnSchema::is_time_index);
+    RelationDesc {
+        typ: crate::repr::RelationType {
+            column_types: columns
+                .iter()
+                .map(|column| ColumnType::new(column.data_type.clone(), column.is_nullable()))
+                .collect(),
+            keys: if keys.is_empty() {
+                vec![]
+            } else {
+                vec![crate::repr::Key::from(keys)]
+            },
+            time_index,
+            auto_columns: vec![],
+        },
+        names: columns
+            .iter()
+            .map(|column| Some(column.name.clone()))
+            .collect(),
+    }
 }
 
 fn default_num_workers() -> usize {
@@ -83,6 +154,163 @@ fn default_num_workers() -> usize {
 
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "update_at";
+
+/// Resolves the columns appended by the flow, validating the complete output/sink layout.
+///
+/// A sink with the same arity as the query is an ordinary sink, even when its last
+/// column happens to be named `update_at`. Auto columns are only inferred from the
+/// arity difference and their exact trailing layout.
+pub(crate) fn resolve_sink_layout(
+    output_schema: &[ColumnSchema],
+    sink_schema: &[ColumnSchema],
+) -> Result<Vec<ColumnSchema>, Error> {
+    ensure!(
+        sink_schema.len() >= output_schema.len() && sink_schema.len() - output_schema.len() <= 2,
+        InvalidQuerySnafu {
+            reason: format!(
+                "Flow output has {} columns, but sink has {} columns; only zero, one, or two trailing auto columns are supported",
+                output_schema.len(),
+                sink_schema.len()
+            )
+        }
+    );
+    let suffix_len = sink_schema.len() - output_schema.len();
+    for (idx, (output, sink)) in output_schema.iter().zip(sink_schema.iter()).enumerate() {
+        ensure!(
+            output.data_type == sink.data_type,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Flow output column {idx} has type {:?}, but sink column {} has type {:?}",
+                    output.data_type, sink.name, sink.data_type
+                )
+            }
+        );
+    }
+    let suffix = &sink_schema[output_schema.len()..];
+    match suffix_len {
+        0 => Ok(vec![]),
+        1 => {
+            let column = &suffix[0];
+            ensure!(
+                column.name == AUTO_CREATED_UPDATE_AT_TS_COL && column.data_type.is_timestamp(),
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "The trailing sink column must be timestamp {}",
+                        AUTO_CREATED_UPDATE_AT_TS_COL
+                    )
+                }
+            );
+            Ok(suffix.to_vec())
+        }
+        2 => {
+            let update_at = &suffix[0];
+            let placeholder = &suffix[1];
+            ensure!(
+                update_at.name == AUTO_CREATED_UPDATE_AT_TS_COL
+                    && update_at.data_type.is_timestamp()
+                    && placeholder.name == AUTO_CREATED_PLACEHOLDER_TS_COL
+                    && placeholder.data_type.is_timestamp()
+                    && placeholder.is_time_index(),
+                InvalidQuerySnafu {
+                    reason: "The two trailing sink columns must be timestamp update_at followed by timestamp time-index __ts_placeholder".to_string()
+                }
+            );
+            Ok(suffix.to_vec())
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Legacy helper for callers that only have a sink schema. New stateless flows
+/// resolve the suffix against both schemas and store it in `StatelessFlow`.
+pub(crate) fn sink_output_column_count(sink_schema: &[ColumnSchema]) -> Result<usize, Error> {
+    let mut count = sink_schema.len();
+    if sink_schema
+        .last()
+        .is_some_and(|column| column.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
+    {
+        let placeholder = &sink_schema[count - 1];
+        ensure!(
+            placeholder.data_type.is_timestamp() && placeholder.is_time_index(),
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Auto-created sink column {} must be a timestamp time index",
+                    AUTO_CREATED_PLACEHOLDER_TS_COL
+                )
+            }
+        );
+        count -= 1;
+    }
+    if sink_schema
+        .get(count.checked_sub(1).unwrap_or_default())
+        .is_some_and(|column| column.name == AUTO_CREATED_UPDATE_AT_TS_COL)
+    {
+        ensure!(
+            sink_schema[count - 1].data_type.is_timestamp(),
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Auto-created sink column {} must be a timestamp",
+                    AUTO_CREATED_UPDATE_AT_TS_COL
+                )
+            }
+        );
+        count -= 1;
+    }
+    Ok(count)
+}
+
+pub(crate) fn validate_sink_layout(
+    output_schema: &[ColumnSchema],
+    sink_schema: &[ColumnSchema],
+) -> Result<(), Error> {
+    resolve_sink_layout(output_schema, sink_schema).map(|_| ())
+}
+
+pub(crate) fn validate_auto_column_names(output_schema: &[ColumnSchema]) -> Result<(), Error> {
+    for column in output_schema {
+        ensure!(
+            column.name != AUTO_CREATED_UPDATE_AT_TS_COL
+                && column.name != AUTO_CREATED_PLACEHOLDER_TS_COL,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Flow output column {} is reserved for an auto-created sink column",
+                    column.name
+                )
+            }
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_sink_layout_with_suffix(
+    output_schema: &[ColumnSchema],
+    sink_schema: &[ColumnSchema],
+    suffix: &[ColumnSchema],
+) -> Result<(), Error> {
+    ensure!(
+        sink_schema.len() == output_schema.len() + suffix.len()
+            && sink_schema[output_schema.len()..] == *suffix,
+        InvalidQuerySnafu {
+            reason: "Stored sink auto-column layout no longer matches the sink schema".to_string()
+        }
+    );
+    for (idx, (output, sink)) in output_schema
+        .iter()
+        .zip(&sink_schema[..output_schema.len()])
+        .enumerate()
+    {
+        ensure!(
+            output.data_type == sink.data_type,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Flow output column {idx} has type {:?}, but sink column {} has type {:?}",
+                    output.data_type, sink.name, sink.data_type
+                )
+            }
+        );
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -238,47 +466,39 @@ impl StreamingEngine {
         let flow_plan =
             sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, true).await?;
         stateless::validate_plan(&flow_plan)?;
-
-        if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(&sink_table_name).await? {
-            let inferred_schema = relation_desc_to_column_schemas_with_fallback(
-                &relation_desc_from_df_schema(flow_plan.schema())?,
-            );
-            for (idx, zipped) in inferred_schema
-                .iter()
-                .zip_longest(real_schema.iter())
-                .enumerate()
-            {
-                match zipped {
-                    EitherOrBoth::Both(inferred, real) if inferred.data_type == real.data_type => {}
-                    EitherOrBoth::Both(inferred, real) => {
-                        return InvalidQuerySnafu {
-                            reason: format!(
-                                "Column {idx}(name is '{}', flow inferred name is '{}')'s data type mismatch, expect {:?} got {:?}",
-                                real.name, inferred.name, real.data_type, inferred.data_type
-                            ),
-                        }
-                        .fail();
-                    }
-                    EitherOrBoth::Right(real) if real.data_type.is_timestamp() => {}
-                    _ => {
-                        return InvalidQuerySnafu {
-                            reason: format!(
-                                "schema length mismatched, expected {} found {}",
-                                real_schema.len(),
-                                inferred_schema.len()
-                            ),
-                        }
-                        .fail();
-                    }
-                }
-            }
-        } else if !self
-            .create_table_from_relation(
-                &format!("flow-id={flow_id}"),
-                &sink_table_name,
-                &relation_desc_from_df_schema(flow_plan.schema())?,
-            )
+        let source_table_id = source_table_ids[0];
+        let source_table_name = self
+            .table_info_source
+            .get_table_name(&source_table_id)
+            .await?;
+        let source_table_info = self
+            .table_info_source
+            .get_table_info_value(&source_table_id)
             .await?
+            .context(UnexpectedSnafu {
+                reason: "Source table metadata is missing",
+            })?;
+        let source_meta = source_table_info.table_info.meta;
+        let source_schema = source_meta.schema;
+        let source_primary_key_indices = source_meta.primary_key_indices;
+        let (inferred_schema, lineage) = output_column_schemas(&flow_plan, &source_schema)?;
+        let inferred_relation =
+            relation_desc_from_output(&inferred_schema, &lineage, &source_primary_key_indices);
+        let sink_exists = self
+            .fetch_table_pk_schema(&sink_table_name)
+            .await?
+            .is_some();
+        if !sink_exists {
+            validate_auto_column_names(&inferred_schema)?;
+        }
+        if !sink_exists
+            && !self
+                .create_table_from_relation(
+                    &format!("flow-id={flow_id}"),
+                    &sink_table_name,
+                    &inferred_relation,
+                )
+                .await?
         {
             return UnexpectedSnafu {
                 reason: format!("Failed to create table {sink_table_name:?}"),
@@ -286,21 +506,18 @@ impl StreamingEngine {
             .fail();
         }
 
-        let source_table_id = source_table_ids[0];
-        let source_table_name = self
-            .table_info_source
-            .get_table_name(&source_table_id)
-            .await?;
-        let source_schema = self
-            .table_info_source
-            .get_table_info_value(&source_table_id)
+        // Fetch the metadata after validation or auto-creation.  The sink's layout is the
+        // insert contract: flow output aliases must not leak into the request schema.
+        let (sink_primary_keys, _, sink_schema) = self
+            .fetch_table_pk_schema(&sink_table_name)
             .await?
             .context(UnexpectedSnafu {
-                reason: "Source table metadata is missing",
-            })?
-            .table_info
-            .meta
-            .schema;
+                reason: format!("Sink table metadata is missing: {sink_table_name:?}"),
+            })?;
+        let auto_columns = resolve_sink_layout(&inferred_schema, &sink_schema)?;
+        // Keep the exact layout chosen at creation time; execution must not infer it
+        // from a later sink metadata read.
+
         self.stateless_flows.write().await.insert(
             flow_id,
             StatelessFlow {
@@ -308,6 +525,9 @@ impl StreamingEngine {
                 source_table_name,
                 source_schema,
                 sink_table_name,
+                sink_schema,
+                sink_primary_keys,
+                auto_columns,
                 plan: flow_plan,
                 query_ctx,
             },
