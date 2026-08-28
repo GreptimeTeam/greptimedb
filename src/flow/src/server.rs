@@ -449,7 +449,12 @@ impl FlownodeBuilder {
 
         let node_id = self.opts.node_id.map(|id| id as u32);
 
-        let mut man = StreamingEngine::new(node_id, query_engine, table_meta);
+        let mut man = StreamingEngine::new(
+            node_id,
+            query_engine,
+            table_meta,
+            self.frontend_client.clone(),
+        );
         for worker_id in 0..num_workers {
             let (tx, rx) = oneshot::channel();
 
@@ -769,6 +774,7 @@ mod tests {
             node_id,
             query_engine.clone(),
             table_meta.clone(),
+            Arc::new(frontend_client.clone()),
         ));
         let batching_engine = Arc::new(BatchingEngine::new(
             Arc::new(frontend_client),
