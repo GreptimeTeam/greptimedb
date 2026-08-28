@@ -164,8 +164,7 @@ impl WelfordState {
             return None;
         }
 
-        let variance = self.m2 / self.count as f64;
-        Some(if variance < 0.0 { 0.0 } else { variance.sqrt() })
+        Some((self.m2 / self.count as f64).sqrt())
     }
 }
 
