@@ -685,10 +685,14 @@ mod tests {
         let extensions = FrontendHeartbeatExtensions::default();
         let shared_extensions = extensions.clone();
 
+        let options = frontend::frontend::FrontendOptions {
+            meta_client: Some(MetaClientOptions::default()),
+            ..Default::default()
+        };
         let plugins = prepare_frontend_plugins(
             plugins_with_heartbeat_extensions(extensions),
             &[],
-            &frontend::frontend::FrontendOptions::default(),
+            &options,
             None,
         )
         .await
