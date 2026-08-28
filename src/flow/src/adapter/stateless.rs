@@ -16,21 +16,23 @@
 
 use std::sync::Arc;
 
-use api::helper::vectors_to_rows;
+use api::helper::{to_grpc_value, vectors_to_rows};
 use api::v1::greptime_request::Request;
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use common_error::ext::BoxedError;
 use common_query::OutputData;
-use common_recordbatch::{RecordBatch, RecordBatches};
+use common_recordbatch::{RecordBatch, RecordBatches, map_dictionary_to_values_data_type};
+use common_time::Timestamp;
 use datafusion::catalog::MemTable;
 use datafusion::datasource::{TableProvider, provider_as_source};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DFSchema, TableReference};
 use datafusion_expr::LogicalPlan;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::value::Value;
 use query::QueryEngine;
 use session::context::QueryContextRef;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableId;
 
 use crate::TableName;
@@ -46,6 +48,10 @@ pub(crate) struct StatelessFlow {
     pub(crate) source_table_name: TableName,
     pub(crate) source_schema: SchemaRef,
     pub(crate) sink_table_name: TableName,
+    pub(crate) sink_schema: Vec<ColumnSchema>,
+    pub(crate) sink_primary_keys: Vec<String>,
+    /// The exact trailing columns resolved when the flow was created.
+    pub(crate) auto_columns: Vec<ColumnSchema>,
     pub(crate) plan: LogicalPlan,
     pub(crate) query_ctx: QueryContextRef,
 }
@@ -163,6 +169,31 @@ pub(crate) fn validate_plan(plan: &LogicalPlan) -> Result<(), Error> {
     Ok(())
 }
 
+fn synthesize_auto_values(columns: &[ColumnSchema], now: Timestamp) -> Result<Vec<Value>, Error> {
+    columns
+        .iter()
+        .map(|column| {
+            let timestamp_type = column.data_type.as_timestamp().context(InvalidQuerySnafu {
+                reason: format!("Auto sink column {} is not a timestamp", column.name),
+            })?;
+            let value = if column.name == crate::adapter::AUTO_CREATED_UPDATE_AT_TS_COL {
+                now.convert_to(timestamp_type.unit())
+                    .context(InvalidQuerySnafu {
+                        reason: "Current timestamp cannot be represented in sink timestamp unit",
+                    })?
+            } else if column.name == crate::adapter::AUTO_CREATED_PLACEHOLDER_TS_COL {
+                Timestamp::new(0, timestamp_type.unit())
+            } else {
+                return InvalidQuerySnafu {
+                    reason: format!("Unsupported auto sink column {}", column.name),
+                }
+                .fail();
+            };
+            Ok(Value::Timestamp(value))
+        })
+        .collect()
+}
+
 /// Executes one mirror write using only the supplied batch and writes its output.
 pub(crate) async fn execute(
     flow: &StatelessFlow,
@@ -204,7 +235,21 @@ pub(crate) async fn execute(
         }
     };
 
-    let proto_schema = column_schemas_to_proto(batches.schema().column_schemas().to_vec(), &[])?;
+    let output_schema = batches
+        .schema()
+        .column_schemas()
+        .iter()
+        .cloned()
+        .map(|mut column| {
+            column.data_type = map_dictionary_to_values_data_type(&column.data_type);
+            column
+        })
+        .collect::<Vec<_>>();
+    crate::adapter::validate_sink_layout_with_suffix(
+        &output_schema,
+        &flow.sink_schema,
+        &flow.auto_columns,
+    )?;
     let mut output_rows = Vec::new();
     for batch in batches {
         let vectors = datatypes::vectors::Helper::try_into_vectors(batch.columns())
@@ -215,7 +260,19 @@ pub(crate) async fn execute(
     if output_rows.is_empty() {
         return Ok(0);
     }
+
+    // Auto columns are deliberately synthesized here rather than in the query plan. This keeps
+    // one current timestamp for the whole request and preserves the sink's timestamp precision.
+    let auto_values = synthesize_auto_values(&flow.auto_columns, Timestamp::current_millis())?
+        .into_iter()
+        .map(to_grpc_value)
+        .collect::<Vec<_>>();
+    for row in &mut output_rows {
+        row.values.extend(auto_values.iter().cloned());
+    }
+
     let output_row_count = output_rows.len();
+    let proto_schema = column_schemas_to_proto(flow.sink_schema.clone(), &flow.sink_primary_keys)?;
     let request = Request::RowInserts(RowInsertRequests {
         inserts: vec![RowInsertRequest {
             table_name: flow.sink_table_name[2].clone(),
@@ -266,6 +323,59 @@ mod tests {
         .unwrap();
         let arrow = batch.df_record_batch().clone();
         Arc::new(MemTable::try_new(arrow.schema(), vec![vec![arrow]]).unwrap())
+    }
+
+    #[test]
+    fn auto_values_use_the_sink_timestamp_units() {
+        let update_at = ColumnSchema::new(
+            crate::adapter::AUTO_CREATED_UPDATE_AT_TS_COL,
+            datatypes::data_type::ConcreteDataType::timestamp_second_datatype(),
+            true,
+        );
+        let placeholder = ColumnSchema::new(
+            crate::adapter::AUTO_CREATED_PLACEHOLDER_TS_COL,
+            datatypes::data_type::ConcreteDataType::timestamp_nanosecond_datatype(),
+            true,
+        );
+        let values = synthesize_auto_values(
+            &[update_at],
+            Timestamp::new(1_234, common_time::timestamp::TimeUnit::Millisecond),
+        )
+        .unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(
+            values[0].as_timestamp().unwrap().unit(),
+            common_time::timestamp::TimeUnit::Second
+        );
+        assert!(values[0].as_timestamp().unwrap().value() > 0);
+
+        let values = synthesize_auto_values(
+            &[
+                ColumnSchema::new(
+                    crate::adapter::AUTO_CREATED_UPDATE_AT_TS_COL,
+                    datatypes::data_type::ConcreteDataType::timestamp_microsecond_datatype(),
+                    true,
+                ),
+                placeholder,
+            ],
+            Timestamp::new(1_234, common_time::timestamp::TimeUnit::Millisecond),
+        )
+        .unwrap();
+        assert_eq!(values[1].as_timestamp().unwrap().value(), 0);
+        assert_eq!(
+            values[1].as_timestamp().unwrap().unit(),
+            common_time::timestamp::TimeUnit::Nanosecond
+        );
+    }
+
+    #[test]
+    fn auto_values_reject_arbitrary_columns() {
+        let column = ColumnSchema::new(
+            "other",
+            datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        );
+        assert!(synthesize_auto_values(&[column], Timestamp::current_millis()).is_err());
     }
 
     #[tokio::test]
