@@ -15,9 +15,9 @@ data disk.
 
 Dispatching with any other `runner` value uses it as a literal self-hosted
 runner label, which is how a manually prepared host (see
-`ecs-image/bootstrap-runner-host.sh`) runs the workflow. For PR labels, set
-the repository variable `QUERY_REGRESSION_PR_RUNNER` to such a label to
-redirect PR runs away from ECS.
+`ecs-image/bootstrap-runner-host.sh`) runs the workflow. For PR comment
+admission, set the repository variable `QUERY_REGRESSION_PR_RUNNER` to such
+a label to redirect those runs away from ECS.
 
 The office ARC scale set `perf-regression-8-cores` that previously ran this
 workflow is retired; see git history for its values files and pause/deploy
@@ -44,10 +44,11 @@ Configuration lives in repository variables/secrets:
 | Kind | Name | Purpose |
 | --- | --- | --- |
 | secret | `ALICLOUD_ECS_ACCESS_KEY_ID` / `ALICLOUD_ECS_ACCESS_KEY_SECRET` | RAM user scoped to ECS RunInstances/DeleteInstances/Describe*/CreateImage/RunCommand. Used only by provision/teardown jobs on `ubuntu-latest`; never reaches the ECS instance. |
-| secret | `GH_PERSONAL_ACCESS_TOKEN` | Creates the short-lived runner registration token (shared with the jsonbench EC2 path). |
+| secret | `GH_PERSONAL_ACCESS_TOKEN` | Creates the short-lived runner registration token (shared with the jsonbench EC2 path) and `repository_dispatch` events for slash-command-dispatch (`repo` scope; `GITHUB_TOKEN` cannot dispatch). |
 | vars | `ALIYUN_ECS_REGION_ID` / `ALIYUN_ECS_VSWITCH_ID` / `ALIYUN_ECS_SECURITY_GROUP_ID` | Network placement. The security group should allow egress only; no inbound rules are needed. The vSwitch pins the zone. |
 | vars | `ALIYUN_ECS_INSTANCE_TYPE` | Dedicated (non-burstable, non-shared) instance family. Prefer 32 GiB (e.g. `ecs.g8i.2xlarge`); `ecs.c9i.2xlarge` is 8c16g and nightly thin-LTO of greptime peaks above that. Both base and candidate clusters run on the same machine, so noisy neighbors break thresholds. |
 | vars | `QUERY_REGRESSION_ECS_IMAGE_ID` | Custom image built by `ecs-image/build-ecs-image.py`. |
+| vars | `QUERY_REGRESSION_COMMENT_ALLOWLIST` | Comma/whitespace-separated GitHub logins allowed to comment `/query-regression` on a PR. Each login must also have repository `admin` permission. Empty denies all comment commands. |
 
 The system disk is 40 GiB, which covers the image, a 16 GiB swapfile, the
 checkout, and cold build caches (target dir, cargo registry, sccache). ENOSPC
@@ -104,23 +105,27 @@ agent, which Aliyun public Ubuntu images include.
 
 ## Trust admission for PR runs
 
-A maintainer applying the `query-regression` or `heavy-regression` label is
-**trust admission for that exact PR revision**. `query-regression` runs the
-six routine default cases; `heavy-regression` runs only the high-cardinality
-`prom_remote_write_7913` remote-write case. `pull_request: labeled` is the only PR
-trigger: the label event snapshots its merge, head, and base SHAs. A queued
-job fetches that immutable event merge SHA directly, verifies it is a
-two-parent merge whose parents include the snapshotted head exactly once, and
-uses its other parent as the actual base build revision. The snapshotted
-event base is retained for audit only, so a difference from the merge's
-non-head parent is not a failure. The job never follows a newer mutable PR
-merge ref. An unavailable event merge, or one that does not contain exactly
-one snapshotted head parent, fails closed. A later PR head change does not
-retarget an already queued run: it may execute only its previously trusted
-event revision if that revision remains fetchable. To run the new revision,
-the maintainer must review it, remove the label, and re-add the desired
-regression label; cancel the old run if it is no longer wanted. An existing
-label does not automatically rerun the benchmark.
+An allowlisted repository admin commenting `/query-regression` on the PR is
+**trust admission for that exact PR revision**. `/query-regression` runs the
+six routine default cases; `/query-regression heavy` runs only the
+high-cardinality `prom_remote_write_7913` remote-write case.
+`slash-command-dispatch.yml` (`issue_comment` on the default branch) parses
+the command and `repository_dispatch`es; `query-regression-slash.yml` admits
+the revision so secrets work for fork PRs. It snapshots merge, head, and base
+SHAs at admission. A queued job fetches that immutable event merge SHA
+directly, verifies it is a two-parent merge whose parents include the
+snapshotted head exactly once, and uses its other parent as the actual base
+build revision. The snapshotted event base is retained for audit only, so a
+difference from the merge's non-head parent is not a failure. The job never
+follows a newer mutable PR merge ref. An unavailable event merge, or one that
+does not contain exactly one snapshotted head parent, fails closed. A later
+PR head change does not retarget an already queued run: it may execute only
+its previously trusted event revision if that revision remains fetchable. To
+run the new revision, the maintainer must review it and comment
+`/query-regression` again; cancel the old run if it is no longer wanted.
+
+The commenter must be in `QUERY_REGRESSION_COMMENT_ALLOWLIST` and have
+repository `admin` permission.
 
 Admission does not relax runner hardening or GitHub permissions. Keep the ECS
 instance free of cloud credentials and long-lived tokens, keep the security

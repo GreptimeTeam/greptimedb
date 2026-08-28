@@ -203,8 +203,8 @@ experiment matrix for those policy comparisons.
 case for issue #7913. It writes 8192 series × 20160 samples through remote-write
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
 TQL selectors. It is not included in the default `all` case set because ingestion
-cost dominates routine CI validation. Adding the `heavy-regression` PR label runs
-only this case; `query-regression` runs the six routine default cases. Manual
+cost dominates routine CI validation. Commenting `/query-regression heavy` runs
+only this case; `/query-regression` runs the six routine default cases. Manual
 workflow dispatch accepts the `heavy` token to select this case.
 
 ## OTLP trace load scenario
@@ -391,13 +391,28 @@ binaries. Candidate `query_perf_fixture` and `query_regression_runner` are the
 extra head-side helpers; `finalize-remote` uses candidate `greptime datanode
 parquetbench/scanbench` as the read-bench tool against each target's data directory.
 
-The workflow runs automatically only when `query-regression` or `heavy-regression`
-is added to a non-draft PR; it does not rerun on pushes, ready-for-review, or
-reopen events. `query-regression` runs the six routine default cases, while
-`heavy-regression` runs only the high-cardinality remote-write #7913 case. PR runs
-build base/candidate once and use `--allow-large-fixture`. Manual
-`workflow_dispatch` runs can pass `all`, `heavy`, one case path, or a
-comma/whitespace-separated list of case paths, and can override refs.
+The workflow runs when an allowlisted repository admin comments
+`/query-regression` on a non-draft PR. It does not rerun on pushes,
+ready-for-review, or reopen events. `/query-regression` runs the six routine
+default cases; `/query-regression heavy` runs only the high-cardinality
+remote-write #7913 case. PR runs build base/candidate once and
+use `--allow-large-fixture`. Manual `workflow_dispatch` runs can pass `all`,
+`heavy`, one case path, or a comma/whitespace-separated list of case paths, and
+can override refs.
+
+Comment admission is two workflows. `slash-command-dispatch.yml` uses
+[peter-evans/slash-command-dispatch](https://github.com/peter-evans/slash-command-dispatch)
+to parse the first line of a PR comment and, for `/query-regression`,
+`repository_dispatch` a payload with the comment, actor, args, and PR number.
+`query-regression-slash.yml` handles that event: it re-checks
+`QUERY_REGRESSION_COMMENT_ALLOWLIST` (comma/whitespace-separated GitHub logins)
+and repository `admin` permission, snapshots merge/head/base SHAs, and calls
+the reusable workflow. Dispatch requires `GH_PERSONAL_ACCESS_TOKEN` (`repo`
+scope); `GITHUB_TOKEN` cannot create `repository_dispatch` runs. The handler
+runs on the default branch, so it has secrets even for fork PRs. A later head
+change does not retarget an already queued run; comment `/query-regression`
+again after reviewing the new revision. To add another slash command, list it
+in the dispatcher and add a `repository_dispatch` handler.
 The main report artifact uploads only aggregate/per-target JSON reports,
 component logs, and `query-regression-summary.md` with seven-day retention;
 fixture data, SSTs, and cluster state are excluded. PR runs also upload a

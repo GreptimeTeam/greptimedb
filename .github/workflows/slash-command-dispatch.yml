@@ -1,0 +1,35 @@
+name: Slash Command Dispatch
+
+# ChatOps front door: parse `/command` on PR comments, check admin
+# permission, and repository_dispatch to a per-command handler. Handlers
+# own allowlists, SHA admission, and the actual work. Requires
+# GH_PERSONAL_ACCESS_TOKEN (repo scope); GITHUB_TOKEN cannot create
+# repository_dispatch runs.
+#
+# To add a command: list it under `commands` and add a workflow with
+# `on.repository_dispatch.types: ["<command>-command"]`.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  slash-command-dispatch:
+    name: Dispatch slash command
+    if: ${{ github.event.issue.pull_request && startsWith(github.event.comment.body, '/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Slash Command Dispatch
+        uses: peter-evans/slash-command-dispatch@v5
+        with:
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          permission: admin
+          issue-type: pull-request
+          commands: |
+            query-regression

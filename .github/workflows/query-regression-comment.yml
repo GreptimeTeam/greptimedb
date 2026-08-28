@@ -2,7 +2,8 @@ name: Query Regression Comment
 
 on:
   workflow_run:
-    workflows: ["Query Regression"]
+    workflows:
+      - Query Regression Command
     types: [completed]
 
 permissions:
@@ -13,9 +14,9 @@ permissions:
 jobs:
   comment:
     if: >-
-      ${{ github.event.workflow_run.event == 'pull_request' &&
-          github.event.workflow_run.conclusion != 'cancelled' &&
-          github.event.workflow_run.conclusion != 'skipped' }}
+      ${{ github.event.workflow_run.conclusion != 'cancelled' &&
+          github.event.workflow_run.conclusion != 'skipped' &&
+          github.event.workflow_run.event == 'repository_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

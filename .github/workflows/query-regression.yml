@@ -36,6 +36,28 @@ on:
         required: false
         type: string
         default: aliyun-ecs
+      pr_number:
+        description: >-
+          When set, treat this reusable call as PR admission (merge-SHA
+          verification, trusted helper scripts, sticky comment artifact)
+        required: false
+        type: string
+        default: ""
+      head_sha:
+        description: PR head SHA snapshotted at admission (required with pr_number)
+        required: false
+        type: string
+        default: ""
+      head_repo:
+        description: PR head repository full_name (required with pr_number)
+        required: false
+        type: string
+        default: ""
+      base_repo:
+        description: PR base repository full_name (required with pr_number)
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       case:
@@ -82,8 +104,6 @@ on:
         required: false
         type: boolean
         default: false
-  pull_request:
-    types: [labeled]
 
 permissions:
   contents: read
@@ -91,12 +111,10 @@ permissions:
 jobs:
   test-tooling:
     # Stdlib unittests for the workflow Python (case selection, report
-    # helpers, nightly SHA picking, and rendered ECS user-data). They do
-    # not talk to Aliyun or the Actions runner process; running them on
-    # ubuntu-latest fails fast before any ECS spend. Not gated on the
-    # regression labels: those labels boot a VM, these tests should not.
-    # Ordinary PRs also run the same tests from checks.yml, because this
-    # workflow only starts on `labeled` (or dispatch / workflow_call).
+    # helpers, nightly SHA picking, comment-command admission, and rendered
+    # ECS user-data). They do not talk to Aliyun or the Actions runner
+    # process; running them on ubuntu-latest fails fast before any ECS spend.
+    # Ordinary PRs also run the same tests from checks.yml.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -112,24 +130,16 @@ jobs:
           python3 tests/perf/test_query_regression_summary_otlp.py
           python3 tests/perf/test_query_regression_case_selection.py
           python3 tests/perf/test_query_regression_nightly_refs.py
+          python3 tests/perf/test_query_regression_slash.py
           python3 tests/perf/test_aliyun_ecs_runner_scripts.py
 
   provision:
-    # Runs when the aliyun-ecs path is selected: explicitly via the runner
-    # input, or for PR labels by default (a QUERY_REGRESSION_PR_RUNNER
-    # repository variable set to another value redirects PRs to that literal
-    # runner label instead). Uses trusted scripts from the PR base (or the
-    # dispatched ref), never from candidate code. Waits for test-tooling so
-    # a broken user-data template does not still create a VM.
+    # Runs when the aliyun-ecs path is selected via the runner input (PR
+    # comment admission can redirect with QUERY_REGRESSION_PR_RUNNER). Uses
+    # trusted scripts from the caller ref, never from candidate code. Waits
+    # for test-tooling so a broken user-data template does not still create a VM.
     needs: [test-tooling]
-    if: >-
-      ${{ !failure() && !cancelled() &&
-           ((github.event_name != 'pull_request' && inputs.runner == 'aliyun-ecs') ||
-            (github.event_name == 'pull_request' &&
-             !github.event.pull_request.draft &&
-             (github.event.label.name == 'query-regression' ||
-              github.event.label.name == 'heavy-regression') &&
-             (vars.QUERY_REGRESSION_PR_RUNNER || 'aliyun-ecs') == 'aliyun-ecs')) }}
+    if: ${{ !failure() && !cancelled() && inputs.runner == 'aliyun-ecs' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
@@ -141,7 +151,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Install uv
@@ -170,20 +180,11 @@ jobs:
     # lets the job run when provision was intentionally skipped because a
     # literal runner label was selected; a failed or cancelled provision still
     # blocks the run because no ECS runner would be waiting.
-    if: >-
-      ${{ !failure() && !cancelled() &&
-           (github.event_name != 'pull_request' ||
-            (github.event_name == 'pull_request' &&
-             !github.event.pull_request.draft &&
-             (github.event.label.name == 'query-regression' ||
-              github.event.label.name == 'heavy-regression'))) }}
-    runs-on: >-
-      ${{ needs.provision.outputs.label ||
-          (github.event_name != 'pull_request' && inputs.runner ||
-           (vars.QUERY_REGRESSION_PR_RUNNER || 'aliyun-ecs')) }}
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ${{ needs.provision.outputs.label || inputs.runner }}
     timeout-minutes: 180
     env:
-      CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
+      CARGO_PROFILE: ${{ inputs.cargo_profile }}
       CARGO_HOME: /home/runner/.cargo
       UV_CACHE_DIR: /home/runner/.cargo/uv-cache
       RUSTUP_HOME: /opt/rustup
@@ -198,11 +199,15 @@ jobs:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
       QUERY_REGRESSION_CACHE_EPOCH: "1"
-      BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
-      CANDIDATE_REF: ${{ github.event_name != 'pull_request' && (inputs.candidate_ref || github.ref) || '' }}
-      EVENT_MERGE_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
-      EVENT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
-      EVENT_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+      PR_ADMISSION: ${{ github.event_name == 'workflow_call' && inputs.pr_number != '' }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      HEAD_REPO: ${{ inputs.head_repo }}
+      BASE_REPO: ${{ inputs.base_repo }}
+      BASE_REF: ${{ inputs.base_ref }}
+      CANDIDATE_REF: ${{ inputs.candidate_ref || github.ref }}
+      EVENT_MERGE_SHA: ${{ github.event_name == 'workflow_call' && inputs.pr_number != '' && inputs.candidate_ref || '' }}
+      EVENT_HEAD_SHA: ${{ inputs.head_sha }}
+      EVENT_BASE_SHA: ${{ github.event_name == 'workflow_call' && inputs.pr_number != '' && inputs.base_ref || '' }}
       # Runner identity contract. The ECS image uses 1001; a manually prepared
       # host may override via repo variables when 1001 is already taken.
       EXPECTED_RUNNER_UID: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
@@ -271,7 +276,7 @@ jobs:
 
           fail_closed() {
             printf '%s\n' \
-              "PR changed or merge result unavailable; maintainer must remove and re-add the regression label after reviewing current revision. $1" >&2
+              "PR changed or merge result unavailable; maintainer must re-admit the current revision by commenting /query-regression. $1" >&2
             exit 1
           }
 
@@ -313,7 +318,7 @@ jobs:
             exit 1
           }
 
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+          if [[ "${PR_ADMISSION}" == "true" ]]; then
             for identity in EVENT_MERGE_SHA EVENT_HEAD_SHA EVENT_BASE_SHA; do
               value="${!identity-}"
               is_full_sha "${value}" || fail_closed "Missing or invalid ${identity}."
@@ -387,7 +392,7 @@ jobs:
         run: |
           set -euo pipefail
           helper_ref="${VERIFIED_CANDIDATE_SHA}"
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+          if [[ "${PR_ADMISSION}" == "true" ]]; then
             helper_ref="${VERIFIED_BASE_SHA}"
           fi
           mkdir -p "${GITHUB_WORKSPACE}/query-regression-trusted-scripts"
@@ -731,16 +736,16 @@ jobs:
       - name: Run query regression
         id: run
         env:
-          CASE_PATHS: ${{ github.event_name == 'pull_request' && (github.event.label.name == 'heavy-regression' && 'heavy' || 'all') || inputs.case }}
-          HTTP_TIMEOUT: ${{ github.event_name == 'pull_request' && '300' || inputs.http_timeout }}
-          ALLOW_LARGE_FIXTURE: ${{ github.event_name == 'pull_request' && 'true' || inputs.allow_large_fixture }}
+          CASE_PATHS: ${{ inputs.case }}
+          HTTP_TIMEOUT: ${{ inputs.http_timeout }}
+          ALLOW_LARGE_FIXTURE: ${{ inputs.allow_large_fixture }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CASE_NAME: ${{ github.event_name == 'pull_request' && (github.event.label.name == 'heavy-regression' && 'heavy case set' || 'default case set') || inputs.case }}
+          CASE_NAME: ${{ inputs.case }}
           BASE_BIN: ${{ github.workspace }}/query-regression-bins/base/greptime
           CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
           OTELGEN_BIN: /usr/local/bin/otelgen
-          SUMMARY_SCRIPT: ${{ github.event_name == 'pull_request' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
+          SUMMARY_SCRIPT: ${{ github.event_name == 'workflow_call' && inputs.pr_number != '' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
           QUERY_REGRESSION_RUNNER: ${{ github.workspace }}/query-regression-bins/candidate/query_regression_runner
         run: >-
           uv run --no-project python src/.github/scripts/query-regression-run.py
@@ -749,13 +754,9 @@ jobs:
           --summary-script "${SUMMARY_SCRIPT}"
 
       - name: Write PR metadata for trusted comment workflow
-        if: ${{ always() && github.event_name == 'pull_request' }}
+        if: ${{ always() && github.event_name == 'workflow_call' && inputs.pr_number != '' }}
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: uv run --no-project python query-regression-trusted-scripts/query-regression-pr-metadata.py
@@ -777,7 +778,7 @@ jobs:
           retention-days: 7
 
       - name: Upload trusted comment artifact
-        if: ${{ always() && github.event_name == 'pull_request' }}
+        if: ${{ always() && github.event_name == 'workflow_call' && inputs.pr_number != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: query-regression-comment
@@ -863,7 +864,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Install uv

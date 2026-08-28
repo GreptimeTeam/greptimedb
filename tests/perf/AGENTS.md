@@ -20,6 +20,13 @@
   waits for a successful Nightly Build, then calls `query-regression.yml`
   with the previous vs current nightly SHAs. Keep SHA selection in
   `.github/scripts/query-regression-nightly-refs.py`.
+- PR comment admission is two workflows: `slash-command-dispatch.yml`
+  (peter-evans/slash-command-dispatch) decides whether a `/command` should
+  run and `repository_dispatch`es payload context; `query-regression-slash.yml`
+  handles `/query-regression` (allowlist, merge SHA, reusable call). Keep
+  case-arg validation in `.github/scripts/query-regression-slash.py`. There
+  is no PR-label trigger. To add another command, list it in the dispatcher
+  and add a `repository_dispatch` handler.
 - The case DSL is not required to keep compatibility inside this PR. When the
   DSL changes, update TOML cases, the outer lifecycle script, Rust helpers, and
   docs together.
@@ -35,8 +42,7 @@
 - Before pushing perf harness changes, run at least:
   - the Python tests in the `test-tooling` job of
     `.github/workflows/query-regression.yml` (ubuntu-latest, not the ECS runner).
-    The Checks workflow runs the same tests on ordinary PRs so they are not
-    gated on the `query-regression` / `heavy-regression` labels.
+    The Checks workflow runs the same tests on ordinary PRs.
   - `cargo fmt --all -- --check`
   - `cargo build -p cmd --bin query_perf_fixture --features dev-tools`
   - `cargo build -p cmd --bin query_regression_runner --features dev-tools`

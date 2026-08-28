@@ -305,6 +305,133 @@ test('escapes Markdown table content, including bare carriage returns', () => {
   assert.doesNotMatch(table, /hidden|comment|drop|\r/);
 });
 
+test('posts a comment-command report without treating workflow_run as the PR head', async () => {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+
+  try {
+    fs.mkdirSync(artifactDir);
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify({
+      run_id: 202,
+      run_attempt: 1,
+      base_repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'pr-head-sha',
+      head_repo: 'fork/repo',
+      built_base_sha: 'base-sha',
+      event_base_sha: 'event-base-sha',
+      candidate_sha: 'merge-sha',
+    }));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = '202';
+    process.env.WORKFLOW_RUN_ATTEMPT = '1';
+
+    await handler({
+      core: {
+        info() {},
+        warning() {},
+        setOutput(name, value) { outputs.set(name, value); },
+      },
+      context: {
+        repo: { owner: 'owner', repo: 'repo' },
+        payload: {
+          workflow_run: {
+            event: 'repository_dispatch',
+            head_sha: 'default-branch-sha',
+            head_repository: { full_name: 'owner/repo' },
+            pull_requests: [],
+          },
+        },
+      },
+      github: {
+        rest: {
+          pulls: {
+            get: async () => ({
+              data: {
+                state: 'open',
+                base: { repo: { full_name: 'owner/repo' } },
+                head: { repo: { full_name: 'fork/repo' }, sha: 'pr-head-sha' },
+              },
+            }),
+          },
+        },
+      },
+    });
+
+    assert.equal(outputs.get('should_post'), 'true');
+    assert.equal(outputs.get('pr_number'), '42');
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});
+
+test('skips reports produced by a pull_request workflow_run', async () => {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+  const infos = [];
+
+  try {
+    fs.mkdirSync(artifactDir);
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify({
+      run_id: 303,
+      run_attempt: 1,
+      base_repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'head-sha',
+      head_repo: 'fork/repo',
+      built_base_sha: 'base-sha',
+      event_base_sha: 'event-base-sha',
+      candidate_sha: 'candidate-sha',
+    }));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = '303';
+    process.env.WORKFLOW_RUN_ATTEMPT = '1';
+
+    await handler({
+      core: {
+        info(message) { infos.push(message); },
+        warning() {},
+        setOutput(name, value) { outputs.set(name, value); },
+      },
+      context: {
+        repo: { owner: 'owner', repo: 'repo' },
+        payload: {
+          workflow_run: {
+            event: 'pull_request',
+            head_sha: 'head-sha',
+            head_repository: { full_name: 'fork/repo' },
+            pull_requests: [{ number: 42 }],
+          },
+        },
+      },
+      github: { rest: { pulls: { get: async () => { throw new Error('should not fetch PR'); } } } },
+    });
+
+    assert.equal(outputs.get('should_post'), 'false');
+    assert.match(infos.join('\n'), /not repository_dispatch/);
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});
+
 test('writes the explicit no-report summary without an empty table', async () => {
   const originalCwd = process.cwd();
   const originalRunId = process.env.WORKFLOW_RUN_ID;
@@ -340,10 +467,10 @@ test('writes the explicit no-report summary without an empty table', async () =>
         repo: { owner: 'owner', repo: 'repo' },
         payload: {
           workflow_run: {
-            event: 'pull_request',
-            head_sha: 'head-sha',
-            head_repository: { full_name: 'fork/repo' },
-            pull_requests: [{ number: 42 }],
+            event: 'repository_dispatch',
+            head_sha: 'default-branch-sha',
+            head_repository: { full_name: 'owner/repo' },
+            pull_requests: [],
           },
         },
       },
