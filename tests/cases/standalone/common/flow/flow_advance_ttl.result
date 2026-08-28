@@ -178,7 +178,6 @@ FROM
 
 Error: 1004(InvalidArguments), Invalid SQL, error: flow 'test_distinct_basic' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode; use a TTL longer than the flush interval
 
--- the flow must not have been created
 SELECT count(*) FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'test_distinct_basic';
 
 +----------+

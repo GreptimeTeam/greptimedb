@@ -168,8 +168,6 @@ impl InformationSchemaFlows {
             if_not_exists: true,
             expire_after: flow_info.expire_after(),
             eval_interval: flow_info.eval_interval(),
-            // Derive the offset from the effective typed schedule anchor. A zero
-            // anchor (default) is omitted on display.
             eval_offset: effective_eval_schedule_from_flow_info(flow_info)
                 .map_err(BoxedError::new)
                 .context(InternalSnafu)?
@@ -531,7 +529,6 @@ mod tests {
             "internal key must be absent, got:\n{sql}"
         );
 
-        // The generated statement must reparse.
         let stmts = ParserContext::create_with_dialect(
             &sql,
             &GreptimeDbDialect {},

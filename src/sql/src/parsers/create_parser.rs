@@ -2050,7 +2050,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 _ => panic!("{:?}", stmts[0]),
             }
         }
-        // roundtrip: 1 hour interval + 2 minutes offset
         let sql = r#"
 CREATE FLOW task_1
 SINK TO schema_1.table_1
@@ -2069,7 +2068,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
         let recreated = parse_create_flow(&show_create);
         assert_eq!(recreated, create_task, "input sql is:\n{show_create}");
 
-        // case-insensitive syntax
         let sql = r#"
 create flow task_2
 sink to schema_1.table_1
@@ -2097,7 +2095,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
             "zero offset should be omitted on display"
         );
 
-        // offset without interval is rejected
         let sql = r#"
 CREATE FLOW task_4
 SINK TO schema_1.table_1
@@ -2113,7 +2110,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
             "unexpected error: {err}"
         );
 
-        // invalid offsets: negative, equal to interval, greater than interval
         for (offset, interval) in [
             ("-1 seconds", "1 hour"),
             ("1 hour", "1 hour"),
@@ -2141,7 +2137,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;"#
             );
         }
 
-        // fractional-second offset is rejected
         let sql = r#"
 CREATE FLOW task_fractional_offset
 SINK TO schema_1.table_1
@@ -2158,7 +2153,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
             "unexpected error: {err}"
         );
 
-        // fractional-second interval with offset is rejected
         let sql = r#"
 CREATE FLOW task_fractional_interval
 SINK TO schema_1.table_1

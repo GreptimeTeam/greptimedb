@@ -217,7 +217,6 @@ pub fn select_due_scheduled_times(
     let wall_now = i128::from(wall_now_secs);
     let interval = i128::from(interval);
 
-    // Number of due scheduled times in `[first_due, wall_now]`.
     let total_count = (wall_now - first_due) / interval + 1;
     // `first_due >= 0` and `wall_now <= i64::MAX`, so this always fits in u64.
     let total_count = u64::try_from(total_count).map_err(|_| {
@@ -415,7 +414,6 @@ mod test {
             max_runs: 3,
             max_lag_secs: 3600,
         };
-        // Nothing due before start.
         assert_eq!(
             select_due_scheduled_times(&s, 0, 100)
                 .unwrap()
@@ -430,7 +428,6 @@ mod test {
         for t in &due.scheduled_times_secs {
             assert_eq!((t - 120) % 3600, 0);
         }
-        // Cursor strictly after start advances to the next phase boundary.
         assert_eq!(s.next_scheduled_time_after(3720).unwrap(), 7320);
         assert_eq!(s.next_scheduled_time_after(7300).unwrap(), 7320);
     }

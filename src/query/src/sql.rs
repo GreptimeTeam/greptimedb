@@ -1228,8 +1228,6 @@ pub fn show_create_flow(
         if_not_exists: true,
         expire_after: flow_val.expire_after(),
         eval_interval: flow_val.eval_interval(),
-        // Derive the offset from the effective typed schedule anchor. A zero
-        // anchor (default) is omitted on display.
         eval_offset: effective_eval_schedule_from_flow_info(&flow_val)
             .map_err(BoxedError::new)
             .context(error::QueryExecutionSnafu)?

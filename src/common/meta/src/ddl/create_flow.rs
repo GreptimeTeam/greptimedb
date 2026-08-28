@@ -524,7 +524,6 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         .fail();
     }
 
-    // Reject internal transport keys (never accepted from user input).
     for key in [INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY] {
         if flow_task.flow_options.contains_key(key) {
             return UnexpectedSnafu {
@@ -700,7 +699,6 @@ pub(crate) fn resolve_schedule_defaults_into_task(
         return Ok(());
     }
 
-    // EVAL OFFSET defines the epoch phase: `anchor + k * interval`.
     let anchor_secs = task.eval_offset_secs.unwrap_or(0);
 
     // Defense: `validate_flow_options` (called before this in `on_prepare`)
@@ -723,7 +721,6 @@ pub(crate) fn resolve_schedule_defaults_into_task(
         }
     }
 
-    // --- Compute start ---
     // New flow, or OR REPLACE with changed interval/offset: start at the next
     // aligned boundary strictly after the exact prepare instant, rounded up to
     // the next whole second so the first boundary is never in the past. The

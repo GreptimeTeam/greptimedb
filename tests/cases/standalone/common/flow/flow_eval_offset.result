@@ -50,7 +50,6 @@ INSERT INTO eval_offset_input VALUES
 
 Affected Rows: 2
 
--- Let the scheduled flow evaluate at least once.
 -- SQLNESS SLEEP 5s
 -- Prove the offset phase: every row the offset flow wrote has an odd
 -- second-of-minute (1 + 2k is always odd). This is deterministic regardless
@@ -66,7 +65,6 @@ FROM eval_offset_phase_sink;
 | true            | true                       |
 +-----------------+----------------------------+
 
--- Invalid syntax / validation cases.
 CREATE FLOW invalid_eval_offset_no_interval
 SINK TO invalid_eval_offset_sink
 EVAL OFFSET '1s'

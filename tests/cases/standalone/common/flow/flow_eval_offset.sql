@@ -25,7 +25,6 @@ INSERT INTO eval_offset_input VALUES
   (now(), 'a', 1.0),
   (now(), 'b', 2.0);
 
--- Let the scheduled flow evaluate at least once.
 -- SQLNESS SLEEP 5s
 
 -- Prove the offset phase: every row the offset flow wrote has an odd
@@ -36,7 +35,6 @@ SELECT
   bool_and(date_part('second', ts)::BIGINT % 2 = 1) AS offset_flow_at_odd_seconds
 FROM eval_offset_phase_sink;
 
--- Invalid syntax / validation cases.
 CREATE FLOW invalid_eval_offset_no_interval
 SINK TO invalid_eval_offset_sink
 EVAL OFFSET '1s'

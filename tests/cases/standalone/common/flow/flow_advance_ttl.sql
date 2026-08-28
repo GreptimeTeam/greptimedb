@@ -80,7 +80,6 @@ SELECT
 FROM
     distinct_basic;
 
--- the flow must not have been created
 SELECT count(*) FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'test_distinct_basic';
 
 DROP TABLE distinct_basic;

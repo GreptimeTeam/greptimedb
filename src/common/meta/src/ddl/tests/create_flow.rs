@@ -381,7 +381,6 @@ fn test_validate_flow_options_rejects_internal_transport_keys() {
 
 #[test]
 fn test_validate_flow_options_rejects_invalid_eval_offset() {
-    // offset without interval
     let mut task = test_create_flow_task(
         "my_flow",
         vec![],
@@ -397,7 +396,6 @@ fn test_validate_flow_options_rejects_invalid_eval_offset() {
         "unexpected error: {err}"
     );
 
-    // negative / equal / greater than interval
     for offset_secs in [-1, 300, 301] {
         let mut task = test_create_flow_task(
             "my_flow",
@@ -415,7 +413,6 @@ fn test_validate_flow_options_rejects_invalid_eval_offset() {
         );
     }
 
-    // valid offsets are accepted
     for offset_secs in [0, 1, 299] {
         let mut task = test_create_flow_task(
             "my_flow",
@@ -576,7 +573,6 @@ fn test_resolve_schedule_with_eval_offset_uses_epoch_phase() {
     resolve_schedule_defaults_into_task(&mut task, None).unwrap();
     let sched = task.eval_schedule.as_ref().unwrap();
     assert_eq!(sched.anchor_secs, 120);
-    // start is a boundary >= the prepare ceil
     assert!(sched.start_secs >= prepare_ceil);
     assert_eq!((sched.start_secs - 120) % 3600, 0);
 
@@ -623,7 +619,6 @@ fn test_resolve_schedule_with_eval_offset_uses_epoch_phase() {
 fn test_resolve_schedule_or_replace_preserves_and_recomputes() {
     let sink = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
 
-    // Original flow: interval 3600, offset 120, resolved with a fixed start.
     let mut task = test_create_flow_task("my_flow", vec![], sink.clone(), false);
     task.or_replace = false;
     task.eval_interval_secs = Some(3600);
@@ -639,7 +634,6 @@ fn test_resolve_schedule_or_replace_preserves_and_recomputes() {
         1_700_000_000,
     );
 
-    // OR REPLACE with the same interval+offset preserves the full schedule.
     let mut replace_same = test_create_flow_task("my_flow", vec![], sink.clone(), false);
     replace_same.or_replace = true;
     replace_same.eval_interval_secs = Some(3600);
@@ -647,7 +641,6 @@ fn test_resolve_schedule_or_replace_preserves_and_recomputes() {
     resolve_schedule_defaults_into_task(&mut replace_same, Some(&prev_info)).unwrap();
     assert_eq!(replace_same.eval_schedule, Some(original_sched.clone()));
 
-    // OR REPLACE with a changed offset recomputes (anchor must change).
     let mut replace_changed = test_create_flow_task("my_flow", vec![], sink.clone(), false);
     replace_changed.or_replace = true;
     replace_changed.eval_interval_secs = Some(3600);
@@ -658,7 +651,6 @@ fn test_resolve_schedule_or_replace_preserves_and_recomputes() {
     assert_eq!((recomputed.start_secs - 180) % 3600, 0);
     assert_ne!(recomputed.start_secs, original_sched.start_secs);
 
-    // OR REPLACE with a changed interval recomputes.
     let mut replace_interval = test_create_flow_task("my_flow", vec![], sink.clone(), false);
     replace_interval.or_replace = true;
     replace_interval.eval_interval_secs = Some(1800);
@@ -669,7 +661,6 @@ fn test_resolve_schedule_or_replace_preserves_and_recomputes() {
         120
     );
 
-    // OR REPLACE with omitted offset resets to zero anchor (recompute).
     let mut replace_omitted = test_create_flow_task("my_flow", vec![], sink, false);
     replace_omitted.or_replace = true;
     replace_omitted.eval_interval_secs = Some(3600);
@@ -700,7 +691,6 @@ fn test_create_flow_task_serde_defaults_for_old_data() {
     let task: CreateFlowTask = serde_json::from_str(json).unwrap();
     assert_eq!(task.eval_offset_secs, None);
     assert_eq!(task.eval_interval_secs, Some(300));
-    // round-trips
     let encoded = serde_json::to_string(&task).unwrap();
     let decoded: CreateFlowTask = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded.eval_offset_secs, None);
@@ -738,7 +728,6 @@ fn test_create_flow_task_proto_roundtrip_preserves_offset_key() {
     );
 
     let pb: api::v1::meta::CreateFlowTask = task.clone().into();
-    // The key must survive the typed -> proto conversion.
     assert_eq!(
         pb.create_flow
             .as_ref()
@@ -750,7 +739,6 @@ fn test_create_flow_task_proto_roundtrip_preserves_offset_key() {
 
     let parsed = CreateFlowTask::try_from(pb).unwrap();
     assert_eq!(parsed.eval_offset_secs, Some(120));
-    // The key is stripped from the parsed task's options.
     assert!(
         !parsed
             .flow_options

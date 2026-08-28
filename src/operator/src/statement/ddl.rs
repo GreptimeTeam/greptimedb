@@ -896,16 +896,13 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)
     }
 
-    /// Determine the flow type based on the SQL query
-    ///
-    /// If it contains aggregation or distinct, then it is a batch flow, otherwise it is a streaming flow
+    /// Determines the flow type from source-table state, schedule requirements,
+    /// and SQL shape.
     async fn determine_flow_type(
         &self,
         expr: &CreateFlowExpr,
         query_ctx: QueryContextRef,
     ) -> Result<FlowType> {
-        // A flow with `EVAL INTERVAL` must use the batching scheduler so the
-        // fixed epoch-phase schedule (including any `EVAL OFFSET`) is honored.
         let has_eval_interval = expr.eval_interval.is_some();
 
         let mut has_missing_source_table = false;
@@ -3452,7 +3449,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             );
         }
 
-        // A benign expr (no internal keys) passes the guard.
         let flow_options =
             HashMap::from([("defer_on_missing_source".to_string(), "true".to_string())]);
         assert!(reject_spoofed_internal_flow_transport_keys(&flow_options).is_ok());

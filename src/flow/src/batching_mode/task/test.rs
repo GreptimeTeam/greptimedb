@@ -195,7 +195,6 @@ async fn test_non_aggregate_scheduled_sql_honors_eval_offset_phase() {
     })
     .unwrap();
 
-    // The offset anchor survives into the task config: it is not dropped.
     let stored = task.config.eval_schedule.as_ref().unwrap();
     assert_eq!(stored.anchor_secs, 120);
     assert_eq!(stored.start_secs, 3720);
@@ -842,10 +841,7 @@ async fn test_scheduled_time_now_is_bound_to_selected_attempt() {
 /// errors, representable values are exact.
 #[test]
 fn test_scheduled_loop_arithmetic_near_i64_boundary() {
-    // --- initial_schedule_cursor: exact difference, never saturated ---
-    // Ordinary schedule: cursor is exactly one interval before start.
     assert_eq!(initial_schedule_cursor(3720, 3600).unwrap(), 120);
-    // Near i64::MAX: the exact difference, no clamping to i64::MAX.
     assert_eq!(
         initial_schedule_cursor(i64::MAX, 3600).unwrap(),
         i64::MAX - 3600
@@ -854,13 +850,11 @@ fn test_scheduled_loop_arithmetic_near_i64_boundary() {
     // a saturated cursor equal to start that would silently skip the first
     // scheduled tick.
     assert!(initial_schedule_cursor(i64::MIN, 3600).is_err());
-    // start just above i64::MIN: the exact i64::MIN cursor is representable.
     assert_eq!(
         initial_schedule_cursor(i64::MIN + 3600, 3600).unwrap(),
         i64::MIN
     );
 
-    // --- scheduled_time_millis: exact product, never saturated ---
     assert_eq!(
         scheduled_time_millis(1_700_000_000).unwrap(),
         1_700_000_000_000
@@ -873,7 +867,6 @@ fn test_scheduled_loop_arithmetic_near_i64_boundary() {
     assert!(err.to_string().contains("milliseconds"), "{err}");
     assert!(scheduled_time_millis(i64::MAX).is_err());
 
-    // --- sleep_delta_secs: no i64 subtraction overflow, no wrap ---
     // The widest representable gap (i64::MIN..=i64::MAX) is exactly u64::MAX;
     // subtracting in i64 would panic in debug and wrap in release, so the
     // i128 path must return the exact u64 value.
