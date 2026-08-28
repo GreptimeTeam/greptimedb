@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use session::context::QueryContext;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -49,22 +49,28 @@ use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::refill::RefillTask;
+use crate::adapter::stateless::StatelessFlow;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 pub(crate) use crate::adapter::worker::{Worker, WorkerHandle, create_worker};
 use crate::batching_mode::BatchingModeOptions;
+use crate::batching_mode::frontend_client::FrontendClient;
+use crate::batching_mode::utils::sql_to_df_plan;
 use crate::compute::ErrCollector;
-use crate::df_optimizer::sql_to_flow_plan;
-use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
+use crate::error::{
+    EvalSnafu, ExternalSnafu, InsertIntoFlowSnafu, InternalSnafu, InvalidQuerySnafu,
+    UnexpectedSnafu,
+};
 use crate::expr::Batch;
-use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
-use crate::repr::{self, BATCH_SIZE, DiffRow, RelationDesc, Row};
+use crate::metrics::{METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
+use crate::repr::{self, BATCH_SIZE, ColumnType, DiffRow, RelationDesc, Row};
 use crate::{CreateFlowArgs, FlowId, TableName};
 
 pub(crate) mod flownode_impl;
 mod parse_expr;
 pub(crate) mod refill;
 mod stat;
+pub(crate) mod stateless;
 #[cfg(test)]
 mod tests;
 pub(crate) mod util;
@@ -75,6 +81,27 @@ pub(crate) mod table_source;
 
 use crate::FrontendInvoker;
 use crate::error::Error;
+
+fn relation_desc_from_df_schema(
+    schema: &datafusion_common::DFSchema,
+) -> Result<RelationDesc, Error> {
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            ConcreteDataType::try_from(field.data_type())
+                .map(|data_type| {
+                    (
+                        field.name().clone(),
+                        ColumnType::new(data_type, field.is_nullable()),
+                    )
+                })
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RelationDesc::from_names_and_types(columns))
+}
 
 fn expire_after_secs_to_millis(expire_after_secs: i64) -> Result<repr::Duration, Error> {
     ensure!(
@@ -177,6 +204,8 @@ pub struct StreamingEngine {
     worker_selector: Mutex<usize>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     pub query_engine: Arc<dyn QueryEngine>,
+    /// The frontend client used for direct sink writes.
+    pub frontend_client: Arc<FrontendClient>,
     /// Getting table name and table schema from table info manager
     table_info_source: ManagedTableSource,
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
@@ -185,6 +214,7 @@ pub struct StreamingEngine {
     /// Contains all refill tasks
     refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
+    stateless_flows: RwLock<BTreeMap<FlowId, StatelessFlow>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
     /// This node id is only available in distributed mode, on standalone mode this is guaranteed to be `None`
@@ -207,6 +237,7 @@ impl StreamingEngine {
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
+        frontend_client: Arc<FrontendClient>,
     ) -> Self {
         let srv_map = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
@@ -219,11 +250,13 @@ impl StreamingEngine {
             worker_handles,
             worker_selector: Mutex::new(0),
             query_engine,
+            frontend_client,
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
             node_context: RwLock::new(node_context),
             refill_tasks: Default::default(),
             flow_err_collectors: Default::default(),
+            stateless_flows: Default::default(),
             src_send_buf_lens: Default::default(),
             tick_manager,
             node_id,
@@ -236,9 +269,10 @@ impl StreamingEngine {
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
+        frontend_client: Arc<FrontendClient>,
         num_workers: usize,
     ) -> (Self, Vec<Worker<'s>>) {
-        let mut zelf = Self::new(node_id, query_engine, table_meta);
+        let mut zelf = Self::new(node_id, query_engine, table_meta, frontend_client);
 
         let workers: Vec<_> = (0..num_workers)
             .map(|_| {
@@ -713,20 +747,32 @@ impl StreamingEngine {
         rows: Vec<DiffRow>,
         batch_datatypes: &[ConcreteDataType],
     ) -> Result<(), Error> {
-        let rows_len = rows.len();
         let table_id = region_id.table_id();
-        let _timer = METRIC_FLOW_INSERT_ELAPSED
-            .with_label_values(&[table_id.to_string().as_str()])
-            .start_timer();
-        self.node_context
+        let flows = self
+            .stateless_flows
             .read()
             .await
-            .send(table_id, rows, batch_datatypes)
-            .await?;
-        trace!(
-            "Handling write request for table_id={} with {} rows",
-            table_id, rows_len
-        );
+            .values()
+            .filter(|flow| flow.source_table_id == table_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for flow in flows {
+            stateless::execute(
+                &flow,
+                &rows,
+                batch_datatypes,
+                &self.query_engine,
+                &self.frontend_client,
+            )
+            .await
+            .map_err(|err| {
+                InsertIntoFlowSnafu {
+                    region_id: u64::from(region_id),
+                    flow_ids: vec![],
+                }
+                .into_error(BoxedError::new(err))
+            })?;
+        }
         Ok(())
     }
 }
@@ -735,13 +781,17 @@ impl StreamingEngine {
 impl StreamingEngine {
     /// remove a flow by it's id
     pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
-        for handle in self.worker_handles.iter() {
-            if handle.contains_flow(flow_id).await? {
-                handle.remove_flow(flow_id).await?;
-                break;
+        let is_stateless = self.stateless_flows.read().await.contains_key(&flow_id);
+        if !is_stateless {
+            for handle in self.worker_handles.iter() {
+                if handle.contains_flow(flow_id).await? {
+                    handle.remove_flow(flow_id).await?;
+                    self.node_context.write().await.remove_flow(flow_id);
+                    break;
+                }
             }
         }
-        self.node_context.write().await.remove_flow(flow_id);
+        self.stateless_flows.write().await.remove(&flow_id);
         Ok(())
     }
 
@@ -755,43 +805,45 @@ impl StreamingEngine {
             flow_id,
             sink_table_name,
             source_table_ids,
-            create_if_not_exists,
-            or_replace,
+            create_if_not_exists: _,
+            or_replace: _,
             expire_after: expire_after_secs,
             eval_interval: _,
-            comment,
+            comment: _,
             sql,
-            flow_options,
+            flow_options: _,
             query_ctx,
             ..
         } = args;
-        let expire_after = expire_after_secs
+        let _expire_after = expire_after_secs
             .map(expire_after_secs_to_millis)
             .transpose()?;
 
-        let mut node_ctx = self.node_context.write().await;
-        // assign global id to source and sink table
-        for source in &source_table_ids {
-            node_ctx
-                .assign_global_id_to_table(&self.table_info_source, None, Some(*source))
-                .await?;
-        }
-        node_ctx
-            .assign_global_id_to_table(&self.table_info_source, Some(sink_table_name.clone()), None)
-            .await?;
+        ensure!(
+            source_table_ids.len() == 1,
+            InvalidQuerySnafu {
+                reason: "Stateless streaming flow does not support multiple source tables",
+            }
+        );
 
-        node_ctx.register_task_src_sink(flow_id, &source_table_ids, sink_table_name.clone());
-
-        node_ctx.query_context = query_ctx.map(Arc::new);
-        // construct a active dataflow state with it
-        let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
-
+        // Build and retain a normal DataFusion plan. It is substituted with the
+        // request-local provider when a mirror write arrives. Do not register
+        // this flow in the legacy worker context: stateless flows have no graph,
+        // replay state, or shared query context.
+        let query_ctx = query_ctx.map(Arc::new).context(UnexpectedSnafu {
+            reason: "Query context is missing",
+        })?;
+        let flow_plan =
+            sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, true).await?;
+        stateless::validate_plan(&flow_plan)?;
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
 
         // check schema against actual table schema if exists
         // if not exist create sink table immediately
         if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(&sink_table_name).await? {
-            let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
+            let auto_schema = relation_desc_to_column_schemas_with_fallback(
+                &relation_desc_from_df_schema(flow_plan.schema())?,
+            );
 
             // for column schema, only `data_type` need to be check for equality
             // since one can omit flow's column name when write flow query
@@ -838,7 +890,7 @@ impl StreamingEngine {
                 .create_table_from_relation(
                     &format!("flow-id={flow_id}"),
                     &sink_table_name,
-                    &flow_plan.schema,
+                    &relation_desc_from_df_schema(flow_plan.schema())?,
                 )
                 .await?;
             if !did_create {
@@ -849,48 +901,41 @@ impl StreamingEngine {
             }
         }
 
-        node_ctx.add_flow_plan(flow_id, flow_plan.clone());
-
-        let _ = comment;
-        let _ = flow_options;
-
-        // TODO(discord9): add more than one handles
-        let sink_id = node_ctx.table_repr.get_by_name(&sink_table_name).unwrap().1;
-        let sink_sender = node_ctx.get_sink_by_global_id(&sink_id)?;
-
-        let source_ids = source_table_ids
-            .iter()
-            .map(|id| node_ctx.table_repr.get_by_table_id(id).unwrap().1)
-            .collect_vec();
-        let source_receivers = source_ids
-            .iter()
-            .map(|id| {
-                node_ctx
-                    .get_source_by_global_id(id)
-                    .map(|s| s.get_receiver())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let err_collector = ErrCollector::default();
-        self.flow_err_collectors
-            .write()
-            .await
-            .insert(flow_id, err_collector.clone());
-        // TODO(discord9): load balance?
-        let handle = self.get_worker_handle_for_create_flow().await;
-        let create_request = worker::Request::Create {
+        let source_table_id = *source_table_ids.first().context(InvalidQuerySnafu {
+            reason: "Stateless streaming flow requires one source table",
+        })?;
+        ensure!(
+            source_table_ids.len() == 1,
+            InvalidQuerySnafu {
+                reason: "Stateless streaming flow does not support multiple source tables",
+            }
+        );
+        let source_table_name = self
+            .table_info_source
+            .get_table_name(&source_table_id)
+            .await?;
+        let source_schema = self
+            .table_info_source
+            .get_table_info_value(&source_table_id)
+            .await?
+            .context(UnexpectedSnafu {
+                reason: "Source table metadata is missing",
+            })?
+            .table_info
+            .meta
+            .schema;
+        self.stateless_flows.write().await.insert(
             flow_id,
-            plan: flow_plan,
-            sink_id,
-            sink_sender,
-            source_ids,
-            src_recvs: source_receivers,
-            expire_after,
-            or_replace,
-            create_if_not_exists,
-            err_collector,
-        };
+            StatelessFlow {
+                source_table_id,
+                source_table_name,
+                source_schema,
+                sink_table_name: sink_table_name.clone(),
+                plan: flow_plan,
+                query_ctx,
+            },
+        );
 
-        handle.create_flow(create_request).await?;
         info!("Successfully create flow with id={}", flow_id);
         Ok(Some(flow_id))
     }
@@ -910,15 +955,20 @@ impl StreamingEngine {
         Ok(row)
     }
 
+    pub(crate) async fn stateless_flow_ids(&self) -> Vec<FlowId> {
+        self.stateless_flows.read().await.keys().copied().collect()
+    }
+
     pub async fn flow_exist_inner(&self, flow_id: FlowId) -> Result<bool, Error> {
-        let mut exist = false;
+        if self.stateless_flows.read().await.contains_key(&flow_id) {
+            return Ok(true);
+        }
         for handle in self.worker_handles.iter() {
             if handle.contains_flow(flow_id).await? {
-                exist = true;
-                break;
+                return Ok(true);
             }
         }
-        Ok(exist)
+        Ok(false)
     }
 }
 

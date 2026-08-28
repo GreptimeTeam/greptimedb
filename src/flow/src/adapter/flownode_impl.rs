@@ -700,6 +700,11 @@ impl FlowEngine for FlowDualEngine {
 
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
+        let flow_type = match flow_type {
+            Some(flow_type) => Some(flow_type),
+            None if self.streaming_engine.flow_exist(flow_id).await? => Some(FlowType::Streaming),
+            None => None,
+        };
 
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
@@ -740,11 +745,12 @@ impl FlowEngine for FlowDualEngine {
 
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
         let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
-        // not using `flow_type.is_some()` to make sure the flow is actually exist in the underlying engine
+        // Check the underlying registry so stateless flows survive a missing
+        // routing-map entry during recovery.
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flow_exist(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flow_exist(flow_id).await,
-            None => Ok(false),
+            None => self.streaming_engine.flow_exist(flow_id).await,
         }
     }
 
@@ -988,13 +994,15 @@ impl FlowEngine for StreamingEngine {
     }
 
     async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
-        Ok(self
+        let mut flow_ids = self
             .flow_err_collectors
             .read()
             .await
             .keys()
             .cloned()
-            .collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        flow_ids.extend(self.stateless_flow_ids().await);
+        Ok(flow_ids)
     }
 
     async fn handle_flow_inserts(
