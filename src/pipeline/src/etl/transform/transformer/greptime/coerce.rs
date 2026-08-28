@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::{options_from_fulltext, options_from_inverted, options_from_skipping};
 use api::v1::{ColumnDataTypeExtension, ColumnOptions, JsonTypeExtension};
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
-use datatypes::extension::json::Json2ExtensionType;
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use datatypes::value::Value;
@@ -150,7 +152,9 @@ fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
     }?;
 
     if transform.type_ == ColumnDataType::Json {
-        let extension = Json2ExtensionType::default();
+        let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            transform.json_settings.clone().unwrap_or_default(),
+        )));
         let options = options.get_or_insert_default();
         options.options.insert(
             EXTENSION_TYPE_NAME_KEY.to_string(),
@@ -538,7 +542,8 @@ fn coerce_json_value(
         }
         ColumnDataType::Json => {
             let json = vrl_value_to_serde_json(v);
-            let encoded = if let Some(settings) = json_settings {
+            let encoded = if let Some(settings) = json_settings.or(transform.json_settings.as_ref())
+            {
                 settings.encode(json)
             } else {
                 JsonSettings::default().encode(json)
@@ -577,6 +582,7 @@ mod tests {
         Transform {
             fields: Fields::default(),
             type_,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -720,6 +726,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -747,6 +754,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -773,13 +781,11 @@ mod tests {
         )
         .unwrap();
         let mut transform = transform(ColumnDataType::Json);
+        transform.json_settings = Some(settings);
         transform.on_failure = Some(OnFailure::Ignore);
         let value: VrlValue = serde_json::json!({"age": "42"}).into();
 
-        assert_eq!(
-            coerce_value(&value, &transform, Some(&settings)).unwrap(),
-            None
-        );
+        assert_eq!(coerce_value(&value, &transform, None).unwrap(), None);
     }
 
     #[test]
@@ -787,6 +793,7 @@ mod tests {
         let mut transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -815,6 +822,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: Some(Index::Fulltext),
             index_options: Some(TransformIndexOptions::Fulltext(
@@ -846,6 +854,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int64,
+            json_settings: None,
             default: None,
             index: Some(Index::Skipping),
             index_options: Some(TransformIndexOptions::Skipping(
@@ -869,6 +878,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: Some(Index::Fulltext),
             index_options: Some(TransformIndexOptions::Skipping(
@@ -886,6 +896,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: None,
             index_options: Some(TransformIndexOptions::Fulltext(

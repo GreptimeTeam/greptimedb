@@ -150,6 +150,7 @@ impl GreptimeTransformer {
         let transform = Transform {
             fields: Fields::one(Field::new(greptime_timestamp().to_string(), None)),
             type_,
+            json_settings: None,
             default,
             index: Some(Index::Time),
             index_options: None,

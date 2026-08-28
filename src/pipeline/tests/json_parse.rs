@@ -19,8 +19,10 @@ use std::borrow::Cow;
 use api::v1::ColumnDataType;
 use api::v1::json_value::Value as JsonValue;
 use api::v1::value::ValueData;
-use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
-use datatypes::extension::json::Json2ExtensionType;
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 
 const INPUT_VALUE_OBJ: &str = r#"
 [
@@ -126,7 +128,11 @@ processors:
 
 transform:
   - field: commit
-    type: json2
+    type:
+      json2:
+        - path: "commitAuthor"
+          type: string
+          nullable: false
 "#;
 
     let output = common::parse_and_exec(INPUT_VALUE_OBJ, pipeline_yaml);
@@ -140,6 +146,16 @@ transform:
             .and_then(|options| options.options.get(EXTENSION_TYPE_NAME_KEY))
             .map(String::as_str),
         Some(Json2ExtensionType::NAME)
+    );
+    let metadata = output.schema[0]
+        .options
+        .as_ref()
+        .and_then(|options| options.options.get(EXTENSION_TYPE_METADATA_KEY))
+        .unwrap();
+    let metadata: JsonMetadata = serde_json::from_str(metadata).unwrap();
+    assert_eq!(
+        metadata.json_settings().type_hints()[0].path,
+        ["commitAuthor"]
     );
 
     let ValueData::JsonValue(value) = output.rows[0].values[0].value_data.as_ref().unwrap() else {

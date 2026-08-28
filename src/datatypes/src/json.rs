@@ -201,6 +201,20 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
                 .fail();
             }
         };
+        let non_finite_default = match &hint.default_constraint {
+            Some(ColumnDefaultConstraint::Value(Value::Float32(value))) => !value.0.is_finite(),
+            Some(ColumnDefaultConstraint::Value(Value::Float64(value))) => !value.0.is_finite(),
+            _ => false,
+        };
+        if non_finite_default {
+            return InvalidJson2LayoutSnafu {
+                reason: format!(
+                    "JSON2 type hint default for '{}' must be finite",
+                    hint.path.join(".")
+                ),
+            }
+            .fail();
+        }
         validate_type_hint(&mut object, &hint.path, data_type)?;
     }
     Ok(())
