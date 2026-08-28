@@ -76,7 +76,8 @@ pub struct Client {
 
 #[derive(Debug)]
 struct Inner {
-    channel_manager: ChannelManager,
+    query_channel_manager: ChannelManager,
+    control_channel_manager: ChannelManager,
     peers: RwLock<Peers>,
     load_balance: Loadbalancer,
     health_check_interval: Duration,
@@ -109,9 +110,19 @@ impl Inner {
         peers: Vec<String>,
         options: ClientOptions,
     ) -> Self {
+        Self::with_managers_and_peers(channel_manager.clone(), channel_manager, peers, options)
+    }
+
+    fn with_managers_and_peers(
+        query_channel_manager: ChannelManager,
+        control_channel_manager: ChannelManager,
+        peers: Vec<String>,
+        options: ClientOptions,
+    ) -> Self {
         let peer_count = peers.len();
         Self {
-            channel_manager,
+            query_channel_manager,
+            control_channel_manager,
             peers: RwLock::new(Peers {
                 addresses: peers,
                 states: PeerStates {
@@ -188,7 +199,7 @@ impl Inner {
     }
 
     async fn check_peer_health(&self, addr: &str) -> bool {
-        let Ok(channel) = self.channel_manager.get(addr) else {
+        let Ok(channel) = self.control_channel_manager.get(addr) else {
             return false;
         };
         let mut client = HealthCheckClient::new(channel);
@@ -269,9 +280,26 @@ impl Client {
         Self::with_manager_and_urls_and_options(channel_manager, urls, ClientOptions::default())
     }
 
-    /// Creates a client with a channel manager, URLs, and custom options.
-    pub fn with_manager_and_urls_and_options<U, A>(
-        channel_manager: ChannelManager,
+    pub(crate) fn with_managers_and_urls<U, A>(
+        query_channel_manager: ChannelManager,
+        control_channel_manager: ChannelManager,
+        urls: A,
+    ) -> Self
+    where
+        U: AsRef<str>,
+        A: AsRef<[U]>,
+    {
+        Self::with_managers_and_urls_and_options(
+            query_channel_manager,
+            control_channel_manager,
+            urls,
+            ClientOptions::default(),
+        )
+    }
+
+    fn with_managers_and_urls_and_options<U, A>(
+        query_channel_manager: ChannelManager,
+        control_channel_manager: ChannelManager,
         urls: A,
         options: ClientOptions,
     ) -> Self
@@ -285,12 +313,32 @@ impl Client {
             .map(|peer| peer.as_ref().to_string())
             .collect();
         Self {
-            inner: Arc::new(Inner::with_manager_and_peers(
-                channel_manager,
+            inner: Arc::new(Inner::with_managers_and_peers(
+                query_channel_manager,
+                control_channel_manager,
                 urls,
                 options,
             )),
         }
+    }
+
+    /// Creates a client with a channel manager, URLs, and custom options.
+    pub fn with_manager_and_urls_and_options<U, A>(
+        channel_manager: ChannelManager,
+        urls: A,
+        options: ClientOptions,
+    ) -> Self
+    where
+        U: AsRef<str>,
+        A: AsRef<[U]>,
+    {
+        let channel_manager_for_query = channel_manager.clone();
+        Self::with_managers_and_urls_and_options(
+            channel_manager_for_query,
+            channel_manager,
+            urls,
+            options,
+        )
     }
 
     pub fn start<U, A>(&self, urls: A)
@@ -350,7 +398,7 @@ impl Client {
 
         let channel = self
             .inner
-            .channel_manager
+            .control_channel_manager
             .get(&addr)
             .context(error::CreateChannelSnafu { addr: &addr })?;
         Ok((addr, channel))
@@ -358,7 +406,7 @@ impl Client {
 
     pub fn max_grpc_recv_message_size(&self) -> usize {
         self.inner
-            .channel_manager
+            .control_channel_manager
             .config()
             .max_recv_message_size
             .as_bytes() as usize
@@ -366,7 +414,7 @@ impl Client {
 
     pub fn max_grpc_send_message_size(&self) -> usize {
         self.inner
-            .channel_manager
+            .control_channel_manager
             .config()
             .max_send_message_size
             .as_bytes() as usize
@@ -377,11 +425,49 @@ impl Client {
         send_compression: bool,
         accept_compression: bool,
     ) -> Result<FlightClient> {
-        let (addr, channel) = self.find_channel()?;
+        self.make_flight_client_with_manager(
+            &self.inner.query_channel_manager,
+            send_compression,
+            accept_compression,
+        )
+    }
+
+    pub(crate) fn make_mutation_flight_client(
+        &self,
+        send_compression: bool,
+        accept_compression: bool,
+    ) -> Result<FlightClient> {
+        self.make_flight_client_with_manager(
+            &self.inner.control_channel_manager,
+            send_compression,
+            accept_compression,
+        )
+    }
+
+    fn make_flight_client_with_manager(
+        &self,
+        channel_manager: &ChannelManager,
+        send_compression: bool,
+        accept_compression: bool,
+    ) -> Result<FlightClient> {
+        self.trigger_health_check();
+        let addr = self
+            .inner
+            .get_peer()
+            .context(error::IllegalGrpcClientStateSnafu {
+                err_msg: "No available peer found",
+            })?;
+        let channel = channel_manager
+            .get(&addr)
+            .context(error::CreateChannelSnafu { addr: &addr })?;
 
         let mut client = FlightServiceClient::new(channel)
-            .max_decoding_message_size(self.max_grpc_recv_message_size())
-            .max_encoding_message_size(self.max_grpc_send_message_size());
+            .max_decoding_message_size(
+                channel_manager.config().max_recv_message_size.as_bytes() as usize
+            )
+            .max_encoding_message_size(
+                channel_manager.config().max_send_message_size.as_bytes() as usize
+            );
         // todo(hl): support compression methods.
         if send_compression {
             client = client.send_compressed(CompressionEncoding::Zstd);
@@ -396,16 +482,40 @@ impl Client {
     pub(crate) fn raw_region_client(&self) -> Result<(String, PbRegionClient<Channel>)> {
         let (addr, channel) = self.find_channel()?;
         let client = PbRegionClient::new(channel)
-            .max_decoding_message_size(self.max_grpc_recv_message_size())
-            .max_encoding_message_size(self.max_grpc_send_message_size());
+            .max_decoding_message_size(
+                self.inner
+                    .control_channel_manager
+                    .config()
+                    .max_recv_message_size
+                    .as_bytes() as usize,
+            )
+            .max_encoding_message_size(
+                self.inner
+                    .control_channel_manager
+                    .config()
+                    .max_send_message_size
+                    .as_bytes() as usize,
+            );
         Ok((addr, client))
     }
 
     pub(crate) fn raw_flow_client(&self) -> Result<(String, PbFlowClient<Channel>)> {
         let (addr, channel) = self.find_channel()?;
         let client = PbFlowClient::new(channel)
-            .max_decoding_message_size(self.max_grpc_recv_message_size())
-            .max_encoding_message_size(self.max_grpc_send_message_size())
+            .max_decoding_message_size(
+                self.inner
+                    .control_channel_manager
+                    .config()
+                    .max_recv_message_size
+                    .as_bytes() as usize,
+            )
+            .max_encoding_message_size(
+                self.inner
+                    .control_channel_manager
+                    .config()
+                    .max_send_message_size
+                    .as_bytes() as usize,
+            )
             .accept_compressed(CompressionEncoding::Zstd)
             .send_compressed(CompressionEncoding::Zstd);
         Ok((addr, client))

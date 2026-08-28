@@ -26,7 +26,8 @@ use crate::flow::FlowRequester;
 use crate::region::RegionRequester;
 
 pub struct NodeClients {
-    channel_manager: ChannelManager,
+    query_channel_manager: ChannelManager,
+    control_channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
 }
 
@@ -39,7 +40,8 @@ impl Default for NodeClients {
 impl Debug for NodeClients {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeClients")
-            .field("channel_manager", &self.channel_manager)
+            .field("query_channel_manager", &self.query_channel_manager)
+            .field("control_channel_manager", &self.control_channel_manager)
             .finish()
     }
 }
@@ -53,7 +55,7 @@ impl DatanodeManager for NodeClients {
             send_compression,
             accept_compression,
             ..
-        } = self.channel_manager.config();
+        } = self.control_channel_manager.config();
         Arc::new(RegionRequester::new(
             client,
             *send_compression,
@@ -74,7 +76,8 @@ impl FlownodeManager for NodeClients {
 impl NodeClients {
     pub fn new(config: ChannelConfig) -> Self {
         Self {
-            channel_manager: ChannelManager::with_config(config, None),
+            query_channel_manager: ChannelManager::with_config(config.clone(), None),
+            control_channel_manager: ChannelManager::with_config(config, None),
             clients: CacheBuilder::new(1024)
                 .time_to_live(Duration::from_secs(30 * 60))
                 .time_to_idle(Duration::from_secs(5 * 60))
@@ -85,8 +88,9 @@ impl NodeClients {
     pub async fn get_client(&self, datanode: &Peer) -> Client {
         self.clients
             .get_with_by_ref(datanode, async move {
-                Client::with_manager_and_urls(
-                    self.channel_manager.clone(),
+                Client::with_managers_and_urls(
+                    self.query_channel_manager.clone(),
+                    self.control_channel_manager.clone(),
                     vec![datanode.addr.clone()],
                 )
             })
@@ -96,5 +100,59 @@ impl NodeClients {
     #[cfg(feature = "testing")]
     pub async fn insert_client(&self, datanode: Peer, client: Client) {
         self.clients.insert(datanode, client).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_grpc::channel_manager::ChannelManager;
+    use common_meta::peer::Peer;
+
+    use super::{ChannelConfig, NodeClients};
+    use crate::Client;
+
+    const PEER_ADDR: &str = "127.0.0.1:3001";
+
+    fn assert_pool_has_one_address(manager: &ChannelManager) {
+        let mut count = 0;
+        let mut addresses = Vec::new();
+        manager.retain_channel(|addr, _| {
+            count += 1;
+            addresses.push(addr.clone());
+            true
+        });
+        assert_eq!(1, count);
+        assert_eq!([PEER_ADDR], addresses.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_node_clients_use_isolated_reused_channel_pools() {
+        let node_clients = NodeClients::new(ChannelConfig::default());
+        let peer = Peer {
+            id: 1,
+            addr: PEER_ADDR.to_string(),
+        };
+        let client = node_clients.get_client(&peer).await;
+
+        client.make_flight_client(false, false).unwrap();
+        client.make_flight_client(false, false).unwrap();
+        assert_pool_has_one_address(&node_clients.query_channel_manager);
+        let mut control_count = 0;
+        node_clients.control_channel_manager.retain_channel(|_, _| {
+            control_count += 1;
+            true
+        });
+        assert_eq!(0, control_count);
+
+        client.make_mutation_flight_client(false, false).unwrap();
+        client.make_mutation_flight_client(false, false).unwrap();
+        assert_pool_has_one_address(&node_clients.query_channel_manager);
+        assert_pool_has_one_address(&node_clients.control_channel_manager);
+
+        let manager = ChannelManager::new();
+        let legacy = Client::with_manager_and_urls(manager.clone(), [PEER_ADDR]);
+        legacy.make_flight_client(false, false).unwrap();
+        legacy.make_mutation_flight_client(false, false).unwrap();
+        assert_pool_has_one_address(&manager);
     }
 }
