@@ -13,6 +13,8 @@
 // limitations under the License.
 
 //! Mergeable Welford state for population standard deviation.
+//!
+//! Input samples and intermediate states must contain only finite values.
 
 use std::sync::Arc;
 
@@ -81,28 +83,38 @@ impl WelfordState {
             return self.mean.to_bits() == 0 && self.m2.to_bits() == 0;
         }
 
-        self.m2 >= 0.0 || self.m2.is_nan()
+        self.mean.is_finite() && self.m2.is_finite() && self.m2 >= 0.0
     }
 
-    fn update(&mut self, value: f64) -> DfResult<()> {
+    fn update(&mut self, sample: f64) -> DfResult<()> {
+        if !sample.is_finite() {
+            return Err(non_finite_input());
+        }
+
         let count = self
             .count
             .checked_add(1)
             .ok_or_else(|| DataFusionError::Execution("Welford count overflow".to_string()))?;
-
-        if self.count == 0 {
-            self.count = count;
-            self.mean = value;
-            self.m2 = 0.0;
-            return Ok(());
-        }
-
-        let delta = value - self.mean;
-        self.mean += delta / count as f64;
-        let delta2 = value - self.mean;
-        self.m2 += delta * delta2;
-        self.count = count;
-        Ok(())
+        let candidate_state = if self.count == 0 {
+            Self {
+                count,
+                mean: sample,
+                m2: 0.0,
+            }
+        } else {
+            let delta = sample - self.mean;
+            if !delta.is_finite() {
+                return Err(non_finite_arithmetic());
+            }
+            let mean = self.mean + delta / count as f64;
+            let delta2 = sample - mean;
+            Self {
+                count,
+                mean,
+                m2: self.m2 + delta * delta2,
+            }
+        };
+        self.replace_with_candidate(candidate_state)
     }
 
     fn merge(&mut self, other: &Self) -> DfResult<()> {
@@ -110,8 +122,7 @@ impl WelfordState {
             return Ok(());
         }
         if self.count == 0 {
-            *self = *other;
-            return Ok(());
+            return self.replace_with_candidate(*other);
         }
 
         let count = self
@@ -119,10 +130,32 @@ impl WelfordState {
             .checked_add(other.count)
             .ok_or_else(|| DataFusionError::Execution("Welford count overflow".to_string()))?;
         let delta = other.mean - self.mean;
-        let weighted_count = self.count as f64 * other.count as f64 / count as f64;
-        self.mean += delta * other.count as f64 / count as f64;
-        self.m2 += other.m2 + delta * delta * weighted_count;
-        self.count = count;
+        if !delta.is_finite() {
+            return Err(non_finite_arithmetic());
+        }
+        let self_count = self.count as f64;
+        let other_count = other.count as f64;
+        let count_f64 = count as f64;
+        let mean_delta = if delta.abs() <= f64::MAX / other_count {
+            delta * other_count / count_f64
+        } else {
+            delta * (other_count / count_f64)
+        };
+        let weighted_count = self_count * other_count / count_f64;
+        let candidate_state = Self {
+            count,
+            mean: self.mean + mean_delta,
+            m2: self.m2 + other.m2 + checked_weighted_square(delta, weighted_count)?,
+        };
+        self.replace_with_candidate(candidate_state)
+    }
+
+    fn replace_with_candidate(&mut self, candidate_state: Self) -> DfResult<()> {
+        if !candidate_state.is_valid() {
+            return Err(non_finite_arithmetic());
+        }
+
+        *self = candidate_state;
         Ok(())
     }
 
@@ -134,6 +167,18 @@ impl WelfordState {
         let variance = self.m2 / self.count as f64;
         Some(if variance < 0.0 { 0.0 } else { variance.sqrt() })
     }
+}
+
+fn checked_weighted_square(delta: f64, weight: f64) -> DfResult<f64> {
+    if delta.abs() <= f64::MAX.sqrt() {
+        return Ok(delta * delta * weight);
+    }
+    if weight <= 1.0 {
+        // Applying the weight first avoids overflow when the weighted square is representable.
+        return Ok(delta * weight * delta);
+    }
+
+    Err(non_finite_arithmetic())
 }
 
 /// Accumulates and merges versioned Welford states.
@@ -177,8 +222,8 @@ impl DfAccumulator for WelfordAccumulator {
         let array = &values[0];
         match array.data_type() {
             DataType::Float64 => {
-                for value in as_primitive_array::<Float64Type>(array)?.iter().flatten() {
-                    self.state.update(value)?;
+                for sample in as_primitive_array::<Float64Type>(array)?.iter().flatten() {
+                    self.state.update(sample)?;
                 }
             }
             DataType::Binary => self.merge_batch(std::slice::from_ref(array))?,
@@ -224,6 +269,14 @@ fn decode_f64(encoded: &[u8], offset: usize) -> f64 {
 
 fn invalid_state() -> DataFusionError {
     DataFusionError::Execution("Invalid Welford state".to_string())
+}
+
+fn non_finite_input() -> DataFusionError {
+    DataFusionError::Execution("Welford state requires finite input values".to_string())
+}
+
+fn non_finite_arithmetic() -> DataFusionError {
+    DataFusionError::Execution("Welford arithmetic produced a non-finite state".to_string())
 }
 
 #[cfg(test)]
@@ -281,15 +334,23 @@ mod tests {
     }
 
     #[test]
-    fn test_welford_state_first_infinite_value() {
-        let mut state = WelfordState::default();
+    fn test_welford_non_finite_values_fail_independent_of_partitioning() {
+        for sample in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut one_pass = WelfordState::default();
+            let update_failed = one_pass.update(sample).is_err();
 
-        state.update(f64::INFINITY).unwrap();
+            let mut merged = WelfordState::default();
+            let non_finite_state = WelfordState {
+                count: 1,
+                mean: sample,
+                m2: 0.0,
+            };
+            let merge_failed = merged.merge(&non_finite_state).is_err();
 
-        assert_eq!(state.count, 1);
-        assert_eq!(state.mean, f64::INFINITY);
-        assert_eq!(state.m2, 0.0);
-        assert_eq!(state.population_stddev(), Some(0.0));
+            assert_eq!((update_failed, merge_failed), (true, true));
+            assert_eq!(one_pass, WelfordState::default());
+            assert_eq!(merged, WelfordState::default());
+        }
     }
 
     #[test]
@@ -314,6 +375,18 @@ mod tests {
             m2: -1.0,
         };
         assert!(WelfordState::decode(&negative_m2.encode()).is_err());
+
+        for (mean, m2) in [
+            (f64::NAN, 0.0),
+            (f64::INFINITY, 0.0),
+            (f64::NEG_INFINITY, 0.0),
+            (0.0, f64::NAN),
+            (0.0, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+        ] {
+            let non_finite = WelfordState { count: 1, mean, m2 };
+            assert!(WelfordState::decode(&non_finite.encode()).is_err());
+        }
     }
 
     #[test]
@@ -322,6 +395,34 @@ mod tests {
         merged.merge(&state_from_values(&[3.0, 4.0])).unwrap();
 
         assert_eq!(merged, state_from_values(&[1.0, 2.0, 3.0, 4.0]));
+    }
+
+    #[test]
+    fn test_welford_large_finite_variance_matches_partitioned_merge() {
+        let large_sample = f64::MAX.sqrt() * 1.1;
+        let one_pass = state_from_values(&[0.0, large_sample]);
+        let mut merged = state_from_values(&[0.0]);
+
+        merged.merge(&state_from_values(&[large_sample])).unwrap();
+
+        assert_eq!(merged, one_pass);
+    }
+
+    #[test]
+    fn test_welford_extreme_values_fail_independent_of_partitioning() {
+        for values in [[f64::MAX, -f64::MAX], [-f64::MAX, f64::MAX]] {
+            let mut one_pass = state_from_values(&values[..1]);
+            let original_one_pass = one_pass;
+            let update_failed = one_pass.update(values[1]).is_err();
+
+            let mut merged = state_from_values(&values[..1]);
+            let original_merged = merged;
+            let merge_failed = merged.merge(&state_from_values(&values[1..])).is_err();
+
+            assert_eq!((update_failed, merge_failed), (true, true));
+            assert_eq!(one_pass, original_one_pass);
+            assert_eq!(merged, original_merged);
+        }
     }
 
     #[test]
