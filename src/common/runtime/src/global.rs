@@ -366,6 +366,9 @@ fn create_workload_scheduler(options: &RuntimeOptions, capacity: usize) -> Sched
     let scheduler = Scheduler::builder()
         // This is deliberately an internal scheduler bound, not public config.
         .max_concurrent_polls(capacity)
+        // In an isolated zero-work poll benchmark, N=16 put clock overhead below
+        // measurement noise with about 4% fairness erosion.
+        .sample_every_polls(16)
         .weight(QUERY_TASK_CLASS, scheduler_options.query_weight.get())
         .weight(WRITE_TASK_CLASS, scheduler_options.write_weight.get())
         .build();
@@ -597,6 +600,7 @@ mod tests {
         let mut options = RuntimeOptions::default();
         options.experimental_workload_scheduler.enable = false;
         let scheduler = create_workload_scheduler(&options, options.global_rt_size);
+        assert_eq!(16, scheduler.stats().sample_every_polls);
         assert!(!scheduler.is_enabled());
 
         scheduler.set_enabled(true);
