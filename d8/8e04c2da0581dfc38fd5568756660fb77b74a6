@@ -1,28 +1,28 @@
 tests-integration/src/standalone.rs
   h_623774b620da8e 30,88,107,118-127,384
-src/meta-srv/src/metasrv/builder.rs
-  h_623774b620da8e 241-251,559-571
-src/meta-srv/src/utils/insert_forwarder.rs
-  h_623774b620da8e 20,31,41,44-50,61-64
-src/frontend/src/events.rs
-  h_623774b620da8e 38-48
-src/operator/src/statement.rs
-  h_623774b620da8e 80-83,951,955,960,963-969,982-987
 tests-integration/tests/database_ddl_event.rs
   h_623774b620da8e 18,23,27,33-174,189
-src/operator/src/insert.rs
-  h_623774b620da8e 67-70,495-496,509-520,522-523
+tests-integration/tests/grpc.rs
+  h_623774b620da8e 87,412,424,485-585
+src/frontend/src/events.rs
+  h_623774b620da8e 38-48
+src/table/src/requests.rs
+  h_623774b620da8e 176-177
 tests-integration/src/cluster.rs
   h_623774b620da8e 172,206,253-259,542,544
   h_623774b620da8e 541,543
-tests-integration/tests/grpc.rs
-  h_623774b620da8e 87,412,424,485-585
-src/table/src/requests.rs
-  h_623774b620da8e 176-177
+src/meta-srv/src/utils/insert_forwarder.rs
+  h_623774b620da8e 20,31,41,44-50,61-64
+src/meta-srv/src/metasrv/builder.rs
+  h_623774b620da8e 241-251,559-571
+src/operator/src/statement.rs
+  h_623774b620da8e 80-83,951,955,960,963-969,982-987
+src/operator/src/insert.rs
+  h_623774b620da8e 67-70,495-496,509-520,522-523
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.6.24",
+  "git_ai_version": "1.7.0",
   "base_commit_sha": "d88e04c2da0581dfc38fd5568756660fb77b74a6",
   "prompts": {},
   "humans": {
