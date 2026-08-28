@@ -40,8 +40,10 @@ use store_api::storage::{ConcreteDataType, RegionId};
 use tokio::sync::RwLock;
 
 use crate::adapter::stateless::StatelessFlow;
-use crate::adapter::table_source::{FlowTableSource, ManagedTableSource};
-use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
+use crate::adapter::table_source::ManagedTableSource;
+use crate::adapter::util::{
+    relation_desc_to_column_schemas_with_fallback, table_info_value_to_relation_desc,
+};
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::utils::sql_to_df_plan;
@@ -408,6 +410,7 @@ impl StreamingEngine {
         region_id: RegionId,
         rows: Vec<DiffRow>,
         batch_datatypes: &[ConcreteDataType],
+        source_schema_version: u32,
     ) -> Result<(), Error> {
         let table_id = region_id.table_id();
         let flows = self
@@ -425,6 +428,7 @@ impl StreamingEngine {
                 batch_datatypes,
                 &self.query_engine,
                 &self.frontend_client,
+                source_schema_version,
             )
             .await
             .map_err(|err| {
@@ -523,6 +527,7 @@ impl StreamingEngine {
             StatelessFlow {
                 source_table_id,
                 source_table_name,
+                source_schema_version: source_schema.version(),
                 source_schema,
                 sink_table_name,
                 sink_schema,
@@ -629,8 +634,19 @@ impl StreamingEngine {
                 .map(|r| (r.schema, r.rows))
                 .unwrap_or_default();
             let now = common_time::util::current_time_millis();
-            let (table_types, fetch_order) = {
-                let table_schema = self.table_info_source.table_from_id(&table_id).await?;
+            let (table_types, fetch_order, source_schema_version) = {
+                // Fetch the source metadata once for both current-schema normalization and
+                // retained-plan validation. In particular, do not execute a retained plan
+                // against rows normalized with a newer schema.
+                let table_info = self
+                    .table_info_source
+                    .get_table_info_value(&table_id)
+                    .await?
+                    .context(UnexpectedSnafu {
+                        reason: format!("Table metadata is missing for table id {table_id}"),
+                    })?;
+                let source_schema_version = table_info.table_info.meta.schema.version();
+                let table_schema = table_info_value_to_relation_desc(table_info)?;
                 let defaults = table_schema
                     .default_values
                     .iter()
@@ -678,7 +694,7 @@ impl StreamingEngine {
                             })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                (types, order)
+                (types, order, source_schema_version)
             };
             let rows = rows_proto
                 .into_iter()
@@ -691,7 +707,7 @@ impl StreamingEngine {
                     (Row::new(row), now, 1)
                 })
                 .collect_vec();
-            self.handle_write_request(region_id.into(), rows, &table_types)
+            self.handle_write_request(region_id.into(), rows, &table_types, source_schema_version)
                 .await
                 .map_err(|err| {
                     InsertIntoFlowSnafu {
