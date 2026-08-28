@@ -19,7 +19,7 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::limit::GlobalLimitExec;
+use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
@@ -63,6 +63,10 @@ impl EnsureGlobalLimitForFetch {
             let maintains_input_order = plan.maintains_input_order();
             let child_parent = ParentContext {
                 global_fetch: provided_global_fetch(&plan),
+                local_fetch: plan
+                    .as_any()
+                    .downcast_ref::<LocalLimitExec>()
+                    .map(LocalLimitExec::fetch),
                 required_ordering: None,
                 required_distribution: Distribution::UnspecifiedDistribution,
                 partitioning_to_restore: None,
@@ -113,6 +117,11 @@ impl EnsureGlobalLimitForFetch {
         if parent
             .global_fetch
             .is_some_and(|parent_fetch| parent_fetch <= fetch)
+            || aggregate_limit.is_some_and(|aggregate_fetch| {
+                parent
+                    .local_fetch
+                    .is_some_and(|local_fetch| local_fetch <= aggregate_fetch)
+            })
             || !(plan.as_any().is::<FilterExec>() || aggregate_limit.is_some())
             || plan.output_partitioning().partition_count() <= 1
         {
@@ -159,6 +168,7 @@ fn aggregate_soft_limit(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
 #[derive(Clone)]
 struct ParentContext {
     global_fetch: Option<usize>,
+    local_fetch: Option<usize>,
     required_ordering: Option<OrderingRequirements>,
     required_distribution: Distribution,
     partitioning_to_restore: Option<Partitioning>,
@@ -169,6 +179,7 @@ impl Default for ParentContext {
     fn default() -> Self {
         Self {
             global_fetch: None,
+            local_fetch: None,
             required_ordering: None,
             required_distribution: Distribution::UnspecifiedDistribution,
             partitioning_to_restore: None,
@@ -291,7 +302,7 @@ mod tests {
     };
     use datafusion::physical_plan::filter::FilterExecBuilder;
     use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
-    use datafusion::physical_plan::limit::GlobalLimitExec;
+    use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
     use datafusion::physical_plan::projection::ProjectionExec;
     use datafusion::physical_plan::repartition::RepartitionExec;
     use datafusion::physical_plan::sorts::sort::SortExec;
@@ -468,6 +479,44 @@ mod tests {
                 .unwrap();
         let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
         assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    async fn local_limit_preserves_per_partition_aggregate_soft_limit() {
+        let schema = schema();
+        let input = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from((0..100).collect::<Vec<_>>()))],
+        )
+        .unwrap();
+        let scan = Arc::new(TestMemoryExec::try_new(&[vec![input]], schema, None).unwrap());
+        // A tighter local limit must retain its per-partition scope.
+        let agg = agg_with_limit(hash_repartition(scan), AggregateMode::SinglePartitioned, 2);
+        let local_limit = Arc::new(LocalLimitExec::new(agg, 1)) as Arc<dyn ExecutionPlan>;
+
+        let optimized = EnsureGlobalLimitForFetch::optimize_plan(
+            Arc::clone(&local_limit),
+            ParentContext::default(),
+        )
+        .unwrap();
+
+        let original_batches =
+            datafusion::physical_plan::collect(local_limit, Arc::new(TaskContext::default()))
+                .await
+                .unwrap();
+        let optimized_batches = datafusion::physical_plan::collect(
+            Arc::clone(&optimized),
+            Arc::new(TaskContext::default()),
+        )
+        .await
+        .unwrap();
+        let original_rows: usize = original_batches.iter().map(|batch| batch.num_rows()).sum();
+        let optimized_rows: usize = optimized_batches.iter().map(|batch| batch.num_rows()).sum();
+
+        assert_eq!(original_rows, 3);
+        assert_eq!(optimized_rows, 3);
+        assert!(optimized.as_any().is::<LocalLimitExec>());
+        assert!(optimized.children()[0].as_any().is::<AggregateExec>());
     }
 
     #[test]
