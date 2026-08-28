@@ -15,12 +15,10 @@
 use datafusion_common::DFSchema;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
 
-use crate::error::{DatafusionSnafu, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu};
-use crate::expr::{SafeMfpPlan, ScalarExpr};
+use crate::error::{DatafusionSnafu, InternalSnafu, InvalidQuerySnafu, Result};
 
 /// a set of column indices that are "keys" for the collection.
 #[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
@@ -96,73 +94,6 @@ impl RelationType {
         self
     }
 
-    /// Trying to apply a mpf on current types, will return a new RelationType
-    /// with the new types, will also try to preserve keys&time index information
-    /// if the old key&time index columns are preserve in given mfp
-    ///
-    /// i.e. old column of size 3, with a mfp's
-    ///
-    /// project = `[2, 1]`,
-    ///
-    /// the old key = `[1]`, old time index = `[2]`,
-    ///
-    /// then new key=`[1]`, new time index=`[0]`
-    ///
-    /// note that this function will remove empty keys like key=`[]` will be removed
-    pub fn apply_mfp(&self, mfp: &SafeMfpPlan) -> Result<Self> {
-        let mfp = &mfp.mfp;
-        let mut all_types = self.column_types.clone();
-        for expr in &mfp.expressions {
-            let expr_typ = expr.typ(&self.column_types)?;
-            all_types.push(expr_typ);
-        }
-        let all_types = all_types;
-        let mfp_out_types = mfp
-            .projection
-            .iter()
-            .map(|i| {
-                all_types.get(*i).cloned().with_context(|| UnexpectedSnafu {
-                    reason: format!(
-                        "MFP index out of bound, len is {}, but the index is {}",
-                        all_types.len(),
-                        *i
-                    ),
-                })
-            })
-            .try_collect()?;
-
-        let old_to_new_col = mfp.get_old_to_new_mapping();
-
-        // since it's just a mfp, we also try to preserve keys&time index information, if they survive mfp transform
-        let keys = self
-            .keys
-            .iter()
-            .filter_map(|key| {
-                key.column_indices
-                    .iter()
-                    .map(|old| old_to_new_col.get(old).cloned())
-                    .collect::<Option<Vec<_>>>()
-                    // remove empty keys
-                    .and_then(|v| if v.is_empty() { None } else { Some(v) })
-                    .map(Key::from)
-            })
-            .collect_vec();
-
-        let time_index = self
-            .time_index
-            .and_then(|old| old_to_new_col.get(&old).cloned());
-        let auto_columns = self
-            .auto_columns
-            .iter()
-            .filter_map(|old| old_to_new_col.get(old).cloned())
-            .collect_vec();
-        Ok(Self {
-            column_types: mfp_out_types,
-            keys,
-            time_index,
-            auto_columns,
-        })
-    }
     /// Constructs a `RelationType` representing the relation with no columns and
     /// no keys.
     pub fn empty() -> Self {
@@ -370,30 +301,6 @@ impl RelationDesc {
 
         DFSchema::try_from(arrow_schema.clone()).with_context(|_e| DatafusionSnafu {
             context: format!("Error when converting to DFSchema: {:?}", arrow_schema),
-        })
-    }
-
-    /// apply mfp, and also project col names for the projected columns
-    pub fn apply_mfp(&self, mfp: &SafeMfpPlan) -> Result<Self> {
-        // TODO(discord9): find a way to deduce name at best effect
-        let names = {
-            let mfp = &mfp.mfp;
-            let mut names = self.names.clone();
-            for expr in &mfp.expressions {
-                if let ScalarExpr::Column(i) = expr {
-                    names.push(self.names.get(*i).cloned().flatten());
-                } else {
-                    names.push(None);
-                }
-            }
-            mfp.projection
-                .iter()
-                .map(|i| names.get(*i).cloned().flatten())
-                .collect_vec()
-        };
-        Ok(Self {
-            typ: self.typ.apply_mfp(mfp)?,
-            names,
         })
     }
 }

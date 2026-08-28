@@ -28,25 +28,10 @@ use table::table_reference::TableReference;
 
 use crate::StreamingEngine;
 use crate::adapter::table_source::TableDesc;
-use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, TableName, WorkerHandle};
+use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, TableName};
 use crate::error::{Error, ExternalSnafu};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 impl StreamingEngine {
-    /// Get a worker handle for creating flow, using round robin to select a worker
-    pub(crate) async fn get_worker_handle_for_create_flow(&self) -> &WorkerHandle {
-        let use_idx = {
-            let mut selector = self.worker_selector.lock().await;
-            if *selector >= self.worker_handles.len() {
-                *selector = 0
-            };
-            let use_idx = *selector;
-            *selector += 1;
-            use_idx
-        };
-        // Safety: selector is always in bound
-        &self.worker_handles[use_idx]
-    }
-
     /// Create table from given schema(will adjust to add auto column if needed), return true if table is created
     pub(crate) async fn create_table_from_relation(
         &self,
