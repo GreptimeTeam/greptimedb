@@ -26,8 +26,8 @@ use datafusion::prelude::create_udaf;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType, Float64Type};
 
-pub const WELFORD_STATE_NAME: &str = "welford_state";
-pub const WELFORD_MERGE_NAME: &str = "welford_merge";
+pub const STDDEV_POP_STATE_NAME: &str = "stddev_pop_state";
+pub const STDDEV_POP_MERGE_NAME: &str = "stddev_pop_merge";
 
 const ENCODED_LEN: usize = 28;
 const MAGIC: &[u8; 4] = b"WLF1";
@@ -143,10 +143,10 @@ pub struct WelfordAccumulator {
 }
 
 impl WelfordAccumulator {
-    /// Creates the `welford_state` aggregate function.
+    /// Creates the `stddev_pop_state` aggregate function.
     pub fn state_udf_impl() -> AggregateUDF {
         create_udaf(
-            WELFORD_STATE_NAME,
+            STDDEV_POP_STATE_NAME,
             vec![DataType::Float64],
             Arc::new(DataType::Binary),
             Volatility::Immutable,
@@ -155,10 +155,10 @@ impl WelfordAccumulator {
         )
     }
 
-    /// Creates the `welford_merge` aggregate function.
+    /// Creates the `stddev_pop_merge` aggregate function.
     pub fn merge_udf_impl() -> AggregateUDF {
         create_udaf(
-            WELFORD_MERGE_NAME,
+            STDDEV_POP_MERGE_NAME,
             vec![DataType::Binary],
             Arc::new(DataType::Binary),
             Volatility::Immutable,

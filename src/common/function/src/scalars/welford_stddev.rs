@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Implementation of the scalar function `welford_stddev`.
+//! Implementation of the scalar function `stddev_pop_calc`.
 
 use std::fmt;
 use std::fmt::Display;
@@ -27,7 +27,7 @@ use crate::aggrs::approximate::welford::WelfordState;
 use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
 
-const NAME: &str = "welford_stddev";
+const NAME: &str = "stddev_pop_calc";
 
 /// Calculates population standard deviation from a serialized Welford state.
 #[derive(Debug)]
@@ -161,10 +161,10 @@ mod tests {
     }
 
     #[test]
-    fn test_welford_stddev_metadata() {
+    fn test_stddev_pop_calc_metadata() {
         let function = WelfordStddevFunction::default();
 
-        assert_eq!(function.name(), "welford_stddev");
+        assert_eq!(function.name(), "stddev_pop_calc");
         assert_eq!(
             function.return_type(&[DataType::Binary]).unwrap(),
             DataType::Float64
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_welford_stddev_rejects_wrong_argument_count() {
+    fn test_stddev_pop_calc_rejects_wrong_argument_count() {
         let error = WelfordStddevFunction::default()
             .invoke_with_args(ScalarFunctionArgs {
                 args: vec![],
@@ -186,7 +186,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("welford_stddev function requires 1 argument, got 0")
+                .contains("stddev_pop_calc function requires 1 argument, got 0")
         );
     }
 }

@@ -17,9 +17,9 @@ INSERT INTO test_welford (`id`, `value`) VALUES
     (10, 100.0),
     (11, NULL);
 
-SELECT welford_stddev(welford_state(`value`)) FROM test_welford;
+SELECT stddev_pop_calc(stddev_pop_state(`value`)) FROM test_welford;
 
-SELECT welford_stddev(welford_state(`value`)) FROM test_welford WHERE false;
+SELECT stddev_pop_calc(stddev_pop_state(`value`)) FROM test_welford WHERE false;
 
 CREATE TABLE grouped_welford (
     `id` INT PRIMARY KEY,
@@ -28,12 +28,12 @@ CREATE TABLE grouped_welford (
 );
 
 INSERT INTO grouped_welford (`id`, `state`)
-SELECT 1, welford_state(`value`) FROM test_welford WHERE id <= 5;
+SELECT 1, stddev_pop_state(`value`) FROM test_welford WHERE id <= 5;
 
 INSERT INTO grouped_welford (`id`, `state`)
-SELECT 2, welford_state(`value`) FROM test_welford WHERE id > 5;
+SELECT 2, stddev_pop_state(`value`) FROM test_welford WHERE id > 5;
 
-SELECT welford_stddev(welford_merge(`state`)) FROM grouped_welford;
+SELECT stddev_pop_calc(stddev_pop_merge(`state`)) FROM grouped_welford;
 
 DROP TABLE grouped_welford;
 DROP TABLE test_welford;
@@ -66,7 +66,7 @@ CREATE TABLE welford_minute_states (
 INSERT INTO welford_minute_states (`minute_ts`, `state`)
 SELECT
     date_bin(INTERVAL '1 minute', `ts`) AS minute_ts,
-    welford_state(`value`) AS state
+    stddev_pop_state(`value`) AS state
 FROM welford_window_raw
 GROUP BY minute_ts;
 
@@ -94,7 +94,7 @@ WITH ranges AS (
     SELECT
         ranges.range_name,
         count(*) AS state_count,
-        welford_stddev(welford_merge(states.`state`)) AS stddev
+        stddev_pop_calc(stddev_pop_merge(states.`state`)) AS stddev
     FROM ranges CROSS JOIN welford_minute_states AS states
     WHERE states.minute_ts >= ranges.start_ts
       AND states.minute_ts < ranges.end_ts
