@@ -1289,7 +1289,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
- "rustc-hash 2.1.1",
+ "rustc-hash",
  "shlex",
  "syn 2.0.117",
 ]
@@ -1731,12 +1731,6 @@ dependencies = [
  "libc",
  "shlex",
 ]
-
-[[package]]
-name = "cc-traits"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "060303ef31ef4a522737e1b1ab68c67916f2a787bb2f4f54f383279adba962b5"
 
 [[package]]
 name = "cedarwood"
@@ -4772,36 +4766,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dfir_rs"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd3b08cdfdba4b482d762906a16ac2cfd45d9949ae62e03ed3c690cfd7dae5dc"
-dependencies = [
- "bincode",
- "byteorder",
- "bytes",
- "futures",
- "getrandom 0.2.16",
- "itertools 0.13.0",
- "lattices",
- "pusherator",
- "ref-cast",
- "regex",
- "rustc-hash 1.1.0",
- "sealed",
- "serde",
- "serde_json",
- "slotmap",
- "smallvec",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "variadics",
- "web-time",
-]
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5440,7 +5404,6 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-substrait",
  "datatypes",
- "dfir_rs",
  "enum-as-inner",
  "enum_dispatch",
  "futures",
@@ -7222,7 +7185,7 @@ dependencies = [
  "jieba-macros",
  "phf 0.13.1",
  "regex",
- "rustc-hash 2.1.1",
+ "rustc-hash",
 ]
 
 [[package]]
@@ -7633,33 +7596,6 @@ checksum = "b5baa5e9ff84f1aefd264e6869907646538a52147a755d494517a8007fb48733"
 dependencies = [
  "regex-automata",
  "rustversion",
-]
-
-[[package]]
-name = "lattices"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51222529a85db7b6e228b279b2b9bb7bc1e47d9ee7b680404bdf5440b255913c"
-dependencies = [
- "cc-traits",
- "lattices_macro",
- "ref-cast",
- "sealed",
- "serde",
- "variadics",
- "variadics_macro",
-]
-
-[[package]]
-name = "lattices_macro"
-version = "0.5.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eee67863077d060b8a25c754241a6e6bf234b82207a62df7b3d5387b6d523c3e"
-dependencies = [
- "proc-macro-crate 1.3.1",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -11665,16 +11601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pusherator"
-version = "0.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3378af79ad42241f1075683daa2a0c06c6654404c3d096a493348395e620f668"
-dependencies = [
- "either",
- "variadics",
-]
-
-[[package]]
 name = "query"
 version = "1.3.0"
 dependencies = [
@@ -11804,7 +11730,7 @@ dependencies = [
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
- "rustc-hash 2.1.1",
+ "rustc-hash",
  "rustls",
  "socket2 0.5.10",
  "thiserror 2.0.17",
@@ -11826,7 +11752,7 @@ dependencies = [
  "rand 0.10.1",
  "rand_pcg",
  "ring",
- "rustc-hash 2.1.1",
+ "rustc-hash",
  "rustls",
  "rustls-pki-types",
  "slab",
@@ -12767,12 +12693,6 @@ checksum = "989e6739f80c4ad5b13e0fd7fe89531180375b18520cc8c82080e4dc4035b84f"
 
 [[package]]
 name = "rustc-hash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
-
-[[package]]
-name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
@@ -13114,18 +13034,6 @@ name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
-
-[[package]]
-name = "sealed"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4a8caec23b7800fb97971a1c6ae365b6239aaeddfb934d6265f8505e795699d"
-dependencies = [
- "heck 0.4.1",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
 
 [[package]]
 name = "secrecy"
@@ -13718,15 +13626,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "slotmap"
-version = "1.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbff4acf519f630b3a3ddcfaea6c06b42174d9a44bc70c620e9ed1649d58b82a"
-dependencies = [
- "version_check",
-]
 
 [[package]]
 name = "smallvec"
@@ -14646,7 +14545,7 @@ dependencies = [
  "rayon",
  "regex",
  "rust-stemmers",
- "rustc-hash 2.1.1",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sketches-ddsketch",
@@ -16063,29 +15962,6 @@ dependencies = [
  "halfbrown",
  "itoa",
  "ryu",
-]
-
-[[package]]
-name = "variadics"
-version = "0.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d49933ddcb1a4ec2ebb9a2931bc526ed269a9276a456c0595ddcc7cb188896"
-dependencies = [
- "hashbrown 0.14.5",
- "sealed",
-]
-
-[[package]]
-name = "variadics_macro"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55476accb4f25086be8a1d18bed73aef9452cefb5ccd133e122e4350a1543ff3"
-dependencies = [
- "proc-macro-crate 1.3.1",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
- "variadics",
 ]
 
 [[package]]
