@@ -155,6 +155,10 @@ impl TwcsPicker {
         files: &Window,
         windows: &BTreeMap<i64, Window>,
     ) -> (Vec<FileHandle>, bool) {
+        if files.files.len() < self.trigger_file_num {
+            return (vec![], false);
+        }
+
         let window = &files.time_window;
         let mut files_to_merge: Vec<_> = files.files().cloned().collect();
 
@@ -183,11 +187,7 @@ impl TwcsPicker {
             find_sorted_runs_by_time_range(&mut files_to_merge)
         };
         let found_runs = sorted_runs.len();
-        let inputs = pick_count_first(
-            sorted_runs,
-            self.trigger_file_num,
-            self.max_output_file_size,
-        );
+        let inputs = pick_count_first(sorted_runs, self.max_output_file_size);
         let filter_deleted = !self.append_mode
             && !window_has_overlap(files, windows)
             && !selected_overlaps_unselected(&inputs, files);
@@ -330,7 +330,7 @@ impl CandidateScore {
 /// enumerates every interval of at most [`MAX_INPUT_FILES`] files as a [`Candidate`].
 /// An interval is eligible when it
 ///
-/// - holds at least `trigger_file_num` files (and at least 2),
+/// - holds at least 2 files,
 /// - is balanced: no single file dominates it (`largest <= sum of the others`),
 /// - makes progress on at least one axis: it reduces the physical file count given
 ///   the output split threshold `max_output_file_size`, or it resolves at least one
@@ -339,11 +339,9 @@ impl CandidateScore {
 /// The best interval wins by [`CandidateScore`]; ties keep the earliest interval.
 fn pick_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
-    trigger_file_num: usize,
     max_output_file_size: Option<u64>,
 ) -> Vec<FileHandle> {
     let files = ordered_files(&sorted_runs);
-    let min_files = trigger_file_num.max(2);
 
     let mut best = None;
     for left in 0..files.len() {
@@ -352,7 +350,7 @@ fn pick_count_first(
         let mut participations: Vec<bool> = Vec::with_capacity(right_bound - left);
         for right in left..right_bound {
             candidate.absorb(&files[right], &files[left..right], &mut participations);
-            if candidate.num_files < min_files
+            if candidate.num_files < 2
                 || !candidate.is_balanced()
                 || !candidate.makes_progress(max_output_file_size)
             {
@@ -1621,7 +1619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_limit_max_input_files() {
+    async fn test_window_trigger_can_exceed_input_limit() {
         common_telemetry::init_default_ut_logging();
 
         let num_files = 50;
@@ -1646,7 +1644,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 3);
 
         let picker = TwcsPicker {
-            trigger_file_num: 4,
+            trigger_file_num: num_files,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1996,10 +1994,7 @@ mod tests {
             vec![SortedRun::from(vec![
                 new_file(0, 9, 1, 400),
                 new_file(20, 29, 2, 100),
-                new_file(40, 49, 3, 100),
-                new_file(60, 69, 4, 100),
             ])],
-            4,
             None,
         );
 
@@ -2016,7 +2011,6 @@ mod tests {
                 new_file(60, 69, 4, 100),
                 new_file(80, 89, 5, 100),
             ])],
-            4,
             None,
         );
 
@@ -2036,7 +2030,6 @@ mod tests {
                 new_file(60, 69, 4, 100),
                 new_file(80, 89, 5, 100),
             ])],
-            4,
             None,
         );
 
@@ -2066,7 +2059,6 @@ mod tests {
                 SortedRun::from(first_run),
                 SortedRun::from(vec![overlapping]),
             ],
-            2,
             None,
         );
         let ranges = picked_ranges(&picked);
@@ -2092,7 +2084,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let picked = pick_count_first(vec![SortedRun::from(files)], 2, None);
+        let picked = pick_count_first(vec![SortedRun::from(files)], None);
         let ranges = picked_ranges(&picked);
 
         assert_eq!(DEFAULT_MAX_INPUT_FILES, ranges.len());
@@ -2112,7 +2104,6 @@ mod tests {
                 new_file(40, 49, 3, 600),
                 new_file(60, 69, 4, 600),
             ])],
-            2,
             Some(512),
         );
 
@@ -2129,7 +2120,6 @@ mod tests {
                 SortedRun::from(vec![new_file(0, 19, 1, 600)]),
                 SortedRun::from(vec![new_file(10, 29, 2, 600)]),
             ],
-            2,
             Some(512),
         );
 
@@ -2150,7 +2140,6 @@ mod tests {
                 new_file(40, 49, 5, 10),
                 new_file(50, 59, 6, 10),
             ])],
-            2,
             Some(512),
         );
 
@@ -2166,7 +2155,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let picked = pick_count_first(vec![SortedRun::from(files)], 2, None);
+        let picked = pick_count_first(vec![SortedRun::from(files)], None);
         let ranges = picked_ranges(&picked);
 
         assert_eq!(DEFAULT_MAX_INPUT_FILES, ranges.len());
@@ -2185,7 +2174,6 @@ mod tests {
                 ]),
                 SortedRun::from(vec![new_file(10, 19, 4, 1), new_file(30, 39, 5, 1)]),
             ],
-            2,
             None,
         );
 
@@ -2212,34 +2200,11 @@ mod tests {
                 new_file(10, 19, 2, 10),
                 new_file(20, 29, 3, 10),
             ])],
-            2,
             None,
         );
 
         assert_eq!(
             vec![(0, 9), (10, 19), (10, 19), (10, 19), (20, 29)],
-            picked_ranges(&picked)
-        );
-    }
-
-    // `trigger_file_num` is documented as "Minimum file num in every time window to
-    // trigger a compaction", so every physical SST counts toward the trigger.
-    #[test]
-    fn test_count_first_trigger_counts_same_sequence_files() {
-        let picked = pick_count_first(
-            vec![SortedRun::from(vec![
-                new_file(0, 9, 1, 10),
-                // Three SSTs with the same sequence: 1 + 3 = 4 actual SSTs >= trigger.
-                new_file(10, 19, 2, 10),
-                new_file(10, 19, 2, 10),
-                new_file(10, 19, 2, 10),
-            ])],
-            3,
-            None,
-        );
-
-        assert_eq!(
-            vec![(0, 9), (10, 19), (10, 19), (10, 19)],
             picked_ranges(&picked)
         );
     }
