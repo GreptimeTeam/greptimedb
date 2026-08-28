@@ -182,7 +182,7 @@ impl SubCommand {
 
     fn is_daemon(&self) -> bool {
         match self {
-            SubCommand::Start(cmd) => cmd.daemon,
+            SubCommand::Start(cmd) => cmd.is_daemon(),
         }
     }
 }
@@ -302,12 +302,24 @@ pub struct StartCommand {
     /// The working home directory of this standalone instance.
     #[clap(long)]
     data_home: Option<String>,
-    /// Run in the background as a daemon (Unix only; no-op on Windows).
+    /// Run in the background as a daemon.
+    #[cfg(unix)]
     #[clap(short, long)]
     daemon: bool,
 }
 
 impl StartCommand {
+    /// Whether the `standalone start` command requested daemonization.
+    #[cfg(unix)]
+    pub(crate) fn is_daemon(&self) -> bool {
+        self.daemon
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn is_daemon(&self) -> bool {
+        false
+    }
+
     /// Load the GreptimeDB options from various sources (command line, config file or env).
     pub fn load_options(
         &self,
@@ -1368,16 +1380,17 @@ mod tests {
         assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_parse_daemon_flag() {
         let command = StartCommand::try_parse_from(["standalone", "--daemon"]).unwrap();
-        assert!(command.daemon);
+        assert!(command.is_daemon());
 
         let command = StartCommand::try_parse_from(["standalone", "-d"]).unwrap();
-        assert!(command.daemon);
+        assert!(command.is_daemon());
 
         let command = StartCommand::try_parse_from(["standalone"]).unwrap();
-        assert!(!command.daemon);
+        assert!(!command.is_daemon());
     }
 
     #[test]

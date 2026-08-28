@@ -17,9 +17,9 @@
 
 use clap::{Parser, Subcommand};
 use cmd::datanode::builder::InstanceBuilder;
-use cmd::error::{InitTlsProviderSnafu, Result};
 #[cfg(unix)]
 use cmd::error::DaemonizeSnafu;
+use cmd::error::{InitTlsProviderSnafu, Result};
 use cmd::options::GlobalOptions;
 use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone, user};
 use common_base::Plugins;
@@ -119,7 +119,8 @@ async fn main_body(cli: Command) -> Result<()> {
 }
 
 /// If `--daemon` was passed for `standalone start`, fork into the background
-/// before any Tokio runtime is built. On non-Unix this is a no-op with a warning.
+/// before any Tokio runtime is built. On non-Unix platforms the `--daemon`
+/// flag does not exist, so this is a no-op.
 fn maybe_daemonize(cli: &Command) -> Result<()> {
     let daemon = matches!(&cli.subcmd, SubCommand::Standalone(cmd) if cmd.is_daemon());
     if !daemon {
@@ -128,25 +129,22 @@ fn maybe_daemonize(cli: &Command) -> Result<()> {
 
     #[cfg(unix)]
     {
-        let cwd = std::env::current_dir().map_err(|e| DaemonizeSnafu {
-            msg: format!("failed to read current working directory: {e}"),
-        }
-        .build())?;
+        let cwd = std::env::current_dir().map_err(|e| {
+            DaemonizeSnafu {
+                msg: format!("failed to read current working directory: {e}"),
+            }
+            .build()
+        })?;
 
         daemonize::Daemonize::new()
             .working_directory(cwd)
             .start()
-            .map_err(|e| DaemonizeSnafu {
-                msg: format!("failed to daemonize: {e}"),
-            }
-            .build())?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        eprintln!(
-            "warning: `--daemon` is not supported on this platform; ignoring it and running in the foreground"
-        );
+            .map_err(|e| {
+                DaemonizeSnafu {
+                    msg: format!("failed to daemonize: {e}"),
+                }
+                .build()
+            })?;
     }
 
     Ok(())
