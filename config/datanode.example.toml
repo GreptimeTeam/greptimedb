@@ -462,7 +462,7 @@ compress_manifest = false
 #+ experimental_compaction_on_exhausted = "wait"
 
 ## Interval to auto flush a region if it has not flushed yet.
-auto_flush_interval = "1h"
+auto_flush_interval = "10m"
 
 ## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 ## @toml2docs:none-default="Auto"
