@@ -47,6 +47,7 @@ pub(crate) struct StatelessFlow {
     pub(crate) source_table_id: TableId,
     pub(crate) source_table_name: TableName,
     pub(crate) source_schema: SchemaRef,
+    pub(crate) source_schema_version: u32,
     pub(crate) sink_table_name: TableName,
     pub(crate) sink_schema: Vec<ColumnSchema>,
     pub(crate) sink_primary_keys: Vec<String>,
@@ -169,6 +170,24 @@ pub(crate) fn validate_plan(plan: &LogicalPlan) -> Result<(), Error> {
     Ok(())
 }
 
+/// Rejects execution when the source metadata changed after the flow plan was retained.
+/// Replanning is intentionally not attempted: the flow must be recreated or recovered so its
+/// plan and source schema are captured together.
+fn validate_source_schema_version(
+    retained_version: u32,
+    current_version: u32,
+) -> Result<(), Error> {
+    ensure!(
+        retained_version == current_version,
+        InvalidQuerySnafu {
+            reason: format!(
+                "Source schema version changed from {retained_version} to {current_version}; recreate or recover the flow before writing"
+            )
+        }
+    );
+    Ok(())
+}
+
 fn synthesize_auto_values(columns: &[ColumnSchema], now: Timestamp) -> Result<Vec<Value>, Error> {
     columns
         .iter()
@@ -201,7 +220,9 @@ pub(crate) async fn execute(
     batch_datatypes: &[datatypes::data_type::ConcreteDataType],
     query_engine: &Arc<dyn QueryEngine>,
     frontend_client: &Arc<FrontendClient>,
+    current_source_schema_version: u32,
 ) -> Result<usize, Error> {
+    validate_source_schema_version(flow.source_schema_version, current_source_schema_version)?;
     let values = rows.iter().map(|(row, _, _)| row.clone()).collect();
     let batch = crate::expr::Batch::try_from_rows_with_types(values, batch_datatypes)
         .map_err(BoxedError::new)
@@ -323,6 +344,17 @@ mod tests {
         .unwrap();
         let arrow = batch.df_record_batch().clone();
         Arc::new(MemTable::try_new(arrow.schema(), vec![vec![arrow]]).unwrap())
+    }
+
+    #[test]
+    fn source_schema_version_must_match_retained_plan() {
+        assert!(validate_source_schema_version(7, 7).is_ok());
+
+        let error = validate_source_schema_version(7, 8).unwrap_err();
+        assert!(matches!(error, Error::InvalidQuery { reason, .. } if
+            reason.contains("Source schema version changed from 7 to 8")
+                && reason.contains("recreate or recover")
+        ));
     }
 
     #[test]
