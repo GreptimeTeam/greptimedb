@@ -270,6 +270,7 @@ fn get_default_for_type(ty: &ColumnDataType) -> Result<ValueData> {
         ColumnDataType::Float32 => ValueData::F32Value(0.0),
         ColumnDataType::Float64 => ValueData::F64Value(0.0),
         ColumnDataType::Binary => ValueData::BinaryValue(jsonb::Value::Null.to_vec()),
+        ColumnDataType::Json => ValueData::JsonValue(Default::default()),
         ColumnDataType::String => ValueData::StringValue(String::new()),
 
         ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(0),

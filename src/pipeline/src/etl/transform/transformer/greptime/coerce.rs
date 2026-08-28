@@ -768,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn test_coerce_json2_with_on_failure_ignore() {
+    fn test_coerce_json2_with_on_failure() {
         let settings = JsonSettings::try_new(
             vec![JsonTypeHint {
                 path: vec!["age".to_string()],
@@ -786,6 +786,12 @@ mod tests {
         let value: VrlValue = serde_json::json!({"age": "42"}).into();
 
         assert_eq!(coerce_value(&value, &transform, None).unwrap(), None);
+
+        transform.on_failure = Some(OnFailure::Default);
+        assert_eq!(
+            coerce_value(&value, &transform, None).unwrap(),
+            Some(ValueData::JsonValue(Default::default()))
+        );
     }
 
     #[test]
