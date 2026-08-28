@@ -15,7 +15,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
@@ -40,8 +40,24 @@ use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
 
+/// Default maximum number of input SST files in one compaction input.
+const DEFAULT_MAX_INPUT_FILES: usize = 32;
+
+const MAX_INPUT_FILES_ENV: &str = "GREPTIME_TWCS_MAX_INPUT_FILES";
+
 /// Maximum number of input SST files in one compaction input.
-const MAX_INPUT_FILES: usize = 32;
+/// Configurable via [`MAX_INPUT_FILES_ENV`].
+static MAX_INPUT_FILES: LazyLock<usize> = LazyLock::new(|| {
+    let env_value = std::env::var(MAX_INPUT_FILES_ENV).ok();
+    parse_max_input_files(env_value.as_deref())
+});
+
+fn parse_max_input_files(env_value: Option<&str>) -> usize {
+    env_value
+        .and_then(|env_value| env_value.parse().ok())
+        .filter(|max_input_files| *max_input_files >= 2)
+        .unwrap_or(DEFAULT_MAX_INPUT_FILES)
+}
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
@@ -332,7 +348,7 @@ fn pick_count_first(
     let mut best = None;
     for left in 0..files.len() {
         let mut candidate = Candidate::default();
-        let right_bound = (left + MAX_INPUT_FILES).min(files.len());
+        let right_bound = left.saturating_add(*MAX_INPUT_FILES).min(files.len());
         let mut participations: Vec<bool> = Vec::with_capacity(right_bound - left);
         for right in left..right_bound {
             candidate.absorb(&files[right], &files[left..right], &mut participations);
@@ -702,6 +718,18 @@ mod tests {
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;
     use crate::test_util::scheduler_util::SchedulerEnv;
+
+    #[test]
+    fn test_valid_max_input_files_env_overrides_default() {
+        assert_eq!(64, parse_max_input_files(Some("64")));
+    }
+
+    #[test]
+    fn test_invalid_max_input_files_env_falls_back_to_default() {
+        for env_value in [None, Some(""), Some("invalid"), Some("0"), Some("1")] {
+            assert_eq!(32, parse_max_input_files(env_value));
+        }
+    }
 
     async fn compaction_region_with_expired_sst() -> CompactionRegion {
         let env = SchedulerEnv::new().await;
@@ -1633,7 +1661,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(1, output.len());
-        assert_eq!(output[0].inputs.len(), 32);
+        assert_eq!(output[0].inputs.len(), num_files.min(*MAX_INPUT_FILES));
     }
 
     #[tokio::test]
@@ -1944,7 +1972,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(1, output.len());
-        assert_eq!(MAX_INPUT_FILES, output[0].inputs.len());
+        assert_eq!(DEFAULT_MAX_INPUT_FILES, output[0].inputs.len());
         assert!(!output[0].filter_deleted);
     }
 
@@ -2020,10 +2048,10 @@ mod tests {
 
     #[test]
     fn test_count_first_prefers_overlap_participants_when_file_counts_match() {
-        let first_run = (0..MAX_INPUT_FILES)
+        let first_run = (0..DEFAULT_MAX_INPUT_FILES)
             .map(|idx| {
                 let start = idx as i64 * 20;
-                let end = if idx + 1 == MAX_INPUT_FILES {
+                let end = if idx + 1 == DEFAULT_MAX_INPUT_FILES {
                     700
                 } else {
                     start + 9
@@ -2043,19 +2071,19 @@ mod tests {
         );
         let ranges = picked_ranges(&picked);
 
-        assert_eq!(MAX_INPUT_FILES, ranges.len());
+        assert_eq!(DEFAULT_MAX_INPUT_FILES, ranges.len());
         assert!(!ranges.contains(&(0, 9)));
         assert!(ranges.contains(&(690, 710)));
     }
 
     #[test]
     fn test_count_first_prefers_smaller_bytes_when_file_counts_match() {
-        let files = (0..=MAX_INPUT_FILES)
+        let files = (0..=DEFAULT_MAX_INPUT_FILES)
             .map(|idx| {
                 let start = idx as i64 * 20;
                 let size = if idx == 0 {
                     100
-                } else if idx == MAX_INPUT_FILES {
+                } else if idx == DEFAULT_MAX_INPUT_FILES {
                     1
                 } else {
                     10
@@ -2067,7 +2095,7 @@ mod tests {
         let picked = pick_count_first(vec![SortedRun::from(files)], 2, None);
         let ranges = picked_ranges(&picked);
 
-        assert_eq!(MAX_INPUT_FILES, ranges.len());
+        assert_eq!(DEFAULT_MAX_INPUT_FILES, ranges.len());
         assert_eq!(Some(&(20, 29)), ranges.first());
         assert_eq!(Some(&(640, 649)), ranges.last());
     }
@@ -2131,7 +2159,7 @@ mod tests {
 
     #[test]
     fn test_count_first_prefers_earlier_time_on_exact_tie() {
-        let files = (0..=MAX_INPUT_FILES)
+        let files = (0..=DEFAULT_MAX_INPUT_FILES)
             .map(|idx| {
                 let start = idx as i64 * 20;
                 new_file(start, start + 9, idx as u64 + 1, 10)
@@ -2141,7 +2169,7 @@ mod tests {
         let picked = pick_count_first(vec![SortedRun::from(files)], 2, None);
         let ranges = picked_ranges(&picked);
 
-        assert_eq!(MAX_INPUT_FILES, ranges.len());
+        assert_eq!(DEFAULT_MAX_INPUT_FILES, ranges.len());
         assert_eq!(Some(&(0, 9)), ranges.first());
         assert_eq!(Some(&(620, 629)), ranges.last());
     }
