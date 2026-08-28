@@ -149,15 +149,22 @@ mod tests {
     #[test]
     fn test_empty_malformed_and_null_states_return_null() {
         let empty = WelfordState::default().encode();
+        let noncanonical_singleton = WelfordState {
+            count: 1,
+            mean: 0.0,
+            m2: 1.0,
+        }
+        .encode();
 
         let ColumnarValue::Array(output) = invoke(BinaryArray::from(vec![
             Some(empty.as_slice()),
             Some(b"invalid".as_slice()),
+            Some(noncanonical_singleton.as_slice()),
             None,
         ])) else {
             panic!("Expected array result");
         };
-        assert_eq!(output.null_count(), 3);
+        assert_eq!(output.null_count(), 4);
     }
 
     #[test]

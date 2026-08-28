@@ -79,11 +79,11 @@ impl WelfordState {
     }
 
     fn is_valid(&self) -> bool {
-        if self.count == 0 {
-            return self.mean.to_bits() == 0 && self.m2.to_bits() == 0;
+        match self.count {
+            0 => self.mean.to_bits() == 0 && self.m2.to_bits() == 0,
+            1 => self.mean.is_finite() && self.m2.to_bits() == 0,
+            _ => self.mean.is_finite() && self.m2.is_finite() && self.m2 >= 0.0,
         }
-
-        self.mean.is_finite() && self.m2.is_finite() && self.m2 >= 0.0
     }
 
     fn update(&mut self, sample: f64) -> DfResult<()> {
@@ -370,11 +370,20 @@ mod tests {
         assert!(WelfordState::decode(&noncanonical_empty.encode()).is_err());
 
         let negative_m2 = WelfordState {
-            count: 1,
+            count: 2,
             mean: 1.0,
             m2: -1.0,
         };
         assert!(WelfordState::decode(&negative_m2.encode()).is_err());
+
+        for m2 in [1.0, -0.0] {
+            let noncanonical_singleton = WelfordState {
+                count: 1,
+                mean: 0.0,
+                m2,
+            };
+            assert!(WelfordState::decode(&noncanonical_singleton.encode()).is_err());
+        }
 
         for (mean, m2) in [
             (f64::NAN, 0.0),
@@ -493,9 +502,18 @@ mod tests {
 
     #[test]
     fn test_welford_accumulator_rejects_malformed_state() {
-        let states = Arc::new(BinaryArray::from(vec![Some(b"invalid".as_slice())])) as ArrayRef;
-        let mut accumulator = WelfordAccumulator::default();
+        let noncanonical_singleton = WelfordState {
+            count: 1,
+            mean: 0.0,
+            m2: 1.0,
+        }
+        .encode();
 
-        assert!(accumulator.merge_batch(&[states]).is_err());
+        for encoded in [b"invalid".to_vec(), noncanonical_singleton.to_vec()] {
+            let states = Arc::new(BinaryArray::from(vec![Some(encoded.as_slice())])) as ArrayRef;
+            let mut accumulator = WelfordAccumulator::default();
+
+            assert!(accumulator.merge_batch(&[states]).is_err());
+        }
     }
 }
