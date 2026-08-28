@@ -42,6 +42,7 @@ use crate::scalars::string::register_string_functions;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::vector::VectorFunction as VectorScalarFunction;
+use crate::scalars::welford_stddev::WelfordStddevFunction;
 use crate::system::SystemFunction;
 
 #[derive(Default)]
@@ -210,6 +211,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     ExpressionFunction::register(&function_registry);
     UddSketchCalcFunction::register(&function_registry);
     HllCalcFunction::register(&function_registry);
+    WelfordStddevFunction::register(&function_registry);
     DecodePrimaryKeyFunction::register(&function_registry);
 
     // Full text search function
