@@ -234,48 +234,33 @@ fn is_explain_analyze_verbose(stmt: &Statement) -> bool {
 }
 
 fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
-    match stmt {
-        Statement::Explain(explain) => {
-            ensure!(
-                explain.analyze && explain.verbose,
-                InvalidSqlSnafu {
-                    err_msg: "statement must be EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE"
-                }
-            );
-            match explain.format {
-                None | Some(AnalyzeFormat::JSON) => {
-                    // Keep explicit FORMAT JSON accepted, but pass JSON through
-                    // QueryContext.explain_format instead of the statement to avoid
-                    // the planner's current `EXPLAIN VERBOSE with FORMAT` limitation.
-                    explain.format = None;
-                    Ok(())
-                }
-                Some(_) => InvalidSqlSnafu {
-                    err_msg: "only FORMAT JSON is supported for EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE",
-                }
-                .fail(),
+    let (is_verbose, format) = match stmt {
+        Statement::Explain(explain) => (explain.analyze && explain.verbose, &mut explain.format),
+        Statement::Tql(Tql::Analyze(analyze)) => (analyze.is_verbose, &mut analyze.format),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: "only EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE statement is supported",
             }
+            .fail();
         }
-        Statement::Tql(Tql::Analyze(analyze)) => {
-            ensure!(
-                analyze.is_verbose,
-                InvalidSqlSnafu {
-                    err_msg: "statement must be EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE"
-                }
-            );
-            match analyze.format {
-                None | Some(AnalyzeFormat::JSON) => {
-                    analyze.format = None;
-                    Ok(())
-                }
-                Some(_) => InvalidSqlSnafu {
-                    err_msg: "only FORMAT JSON is supported for EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE",
-                }
-                .fail(),
-            }
+    };
+
+    ensure!(
+        is_verbose,
+        InvalidSqlSnafu {
+            err_msg: "statement must be EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE"
         }
-        _ => InvalidSqlSnafu {
-            err_msg: "only EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE statement is supported",
+    );
+    match format {
+        None | Some(AnalyzeFormat::JSON) => {
+            // Keep explicit FORMAT JSON accepted, but pass JSON through
+            // QueryContext.explain_format instead of the statement to avoid
+            // the planner's current `EXPLAIN VERBOSE with FORMAT` limitation.
+            *format = None;
+            Ok(())
+        }
+        Some(_) => InvalidSqlSnafu {
+            err_msg: "only FORMAT JSON is supported for EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE",
         }
         .fail(),
     }

@@ -103,28 +103,20 @@ struct AnalyzeStreamPayload {
 
 #[derive(Clone, Debug)]
 #[doc(hidden)]
-pub enum AnalyzeStreamMessage {
-    Empty,
-    Metrics {
-        payload: String,
-    },
-    Terminal {
-        event_name: &'static str,
-        payload: String,
-    },
+pub struct AnalyzeStreamMessage {
+    pub event_name: &'static str,
+    pub payload: String,
 }
 
 struct AnalyzeStreamWorkerGuard {
     cancel: watch::Sender<bool>,
-    handle: Option<common_runtime::JoinHandle<()>>,
+    handle: common_runtime::JoinHandle<()>,
 }
 
 impl Drop for AnalyzeStreamWorkerGuard {
     fn drop(&mut self) {
         let _ = self.cancel.send(true);
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
+        self.handle.abort();
     }
 }
 
@@ -424,7 +416,7 @@ pub fn analyze_stream_body(
             notify,
             _worker: AnalyzeStreamWorkerGuard {
                 cancel,
-                handle: Some(worker),
+                handle: worker,
             },
             done: false,
         },
@@ -449,7 +441,7 @@ pub fn analyze_stream_body(
                 // can otherwise hide a value published while a worker was unwinding.
                 if state.terminal.borrow().is_some() {
                     let terminal = { state.terminal.borrow_and_update().clone() };
-                    if let Some(AnalyzeStreamMessage::Terminal {
+                    if let Some(AnalyzeStreamMessage {
                         event_name,
                         payload,
                     }) = terminal
@@ -473,7 +465,7 @@ pub fn send_analyze_terminal(
 ) {
     if terminal_tx.send_if_modified(|terminal| {
         if terminal.is_none() {
-            *terminal = Some(AnalyzeStreamMessage::Terminal {
+            *terminal = Some(AnalyzeStreamMessage {
                 event_name,
                 payload,
             });

@@ -645,7 +645,7 @@ async fn test_analyze_stream_body_orders_latest_metrics_before_terminal() {
     let notify = Arc::new(Notify::new());
     metrics_tx.send(Some("latest".to_string())).unwrap();
     terminal_tx
-        .send(Some(http_handler::AnalyzeStreamMessage::Terminal {
+        .send(Some(http_handler::AnalyzeStreamMessage {
             event_name: "final",
             payload: "terminal".to_string(),
         }))
@@ -709,10 +709,8 @@ async fn test_analyze_stream_terminal_is_sent_once() {
     http_handler::send_analyze_terminal(&terminal_tx, &notify, "error", "one".to_string());
     http_handler::send_analyze_terminal(&terminal_tx, &notify, "error", "two".to_string());
     terminal_rx.changed().await.unwrap();
-    match terminal_rx.borrow_and_update().clone().unwrap() {
-        http_handler::AnalyzeStreamMessage::Terminal { payload, .. } => assert_eq!(payload, "one"),
-        _ => panic!("expected terminal"),
-    }
+    let terminal = terminal_rx.borrow_and_update().clone().unwrap();
+    assert_eq!(terminal.payload, "one");
 }
 
 #[tokio::test]
@@ -765,10 +763,7 @@ async fn test_analyze_stream_emits_metrics_before_final_when_stream_is_pending()
         delay: Duration::from_millis(1500),
         panic_metrics: false,
     });
-    let options = HttpOptions {
-        ..Default::default()
-    };
-    let server = HttpServerBuilder::new(options)
+    let server = HttpServerBuilder::new(HttpOptions::default())
         .with_sql_handler(sql_handler)
         .build();
     let app = server.build(server.make_app()).unwrap();
@@ -826,10 +821,7 @@ fn sse_event_payload(body: &str, event_name: &str) -> Option<String> {
 }
 
 async fn analyze_stream_test_client(sql_handler: ServerSqlQueryHandlerRef) -> TestClient {
-    let options = HttpOptions {
-        ..Default::default()
-    };
-    let server = HttpServerBuilder::new(options)
+    let server = HttpServerBuilder::new(HttpOptions::default())
         .with_sql_handler(sql_handler)
         .build();
     let app = server.build(server.make_app()).unwrap();

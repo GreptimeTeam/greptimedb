@@ -1293,7 +1293,7 @@ impl HttpServer {
     }
 
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
-        let mut router = Router::new()
+        Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))
             .route(
                 "/sql/parse",
@@ -1306,14 +1306,12 @@ impl HttpServer {
             .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
-            );
-
-        router = router.route(
-            "/sql/analyze/stream",
-            routing::post(handler::sql_analyze_stream),
-        );
-
-        router.with_state(api_state)
+            )
+            .route(
+                "/sql/analyze/stream",
+                routing::post(handler::sql_analyze_stream),
+            )
+            .with_state(api_state)
     }
 
     fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
