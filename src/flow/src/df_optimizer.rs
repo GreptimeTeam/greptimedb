@@ -29,19 +29,13 @@ use datafusion::optimizer::optimize_projections::OptimizeProjections;
 use datafusion::optimizer::simplify_expressions::SimplifyExpressions;
 use datafusion::optimizer::{Analyzer, AnalyzerRule, Optimizer, OptimizerContext};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-use query::QueryEngine;
 use query::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
-use query::parser::QueryLanguageParser;
-use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
-use substrait::DFLogicalSubstraitConvertor;
-
-use crate::adapter::FlownodeContext;
-use crate::error::{DatafusionSnafu, Error, ExternalSnafu, UnexpectedSnafu};
-use crate::plan::TypedPlan;
+use crate::error::{DatafusionSnafu, Error, ExternalSnafu};
 
 // TODO(discord9): use `Analyzer` to manage rules if more `AnalyzerRule` is needed
 pub async fn apply_df_optimizer(
@@ -81,42 +75,6 @@ pub async fn apply_df_optimizer(
         })?;
 
     Ok(plan)
-}
-
-/// To reuse existing code for parse sql, the sql is first parsed into a datafusion logical plan,
-/// then to a substrait plan, and finally to a flow plan.
-pub async fn sql_to_flow_plan(
-    ctx: &mut FlownodeContext,
-    engine: &Arc<dyn QueryEngine>,
-    sql: &str,
-) -> Result<TypedPlan, Error> {
-    let query_ctx = ctx.query_context.clone().ok_or_else(|| {
-        UnexpectedSnafu {
-            reason: "Query context is missing",
-        }
-        .build()
-    })?;
-    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
-    let plan = engine
-        .planner()
-        .plan(&stmt, query_ctx.clone())
-        .await
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
-
-    let opted_plan = apply_df_optimizer(plan, &query_ctx).await?;
-
-    // TODO(discord9): add df optimization
-    let sub_plan = DFLogicalSubstraitConvertor {}
-        .to_sub_plan(&opted_plan, DefaultSerializer)
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
-
-    let flow_plan = TypedPlan::from_substrait_plan(ctx, &sub_plan).await?;
-
-    Ok(flow_plan)
 }
 
 /// This rule check all group by exprs, and make sure they are also in select clause in a aggr query
