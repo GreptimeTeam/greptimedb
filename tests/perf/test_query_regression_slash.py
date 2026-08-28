@@ -65,13 +65,15 @@ def pull_payload(**overrides: object) -> dict:
 
 
 def admit(*, body: str = "/query-regression", actor: str = "maintainer", **pull_overrides: object):
+    payload = pull_payload(**pull_overrides)
     return slash.admit_pull(
-        pull_payload(**pull_overrides),
+        payload,
         actor=actor,
         allowlist=slash.parse_allowlist("maintainer, other-admin"),
         permission="admin",
         command=slash.parse_command(body),
         expected_repo="GreptimeTeam/greptimedb",
+        pr_number=str(payload.get("number") or ""),
     )
 
 
@@ -121,11 +123,113 @@ class ParseCommandTest(unittest.TestCase):
         self.assertFalse(slash.parse_command("/query-regression-extra").matched)
 
 
+class CommentIdentityTest(unittest.TestCase):
+    def comment(self, **overrides: object) -> dict:
+        payload = {
+            "user": {"login": "maintainer"},
+            "body": "/query-regression heavy",
+            "issue_url": "https://api.github.com/repos/GreptimeTeam/greptimedb/issues/42",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_reads_actor_pr_and_case_from_comment(self) -> None:
+        identity = slash.identity_from_comment(
+            self.comment(),
+            "GreptimeTeam/greptimedb",
+        )
+        self.assertEqual(identity.error, "")
+        self.assertEqual(identity.actor, "maintainer")
+        self.assertEqual(identity.pr_number, 42)
+        self.assertEqual(identity.command.case, "heavy")
+
+    def test_rejects_wrong_repo_and_non_command_body(self) -> None:
+        other_repo = slash.identity_from_comment(
+            self.comment(),
+            "other/repo",
+        )
+        self.assertIn("not other/repo", other_repo.error)
+        not_command = slash.identity_from_comment(
+            self.comment(body="please run this"),
+            "GreptimeTeam/greptimedb",
+        )
+        self.assertIn("not a query-regression command", not_command.error)
+
+    def test_payload_mismatch_is_rejected(self) -> None:
+        identity = slash.identity_from_comment(
+            self.comment(),
+            "GreptimeTeam/greptimedb",
+        )
+        self.assertEqual(
+            slash.payload_matches_comment(
+                identity,
+                actor="stranger",
+                pr_number="42",
+                command_args="heavy",
+            ),
+            "payload actor does not match comment author",
+        )
+        self.assertEqual(
+            slash.payload_matches_comment(
+                identity,
+                actor="maintainer",
+                pr_number="99",
+                command_args="heavy",
+            ),
+            "payload PR number does not match comment",
+        )
+        self.assertEqual(
+            slash.payload_matches_comment(
+                identity,
+                actor="maintainer",
+                pr_number="42",
+                command_args="all",
+            ),
+            "payload command args do not match comment",
+        )
+        self.assertEqual(
+            slash.payload_matches_comment(
+                identity,
+                actor="maintainer",
+                pr_number="42",
+                command_args="heavy",
+            ),
+            "",
+        )
+        self.assertEqual(
+            slash.payload_matches_comment(
+                identity,
+                actor="maintainer",
+                pr_number="abc",
+                command_args="heavy",
+            ),
+            "payload PR number is not a valid integer",
+        )
+
+
 class ParseAllowlistTest(unittest.TestCase):
     def test_splits_commas_whitespace_and_strips_at(self) -> None:
         self.assertEqual(
             slash.parse_allowlist("@Ada, bob\nCarol"),
             frozenset({"ada", "bob", "carol"}),
+        )
+
+
+class ParseGithubIdTest(unittest.TestCase):
+    def test_accepts_positive_integers(self) -> None:
+        self.assertEqual(slash.parse_github_id("42"), 42)
+        self.assertEqual(slash.parse_github_id(" 7 "), 7)
+
+    def test_rejects_non_numeric_and_non_positive(self) -> None:
+        self.assertIsNone(slash.parse_github_id("abc"))
+        self.assertIsNone(slash.parse_github_id(""))
+        self.assertIsNone(slash.parse_github_id("0"))
+        self.assertIsNone(slash.parse_github_id("-1"))
+
+    def test_non_numeric_comment_id_fails_closed(self) -> None:
+        self.assertEqual(
+            slash.main(["--repo", "o/r", "--token", "t", "--comment-id", "abc"]),
+            2,
         )
 
 
@@ -145,6 +249,7 @@ class AdmitPullTest(unittest.TestCase):
         decision = admit(actor="stranger")
         self.assertTrue(decision.skip)
         self.assertIn("ALLOWLIST", decision.reason)
+        self.assertEqual(decision.pr_number, "42")
 
     def test_allowlisted_non_admin_is_denied(self) -> None:
         decision = slash.admit_pull(
@@ -154,9 +259,11 @@ class AdmitPullTest(unittest.TestCase):
             permission="write",
             command=slash.parse_command("/query-regression"),
             expected_repo="GreptimeTeam/greptimedb",
+            pr_number="42",
         )
         self.assertTrue(decision.skip)
         self.assertIn("admin", decision.reason)
+        self.assertEqual(decision.pr_number, "42")
 
     def test_empty_allowlist_fails_closed(self) -> None:
         decision = slash.admit_pull(
@@ -166,6 +273,7 @@ class AdmitPullTest(unittest.TestCase):
             permission="admin",
             command=slash.parse_command("/query-regression"),
             expected_repo="GreptimeTeam/greptimedb",
+            pr_number="42",
         )
         self.assertTrue(decision.skip)
         self.assertIn("ALLOWLIST", decision.reason)

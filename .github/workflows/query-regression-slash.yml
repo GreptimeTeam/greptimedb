@@ -2,8 +2,9 @@ name: Query Regression Command
 
 # Handler for `/query-regression`, dispatched by slash-command-dispatch.yml.
 # The payload has the comment, actor, args, and PR number; this workflow
-# re-fetches the PR, admits an allowlisted admin, snapshots merge/head/base
-# SHAs, and calls the reusable Query Regression workflow.
+# re-fetches the comment by id as the source of truth, cross-checks the
+# payload, re-fetches the PR, admits an allowlisted admin, snapshots
+# merge/head/base SHAs, and calls the reusable Query Regression workflow.
 
 on:
   repository_dispatch:
@@ -11,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
   pull-requests: write
 
 jobs:
@@ -40,6 +42,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_API_URL: ${{ github.api_url }}
+          COMMENT_ID: ${{ github.event.client_payload.github.payload.comment.id }}
           COMMENT_ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
           COMMAND_ARGS: ${{ github.event.client_payload.slash_command.args.unnamed.all || '' }}
           PR_NUMBER: ${{ github.event.client_payload.github.payload.issue.number }}
@@ -71,13 +74,13 @@ jobs:
 
       - name: Reply with admission result
         if: ${{ steps.admit.outputs.reply != '' }}
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           REPLY: ${{ steps.admit.outputs.reply }}
+          PR_NUMBER: ${{ steps.admit.outputs.pr_number || github.event.client_payload.github.payload.issue.number }}
         run: |
           set -euo pipefail
-          printf '%s\n' "${REPLY}" | gh pr comment "${{ github.event.client_payload.github.payload.issue.number }}" --body-file -
+          printf '%s\n' "${REPLY}" | gh pr comment "${PR_NUMBER}" --body-file -
 
   query-regression:
     name: Query regression from comment
