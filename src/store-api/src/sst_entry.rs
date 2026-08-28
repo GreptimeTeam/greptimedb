@@ -113,11 +113,6 @@ impl ManifestSstEntry {
             ColumnSchema::new("level", Ty::uint8_datatype(), false),
             ColumnSchema::new("file_path", Ty::string_datatype(), false),
             ColumnSchema::new("file_size", Ty::uint64_datatype(), false),
-            ColumnSchema::new(
-                "max_row_group_uncompressed_size",
-                Ty::uint64_datatype(),
-                false,
-            ),
             ColumnSchema::new("index_file_path", Ty::string_datatype(), true),
             ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
             ColumnSchema::new("num_rows", Ty::uint64_datatype(), false),
@@ -126,12 +121,17 @@ impl ManifestSstEntry {
             ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
-            ColumnSchema::new("partition_expr", Ty::string_datatype(), true),
             ColumnSchema::new("origin_region_id", Ty::uint64_datatype(), false),
             ColumnSchema::new("node_id", Ty::uint64_datatype(), true),
             ColumnSchema::new("visible", Ty::boolean_datatype(), false),
             ColumnSchema::new("primary_key_min", Ty::binary_datatype(), true),
             ColumnSchema::new("primary_key_max", Ty::binary_datatype(), true),
+            ColumnSchema::new(
+                "max_row_group_uncompressed_size",
+                Ty::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("partition_expr", Ty::string_datatype(), true),
         ]))
     }
 
@@ -186,9 +186,6 @@ impl ManifestSstEntry {
             Arc::new(UInt8Array::from_iter_values(levels)),
             Arc::new(StringArray::from_iter_values(file_paths)),
             Arc::new(UInt64Array::from_iter_values(file_sizes)),
-            Arc::new(UInt64Array::from_iter_values(
-                max_row_group_uncompressed_sizes,
-            )),
             Arc::new(StringArray::from_iter(index_file_paths)),
             Arc::new(UInt64Array::from_iter(index_file_sizes)),
             Arc::new(UInt64Array::from_iter_values(num_rows)),
@@ -197,12 +194,15 @@ impl ManifestSstEntry {
             Arc::new(TimestampNanosecondArray::from_iter(min_ts)),
             Arc::new(TimestampNanosecondArray::from_iter(max_ts)),
             Arc::new(UInt64Array::from_iter(sequences)),
-            Arc::new(StringArray::from_iter(partition_exprs)),
             Arc::new(UInt64Array::from_iter_values(origin_region_ids)),
             Arc::new(UInt64Array::from_iter(node_ids)),
             Arc::new(BooleanArray::from_iter(visible_flags)),
             Arc::new(BinaryArray::from_iter(primary_key_min)),
             Arc::new(BinaryArray::from_iter(primary_key_max)),
+            Arc::new(UInt64Array::from_iter_values(
+                max_row_group_uncompressed_sizes,
+            )),
+            Arc::new(StringArray::from_iter(partition_exprs)),
         ];
 
         DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
@@ -527,6 +527,44 @@ mod tests {
         // Schema checks
         assert_eq!(schema.arrow_schema().fields().len(), batch.num_columns());
         assert_eq!(2, batch.num_rows());
+        let expected_columns = [
+            "table_dir",
+            "region_id",
+            "table_id",
+            "region_number",
+            "region_group",
+            "region_sequence",
+            "file_id",
+            "index_version",
+            "level",
+            "file_path",
+            "file_size",
+            "index_file_path",
+            "index_file_size",
+            "num_rows",
+            "num_row_groups",
+            "num_series",
+            "min_ts",
+            "max_ts",
+            "sequence",
+            "origin_region_id",
+            "node_id",
+            "visible",
+            "primary_key_min",
+            "primary_key_max",
+            "max_row_group_uncompressed_size",
+            "partition_expr",
+        ];
+        assert_eq!(
+            expected_columns,
+            schema
+                .arrow_schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
         for (i, f) in schema.arrow_schema().fields().iter().enumerate() {
             assert_eq!(f.name(), batch.schema().field(i).name());
             assert_eq!(f.is_nullable(), batch.schema().field(i).is_nullable());
@@ -622,16 +660,8 @@ mod tests {
         assert_eq!(100, file_sizes.value(0));
         assert_eq!(200, file_sizes.value(1));
 
-        let max_row_group_uncompressed_sizes = batch
-            .column(11)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        assert_eq!(80, max_row_group_uncompressed_sizes.value(0));
-        assert_eq!(160, max_row_group_uncompressed_sizes.value(1));
-
         let index_file_paths = batch
-            .column(12)
+            .column(11)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -639,7 +669,7 @@ mod tests {
         assert_eq!("idx", index_file_paths.value(1));
 
         let index_file_sizes = batch
-            .column(13)
+            .column(12)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -647,7 +677,7 @@ mod tests {
         assert_eq!(11, index_file_sizes.value(1));
 
         let num_rows = batch
-            .column(14)
+            .column(13)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -655,7 +685,7 @@ mod tests {
         assert_eq!(20, num_rows.value(1));
 
         let num_row_groups = batch
-            .column(15)
+            .column(14)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -663,7 +693,7 @@ mod tests {
         assert_eq!(4, num_row_groups.value(1));
 
         let num_series = batch
-            .column(16)
+            .column(15)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -671,7 +701,7 @@ mod tests {
         assert!(num_series.is_null(1));
 
         let min_ts = batch
-            .column(17)
+            .column(16)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -679,7 +709,7 @@ mod tests {
         assert_eq!(5, min_ts.value(1));
 
         let max_ts = batch
-            .column(18)
+            .column(17)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -687,23 +717,15 @@ mod tests {
         assert_eq!(2_000_000, max_ts.value(1));
 
         let sequences = batch
-            .column(19)
+            .column(18)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
         assert!(sequences.is_null(0));
         assert_eq!(9, sequences.value(1));
 
-        let partition_exprs = batch
-            .column(20)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!("a < 10", partition_exprs.value(0));
-        assert!(partition_exprs.is_null(1));
-
         let origin_region_ids = batch
-            .column(21)
+            .column(19)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -711,7 +733,7 @@ mod tests {
         assert_eq!(region_id2.as_u64(), origin_region_ids.value(1));
 
         let node_ids = batch
-            .column(22)
+            .column(20)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -719,7 +741,7 @@ mod tests {
         assert!(node_ids.is_null(1));
 
         let visible = batch
-            .column(23)
+            .column(21)
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
@@ -727,7 +749,7 @@ mod tests {
         assert!(visible.value(1));
 
         let primary_key_min = batch
-            .column(24)
+            .column(22)
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
@@ -735,12 +757,28 @@ mod tests {
         assert!(primary_key_min.is_null(1));
 
         let primary_key_max = batch
-            .column(25)
+            .column(23)
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
         assert_eq!(b"zzz", primary_key_max.value(0));
         assert!(primary_key_max.is_null(1));
+
+        let max_row_group_uncompressed_sizes = batch
+            .column(24)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(80, max_row_group_uncompressed_sizes.value(0));
+        assert_eq!(160, max_row_group_uncompressed_sizes.value(1));
+
+        let partition_exprs = batch
+            .column(25)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("a < 10", partition_exprs.value(0));
+        assert!(partition_exprs.is_null(1));
     }
 
     #[test]
