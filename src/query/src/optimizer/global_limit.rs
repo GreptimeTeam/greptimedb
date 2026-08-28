@@ -279,10 +279,11 @@ fn inherited_partitioning_to_restore(
 
 #[cfg(test)]
 mod tests {
-    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::array::{Array, Int32Array};
     use datafusion::arrow::compute::SortOptions;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::execution::TaskContext;
     use datafusion::physical_expr::expressions::{col, lit};
     use datafusion::physical_plan::aggregates::{
         AggregateExec, AggregateMode, LimitOptions, PhysicalGroupBy,
@@ -292,6 +293,7 @@ mod tests {
     use datafusion::physical_plan::limit::GlobalLimitExec;
     use datafusion::physical_plan::projection::ProjectionExec;
     use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::physical_plan::test::TestMemoryExec;
     use datafusion_common::{JoinType, NullEquality};
     use datafusion_physical_expr::{LexOrdering, Partitioning, PhysicalSortExpr};
@@ -347,22 +349,73 @@ mod tests {
         assert!(optimized.as_any().is::<AggregateExec>());
     }
 
-    #[test]
-    fn ignores_topk_ordered_aggregate_limit() {
+    #[tokio::test]
+    async fn topk_ordered_aggregate_limit_returns_global_winner() {
         // Ordered limit options come from TopKAggregation: each partition only
         // keeps its local top-N candidates, and the global top-N is chosen by
         // the sort machinery above. Truncating the merged candidates with a
         // coalesce fetch would drop true top-N rows.
-        let agg = agg_with_limit_options(
-            unordered_input(),
-            AggregateMode::FinalPartitioned,
-            LimitOptions::new_with_order(1, true),
+        //
+        // Partition 0 holds a losing candidate (100), partition 1 the global
+        // winner (1) of the ascending TopK. The global sort must see both.
+        let schema = schema();
+        let losing =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![100]))])
+                .unwrap();
+        let winning =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))])
+                .unwrap();
+        let input = Arc::new(
+            TestMemoryExec::try_new(&[vec![losing], vec![winning]], schema.clone(), None).unwrap(),
         );
+        let agg = agg_with_limit_options(
+            input,
+            AggregateMode::FinalPartitioned,
+            LimitOptions::new_with_order(1, false),
+        );
+        // Mirrors the real plan shape after EnforceDistribution: the global
+        // sort reads a single partition merged from the multi-partition
+        // aggregate. The merged stream must contain candidates from all
+        // aggregate partitions.
+        let merge = Arc::new(CoalescePartitionsExec::new(agg)) as Arc<dyn ExecutionPlan>;
+        let ordering = LexOrdering::new([PhysicalSortExpr::new(
+            col("a", schema.as_ref()).unwrap(),
+            SortOptions {
+                descending: false,
+                nulls_first: false,
+            },
+        )])
+        .unwrap();
+        let sort =
+            Arc::new(SortExec::new(ordering, merge).with_fetch(Some(1))) as Arc<dyn ExecutionPlan>;
 
         let optimized =
-            EnsureGlobalLimitForFetch::optimize_plan(agg, ParentContext::default()).unwrap();
+            EnsureGlobalLimitForFetch::optimize_plan(sort, ParentContext::default()).unwrap();
 
-        assert!(optimized.as_any().is::<AggregateExec>());
+        // The rule must not insert any candidate-truncating node below the
+        // merge...
+        let merge = optimized.children()[0].clone();
+        assert!(merge.as_any().is::<CoalescePartitionsExec>());
+        assert!(merge.children()[0].as_any().is::<AggregateExec>());
+
+        // ...and the executed plan must return the global winner.
+        let batches =
+            datafusion::physical_plan::collect(optimized, Arc::new(TaskContext::default()))
+                .await
+                .unwrap();
+        let values = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![1]);
     }
 
     #[test]
