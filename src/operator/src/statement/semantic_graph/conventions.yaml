@@ -17,6 +17,8 @@ co_declared_edges:
   - { src: service.instance, dst: k8s.pod, rel: runs_on }
   - { src: service.instance, dst: container, rel: runs_on }
   - { src: container, dst: host, rel: runs_on }
+  - { src: service.instance, dst: k8s.container, rel: runs_on }
+  - { src: k8s.container, dst: host, rel: runs_on }
 
 # Applied only to trace sources; the endpoints are Greptime entity types
 # derived from GenAI semantic-convention attributes.
@@ -54,9 +56,18 @@ otlp_trace_entities:
   # A container inside a pod is the k8s.container entity, under the identity
   # kube-state-metrics gives it, so the two sources name one node. The generic
   # container yields to it — but only on rows that actually produce it, or a
-  # container would vanish instead of merging.
+  # container would vanish instead of merging. The runtime id stays descriptive
+  # as it is in kube_pod_container_info: it is the handle back to runtime logs
+  # and metrics, and yielding must not cost the row an attribute it carried.
+  #
+  # Nothing checks a supersession against the edge vocabulary. Whatever edges
+  # the superseded type takes part in, the superseding type needs its own, or
+  # rows that gain the more specific type lose the connections it had.
   - entity: k8s.container
     id: [resource_attributes.k8s.pod.uid, resource_attributes.k8s.container.name]
+    descriptive:
+      - resource_attributes.container.id
+      - resource_attributes.container.name
   - entity: container
     id: [resource_attributes.container.id]
     superseded_by: k8s.container
@@ -161,6 +172,9 @@ otel_info_metrics:
         - host.name
     - entity: k8s.container
       id: [k8s.pod.uid, k8s.container.name]
+      descriptive:
+        - container.id
+        - container.name
     # Yields to k8s.container, as on the trace side above. One descriptor table
     # holds both pod rows and bare-runtime rows, so the test is per row.
     - entity: container

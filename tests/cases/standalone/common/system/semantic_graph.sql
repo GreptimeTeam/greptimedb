@@ -433,6 +433,13 @@ select entity_type, entity_id, source_tables
 from greptime_private.semantic_entities
 order by entity_type, entity_id, source_tables;
 
+-- Superseding must not cost the row an attribute it carried: the runtime
+-- container id stays reachable as a descriptive attribute of k8s.container.
+-- SQLNESS PROTOCOL MYSQL
+select entity_id, descriptive
+from greptime_private.semantic_entities
+where entity_type = 'k8s.container';
+
 -- SQLNESS PROTOCOL MYSQL
 select src_type, src_id, dst_type, dst_id, rel_type, provenance
 from greptime_private.semantic_relationships

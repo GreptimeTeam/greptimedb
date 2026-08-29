@@ -433,7 +433,7 @@ fn cast_string_or_empty(column: &str) -> Expr {
 /// unscheduled pod's `node`, an owner-less pod's `owner_*`), and an empty
 /// string is never a meaningful entity id. The qualifier is optional by
 /// construction and so is not guarded.
-pub(crate) fn identifies(column: &str) -> Expr {
+fn identifies(column: &str) -> Expr {
     ident(column)
         .is_not_null()
         .and(cast(ident(column), DataType::Utf8).not_eq(lit("")))

@@ -692,12 +692,14 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
     }
 
     fn table_declarations(&self, table_info: &TableInfo) -> Vec<TableEntityDeclaration> {
-        // A broken embedded conventions file leaves the explicit declarations
-        // reportable; the scan paths surface the error itself.
-        let Ok(conventions) = conventions() else {
-            return vec![];
+        // Options parse without the conventions, so a broken embedded file
+        // still leaves the explicit half reportable; the scan paths surface the
+        // error itself.
+        let derived = match conventions() {
+            Ok(conventions) => Self::declarations_for(table_info, conventions),
+            Err(_) => Self::parse_declarations(table_info),
         };
-        let mut declarations = Self::declarations_for(table_info, conventions)
+        let mut declarations = derived
             .into_iter()
             .map(|declaration| TableEntityDeclaration {
                 origin: if Self::explicitly_declares(table_info, &declaration.entity_type) {
@@ -710,6 +712,7 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
                 id_qualifier: declaration.id_qualifier,
                 superseded_by_columns: declaration.superseded_by_columns,
                 descriptive_columns: declaration.descriptive_columns,
+                scope_columns: declaration.scope_columns,
             })
             .collect::<Vec<_>>();
         declarations.sort_by(|a, b| a.entity_type.cmp(&b.entity_type));
@@ -991,6 +994,43 @@ mod tests {
         assert_eq!(
             declarations[1].descriptive_columns,
             vec!["resource_attributes.host.name"]
+        );
+
+        // A wrong `resource_attributes.` prefix here would silently leave the
+        // generic container standing beside the k8s one, which the
+        // descriptor-table case cannot catch.
+        let pod_container = table_info(
+            &[
+                "service_name",
+                "resource_attributes.container.id",
+                "resource_attributes.container.name",
+                "resource_attributes.k8s.pod.uid",
+                "resource_attributes.k8s.container.name",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let declarations = sorted_declarations(&pod_container);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["container", "k8s.container", "k8s.pod", "service"]
+        );
+        assert_eq!(
+            declarations[0].superseded_by_columns,
+            vec![
+                "resource_attributes.k8s.pod.uid",
+                "resource_attributes.k8s.container.name"
+            ]
+        );
+        assert_eq!(
+            declarations[1].descriptive_columns,
+            vec![
+                "resource_attributes.container.id",
+                "resource_attributes.container.name"
+            ]
         );
 
         let names_only = table_info(

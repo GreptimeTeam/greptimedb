@@ -94,6 +94,7 @@ pub struct TableEntityDeclaration {
     /// Reported because the declaration otherwise reads as unconditional.
     pub superseded_by_columns: Vec<String>,
     pub descriptive_columns: Vec<String>,
+    pub scope_columns: Vec<String>,
 }
 
 /// Produces the rows of the computed entity-graph tables at read time.
@@ -226,9 +227,10 @@ fn json() -> ConcreteDataType {
 ///   `process`, `service.instance` (the OTel-style, possibly dotted, type).
 /// - `entity_id`     — canonical identifier: the identifying values in declared
 ///   order, escaped and joined.
-/// - `entity_id_attrs` — JSON object of the identifying attributes, always
-///   present: it names the attributes the id was assembled from, so a consumer
-///   holding an id can tell which columns it came from and query them back.
+/// - `entity_id_attrs` — JSON object of the identifying attributes, on every
+///   derived row: it names the attributes the id was assembled from, so a
+///   consumer holding an id can tell which columns it came from and query them
+///   back.
 /// - `scope`         — namespace/environment the id is scoped to; empty when none.
 /// - `descriptive`   — JSON snapshot of the entity's descriptive (non-identifying)
 ///   attributes; NULL when no descriptive columns were declared.

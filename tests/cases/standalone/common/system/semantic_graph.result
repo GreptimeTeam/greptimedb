@@ -694,6 +694,19 @@ order by entity_type, entity_id, source_tables;
 | service.instance | shop/api,inst-4 | ["public.greptime_otel_resource_info"] |
 +------------------+-----------------+----------------------------------------+
 
+-- Superseding must not cost the row an attribute it carried: the runtime
+-- container id stays reachable as a descriptive attribute of k8s.container.
+-- SQLNESS PROTOCOL MYSQL
+select entity_id, descriptive
+from greptime_private.semantic_entities
+where entity_type = 'k8s.container';
+
++-----------+---------------------------------------------------+
+| entity_id | descriptive                                       |
++-----------+---------------------------------------------------+
+| uid-1,api | {"container.id":"c-2","container.name":"api-ctr"} |
++-----------+---------------------------------------------------+
+
 -- SQLNESS PROTOCOL MYSQL
 select src_type, src_id, dst_type, dst_id, rel_type, provenance
 from greptime_private.semantic_relationships
@@ -713,9 +726,11 @@ order by rel_type, src_id, dst_id;
 | service.instance | shop/api,inst-1 | host          | h-1       | runs_on  | attribute  |
 | service.instance | shop/api,inst-3 | host          | h-2       | runs_on  | attribute  |
 | service.instance | shop/api,inst-3 | k8s.pod       | uid-1     | runs_on  | attribute  |
+| service.instance | shop/api,inst-3 | k8s.container | uid-1,api | runs_on  | attribute  |
 | service.instance | shop/api,inst-4 | container     | c-3       | runs_on  | attribute  |
 | service.instance | shop/api,inst-4 | host          | h-2       | runs_on  | attribute  |
 | service.instance | shop/api,inst-4 | k8s.pod       | uid-2     | runs_on  | attribute  |
+| k8s.container    | uid-1,api       | host          | h-2       | runs_on  | attribute  |
 +------------------+-----------------+---------------+-----------+----------+------------+
 
 drop table greptime_otel_resource_info;

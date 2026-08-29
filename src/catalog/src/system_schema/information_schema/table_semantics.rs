@@ -26,9 +26,11 @@
 //! `entity_declarations` reports the entities the table actually contributes to
 //! the graph. Options alone cannot answer that: the built-in conventions derive
 //! declarations for trace tables and whitelisted descriptor metrics without any
-//! option being set, so "why is my table not in the graph" was previously only
-//! answerable from debug logs. A table that declares nothing by option but
-//! derives entities by convention gets a row here too.
+//! option being set, so the derived half was previously visible only in debug
+//! logs. A table that declares nothing by option but derives entities by
+//! convention gets a row here too. What the column shows is the outcome, not
+//! the reasoning: a declaration dropped for naming a missing column is absent
+//! here and explained only by the log.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
@@ -94,6 +96,8 @@ struct DeclarationEntry {
     superseded_by: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     descriptive: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    scope: Vec<String>,
 }
 
 impl From<TableEntityDeclaration> for DeclarationEntry {
@@ -105,6 +109,7 @@ impl From<TableEntityDeclaration> for DeclarationEntry {
             id_qualifier: declaration.id_qualifier,
             superseded_by: declaration.superseded_by_columns,
             descriptive: declaration.descriptive_columns,
+            scope: declaration.scope_columns,
         }
     }
 }
