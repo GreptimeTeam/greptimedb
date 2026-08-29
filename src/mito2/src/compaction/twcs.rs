@@ -40,6 +40,9 @@ use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
 
+/// A mixed L0/L1 compaction may rewrite at most this many L1 rows per L0 row.
+const MAX_L1_L0_ROW_RATIO: usize = 2;
+
 /// Default maximum number of input SST files in one compaction input.
 const DEFAULT_MAX_INPUT_FILES: usize = 32;
 
@@ -181,13 +184,36 @@ impl TwcsPicker {
             }
         }
 
+        let num_l0_files = files_to_merge
+            .iter()
+            .filter(|file| file.level() == 0)
+            .count();
+        let num_l1_files = files_to_merge.len() - num_l0_files;
+        // Keep fresh L0 data and compacted L1 data in separate tasks whenever either
+        // level can trigger compaction on its own. This prevents each L0 batch from
+        // pulling the previous L1 output into another rewrite.
+        let require_mixed_levels;
+        if num_l0_files >= self.trigger_file_num {
+            files_to_merge.retain(|file| file.level() == 0);
+            require_mixed_levels = false;
+        } else if num_l1_files >= self.trigger_file_num {
+            files_to_merge.retain(|file| file.level() != 0);
+            require_mixed_levels = false;
+        } else {
+            require_mixed_levels = num_l0_files > 0 && num_l1_files > 0;
+        }
+
         let sorted_runs = if files_to_merge.len() < 1024 {
             find_sorted_runs(&mut files_to_merge)
         } else {
             find_sorted_runs_by_time_range(&mut files_to_merge)
         };
         let found_runs = sorted_runs.len();
-        let inputs = pick_count_first(sorted_runs, self.max_output_file_size);
+        let inputs = if require_mixed_levels {
+            pick_mixed_count_first(sorted_runs, self.max_output_file_size)
+        } else {
+            pick_count_first(sorted_runs, self.max_output_file_size)
+        };
         let filter_deleted = !self.append_mode
             && !window_has_overlap(files, windows)
             && !selected_overlaps_unselected(&inputs, files);
@@ -229,6 +255,14 @@ struct Candidate {
     /// Files in the interval that overlap another interval file from a different
     /// sorted run. Resolving these overlaps is what reduces sorted runs.
     overlap_participants: usize,
+    /// Number of rows contributed by uncompacted files.
+    l0_rows: usize,
+    /// Number of rows contributed by compacted files.
+    l1_rows: usize,
+    has_l0: bool,
+    has_l1: bool,
+    /// Whether at least one file uses 0 to represent an unknown row count.
+    has_unknown_rows: bool,
 }
 
 impl Candidate {
@@ -245,6 +279,7 @@ impl Candidate {
         let file_size = file.file.size() as usize;
         self.total_size += file_size;
         self.largest_file_size = self.largest_file_size.max(file_size);
+        self.absorb_level_rows(file.file);
 
         let mut participates = false;
         for (offset, other) in preceding.iter().enumerate() {
@@ -259,6 +294,18 @@ impl Candidate {
         participations.push(participates);
         if participates {
             self.overlap_participants += 1;
+        }
+    }
+
+    fn absorb_level_rows(&mut self, file: &FileHandle) {
+        let num_rows = file.num_rows();
+        self.has_unknown_rows |= num_rows == 0;
+        if file.level() == 0 {
+            self.has_l0 = true;
+            self.l0_rows = self.l0_rows.saturating_add(num_rows);
+        } else {
+            self.has_l1 = true;
+            self.l1_rows = self.l1_rows.saturating_add(num_rows);
         }
     }
 
@@ -285,6 +332,19 @@ impl Candidate {
     /// the same amount of data, so every rewrite moves it into a larger size tier.
     fn is_balanced(&self) -> bool {
         self.largest_file_size <= self.total_size - self.largest_file_size
+    }
+
+    /// Bounds rewrite amplification for mixed L0/L1 candidates. Legacy files with
+    /// unknown row counts retain the byte-balance behavior above.
+    fn has_balanced_level_rows(&self) -> bool {
+        !self.has_l0
+            || !self.has_l1
+            || self.has_unknown_rows
+            || self.l1_rows <= self.l0_rows.saturating_mul(MAX_L1_L0_ROW_RATIO)
+    }
+
+    fn has_mixed_levels(&self) -> bool {
+        self.has_l0 && self.has_l1
     }
 
     /// A candidate is worth compacting only if it makes progress on at least one
@@ -332,6 +392,7 @@ impl CandidateScore {
 ///
 /// - holds at least 2 files,
 /// - is balanced: no single file dominates it (`largest <= sum of the others`),
+/// - when mixing levels with known row counts, has at most twice as many L1 rows as L0 rows,
 /// - makes progress on at least one axis: it reduces the physical file count given
 ///   the output split threshold `max_output_file_size`, or it resolves at least one
 ///   overlap between sorted runs.
@@ -340,6 +401,25 @@ impl CandidateScore {
 fn pick_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+) -> Vec<FileHandle> {
+    pick_count_first_where(sorted_runs, max_output_file_size, |_| true)
+}
+
+fn pick_mixed_count_first(
+    sorted_runs: Vec<SortedRun<FileHandle>>,
+    max_output_file_size: Option<u64>,
+) -> Vec<FileHandle> {
+    pick_count_first_where(
+        sorted_runs,
+        max_output_file_size,
+        Candidate::has_mixed_levels,
+    )
+}
+
+fn pick_count_first_where(
+    sorted_runs: Vec<SortedRun<FileHandle>>,
+    max_output_file_size: Option<u64>,
+    is_eligible: impl Fn(&Candidate) -> bool,
 ) -> Vec<FileHandle> {
     let files = ordered_files(&sorted_runs);
 
@@ -352,6 +432,8 @@ fn pick_count_first(
             candidate.absorb(&files[right], &files[left..right], &mut participations);
             if candidate.num_files < 2
                 || !candidate.is_balanced()
+                || !is_eligible(&candidate)
+                || !candidate.has_balanced_level_rows()
                 || !candidate.makes_progress(max_output_file_size)
             {
                 continue;
@@ -1290,7 +1372,9 @@ mod tests {
                     output_level: 1,
                 },
                 ExpectedOutput {
-                    input_files: vec![0, 1, 4],
+                    // L1 reaches the trigger on its own, so compact it without
+                    // rewriting the L0 tail. A chained pick can handle the tail.
+                    input_files: vec![0, 1],
                     output_level: 1,
                 },
             ],
@@ -1456,6 +1540,33 @@ mod tests {
             output.is_empty(),
             "Should return empty output when no runs are found after filtering"
         );
+    }
+
+    #[tokio::test]
+    async fn test_append_mode_can_pick_remaining_single_level_files() {
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 9, 0, 1, 100),
+            new_file_handle_with_size_and_sequence(FileId::random(), 20, 29, 0, 2, 100),
+            new_file_handle_with_size_and_sequence(FileId::random(), 40, 49, 0, 3, 100),
+            new_file_handle_with_size_and_sequence(FileId::random(), 60, 69, 0, 4, 2_000),
+        ];
+        let windows = assign_to_windows(files.iter(), 1);
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(1),
+            max_output_file_size: Some(1_000),
+            append_mode: true,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(1), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(3, output[0].inputs.len());
     }
 
     #[tokio::test]
@@ -1978,6 +2089,27 @@ mod tests {
         new_file_handle_with_size_and_sequence(FileId::random(), start, end, 0, sequence, file_size)
     }
 
+    fn new_file_with_level_and_rows(
+        start: i64,
+        end: i64,
+        level: Level,
+        sequence: u64,
+        file_size: u64,
+        num_rows: u64,
+    ) -> FileHandle {
+        let file = new_file_handle_with_size_and_sequence(
+            FileId::random(),
+            start,
+            end,
+            level,
+            sequence,
+            file_size,
+        );
+        let mut meta = file.meta_ref().clone();
+        meta.num_rows = num_rows;
+        FileHandle::new(meta, crate::test_util::new_noop_file_purger())
+    }
+
     fn picked_ranges(files: &[FileHandle]) -> Vec<(i64, i64)> {
         files
             .iter()
@@ -2066,6 +2198,102 @@ mod tests {
         assert_eq!(DEFAULT_MAX_INPUT_FILES, ranges.len());
         assert!(!ranges.contains(&(0, 9)));
         assert!(ranges.contains(&(690, 710)));
+    }
+
+    #[tokio::test]
+    async fn test_picker_avoids_chained_l1_rewrites_by_compacting_levels_separately() {
+        let mut enough_l0 = (0..DEFAULT_MAX_INPUT_FILES)
+            .map(|idx| {
+                let start = idx as i64 * 20;
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    start,
+                    start + 9,
+                    0,
+                    idx as u64 + 1,
+                    10,
+                )
+            })
+            .collect::<Vec<_>>();
+        enough_l0.push(new_file_handle_with_size_and_sequence(
+            FileId::random(),
+            0,
+            700,
+            1,
+            100,
+            100,
+        ));
+        let mut enough_l1 = (0..4)
+            .map(|idx| {
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    idx * 100,
+                    idx * 100 + 99,
+                    1,
+                    idx as u64 + 1,
+                    100,
+                )
+            })
+            .collect::<Vec<_>>();
+        enough_l1.extend((0..3).map(|idx| {
+            new_file_handle_with_size_and_sequence(
+                FileId::random(),
+                idx * 20,
+                idx * 20 + 9,
+                0,
+                idx as u64 + 10,
+                10,
+            )
+        }));
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(1),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        for (case, files, expected_level, expected_len) in [
+            ("L0 reaches trigger", enough_l0, 0, DEFAULT_MAX_INPUT_FILES),
+            ("L1 reaches trigger", enough_l1, 1, 4),
+        ] {
+            let windows = assign_to_windows(files.iter(), 1);
+            let output = picker
+                .build_output_with_time_range(RegionId::from_u64(1), windows, Some(1), None)
+                .await
+                .unwrap();
+
+            assert_eq!(1, output.len(), "{case}");
+            assert_eq!(expected_len, output[0].inputs.len(), "{case}");
+            assert!(
+                output[0]
+                    .inputs
+                    .iter()
+                    .all(|file| file.level() == expected_level),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mixed_candidate_row_balance() {
+        for (case, l1_rows, l0_rows, expected_len) in [
+            ("L1 rows dominate", 1_000_000, 10_000, 0),
+            ("L1 rows meet ratio", 60_000, 10_000, 4),
+            ("L0 rows are unknown", 1_000_000, 0, 4),
+        ] {
+            let files = vec![
+                new_file_with_level_and_rows(0, 99, 1, 1, 100, l1_rows),
+                new_file_with_level_and_rows(0, 9, 0, 2, 100, l0_rows),
+                new_file_with_level_and_rows(20, 29, 0, 3, 100, l0_rows),
+                new_file_with_level_and_rows(40, 49, 0, 4, 100, l0_rows),
+            ];
+
+            let picked = pick_mixed_count_first(vec![SortedRun::from(files)], None);
+
+            assert_eq!(expected_len, picked.len(), "{case}");
+        }
     }
 
     #[test]
