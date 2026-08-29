@@ -332,9 +332,8 @@ const VIRTUAL_NODE_CONFIDENCE: f64 = 0.5;
 /// and `confidence < 1.0`. Real pairs win: when a window's edge key holds any
 /// pair, the edge reports only the pair population (the RFC pins RED metrics
 /// to observed span pairs) and the unmatched clients are suppressed, so one
-/// `(window, edge)` never yields two rows. `unmatched_count` stays outside that
-/// rule and counts them on the same row, or a callee that stopped answering
-/// would be indistinguishable from a caller that stopped calling.
+/// `(window, edge)` never yields two rows. `unmatched_count` stays outside the
+/// rule and counts them on the same row.
 fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<Option<DataFrame>> {
     let mut clients: Option<DataFrame> = None;
     let mut servers: Option<DataFrame> = None;
@@ -458,8 +457,8 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
             real_wins(lit(1.0_f64), lit(VIRTUAL_NODE_CONFIDENCE))?.alias(CONFIDENCE_COLUMN),
             real_wins(ident("pair_count"), ident(UNMATCHED_COUNT_COLUMN))?
                 .alias(REQUEST_COUNT_COLUMN),
-            // Deliberately outside `real_wins`: reporting the clients the pair
-            // population swallowed is the whole point of the column.
+            // Outside `real_wins`: reporting what the pair population
+            // swallowed is the point of the column.
             ident(UNMATCHED_COUNT_COLUMN),
             real_wins(ident("pair_errors"), ident("unmatched_errors"))?.alias(ERROR_COUNT_COLUMN),
             // duration sums in nanoseconds; the contract column is seconds.
@@ -473,9 +472,9 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
             .alias(DURATION_SUM_COLUMN),
             real_wins(ident("pair_count"), ident(UNMATCHED_COUNT_COLUMN))?
                 .alias(DURATION_COUNT_COLUMN),
-            // A pair is timed by the server span, an unmatched client by its own
-            // span (network wait included). Mixing the two would make the max
-            // describe a different population than duration_sum/duration_count.
+            // A pair is timed by the server span, an unmatched client by its
+            // own (network wait included), so mixing them would describe a
+            // different population than duration_sum/duration_count.
             (cast(
                 real_wins(
                     ident("pair_duration_max_nano"),
@@ -729,8 +728,8 @@ fn agent_calls_branch(
             lit(PROVENANCE_TRACE).alias(PROVENANCE_COLUMN),
             lit(1.0_f64).alias(CONFIDENCE_COLUMN),
             ident(REQUEST_COUNT_COLUMN),
-            // The agent join is an inner join: an unanswered delegation leaves
-            // no pair to count, so there is no unmatched population here.
+            // The join is inner: an unanswered delegation leaves no row, so
+            // there is no unmatched population here.
             lit(ScalarValue::Int64(None)).alias(UNMATCHED_COUNT_COLUMN),
             ident(ERROR_COUNT_COLUMN),
             (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
@@ -1266,9 +1265,7 @@ mod tests {
         assert_eq!(strings(batch, 9), vec!["trace"]);
         assert_eq!(confidence(batch, 0), 1.0);
         assert_eq!(red_metrics(batch, 0), (2, 1, 3.0, 2));
-        // The child spans carry the durations, so the max is real here; an
-        // unanswered delegation leaves no row to count, so there is no
-        // unmatched population.
+        // The child spans carry the durations, so the max is real here.
         assert_eq!(duration_max(batch, 0), 2.0);
         assert!(batch.column(12).is_null(0));
     }
@@ -1568,8 +1565,7 @@ mod tests {
             )],
             &[
                 // A sampled-out server: the client names the same peer an
-                // actual pair witnesses in the same window. Its duration is the
-                // larger of the two, and it is a client-side measurement.
+                // actual pair witnesses in the same window, and outlasts it.
                 (
                     1_000,
                     "t1",
@@ -1607,12 +1603,9 @@ mod tests {
         assert_eq!(strings(batch, 7), vec!["cart"]);
         assert_eq!(confidence(batch, 0), 1.0);
         assert_eq!(red_metrics(batch, 0), (1, 0, 0.5, 1));
-        // The suppressed client is timed client-side and is the longer of the
-        // two: taking it would make duration_max describe a population the rest
-        // of the RED columns exclude.
+        // The longer, client-timed span is excluded from the max but still
+        // counted.
         assert_eq!(duration_max(batch, 0), 0.5);
-        // ...but it is still counted, or "the callee stopped answering" looks
-        // exactly like "the caller stopped calling".
         assert_eq!(unmatched_count(batch, 0), 1);
         assert!(json_texts(batch, 17)[0].is_none());
     }

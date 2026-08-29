@@ -55,14 +55,11 @@ otlp_trace_entities:
       - resource_attributes.host.name
   # A container inside a pod is the k8s.container entity, under the identity
   # kube-state-metrics gives it, so the two sources name one node. The generic
-  # container yields to it — but only on rows that actually produce it, or a
-  # container would vanish instead of merging. The runtime id stays descriptive
-  # as it is in kube_pod_container_info: it is the handle back to runtime logs
-  # and metrics, and yielding must not cost the row an attribute it carried.
+  # container yields to it only on rows that produce it, or a container would
+  # vanish instead of merging, and keeps its runtime id descriptive.
   #
-  # Nothing checks a supersession against the edge vocabulary. Whatever edges
-  # the superseded type takes part in, the superseding type needs its own, or
-  # rows that gain the more specific type lose the connections it had.
+  # Nothing checks a supersession against the edge vocabulary: whatever edges
+  # the superseded type takes part in, the superseding type needs its own.
   - entity: k8s.container
     id: [resource_attributes.k8s.pod.uid, resource_attributes.k8s.container.name]
     descriptive:

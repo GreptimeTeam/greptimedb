@@ -236,8 +236,7 @@ impl EntityGraphProviderImpl {
 
     /// Binds each `superseded_by` to the identity the superseding type has on
     /// this table, once every declaration is known. A type nothing declares
-    /// here — its columns are gone, its explicit declaration was skipped —
-    /// leaves the guard empty, so the superseded entity stands instead of
+    /// here leaves the guard empty, so the superseded entity stands instead of
     /// yielding to a node that will never be derived.
     fn resolve_supersessions(
         declarations: &mut [EntityDeclaration],
@@ -692,9 +691,8 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
     }
 
     fn table_declarations(&self, table_info: &TableInfo) -> Vec<TableEntityDeclaration> {
-        // Options parse without the conventions, so a broken embedded file
-        // still leaves the explicit half reportable; the scan paths surface the
-        // error itself.
+        // A broken embedded file still leaves the explicit half reportable;
+        // the scan paths surface the error itself.
         let derived = match conventions() {
             Ok(conventions) => Self::declarations_for(table_info, conventions),
             Err(_) => Self::parse_declarations(table_info),
@@ -996,9 +994,9 @@ mod tests {
             vec!["resource_attributes.host.name"]
         );
 
-        // A wrong `resource_attributes.` prefix here would silently leave the
-        // generic container standing beside the k8s one, which the
-        // descriptor-table case cannot catch.
+        // A wrong `resource_attributes.` prefix would leave the generic
+        // container standing beside the k8s one, which the descriptor-table
+        // case cannot catch.
         let pod_container = table_info(
             &[
                 "service_name",
@@ -1155,9 +1153,8 @@ mod tests {
         assert_eq!(declarations[5].id_columns, vec!["job", "instance"]);
         assert!(declarations[5].descriptive_columns.is_empty());
 
-        // Without the columns that identify a k8s.container, nothing here can
-        // produce one — so the generic container must keep standing, or a
-        // container disappears from the graph rather than changing type.
+        // Nothing here can produce a k8s.container, so the generic one must
+        // stand or the container disappears instead of changing type.
         let no_k8s = prom_table_info(
             "greptime_otel_resource_info",
             &["job", "container.id", "k8s.pod.uid"],
@@ -1167,9 +1164,8 @@ mod tests {
         assert_eq!(declarations[0].entity_type, "container");
         assert!(declarations[0].superseded_by_columns.is_empty());
 
-        // Same rule when an explicit k8s.container declaration is skipped for
-        // naming a dropped column: it blocks the implicit one, so nothing
-        // declares the type and the generic container must not yield to it.
+        // Same rule when a skipped explicit declaration blocks the implicit
+        // one: nothing declares the type, so nothing may yield to it.
         let mut stamps = OTEL_STAMPS.to_vec();
         stamps.push(("greptime.semantic.entity.k8s.container.id", "gone"));
         let broken_explicit = prom_table_info(

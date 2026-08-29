@@ -129,10 +129,9 @@ pub trait EntityGraphProvider: Send + Sync {
     ) -> std::result::Result<Option<SendableRecordBatchStream>, BoxedError>;
 
     /// The entities `table_info` contributes to the graph: its explicit
-    /// declarations merged with the ones the conventions derive. This is the
-    /// only way an operator can see the derived half, so it backs
-    /// `information_schema.table_semantics`. Metadata-only by contract — it
-    /// runs per table on that view's scan and must not touch the query engine.
+    /// declarations merged with the ones the conventions derive. Metadata-only
+    /// by contract — it runs per table on the `table_semantics` scan and must
+    /// not touch the query engine.
     fn table_declarations(&self, table_info: &TableInfo) -> Vec<TableEntityDeclaration>;
 }
 
@@ -227,10 +226,8 @@ fn json() -> ConcreteDataType {
 ///   `process`, `service.instance` (the OTel-style, possibly dotted, type).
 /// - `entity_id`     — canonical identifier: the identifying values in declared
 ///   order, escaped and joined.
-/// - `entity_id_attrs` — JSON object of the identifying attributes, on every
-///   derived row: it names the attributes the id was assembled from, so a
-///   consumer holding an id can tell which columns it came from and query them
-///   back.
+/// - `entity_id_attrs` — JSON object of the identifying attributes, so a
+///   consumer holding an id can tell which columns it came from.
 /// - `scope`         — namespace/environment the id is scoped to; empty when none.
 /// - `descriptive`   — JSON snapshot of the entity's descriptive (non-identifying)
 ///   attributes; NULL when no descriptive columns were declared.
@@ -271,9 +268,8 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 ///   declared edges, lower for virtual-node or agent-inferred edges. It does
 ///   not correct for trace sampling.
 /// - `request_count` — RED: number of requests over the window (`calls` edges).
-/// - `unmatched_count` — client spans on this edge with no server span in the
-///   window. When the edge also holds paired spans the other RED columns
-///   describe the pairs alone, so this is the only column that distinguishes a
+/// - `unmatched_count` — client spans on this edge with no server span. The
+///   other RED columns describe the pairs alone, so this is what separates a
 ///   callee that stopped responding from traffic that stopped arriving.
 /// - `error_count`   — RED: number of errored requests over the window.
 /// - `duration_sum`  — RED: sum of request durations, in seconds, over the window.

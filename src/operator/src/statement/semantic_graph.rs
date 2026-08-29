@@ -687,9 +687,7 @@ fn registry_source(
             .cloned()
             .collect::<Vec<_>>();
         // Carried for single-column ids too. Entity equality reads entity_id
-        // alone, so this is not part of the identity; it tells a consumer
-        // holding an id which attributes produced it, without which a bare
-        // `a3f2...` cannot be traced back to a column of the source table.
+        // alone, so this is not part of the identity.
         let entity_id_attrs = json_object_expr(&id_parts);
 
         let scope = match decl.scope_columns.as_slice() {
@@ -1019,8 +1017,7 @@ mod tests {
         let batch = &batches[0];
         assert_eq!(strings(batch, 4), vec!["service"; batch.num_rows()]);
         assert_eq!(strings(batch, 5), vec!["cart"; batch.num_rows()]);
-        // A single-column id still names its attribute; descriptive stays a
-        // typed-JSON NULL, none having been declared.
+        // A single-column id still names its attribute.
         assert_eq!(
             json_texts(batch, 6),
             vec![Some(r#"{"service_name":"cart"}"#.to_string()); batch.num_rows()]
@@ -1180,10 +1177,9 @@ mod tests {
 
     #[tokio::test]
     async fn registry_superseding_is_per_row_and_never_drops_an_entity() {
-        // One descriptor table holds pod rows and bare-runtime rows together, so
-        // a schema-level test could only keep or drop the whole table. Each row
-        // must end up with exactly one container node: the specific type where
-        // its identity is complete, the generic one everywhere else.
+        // One table holds pod rows and bare-runtime rows, so the rule is per
+        // row: each must end up with exactly one container node, the specific
+        // type where its identity is complete and the generic one elsewhere.
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "ts",

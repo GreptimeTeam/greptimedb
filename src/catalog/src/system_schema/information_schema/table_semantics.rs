@@ -23,14 +23,11 @@
 //! `semantic_options` JSON string, keyed by the option name with the
 //! `greptime.semantic.` prefix stripped.
 //!
-//! `entity_declarations` reports the entities the table actually contributes to
-//! the graph. Options alone cannot answer that: the built-in conventions derive
-//! declarations for trace tables and whitelisted descriptor metrics without any
-//! option being set, so the derived half was previously visible only in debug
-//! logs. A table that declares nothing by option but derives entities by
-//! convention gets a row here too. What the column shows is the outcome, not
-//! the reasoning: a declaration dropped for naming a missing column is absent
-//! here and explained only by the log.
+//! `entity_declarations` reports the entities the table contributes to the
+//! graph, including the ones the conventions derive with no option set — so a
+//! table with no semantic option still gets a row. It shows the outcome, not
+//! the reasoning: a declaration dropped for naming a missing column is simply
+//! absent, and only the log says why.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
@@ -119,8 +116,8 @@ fn entity_declarations_json(declarations: Vec<TableEntityDeclaration>) -> Option
         return None;
     }
     let entries: Vec<DeclarationEntry> = declarations.into_iter().map(Into::into).collect();
-    // Serializing strings cannot realistically fail; fold a failure into `None`
-    // rather than panicking the query path, as the options tail does.
+    // Fold a failure into `None` rather than panicking the query path, as the
+    // options tail does.
     serde_json::to_string(&entries).ok()
 }
 
@@ -322,7 +319,6 @@ impl InformationSchemaSemanticTablesBuilder {
         let predicates = Predicates::from_scan_request(&request);
         // Resolved once for the whole scan: the lookup downcasts the catalog
         // manager, while the per-table call behind it is pure metadata work.
-        // Absent on a node with no query engine, leaving the column NULL.
         let graph_provider = utils::entity_graph_provider(&self.catalog_manager)?;
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {

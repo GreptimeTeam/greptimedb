@@ -261,7 +261,7 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
                         )
                     })?;
                 // A chain would let the middle entity withdraw while its own
-                // replacement is absent, which is the vanishing this guards.
+                // replacement is absent.
                 if superseding.superseded_by.is_some() {
                     return Err(format!(
                         "entity `{}` of info metric `{table}` is superseded by `{}`, which is \
@@ -344,8 +344,8 @@ mod tests {
             )
             .contains("descriptive_rest")
         );
-        // Superseding an entity the same table does not declare leaves the rule
-        // dead and the duplicate node it guards against back in the graph.
+        // Superseding a type the same table does not declare leaves the rule
+        // dead and the duplicate node back in the graph.
         assert!(
             err(
                 "",
