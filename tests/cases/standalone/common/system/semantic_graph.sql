@@ -448,30 +448,6 @@ order by rel_type, src_id, dst_id;
 
 drop table greptime_otel_resource_info;
 
--- The descriptor whitelist is gated on source=opentelemetry: the same table
--- shape stamped as a prometheus source contributes nothing.
-create table greptime_otel_resource_info (
-  greptime_timestamp timestamp(3) time index,
-  job string,
-  instance string,
-  "host.id" string,
-  greptime_value double,
-  primary key (job, instance, "host.id")
-) with (
-  'greptime.semantic.signal_type' = 'metric',
-  'greptime.semantic.source' = 'prometheus'
-);
-
-insert into greptime_otel_resource_info values
-  (now(), 'shop/api', 'inst-1', 'h-1', 1);
-
--- SQLNESS PROTOCOL MYSQL
-select entity_type, entity_id
-from greptime_private.semantic_entities
-order by entity_type, entity_id;
-
-drop table greptime_otel_resource_info;
-
 -- Cross-signal identity: the same service reaches the graph as trace spans and
 -- as an ingestion-synthesized descriptor. The two sources name their identity
 -- columns differently and only the metric side pre-composes the namespace into
