@@ -115,7 +115,7 @@ impl<S: LogStore> Wal<S> {
             Provider::RaftEngine(_) => Box::new(LogStoreEntryReader::new(
                 LogStoreRawEntryReader::new(self.store.clone()),
             )),
-            Provider::Kafka(_) => {
+            Provider::Kafka(_) | Provider::External(_) => {
                 let reader = if let Some(location_id) = location_id {
                     LogStoreRawEntryReader::new(self.store.clone())
                         .with_wal_index(WalIndex::new(region_id, location_id))
@@ -127,10 +127,6 @@ impl<S: LogStore> Wal<S> {
                     reader, region_id,
                 )))
             }
-            Provider::External(_) => Box::new(LogStoreEntryReader::new(RegionRawEntryReader::new(
-                LogStoreRawEntryReader::new(self.store.clone()),
-                region_id,
-            ))),
             Provider::Noop => Box::new(NoopEntryReader),
         }
     }
@@ -241,6 +237,8 @@ impl<S: LogStore> WalWriter<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use api::v1::helper::{tag_column_schema, time_index_column_schema};
     use api::v1::{
         ArrowIpc, BulkWalEntry, ColumnDataType, Mutation, OpType, Row, Rows, Value, bulk_wal_entry,
@@ -272,6 +270,7 @@ mod tests {
     #[derive(Debug)]
     struct SharedNamespaceLogStore {
         entries: Vec<Entry>,
+        read_indexes: Mutex<Vec<Option<WalIndex>>>,
     }
 
     #[async_trait::async_trait]
@@ -293,9 +292,10 @@ mod tests {
             &self,
             _provider: &Provider,
             _entry_id: EntryId,
-            _index: Option<WalIndex>,
+            index: Option<WalIndex>,
         ) -> std::result::Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error>
         {
+            self.read_indexes.lock().unwrap().push(index);
             Ok(Box::pin(stream::iter(vec![Ok(self.entries.clone())])))
         }
 
@@ -591,6 +591,7 @@ mod tests {
                     data,
                 }),
             ],
+            read_indexes: Mutex::new(Vec::new()),
         };
         let wal = Wal::new(Arc::new(store));
 
@@ -602,6 +603,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(vec![(1, wal_entry)], entries);
+    }
+
+    #[tokio::test]
+    async fn test_external_provider_reader_forwards_wal_index() {
+        let provider =
+            Provider::external(ExternalProvider::remote("test-backend", "shared-namespace"));
+        let region_id = RegionId::new(1, 1);
+        let location_id = 42;
+        let store = Arc::new(SharedNamespaceLogStore {
+            entries: Vec::new(),
+            read_indexes: Mutex::new(Vec::new()),
+        });
+        let wal = Wal::new(store.clone());
+
+        wal.wal_entry_reader(&provider, region_id, Some(location_id))
+            .read(&provider, 0)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        let indexes = store.read_indexes.lock().unwrap();
+        let index = indexes[0].unwrap();
+        assert_eq!(region_id, index.region_id);
+        assert_eq!(location_id, index.location_id);
     }
 
     #[tokio::test]
