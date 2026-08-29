@@ -1640,6 +1640,7 @@ impl ErrorExt for Error {
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
             | FetchManifests { source, .. }
+            | ResolveWalProvider { source, .. }
             | External { source, .. } => source.retry_hint(),
 
             OpenRegion { source, .. }
@@ -1698,6 +1699,16 @@ mod tests {
     use snafu::IntoError;
 
     use super::*;
+
+    #[test]
+    fn test_resolve_wal_provider_preserves_source_retry_hint() {
+        let region_id = RegionId::new(1, 1);
+        let source = RegionBusySnafu { region_id }.build();
+        let error = ResolveWalProviderSnafu { region_id }.into_error(BoxedError::new(source));
+
+        assert_eq!(StatusCode::RegionBusy, error.status_code());
+        assert_eq!(RetryHint::Retryable, error.retry_hint());
+    }
 
     #[test]
     fn test_manifest_update_persistence() {
