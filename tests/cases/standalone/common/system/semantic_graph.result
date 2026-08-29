@@ -241,17 +241,18 @@ Affected Rows: 1
 
 -- SQLNESS PROTOCOL MYSQL
 select src_id, dst_id, rel_type, provenance, confidence,
-  request_count, error_count, duration_sum, duration_count, attributes
+  request_count, unmatched_count, error_count,
+  duration_sum, duration_count, duration_max, attributes
 from greptime_private.semantic_relationships
 order by dst_id;
 
-+----------+-----------+----------+------------+------------+---------------+-------------+--------------+----------------+------------------------------------+
-| src_id   | dst_id    | rel_type | provenance | confidence | request_count | error_count | duration_sum | duration_count | attributes                         |
-+----------+-----------+----------+------------+------------+---------------+-------------+--------------+----------------+------------------------------------+
-| frontend | cart      | calls    | trace      | 1          | 2             | 1           | 2            | 2              |                                    |
-| frontend | orders-db | calls    | trace      | 0.5        | 1             | 0           | 0.1          | 1              | {"connection_type":"database"}     |
-| frontend | redis     | calls    | trace      | 0.5        | 1             | 0           | 0.25         | 1              | {"connection_type":"virtual_node"} |
-+----------+-----------+----------+------------+------------+---------------+-------------+--------------+----------------+------------------------------------+
++----------+-----------+----------+------------+------------+---------------+-----------------+-------------+--------------+----------------+--------------+------------------------------------+
+| src_id   | dst_id    | rel_type | provenance | confidence | request_count | unmatched_count | error_count | duration_sum | duration_count | duration_max | attributes                         |
++----------+-----------+----------+------------+------------+---------------+-----------------+-------------+--------------+----------------+--------------+------------------------------------+
+| frontend | cart      | calls    | trace      | 1          | 2             | 0               | 1           | 2            | 2              | 1.5          |                                    |
+| frontend | orders-db | calls    | trace      | 0.5        | 1             | 1               | 0           | 0.1          | 1              | 0.1          | {"connection_type":"database"}     |
+| frontend | redis     | calls    | trace      | 0.5        | 1             | 1               | 0           | 0.25         | 1              | 0.25         | {"connection_type":"virtual_node"} |
++----------+-----------+----------+------------+------------+---------------+-----------------+-------------+--------------+----------------+--------------+------------------------------------+
 
 -- SQLNESS PROTOCOL MYSQL
 select entity_type, entity_id, entity_id_attrs, scope, source_tables

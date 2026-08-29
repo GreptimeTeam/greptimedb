@@ -36,13 +36,13 @@ use std::sync::{Arc, LazyLock, Weak};
 
 use common_catalog::consts::{
     CONFIDENCE_COLUMN, DEFAULT_PRIVATE_SCHEMA_NAME, DST_ID_COLUMN, DST_TYPE_COLUMN,
-    DURATION_COUNT_COLUMN, DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN, ENTITY_DESCRIPTIVE_COLUMN,
-    ENTITY_ID_ATTRS_COLUMN, ENTITY_ID_COLUMN, ENTITY_SCOPE_COLUMN, ENTITY_TYPE_COLUMN,
-    ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, OBSERVED_AT_COLUMN, PROVENANCE_COLUMN, REL_TYPE_COLUMN,
-    REQUEST_COUNT_COLUMN, SEMANTIC_ENTITIES_TABLE_ID,
+    DURATION_COUNT_COLUMN, DURATION_MAX_COLUMN, DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN,
+    ENTITY_DESCRIPTIVE_COLUMN, ENTITY_ID_ATTRS_COLUMN, ENTITY_ID_COLUMN, ENTITY_SCOPE_COLUMN,
+    ENTITY_TYPE_COLUMN, ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, OBSERVED_AT_COLUMN,
+    PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN, SEMANTIC_ENTITIES_TABLE_ID,
     SEMANTIC_ENTITIES_TABLE_NAME as SEMANTIC_ENTITIES, SEMANTIC_RELATIONSHIPS_TABLE_ID,
     SEMANTIC_RELATIONSHIPS_TABLE_NAME as SEMANTIC_RELATIONSHIPS, SOURCE_TABLES_COLUMN,
-    SRC_ID_COLUMN, SRC_TYPE_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
+    SRC_ID_COLUMN, SRC_TYPE_COLUMN, UNMATCHED_COUNT_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
 };
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
@@ -251,7 +251,7 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 });
 
 /// Schema of `semantic_relationships` — the edge set of the graph, one row per
-/// edge observed in a time window. This is the 16-column contract every derived
+/// edge observed in a time window. This is the 18-column contract every derived
 /// branch and the declared-edge table must project for the top-level `UNION ALL`.
 ///
 /// Columns:
@@ -271,10 +271,16 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 ///   declared edges, lower for virtual-node or agent-inferred edges. It does
 ///   not correct for trace sampling.
 /// - `request_count` — RED: number of requests over the window (`calls` edges).
+/// - `unmatched_count` — client spans on this edge with no server span in the
+///   window. When the edge also holds paired spans the other RED columns
+///   describe the pairs alone, so this is the only column that distinguishes a
+///   callee that stopped responding from traffic that stopped arriving.
 /// - `error_count`   — RED: number of errored requests over the window.
 /// - `duration_sum`  — RED: sum of request durations, in seconds, over the window.
 /// - `duration_count`— RED: number of durations summed (pair with `duration_sum`
 ///   to get an average).
+/// - `duration_max`  — RED: longest single request, in seconds, over the same
+///   population `duration_sum` covers.
 /// - `attributes`    — JSON of edge attributes, e.g. `connection_type`,
 ///   `db.system`, `peer.service`.
 static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -299,6 +305,11 @@ static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
             ConcreteDataType::int64_datatype(),
             true,
         ),
+        ColumnSchema::new(
+            UNMATCHED_COUNT_COLUMN,
+            ConcreteDataType::int64_datatype(),
+            true,
+        ),
         ColumnSchema::new(ERROR_COUNT_COLUMN, ConcreteDataType::int64_datatype(), true),
         ColumnSchema::new(
             DURATION_SUM_COLUMN,
@@ -308,6 +319,11 @@ static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         ColumnSchema::new(
             DURATION_COUNT_COLUMN,
             ConcreteDataType::int64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            DURATION_MAX_COLUMN,
+            ConcreteDataType::float64_datatype(),
             true,
         ),
         ColumnSchema::new(EDGE_ATTRIBUTES_COLUMN, json(), true),

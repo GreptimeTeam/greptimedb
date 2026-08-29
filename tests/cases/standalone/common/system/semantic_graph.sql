@@ -150,7 +150,8 @@ insert into graph_traces_malformed values (now(), 'not a trace');
 
 -- SQLNESS PROTOCOL MYSQL
 select src_id, dst_id, rel_type, provenance, confidence,
-  request_count, error_count, duration_sum, duration_count, attributes
+  request_count, unmatched_count, error_count,
+  duration_sum, duration_count, duration_max, attributes
 from greptime_private.semantic_relationships
 order by dst_id;
 
