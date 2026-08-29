@@ -302,12 +302,13 @@ impl RegionOpener {
                     region_dir, self.region_id
                 );
             }
-            Err(e) => {
+            Err(e) if can_fallback_to_create(&e) => {
                 warn!(e;
                     "Failed to open region {} before creating it, region_dir: {}",
                     self.region_id, region_dir
                 );
             }
+            Err(e) => return Err(e),
         }
         // Safety: must be set before calling this method.
         let mut options = self.options.take().unwrap();
@@ -632,6 +633,10 @@ impl RegionOpener {
 
         Ok(Some(region))
     }
+}
+
+fn can_fallback_to_create(error: &error::Error) -> bool {
+    !matches!(error, error::Error::ResolveWalProvider { .. })
 }
 
 pub(crate) fn provider_for_log_store<S: LogStore>(
@@ -1361,8 +1366,9 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        initial_pruned_entry_id, preload_parquet_meta_cache_for_files, provider_for_log_store,
-        sanitize_region_options, supports_open_region_object_storage_requirement,
+        can_fallback_to_create, initial_pruned_entry_id, preload_parquet_meta_cache_for_files,
+        provider_for_log_store, sanitize_region_options,
+        supports_open_region_object_storage_requirement,
     };
     use crate::cache::CacheManager;
     use crate::cache::file_cache::{FileType, IndexKey};
@@ -1379,6 +1385,7 @@ mod tests {
     struct ExternalLogStore {
         inner: log_store::noop::log_store::NoopLogStore,
         resolve_calls: AtomicUsize,
+        fail_resolution: bool,
     }
 
     impl ExternalLogStore {
@@ -1386,6 +1393,14 @@ mod tests {
             Self {
                 inner: log_store::noop::log_store::NoopLogStore,
                 resolve_calls: AtomicUsize::new(0),
+                fail_resolution: false,
+            }
+        }
+
+        fn with_resolution_error() -> Self {
+            Self {
+                fail_resolution: true,
+                ..Self::new()
             }
         }
     }
@@ -1404,6 +1419,9 @@ mod tests {
             _wal_options: &WalOptions,
         ) -> Result<Option<ExternalProvider>, Self::Error> {
             self.resolve_calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_resolution {
+                return log_store::error::IllegalStateSnafu.fail();
+            }
             Ok(Some(ExternalProvider::new(
                 "test-external",
                 region_id.as_u64().to_string(),
@@ -1544,6 +1562,17 @@ mod tests {
 
         assert_eq!(Provider::Noop, provider);
         assert_eq!(0, store.resolve_calls.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_provider_resolution_error_cannot_fallback_to_create() {
+        let region_id = RegionId::new(1, 2);
+        let store = ExternalLogStore::with_resolution_error();
+
+        let error = provider_for_log_store(&store, region_id, &WalOptions::RaftEngine).unwrap_err();
+
+        assert!(!can_fallback_to_create(&error));
+        assert_eq!(1, store.resolve_calls.load(Ordering::Relaxed));
     }
 
     #[test]
