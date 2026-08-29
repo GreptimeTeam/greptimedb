@@ -1386,6 +1386,8 @@ mod tests {
         inner: log_store::noop::log_store::NoopLogStore,
         resolve_calls: AtomicUsize,
         fail_resolution: bool,
+        remote_wal: bool,
+        latest_entry_id: EntryId,
     }
 
     impl ExternalLogStore {
@@ -1394,6 +1396,16 @@ mod tests {
                 inner: log_store::noop::log_store::NoopLogStore,
                 resolve_calls: AtomicUsize::new(0),
                 fail_resolution: false,
+                remote_wal: false,
+                latest_entry_id: 0,
+            }
+        }
+
+        fn with_wal_semantics(remote_wal: bool, latest_entry_id: EntryId) -> Self {
+            Self {
+                remote_wal,
+                latest_entry_id,
+                ..Self::new()
             }
         }
 
@@ -1422,10 +1434,13 @@ mod tests {
             if self.fail_resolution {
                 return log_store::error::IllegalStateSnafu.fail();
             }
-            Ok(Some(ExternalProvider::local(
-                "test-external",
-                region_id.as_u64().to_string(),
-            )))
+            let backend = "test-external";
+            let namespace = region_id.as_u64().to_string();
+            Ok(Some(if self.remote_wal {
+                ExternalProvider::remote(backend, namespace)
+            } else {
+                ExternalProvider::local(backend, namespace)
+            }))
         }
 
         async fn append_batch(
@@ -1483,8 +1498,8 @@ mod tests {
             self.inner.entry(data, entry_id, region_id, provider)
         }
 
-        fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId, Self::Error> {
-            self.inner.latest_entry_id(provider)
+        fn latest_entry_id(&self, _provider: &Provider) -> Result<EntryId, Self::Error> {
+            Ok(self.latest_entry_id)
         }
     }
 
@@ -1544,6 +1559,20 @@ mod tests {
             provider
         );
         assert_eq!(1, store.resolve_calls.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_external_provider_initial_flushed_entry_id() {
+        let region_id = RegionId::new(1, 2);
+        let local_store = ExternalLogStore::with_wal_semantics(false, 42);
+        let local_provider =
+            provider_for_log_store(&local_store, region_id, &WalOptions::RaftEngine).unwrap();
+        assert_eq!(0, local_provider.initial_flushed_entry_id(&local_store));
+
+        let remote_store = ExternalLogStore::with_wal_semantics(true, 42);
+        let remote_provider =
+            provider_for_log_store(&remote_store, region_id, &WalOptions::RaftEngine).unwrap();
+        assert_eq!(42, remote_provider.initial_flushed_entry_id(&remote_store));
     }
 
     #[test]
