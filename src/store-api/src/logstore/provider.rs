@@ -41,6 +41,43 @@ impl Display for KafkaProvider {
     }
 }
 
+/// Opaque identity for a log store implemented outside the built-in backends.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExternalProvider {
+    backend: String,
+    namespace: String,
+}
+
+impl ExternalProvider {
+    pub fn new(backend: impl Into<String>, namespace: impl Into<String>) -> Self {
+        Self {
+            backend: backend.into(),
+            namespace: namespace.into(),
+        }
+    }
+
+    /// Returns the stable backend identity.
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    /// Returns the backend-defined namespace identity.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Returns the type name.
+    pub fn type_name() -> &'static str {
+        "ExternalProvider"
+    }
+}
+
+impl Display for ExternalProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}({})", self.backend, self.namespace)
+    }
+}
+
 // The Provider of raft engine log store
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RaftEngineProvider {
@@ -63,6 +100,7 @@ impl RaftEngineProvider {
 pub enum Provider {
     RaftEngine(RaftEngineProvider),
     Kafka(Arc<KafkaProvider>),
+    External(Arc<ExternalProvider>),
     Noop,
 }
 
@@ -73,6 +111,7 @@ impl Display for Provider {
                 write!(f, "RaftEngine(region={})", RegionId::from_u64(provider.id))
             }
             Provider::Kafka(provider) => write!(f, "Kafka(topic={})", provider.topic),
+            Provider::External(provider) => write!(f, "External({provider})"),
             Provider::Noop => write!(f, "Noop"),
         }
     }
@@ -99,6 +138,14 @@ impl Provider {
         Provider::Kafka(Arc::new(KafkaProvider { topic }))
     }
 
+    pub fn external(provider: ExternalProvider) -> Provider {
+        Provider::External(Arc::new(provider))
+    }
+
+    pub fn external_provider(backend: impl Into<String>, namespace: impl Into<String>) -> Provider {
+        Provider::external(ExternalProvider::new(backend, namespace))
+    }
+
     pub fn noop_provider() -> Provider {
         Provider::Noop
     }
@@ -113,6 +160,7 @@ impl Provider {
         match self {
             Provider::RaftEngine(_) => RaftEngineProvider::type_name(),
             Provider::Kafka(_) => KafkaProvider::type_name(),
+            Provider::External(_) => ExternalProvider::type_name(),
             Provider::Noop => "Noop",
         }
     }
@@ -131,5 +179,32 @@ impl Provider {
             return Some(ns);
         }
         None
+    }
+
+    /// Returns the reference of [`ExternalProvider`] if present.
+    pub fn as_external_provider(&self) -> Option<&ExternalProvider> {
+        if let Provider::External(provider) = self {
+            return Some(provider);
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_external_provider_identity() {
+        let provider = Provider::external_provider("test-backend", "node-1/region-2");
+
+        let external = provider.as_external_provider().unwrap();
+        assert_eq!("test-backend", external.backend());
+        assert_eq!("node-1/region-2", external.namespace());
+        assert_eq!(
+            "External(test-backend(node-1/region-2))",
+            provider.to_string()
+        );
+        assert!(!provider.is_remote_wal());
     }
 }

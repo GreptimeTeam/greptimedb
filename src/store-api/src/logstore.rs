@@ -21,13 +21,14 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 use common_error::ext::ErrorExt;
+use common_wal::options::WalOptions;
 use entry::Entry;
 use futures::Stream;
 
 pub type SendableEntryStream<'a, I, E> = Pin<Box<dyn Stream<Item = Result<Vec<I>, E>> + Send + 'a>>;
 
 pub use crate::logstore::entry::Id as EntryId;
-use crate::logstore::provider::Provider;
+use crate::logstore::provider::{ExternalProvider, Provider};
 use crate::storage::RegionId;
 
 // The information used to locate WAL index for the specified region.
@@ -53,6 +54,17 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
+
+    /// Resolves a provider identity for a region owned by an external log store.
+    ///
+    /// Returning `Ok(None)` delegates to the built-in provider resolution.
+    fn resolve_provider(
+        &self,
+        _region_id: RegionId,
+        _wal_options: &WalOptions,
+    ) -> Result<Option<ExternalProvider>, Self::Error> {
+        Ok(None)
+    }
 
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.

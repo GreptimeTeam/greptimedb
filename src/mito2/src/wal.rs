@@ -127,6 +127,10 @@ impl<S: LogStore> Wal<S> {
                     reader, region_id,
                 )))
             }
+            Provider::External(_) => Box::new(LogStoreEntryReader::new(RegionRawEntryReader::new(
+                LogStoreRawEntryReader::new(self.store.clone()),
+                region_id,
+            ))),
             Provider::Noop => Box::new(NoopEntryReader),
         }
     }
@@ -249,9 +253,12 @@ mod tests {
     use datatypes::arrow::array::{ArrayRef, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::Field;
     use datatypes::arrow_array::StringArray;
-    use futures::TryStreamExt;
+    use futures::{TryStreamExt, stream};
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::test_util::log_store_util;
+    use prost::Message;
+    use store_api::logstore::SendableEntryStream;
+    use store_api::logstore::entry::NaiveEntry;
     use store_api::storage::SequenceNumber;
 
     use super::*;
@@ -259,6 +266,89 @@ mod tests {
     struct WalEnv {
         _wal_dir: TempDir,
         log_store: Option<Arc<RaftEngineLogStore>>,
+    }
+
+    #[derive(Debug)]
+    struct SharedNamespaceLogStore {
+        entries: Vec<Entry>,
+    }
+
+    #[async_trait::async_trait]
+    impl LogStore for SharedNamespaceLogStore {
+        type Error = crate::error::Error;
+
+        async fn stop(&self) -> std::result::Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        async fn append_batch(
+            &self,
+            _entries: Vec<Entry>,
+        ) -> std::result::Result<AppendBatchResponse, Self::Error> {
+            unreachable!()
+        }
+
+        async fn read(
+            &self,
+            _provider: &Provider,
+            _entry_id: EntryId,
+            _index: Option<WalIndex>,
+        ) -> std::result::Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error>
+        {
+            Ok(Box::pin(stream::iter(vec![Ok(self.entries.clone())])))
+        }
+
+        async fn create_namespace(
+            &self,
+            _provider: &Provider,
+        ) -> std::result::Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        async fn delete_namespace(
+            &self,
+            _provider: &Provider,
+        ) -> std::result::Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        async fn list_namespaces(&self) -> std::result::Result<Vec<Provider>, Self::Error> {
+            unreachable!()
+        }
+
+        async fn obsolete(
+            &self,
+            _provider: &Provider,
+            _region_id: RegionId,
+            _entry_id: EntryId,
+        ) -> std::result::Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        async fn obsolete_all(
+            &self,
+            _provider: &Provider,
+            _region_id: RegionId,
+        ) -> std::result::Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        fn entry(
+            &self,
+            _data: Vec<u8>,
+            _entry_id: EntryId,
+            _region_id: RegionId,
+            _provider: &Provider,
+        ) -> std::result::Result<Entry, Self::Error> {
+            unreachable!()
+        }
+
+        fn latest_entry_id(
+            &self,
+            _provider: &Provider,
+        ) -> std::result::Result<EntryId, Self::Error> {
+            unreachable!()
+        }
     }
 
     impl WalEnv {
@@ -472,6 +562,44 @@ mod tests {
         let stream = wal.scan(id1, 5, &ns1).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         assert!(actual.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_external_provider_scan_is_region_isolated() {
+        let provider = Provider::external_provider("test-backend", "shared-namespace");
+        let region_id = RegionId::new(1, 1);
+        let other_region_id = RegionId::new(1, 2);
+        let wal_entry = WalEntry {
+            mutations: vec![new_mutation(OpType::Put, 1, &[("k1", 1)])],
+            bulk_entries: vec![],
+        };
+        let data = wal_entry.encode_to_vec();
+        let store = SharedNamespaceLogStore {
+            entries: vec![
+                Entry::Naive(NaiveEntry {
+                    provider: provider.clone(),
+                    region_id,
+                    entry_id: 1,
+                    data: data.clone(),
+                }),
+                Entry::Naive(NaiveEntry {
+                    provider: provider.clone(),
+                    region_id: other_region_id,
+                    entry_id: 2,
+                    data,
+                }),
+            ],
+        };
+        let wal = Wal::new(Arc::new(store));
+
+        let entries = wal
+            .scan(region_id, 0, &provider)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert_eq!(vec![(1, wal_entry)], entries);
     }
 
     #[tokio::test]

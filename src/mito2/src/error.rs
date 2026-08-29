@@ -1197,6 +1197,14 @@ pub enum Error {
     ))]
     IncompatibleWalProviderChange { global: String, region: String },
 
+    #[snafu(display("Failed to resolve WAL provider for region {region_id}"))]
+    ResolveWalProvider {
+        region_id: RegionId,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Expected mito manifest info"))]
     MitoManifestInfo {
         #[snafu(implicit)]
@@ -1579,6 +1587,8 @@ impl ErrorExt for Error {
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
+
+            ResolveWalProvider { source, .. } => source.status_code(),
 
             ScanSeries { source, .. } => source.status_code(),
 
