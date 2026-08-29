@@ -1422,7 +1422,7 @@ mod tests {
             if self.fail_resolution {
                 return log_store::error::IllegalStateSnafu.fail();
             }
-            Ok(Some(ExternalProvider::new(
+            Ok(Some(ExternalProvider::local(
                 "test-external",
                 region_id.as_u64().to_string(),
             )))
@@ -1537,7 +1537,10 @@ mod tests {
         let provider = provider_for_log_store(&store, region_id, &WalOptions::RaftEngine).unwrap();
 
         assert_eq!(
-            Provider::external_provider("test-external", region_id.as_u64().to_string()),
+            Provider::external(ExternalProvider::local(
+                "test-external",
+                region_id.as_u64().to_string(),
+            )),
             provider
         );
         assert_eq!(1, store.resolve_calls.load(Ordering::Relaxed));

@@ -259,6 +259,7 @@ mod tests {
     use prost::Message;
     use store_api::logstore::SendableEntryStream;
     use store_api::logstore::entry::NaiveEntry;
+    use store_api::logstore::provider::ExternalProvider;
     use store_api::storage::SequenceNumber;
 
     use super::*;
@@ -566,7 +567,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_external_provider_scan_is_region_isolated() {
-        let provider = Provider::external_provider("test-backend", "shared-namespace");
+        let provider =
+            Provider::external(ExternalProvider::local("test-backend", "shared-namespace"));
         let region_id = RegionId::new(1, 1);
         let other_region_id = RegionId::new(1, 2);
         let wal_entry = WalEntry {

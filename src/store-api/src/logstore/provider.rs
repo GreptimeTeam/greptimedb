@@ -46,13 +46,25 @@ impl Display for KafkaProvider {
 pub struct ExternalProvider {
     backend: String,
     namespace: String,
+    remote_wal: bool,
 }
 
 impl ExternalProvider {
-    pub fn new(backend: impl Into<String>, namespace: impl Into<String>) -> Self {
+    /// Creates an external provider backed by a local WAL.
+    pub fn local(backend: impl Into<String>, namespace: impl Into<String>) -> Self {
         Self {
             backend: backend.into(),
             namespace: namespace.into(),
+            remote_wal: false,
+        }
+    }
+
+    /// Creates an external provider backed by a remotely shared WAL.
+    pub fn remote(backend: impl Into<String>, namespace: impl Into<String>) -> Self {
+        Self {
+            backend: backend.into(),
+            namespace: namespace.into(),
+            remote_wal: true,
         }
     }
 
@@ -64,6 +76,11 @@ impl ExternalProvider {
     /// Returns the backend-defined namespace identity.
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    /// Returns whether this provider uses a remotely shared WAL.
+    pub fn is_remote_wal(&self) -> bool {
+        self.remote_wal
     }
 
     /// Returns the type name.
@@ -124,7 +141,7 @@ impl Provider {
     /// Currently only used for remote WAL.
     /// For local WAL, the initial flushed entry id is 0.
     pub fn initial_flushed_entry_id<S: LogStore>(&self, wal: &S) -> u64 {
-        if matches!(self, Provider::Kafka(_)) {
+        if self.is_remote_wal() {
             return wal.latest_entry_id(self).unwrap_or(0);
         }
         0
@@ -142,17 +159,17 @@ impl Provider {
         Provider::External(Arc::new(provider))
     }
 
-    pub fn external_provider(backend: impl Into<String>, namespace: impl Into<String>) -> Provider {
-        Provider::external(ExternalProvider::new(backend, namespace))
-    }
-
     pub fn noop_provider() -> Provider {
         Provider::Noop
     }
 
     /// Returns true if it's remote WAL.
     pub fn is_remote_wal(&self) -> bool {
-        matches!(self, Provider::Kafka(_))
+        match self {
+            Provider::Kafka(_) => true,
+            Provider::External(provider) => provider.is_remote_wal(),
+            Provider::RaftEngine(_) | Provider::Noop => false,
+        }
     }
 
     /// Returns the type name.
@@ -196,7 +213,8 @@ mod tests {
 
     #[test]
     fn test_external_provider_identity() {
-        let provider = Provider::external_provider("test-backend", "node-1/region-2");
+        let provider =
+            Provider::external(ExternalProvider::local("test-backend", "node-1/region-2"));
 
         let external = provider.as_external_provider().unwrap();
         assert_eq!("test-backend", external.backend());
@@ -206,5 +224,9 @@ mod tests {
             provider.to_string()
         );
         assert!(!provider.is_remote_wal());
+
+        let remote =
+            Provider::external(ExternalProvider::remote("test-backend", "node-1/region-2"));
+        assert!(remote.is_remote_wal());
     }
 }
