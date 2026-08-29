@@ -97,6 +97,7 @@ impl WalEntryDistributor {
 /// Receives the Wal entries from [WalEntryDistributor].
 #[derive(Debug)]
 pub(crate) struct WalEntryReceiver {
+    provider: Provider,
     /// Receives the [Entry] from the [WalEntryDistributor].
     entry_receiver: Option<Receiver<Entry>>,
     /// Sends the `start_id` to the [WalEntryDistributor].
@@ -104,11 +105,20 @@ pub(crate) struct WalEntryReceiver {
 }
 
 impl WalEntryReceiver {
-    pub fn new(entry_receiver: Receiver<Entry>, arg_sender: oneshot::Sender<EntryId>) -> Self {
+    pub fn new(
+        provider: Provider,
+        entry_receiver: Receiver<Entry>,
+        arg_sender: oneshot::Sender<EntryId>,
+    ) -> Self {
         Self {
+            provider,
             entry_receiver: Some(entry_receiver),
             arg_sender: Some(arg_sender),
         }
+    }
+
+    pub fn provider(&self) -> &Provider {
+        &self.provider
     }
 }
 
@@ -203,7 +213,11 @@ pub fn build_wal_entry_distributor_and_receivers(
 
         senders.insert(region_id, entry_sender);
         arg_receivers.push((region_id, arg_receiver));
-        readers.push(WalEntryReceiver::new(entry_receiver, arg_sender));
+        readers.push(WalEntryReceiver::new(
+            provider.clone(),
+            entry_receiver,
+            arg_sender,
+        ));
     }
 
     (

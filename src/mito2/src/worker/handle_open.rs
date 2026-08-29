@@ -38,6 +38,7 @@ use crate::region::options::RegionOptions;
 use crate::request::OptionOutputTx;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
+use crate::wal::entry_reader::WalEntryReader;
 use crate::worker::handle_drop::{
     cleanup_region_file_artifacts, remove_region_dir_for_full_drop, remove_region_dir_once,
 };
@@ -198,7 +199,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
         .hook(self.plugins.get())
-        .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
+        .wal_entry_reader(wal_entry_receiver.map(|receiver| {
+            let provider = receiver.provider().clone();
+            (provider, Box::new(receiver) as Box<dyn WalEntryReader>)
+        }))
         .replay_checkpoint(request.checkpoint.map(|checkpoint| checkpoint.entry_id))
         .parse_options(request.options.clone())
         {

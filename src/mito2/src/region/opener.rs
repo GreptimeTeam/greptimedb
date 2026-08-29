@@ -87,6 +87,14 @@ const PARQUET_META_PRELOAD_CONCURRENCY: usize = 8;
 static PARQUET_META_PRELOAD_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(PARQUET_META_PRELOAD_CONCURRENCY));
 
+fn matching_wal_entry_reader(
+    wal_entry_reader: Option<(Provider, Box<dyn WalEntryReader>)>,
+    provider: &Provider,
+) -> Option<Box<dyn WalEntryReader>> {
+    wal_entry_reader
+        .and_then(|(reader_provider, reader)| (reader_provider == *provider).then_some(reader))
+}
+
 fn initial_pruned_entry_id(wal_options: &WalOptions) -> EntryId {
     match wal_options {
         WalOptions::Kafka(options) => options.initial_pruned_entry_id.unwrap_or(0),
@@ -122,7 +130,7 @@ pub(crate) struct RegionOpener {
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
     stats: ManifestStats,
-    wal_entry_reader: Option<Box<dyn WalEntryReader>>,
+    wal_entry_reader: Option<(Provider, Box<dyn WalEntryReader>)>,
     replay_checkpoint: Option<u64>,
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
@@ -214,7 +222,7 @@ impl RegionOpener {
     /// constructing a new one from scratch.
     pub(crate) fn wal_entry_reader(
         mut self,
-        wal_entry_reader: Option<Box<dyn WalEntryReader>>,
+        wal_entry_reader: Option<(Provider, Box<dyn WalEntryReader>)>,
     ) -> Self {
         self.wal_entry_reader = wal_entry_reader;
         self
@@ -482,9 +490,7 @@ impl RegionOpener {
 
         let region_id = self.region_id;
         let provider = self.provider(wal, &region_options.wal_options)?;
-        let wal_entry_reader = self
-            .wal_entry_reader
-            .take()
+        let wal_entry_reader = matching_wal_entry_reader(self.wal_entry_reader.take(), &provider)
             .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id, None));
         let on_region_opened = wal.on_region_opened();
         let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
@@ -1366,8 +1372,8 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        can_fallback_to_create, initial_pruned_entry_id, preload_parquet_meta_cache_for_files,
-        provider_for_log_store, sanitize_region_options,
+        can_fallback_to_create, initial_pruned_entry_id, matching_wal_entry_reader,
+        preload_parquet_meta_cache_for_files, provider_for_log_store, sanitize_region_options,
         supports_open_region_object_storage_requirement,
     };
     use crate::cache::CacheManager;
@@ -1380,6 +1386,7 @@ mod tests {
     use crate::sst::parquet::PARQUET_METADATA_KEY;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::sst_region_metadata;
+    use crate::wal::entry_reader::NoopEntryReader;
 
     #[derive(Debug)]
     struct ExternalLogStore {
@@ -1573,6 +1580,30 @@ mod tests {
         let remote_provider =
             provider_for_log_store(&remote_store, region_id, &WalOptions::RaftEngine).unwrap();
         assert_eq!(42, remote_provider.initial_flushed_entry_id(&remote_store));
+    }
+
+    #[test]
+    fn test_batch_wal_reader_requires_resolved_provider() {
+        let region_id = RegionId::new(1, 2);
+        let external = provider_for_log_store(
+            &ExternalLogStore::new(),
+            region_id,
+            &WalOptions::Kafka(KafkaWalOptions::new("topic".to_string())),
+        )
+        .unwrap();
+        let kafka = Provider::kafka_provider("topic".to_string());
+
+        assert!(
+            matching_wal_entry_reader(Some((kafka, Box::new(NoopEntryReader))), &external)
+                .is_none()
+        );
+        assert!(
+            matching_wal_entry_reader(
+                Some((external.clone(), Box::new(NoopEntryReader))),
+                &external,
+            )
+            .is_some()
+        );
     }
 
     #[test]
