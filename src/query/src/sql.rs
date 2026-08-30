@@ -278,7 +278,6 @@ async fn query_from_information_schema_table(
     dataframe_to_output(dataframe).await
 }
 
-/// Executes the [`DataFrame`] into a stream [`Output`].
 async fn dataframe_to_output(dataframe: DataFrame) -> Result<Output> {
     let stream = dataframe.execute_stream().await?;
     Ok(Output::new_with_stream(Box::pin(
@@ -286,13 +285,9 @@ async fn dataframe_to_output(dataframe: DataFrame) -> Result<Output> {
     )))
 }
 
-/// Builds the [`DataFrame`] backing an information-schema-backed `SHOW`
-/// statement. Exposed separately so protocol `Describe` handlers can derive
-/// the statement's output schema from the same projection the executor uses
-/// (without executing it).
-///
-/// `kind` is borrowed: only the `WHERE` kind needs an owned expression (for
-/// `sql_to_expr`), so it is cloned in that arm alone.
+/// Builds the [`DataFrame`] for a `SHOW` statement without executing it,
+/// so `Describe` handlers can derive the output schema from the same
+/// projection the executor uses.
 #[allow(clippy::too_many_arguments)]
 async fn query_from_information_schema_dataframe(
     query_engine: &QueryEngineRef,
@@ -392,8 +387,6 @@ async fn query_from_information_schema_dataframe(
                 .downcast_ref::<DfLogicalPlanner>()
                 .expect("Must be the datafusion planner");
 
-            // `sql_to_expr` takes the expression by value; this is the only
-            // place a `ShowKind` payload needs to be cloned.
             let filter = planner
                 .sql_to_expr(filter.clone(), dataframe.schema(), false, query_ctx)
                 .await?;

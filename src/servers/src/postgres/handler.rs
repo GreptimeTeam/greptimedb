@@ -557,11 +557,8 @@ fn describe_fields(
     session: &Arc<Session>,
 ) -> PgWireResult<Vec<FieldInfo>> {
     match sql_plan {
-        // EXPLAIN ANALYZE: at execution time the physical plan is replaced with
-        // GreptimeDB's `DistAnalyzeExec` (see `optimize_physical_plan`), whose
-        // output schema (stage/node/plan) differs from the DataFusion `Analyze`
-        // logical plan schema (plan_type/plan). Describe with the schema the
-        // client will actually receive so the DataRow field count matches.
+        // Execution swaps in DistAnalyzeExec (stage/node/plan), whose schema
+        // differs from the logical `Analyze` plan's (plan_type/plan).
         SqlPlan::Plan(LogicalPlan::Analyze(_), _) => {
             let schema: Schema =
                 Schema::try_from(dist_analyze_output_schema()).map_err(convert_err)?;
@@ -681,8 +678,7 @@ fn describe_fields(
                 Ok(vec![])
             }
         }
-        // SHOW VARIABLES: a single column named after the variable (all
-        // values are strings; see `query::sql::show_variable`).
+        // Single column named after the variable (see `query::sql::show_variable`).
         SqlPlan::Statement(Statement::ShowVariables(show), _) => Ok(vec![FieldInfo::new(
             show.variable.to_string().to_uppercase(),
             None,
@@ -690,8 +686,7 @@ fn describe_fields(
             Type::TEXT,
             format.format_for(0),
         )]),
-        // SHOW STATUS: fixed two-column string schema (currently always
-        // empty; see `query::sql::show_status`).
+        // Mirrors `query::sql::show_status` (currently always empty).
         SqlPlan::Statement(Statement::ShowStatus(_), _) => Ok(vec![
             FieldInfo::new(
                 "Variable_name".to_string(),
@@ -708,8 +703,6 @@ fn describe_fields(
                 format.format_for(1),
             ),
         ]),
-        // SHOW SEARCH_PATH: single string column (see
-        // `query::sql::show_search_path`).
         SqlPlan::Statement(Statement::ShowSearchPath(_), _) => Ok(vec![FieldInfo::new(
             "search_path".to_string(),
             None,
@@ -717,39 +710,27 @@ fn describe_fields(
             Type::TEXT,
             format.format_for(0),
         )]),
-        // DESCRIBE TABLE: mirror the fixed output schema of
-        // `query::sql::describe_table` (all string columns).
+        // Mirrors `query::sql::describe_table`.
         SqlPlan::Statement(Statement::DescribeTable(_), _) => {
             schema_to_pg(&DESCRIBE_TABLE_OUTPUT_SCHEMA, format, None).map_err(convert_err)
         }
-        // ADMIN function: a single column named after the statement text and
-        // typed with the admin function's return type (see
+        // Single column typed with the function's return type (see
         // `operator::statement::admin_output_schema`).
         SqlPlan::Statement(Statement::Admin(admin), _) => {
             let query_ctx = session.new_query_context();
             match admin_output_schema(admin, &query_ctx) {
                 Some(schema) => schema_to_pg(&schema, format, None).map_err(convert_err),
-                // Function or arguments unresolvable; execution will surface
-                // the underlying error.
+                // Unresolvable; execution will surface the error.
                 None => Ok(vec![]),
             }
         }
-        // FETCH cursor: return the cursor's schema so the RowDescription
-        // matches the DataRow field count sent during Execute.
+        // Describe from the declared cursor's schema.
         SqlPlan::Statement(Statement::FetchCursor(fetch), _) => {
             let cursor_name = fetch.cursor_name.to_string();
             match session.get_cursor(&cursor_name) {
-                Some(cursor) => {
-                    // `cursor.schema()` is the GreptimeDB `SchemaRef` captured
-                    // when the cursor was declared; `schema_to_pg` accepts it
-                    // directly (no DataFusion -> GreptimeDB conversion needed).
-                    schema_to_pg(&cursor.schema(), format, None).map_err(convert_err)
-                }
-                None => {
-                    // Cursor not found (e.g. DECLARE hasn't executed yet in
-                    // an extended-protocol batch). Return NoData as a fallback.
-                    Ok(vec![])
-                }
+                Some(cursor) => schema_to_pg(&cursor.schema(), format, None).map_err(convert_err),
+                // Cursor not declared yet; execution will error.
+                None => Ok(vec![]),
             }
         }
         _ => {

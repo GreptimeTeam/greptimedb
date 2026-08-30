@@ -849,14 +849,10 @@ impl Instance {
         query_interceptor.pre_execute(stmt.as_ref(), Some(&plan), query_ctx.clone())?;
 
         // TQL EXPLAIN/ANALYZE formats are consumed from the query context at
-        // execution time (see `optimize_physical_plan`). When the plan was
-        // already built during Describe, the context side effect of
-        // `plan_tql` is lost, so re-apply it from the statement here.
-        //
-        // `explain_format` is per-query state (each statement gets a fresh
-        // `QueryContext`), so this can never overwrite an existing value:
-        // we only set it when the statement itself carries an explicit
-        // `FORMAT` clause, and an explicit clause should always win anyway.
+        // execution time (see `optimize_physical_plan`); re-apply the side
+        // effect of `plan_tql` that was lost when the plan was built during
+        // Describe. `explain_format` is per-query state, so this never
+        // overwrites anything.
         if let Some(Statement::Tql(tql)) = &stmt {
             let format = match tql {
                 Tql::Explain(explain) => explain.format.as_ref(),
@@ -949,12 +945,9 @@ impl Instance {
         vec![result]
     }
 
-    /// Builds the [`DataFrame`] backing an information-schema-backed `SHOW`
-    /// statement, so `Describe` can derive the statement's output schema from
-    /// the same projection the executor uses. Returns `None` for statements
-    /// that are not information-schema-backed SHOWs.
-    ///
-    /// The future is boxed to keep `do_describe_inner`'s state machine small.
+    /// Builds the [`DataFrame`] for an information-schema-backed `SHOW`
+    /// statement; `None` for other statements. The future is boxed to keep
+    /// `do_describe_inner`'s state machine small.
     fn show_statement_dataframe<'a>(
         &'a self,
         stmt: &'a Statement,
@@ -1038,9 +1031,7 @@ impl Instance {
                 .context(error::DescribeStatementSnafu);
         }
 
-        // SHOW statements are described from the same information_schema
-        // projection the executor builds, so the Describe schema always
-        // matches the executed DataRows.
+        // Describe SHOW statements from the same projection the executor builds.
         if let Some(dataframe) = self
             .show_statement_dataframe(&stmt, &query_ctx)
             .await

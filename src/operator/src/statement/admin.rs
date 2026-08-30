@@ -78,8 +78,7 @@ struct CoreAdminFunctionService {
     query_engine: query::QueryEngineRef,
 }
 
-/// Resolved parts of an `ADMIN` function call that are needed both for
-/// execution and for computing the statement's output schema.
+/// Parts of an `ADMIN` call needed both for execution and schema derivation.
 struct ResolvedAdminFunction {
     admin_udf: datafusion_expr::ScalarUDF,
     fn_name: String,
@@ -88,8 +87,8 @@ struct ResolvedAdminFunction {
     ret_type: ArrowDataType,
 }
 
-/// Resolves the admin function referenced by `stmt`, parses its literal
-/// arguments and derives its return type, without executing it.
+/// Resolves the function, parses its literal arguments and derives its
+/// return type, without executing it.
 fn resolve_admin_function(
     stmt: &Admin,
     query_ctx: &QueryContextRef,
@@ -110,7 +109,6 @@ fn resolve_admin_function(
     };
 
     let admin_udf = factory.provide(func_ctx);
-    // sanity check: the function must be executable asynchronously
     admin_udf
         .as_async()
         .context(error::AdminFunctionNotFoundSnafu { name: func_name })?;
@@ -163,13 +161,9 @@ fn resolve_admin_function(
     })
 }
 
-/// Computes the output schema of an `ADMIN` statement without executing it.
-///
-/// The schema mirrors what [`CoreAdminFunctionService::execute`] produces: a
-/// single column named after the statement text, typed with the admin
-/// function's return type. Returning `None` (i.e. unresolvable function or
-/// arguments) lets callers fall back to `NoData`; execution will then surface
-/// the underlying error.
+/// Output schema of an `ADMIN` statement, mirroring what
+/// [`CoreAdminFunctionService::execute`] produces. `None` if the function
+/// or arguments are unresolvable; execution will then surface the error.
 pub fn admin_output_schema(stmt: &Admin, query_ctx: &QueryContextRef) -> Option<Schema> {
     let resolved =
         resolve_admin_function(stmt, query_ctx, Arc::new(FunctionState::default())).ok()?;
