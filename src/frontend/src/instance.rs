@@ -852,6 +852,11 @@ impl Instance {
         // execution time (see `optimize_physical_plan`). When the plan was
         // already built during Describe, the context side effect of
         // `plan_tql` is lost, so re-apply it from the statement here.
+        //
+        // `explain_format` is per-query state (each statement gets a fresh
+        // `QueryContext`), so this can never overwrite an existing value:
+        // we only set it when the statement itself carries an explicit
+        // `FORMAT` clause, and an explicit clause should always win anyway.
         if let Some(Statement::Tql(tql)) = &stmt {
             let format = match tql {
                 Tql::Explain(explain) => explain.format.as_ref(),
@@ -980,17 +985,10 @@ impl Instance {
                         .await
                 }
                 Statement::ShowCharset(kind) => {
-                    query::sql::show_charsets_dataframe(kind.clone(), engine, catalog_manager, ctx)
-                        .await
+                    query::sql::show_charsets_dataframe(kind, engine, catalog_manager, ctx).await
                 }
                 Statement::ShowCollation(kind) => {
-                    query::sql::show_collations_dataframe(
-                        kind.clone(),
-                        engine,
-                        catalog_manager,
-                        ctx,
-                    )
-                    .await
+                    query::sql::show_collations_dataframe(kind, engine, catalog_manager, ctx).await
                 }
                 Statement::ShowIndex(show) => {
                     query::sql::show_index_dataframe(show, engine, catalog_manager, ctx).await

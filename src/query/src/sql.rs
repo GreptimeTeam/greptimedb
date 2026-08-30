@@ -214,7 +214,7 @@ pub async fn show_databases_dataframe(
         filters,
         like_field,
         sort,
-        stmt.kind.clone(),
+        &stmt.kind,
     )
     .await
 }
@@ -272,7 +272,7 @@ async fn query_from_information_schema_table(
         filters,
         like_field,
         sort,
-        kind,
+        &kind,
     )
     .await?;
     dataframe_to_output(dataframe).await
@@ -290,6 +290,10 @@ async fn dataframe_to_output(dataframe: DataFrame) -> Result<Output> {
 /// statement. Exposed separately so protocol `Describe` handlers can derive
 /// the statement's output schema from the same projection the executor uses
 /// (without executing it).
+///
+/// `kind` is borrowed: only the `WHERE` kind needs an owned expression (for
+/// `sql_to_expr`), so it is cloned in that arm alone.
+#[allow(clippy::too_many_arguments)]
 async fn query_from_information_schema_dataframe(
     query_engine: &QueryEngineRef,
     catalog_manager: &CatalogManagerRef,
@@ -300,7 +304,7 @@ async fn query_from_information_schema_dataframe(
     filters: Vec<Expr>,
     like_field: Option<&str>,
     sort: Vec<SortExpr>,
-    kind: ShowKind,
+    kind: &ShowKind,
 ) -> Result<DataFrame> {
     let table = catalog_manager
         .table(
@@ -388,8 +392,10 @@ async fn query_from_information_schema_dataframe(
                 .downcast_ref::<DfLogicalPlanner>()
                 .expect("Must be the datafusion planner");
 
+            // `sql_to_expr` takes the expression by value; this is the only
+            // place a `ShowKind` payload needs to be cloned.
             let filter = planner
-                .sql_to_expr(filter, dataframe.schema(), false, query_ctx)
+                .sql_to_expr(filter.clone(), dataframe.schema(), false, query_ctx)
                 .await?;
 
             // Apply the `where` clause filters
@@ -467,7 +473,7 @@ pub async fn show_columns_dataframe(
         filters,
         like_field,
         sort,
-        stmt.kind.clone(),
+        &stmt.kind,
     )
     .await
 }
@@ -552,7 +558,7 @@ pub async fn show_index_dataframe(
         filters,
         like_field,
         sort,
-        stmt.kind.clone(),
+        &stmt.kind,
     )
     .await
 }
@@ -609,7 +615,7 @@ pub async fn show_region_dataframe(
         filters,
         like_field,
         sort,
-        stmt.kind.clone(),
+        &stmt.kind,
     )
     .await
 }
@@ -657,12 +663,13 @@ pub async fn show_tables_dataframe(
 
     // Transform the WHERE clause for backward compatibility:
     // Replace "Tables" with "Tables_in_{schema}" to support old queries
-    let kind = match stmt.kind.clone() {
-        ShowKind::Where(mut filter) => {
+    let rewritten_kind = match &stmt.kind {
+        ShowKind::Where(filter) => {
+            let mut filter = filter.clone();
             replace_column_in_expr(&mut filter, "Tables", &tables_column);
             ShowKind::Where(filter)
         }
-        other => other,
+        kind => kind.clone(),
     };
 
     query_from_information_schema_dataframe(
@@ -675,7 +682,7 @@ pub async fn show_tables_dataframe(
         filters,
         like_field,
         sort,
-        kind,
+        &rewritten_kind,
     )
     .await
 }
@@ -744,7 +751,7 @@ pub async fn show_table_status_dataframe(
         filters,
         like_field,
         sort,
-        stmt.kind.clone(),
+        &stmt.kind,
     )
     .await
 }
@@ -757,13 +764,13 @@ pub async fn show_collations(
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let dataframe =
-        show_collations_dataframe(kind, query_engine, catalog_manager, query_ctx).await?;
+        show_collations_dataframe(&kind, query_engine, catalog_manager, query_ctx).await?;
     dataframe_to_output(dataframe).await
 }
 
 /// Builds the [`DataFrame`] for `SHOW COLLATION` without executing it.
 pub async fn show_collations_dataframe(
-    kind: ShowKind,
+    kind: &ShowKind,
     query_engine: &QueryEngineRef,
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
@@ -804,13 +811,14 @@ pub async fn show_charsets(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let dataframe = show_charsets_dataframe(kind, query_engine, catalog_manager, query_ctx).await?;
+    let dataframe =
+        show_charsets_dataframe(&kind, query_engine, catalog_manager, query_ctx).await?;
     dataframe_to_output(dataframe).await
 }
 
 /// Builds the [`DataFrame`] for `SHOW CHARSET` without executing it.
 pub async fn show_charsets_dataframe(
-    kind: ShowKind,
+    kind: &ShowKind,
     query_engine: &QueryEngineRef,
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
@@ -1079,7 +1087,7 @@ pub async fn show_views_dataframe(
         filters,
         like_field,
         sort,
-        stmt.kind.clone(),
+        &stmt.kind,
     )
     .await
 }
@@ -1117,7 +1125,7 @@ pub async fn show_flows_dataframe(
         filters,
         like_field,
         sort,
-        stmt.kind.clone(),
+        &stmt.kind,
     )
     .await
 }
@@ -1539,7 +1547,7 @@ pub async fn show_processlist_dataframe(
         filters,
         like_field,
         sort,
-        ShowKind::All,
+        &ShowKind::All,
     )
     .await
 }
