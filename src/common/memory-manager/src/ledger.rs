@@ -259,6 +259,7 @@ impl Account {
         // Saturates: the conversion clamps to the max permit count.
         let new_target = self.inner.bytes_to_permits(bytes);
         let _guard = self.inner.lock_control();
+        let old_target = self.inner.target_permits.load(Ordering::Acquire);
         let effective = self.inner.effective_permits.load(Ordering::Acquire);
         self.inner
             .target_permits
@@ -282,7 +283,10 @@ impl Account {
                 .store(now_effective, Ordering::Release);
             now_effective - new_target
         };
-        self.inner.resize_tx.send_replace(());
+        let new_effective = self.inner.effective_permits.load(Ordering::Acquire);
+        if new_target != old_target || new_effective != effective {
+            self.inner.resize_tx.send_replace(());
+        }
         self.inner.permits_to_bytes(deficit)
     }
 
@@ -778,6 +782,29 @@ mod tests {
         assert_eq!(acc.effective_limit_bytes(), 10 * KB);
         assert_eq!(acc.used_bytes(), 10 * KB);
         drop((held, granted));
+    }
+
+    #[tokio::test]
+    async fn repeated_limit_keeps_collector_queue_position() {
+        let acc = account(8);
+        let mut held = acc.acquire(8 * KB).await.unwrap();
+        assert_eq!(acc.set_limit_bytes(4 * KB), 4 * KB);
+
+        let mut collector = Box::pin(acc.collect_shrink());
+        assert_pending(collector.as_mut()).await;
+        let mut waiter = Box::pin(acc.acquire(KB));
+        assert_pending(waiter.as_mut()).await;
+
+        // With no target or effective-capacity change, the queued collector
+        // keeps its FIFO position ahead of the waiter.
+        assert_eq!(acc.set_limit_bytes(4 * KB), 4 * KB);
+        assert_eq!(held.shrink(4 * KB), 4 * KB);
+        collector.await;
+        assert_pending(waiter.as_mut()).await;
+        assert_eq!(acc.effective_limit_bytes(), 4 * KB);
+
+        drop(held);
+        assert_eq!(waiter.await.unwrap().granted_bytes(), KB);
     }
 
     #[tokio::test]
