@@ -46,13 +46,9 @@ const STAGE: &str = "stage";
 const NODE: &str = "node";
 const PLAN: &str = "plan";
 
-/// Returns the fixed output schema of [`DistAnalyzeExec`]:
-/// (`stage`: UInt32, `node`: UInt32, `plan`: Utf8).
-///
-/// Exposed so protocol-level `Describe` handlers can advertise the schema
-/// clients will actually receive (the physical plan is rewritten in
-/// `optimize_physical_plan` and its schema differs from the DataFusion
-/// `Analyze` logical plan schema).
+/// Fixed output schema of [`DistAnalyzeExec`], for `Describe` handlers:
+/// execution rewrites the plan in `optimize_physical_plan`, so this schema
+/// differs from the logical `Analyze` plan's.
 pub fn dist_analyze_output_schema() -> SchemaRef {
     SchemaRef::new(Schema::new(vec![
         Field::new(STAGE, DataType::UInt32, true),
