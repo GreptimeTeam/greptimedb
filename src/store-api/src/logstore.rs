@@ -55,9 +55,24 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 
-    /// Resolves a provider identity for a region owned by an external log store.
+    /// Resolves the provider used by Mito for a region owned by an external log
+    /// store.
     ///
-    /// Returning `Ok(None)` delegates to the built-in provider resolution.
+    /// Mito uses the returned provider when creating or reopening a region,
+    /// replaying its WAL, and performing offline cleanup. The provider identity
+    /// and its local or remote WAL semantics must remain stable while the region's
+    /// WAL data exists; otherwise replay and obsolete operations may target
+    /// different namespaces or use inconsistent recovery semantics.
+    ///
+    /// Resolution order:
+    /// - Mito does not call this method for [`WalOptions::Noop`].
+    /// - `Ok(Some(_))` overrides the built-in Raft Engine or Kafka provider.
+    /// - `Ok(None)` delegates to the built-in provider resolution.
+    /// - `Err(_)` aborts the operation. In particular, `create_or_open` does not
+    ///   fall back to creating a new region after provider resolution fails.
+    ///
+    /// This synchronous method is called from async worker paths. It must be
+    /// inexpensive and must not perform blocking I/O.
     fn resolve_provider(
         &self,
         _region_id: RegionId,
