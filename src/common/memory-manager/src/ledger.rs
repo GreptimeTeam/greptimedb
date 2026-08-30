@@ -30,12 +30,20 @@
 //!   with wait/fail policies (the scan-tracker face) and synchronous
 //!   `try_grow`/`shrink` (the DataFusion memory-pool face). Both draw from the
 //!   same semaphore, so their sum can never exceed the account limit.
+//!
+//! Resize linearizes when its control critical section ends. Successful
+//! acquisition and growth linearize when their permits are added to the usage
+//! counter in the same critical section after current-target revalidation.
+//! Release linearizes when it subtracts from that counter, immediately before
+//! returning the corresponding semaphore permits.
 
+use std::future::{Future, poll_fn};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::task::Poll;
 
 use snafu::ensure;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, watch};
 
 use crate::error::{
     MemoryAcquireTimeoutSnafu, MemoryLimitExceededSnafu, MemorySemaphoreClosedSnafu, Result,
@@ -67,11 +75,14 @@ struct AccountInner {
     /// Capacity the semaphore currently embodies (available + outstanding).
     /// Converges towards `target_permits` while shrinking.
     effective_permits: AtomicU32,
-    /// Serializes limit changes and collector bookkeeping (control plane only,
-    /// never taken on the acquisition hot path).
+    /// Serializes limit changes, collector bookkeeping, and grant validation.
     control: Mutex<()>,
     /// Single-flight flag for the shrink collector.
     collecting: AtomicBool,
+    /// Permits granted to guards, excluding collector reservations.
+    used_permits: AtomicU32,
+    /// Wakes a collector so it can cancel and replan an obsolete chunk.
+    resize_tx: watch::Sender<()>,
 }
 
 impl AccountInner {
@@ -81,6 +92,36 @@ impl AccountInner {
 
     fn permits_to_bytes(&self, permits: u32) -> u64 {
         self.granularity.permits_to_bytes(permits)
+    }
+
+    fn lock_control(&self) -> MutexGuard<'_, ()> {
+        self.control
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn target_bytes(&self) -> u64 {
+        self.permits_to_bytes(self.target_permits.load(Ordering::Acquire))
+    }
+
+    fn validate_and_record_grant(&self, permits: u32, requested_bytes: u64) -> Result<()> {
+        let _guard = self.lock_control();
+        let target = self.target_permits.load(Ordering::Acquire);
+        let used = self.used_permits.load(Ordering::Acquire);
+        ensure!(
+            used.saturating_add(permits) <= target,
+            MemoryLimitExceededSnafu {
+                requested_bytes,
+                limit_bytes: self.permits_to_bytes(target),
+            }
+        );
+        self.used_permits.fetch_add(permits, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn release_used(&self, permits: u32) {
+        let previous = self.used_permits.fetch_sub(permits, Ordering::AcqRel);
+        debug_assert!(previous >= permits, "account usage counter underflowed");
     }
 }
 
@@ -116,6 +157,11 @@ impl Drop for CollectingFlagGuard<'_> {
     }
 }
 
+enum CollectorWake {
+    Resized,
+    Acquired(std::result::Result<OwnedSemaphorePermit, tokio::sync::AcquireError>),
+}
+
 /// A bounded memory account with a runtime-adjustable limit.
 ///
 /// Cloning shares the same underlying budget.
@@ -141,6 +187,7 @@ impl Account {
     ) -> Self {
         // Saturates: the conversion clamps to the max permit count.
         let limit_permits = granularity.bytes_to_permits(limit_bytes);
+        let (resize_tx, _) = watch::channel(());
         Self {
             inner: Arc::new(AccountInner {
                 name: name.into(),
@@ -151,6 +198,8 @@ impl Account {
                 effective_permits: AtomicU32::new(limit_permits),
                 control: Mutex::new(()),
                 collecting: AtomicBool::new(false),
+                used_permits: AtomicU32::new(0),
+                resize_tx,
             }),
         }
     }
@@ -173,33 +222,28 @@ impl Account {
 
     /// Desired limit in bytes (set instantly by `set_limit_bytes`).
     pub fn target_limit_bytes(&self) -> u64 {
-        self.inner
-            .permits_to_bytes(self.inner.target_permits.load(Ordering::Acquire))
+        let _guard = self.inner.lock_control();
+        self.inner.target_bytes()
     }
 
     /// Capacity the account currently embodies. Equals the target except while
     /// a shrink is converging.
     pub fn effective_limit_bytes(&self) -> u64 {
+        let _guard = self.inner.lock_control();
         self.inner
             .permits_to_bytes(self.inner.effective_permits.load(Ordering::Acquire))
     }
 
     /// Bytes currently granted to guards.
     ///
-    /// Derived as `effective - available`; while the shrink collector holds a
-    /// chunk the chunk transiently counts as used. The two reads are not
-    /// atomic with respect to limit changes: a concurrent `set_limit_bytes`
-    /// or collector step may transiently over-report usage, bounded by the
-    /// in-flight delta. Mutation orderings are chosen so the transient error
-    /// is towards over-reporting — the safe direction for admission checks.
+    /// Resize bookkeeping and collector reservations are excluded. A permit
+    /// acquired internally but not yet revalidated is not granted to a guard.
+    /// Grant bookkeeping may briefly over-report before the guard is returned.
+    /// A release updates this counter immediately before returning its permit;
+    /// resize cannot make the value under-report an already successful grant.
     pub fn used_bytes(&self) -> u64 {
-        let effective = self.inner.effective_permits.load(Ordering::Acquire);
-        let available = self
-            .inner
-            .semaphore
-            .available_permits()
-            .min(effective as usize) as u32;
-        self.inner.permits_to_bytes(effective - available)
+        self.inner
+            .permits_to_bytes(self.inner.used_permits.load(Ordering::Acquire))
     }
 
     /// Adjusts the limit. Returns the remaining shrink deficit in bytes.
@@ -214,19 +258,15 @@ impl Account {
     pub fn set_limit_bytes(&self, bytes: u64) -> u64 {
         // Saturates: the conversion clamps to the max permit count.
         let new_target = self.inner.bytes_to_permits(bytes);
-        let _guard = self.inner.control.lock().unwrap();
+        let _guard = self.inner.lock_control();
         let effective = self.inner.effective_permits.load(Ordering::Acquire);
         self.inner
             .target_permits
             .store(new_target, Ordering::Release);
 
-        if new_target >= effective {
+        let deficit = if new_target >= effective {
             let delta = new_target - effective;
             if delta > 0 {
-                // Publish the higher effective limit before crediting the
-                // semaphore: a concurrent `used_bytes` then transiently
-                // over-reports (bounded by `delta`) instead of
-                // under-reporting granted memory.
                 self.inner
                     .effective_permits
                     .store(new_target, Ordering::Release);
@@ -240,8 +280,10 @@ impl Account {
             self.inner
                 .effective_permits
                 .store(now_effective, Ordering::Release);
-            self.inner.permits_to_bytes(now_effective - new_target)
-        }
+            now_effective - new_target
+        };
+        self.inner.resize_tx.send_replace(());
+        self.inner.permits_to_bytes(deficit)
     }
 
     /// Drives an in-progress shrink until the account has converged
@@ -269,6 +311,7 @@ impl Account {
             collecting: &self.inner.collecting,
             armed: true,
         };
+        let mut resize_rx = self.inner.resize_tx.subscribe();
 
         loop {
             // Harvest idle capacity and size the next chunk. Convergence and
@@ -276,7 +319,7 @@ impl Account {
             // shrink of the target can never slip between them and strand
             // its deficit behind a still-set flag.
             let chunk = {
-                let _guard = self.inner.control.lock().unwrap();
+                let _guard = self.inner.lock_control();
                 let target = self.inner.target_permits.load(Ordering::Acquire);
                 let effective = self.inner.effective_permits.load(Ordering::Acquire);
                 if effective <= target {
@@ -293,25 +336,24 @@ impl Account {
                     flag_guard.clear();
                     return;
                 }
+                let _ = resize_rx.borrow_and_update();
                 (now_effective - target).min(SHRINK_CHUNK_MAX_PERMITS)
             };
 
-            // Queue for the chunk like any other waiter (FIFO). If the
-            // future is dropped while waiting here, the drop backstop
-            // releases the single-flight flag.
-            let Ok(mut permit) = self.inner.semaphore.clone().acquire_many_owned(chunk).await
-            else {
-                // Semaphore closed: no progress is possible; the drop
-                // backstop releases the flag.
-                return;
+            let wake =
+                Self::wait_for_chunk_or_resize(self.inner.semaphore.clone(), chunk, &mut resize_rx)
+                    .await;
+            let mut permit = match wake {
+                CollectorWake::Resized => continue,
+                CollectorWake::Acquired(Ok(permit)) => permit,
+                CollectorWake::Acquired(Err(_)) => return,
             };
 
-            let _guard = self.inner.control.lock().unwrap();
+            let _guard = self.inner.lock_control();
             let target = self.inner.target_permits.load(Ordering::Acquire);
             let effective = self.inner.effective_permits.load(Ordering::Acquire);
             let needed = effective.saturating_sub(target);
             if needed == 0 {
-                // Target was raised meanwhile; return the capacity.
                 drop(permit);
                 continue;
             }
@@ -326,6 +368,25 @@ impl Account {
                 .effective_permits
                 .store(effective - forget_n, Ordering::Release);
         }
+    }
+
+    async fn wait_for_chunk_or_resize(
+        semaphore: Arc<Semaphore>,
+        chunk: u32,
+        resize_rx: &mut watch::Receiver<()>,
+    ) -> CollectorWake {
+        let mut resized = Box::pin(resize_rx.changed());
+        let mut acquired = Box::pin(semaphore.acquire_many_owned(chunk));
+        poll_fn(|cx| {
+            if resized.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(CollectorWake::Resized);
+            }
+            if let Poll::Ready(result) = acquired.as_mut().poll(cx) {
+                return Poll::Ready(CollectorWake::Acquired(result));
+            }
+            Poll::Pending
+        })
+        .await
     }
 
     /// Checks a request against the target limit, comparing in bytes before
@@ -355,6 +416,7 @@ impl Account {
             .acquire_many_owned(permits)
             .await
             .map_err(|_| MemorySemaphoreClosedSnafu.build())?;
+        self.inner.validate_and_record_grant(permits, bytes)?;
         Ok(AccountGuard {
             inner: self.inner.clone(),
             permit,
@@ -368,13 +430,15 @@ impl Account {
             return None;
         }
         let permits = self.inner.bytes_to_permits(bytes);
-        match self.inner.semaphore.clone().try_acquire_many_owned(permits) {
-            Ok(permit) => Some(AccountGuard {
-                inner: self.inner.clone(),
-                permit,
-            }),
-            Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => None,
-        }
+        let permit = match self.inner.semaphore.clone().try_acquire_many_owned(permits) {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => return None,
+        };
+        self.inner.validate_and_record_grant(permits, bytes).ok()?;
+        Some(AccountGuard {
+            inner: self.inner.clone(),
+            permit,
+        })
     }
 
     /// Acquires memory according to the given policy.
@@ -419,33 +483,9 @@ impl AccountGuard {
             .permits_to_bytes(self.permit.num_permits() as u32)
     }
 
-    /// Synchronously grows this guard. Returns false if capacity or the
-    /// target limit does not allow it. The limit check compares bytes, so a
-    /// request beyond the (possibly saturated) target fails instead of being
-    /// clamped.
-    pub fn try_grow(&mut self, bytes: u64) -> bool {
-        let target_bytes = self
-            .inner
-            .permits_to_bytes(self.inner.target_permits.load(Ordering::Acquire));
-        if self.granted_bytes().saturating_add(bytes) > target_bytes {
-            return false;
-        }
-        let permits = self.inner.bytes_to_permits(bytes);
-        match self.inner.semaphore.clone().try_acquire_many_owned(permits) {
-            Ok(extra) => {
-                self.permit.merge(extra);
-                true
-            }
-            Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => false,
-        }
-    }
-
-    /// Grows this guard, waiting until capacity is available. The limit
-    /// check compares bytes, like [Self::try_grow].
-    pub async fn grow(&mut self, bytes: u64) -> Result<()> {
-        let target_bytes = self
-            .inner
-            .permits_to_bytes(self.inner.target_permits.load(Ordering::Acquire));
+    fn ensure_growth_within_target(&self, bytes: u64) -> Result<()> {
+        let _guard = self.inner.lock_control();
+        let target_bytes = self.inner.target_bytes();
         ensure!(
             self.granted_bytes().saturating_add(bytes) <= target_bytes,
             MemoryLimitExceededSnafu {
@@ -453,6 +493,37 @@ impl AccountGuard {
                 limit_bytes: target_bytes,
             }
         );
+        Ok(())
+    }
+
+    /// Synchronously grows this guard. Returns false if capacity or the
+    /// target limit does not allow it. The limit check compares bytes, so a
+    /// request beyond the (possibly saturated) target fails instead of being
+    /// clamped.
+    pub fn try_grow(&mut self, bytes: u64) -> bool {
+        if self.ensure_growth_within_target(bytes).is_err() {
+            return false;
+        }
+        let permits = self.inner.bytes_to_permits(bytes);
+        let extra = match self.inner.semaphore.clone().try_acquire_many_owned(permits) {
+            Ok(extra) => extra,
+            Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => return false,
+        };
+        if self
+            .inner
+            .validate_and_record_grant(permits, bytes)
+            .is_err()
+        {
+            return false;
+        }
+        self.permit.merge(extra);
+        true
+    }
+
+    /// Grows this guard, waiting until capacity is available. The limit
+    /// check compares bytes, like [Self::try_grow].
+    pub async fn grow(&mut self, bytes: u64) -> Result<()> {
+        self.ensure_growth_within_target(bytes)?;
         let permits = self.inner.bytes_to_permits(bytes);
         let extra = self
             .inner
@@ -461,6 +532,7 @@ impl AccountGuard {
             .acquire_many_owned(permits)
             .await
             .map_err(|_| MemorySemaphoreClosedSnafu.build())?;
+        self.inner.validate_and_record_grant(permits, bytes)?;
         self.permit.merge(extra);
         Ok(())
     }
@@ -479,6 +551,7 @@ impl AccountGuard {
         }
         match self.permit.split(permits as usize) {
             Some(returned) => {
+                self.inner.release_used(permits);
                 drop(returned);
                 self.inner.permits_to_bytes(permits)
             }
@@ -492,12 +565,16 @@ impl AccountGuard {
     }
 }
 
-/// Point-in-time view of an account, for the future system table.
+impl Drop for AccountGuard {
+    fn drop(&mut self) {
+        self.inner.release_used(self.permit.num_permits() as u32);
+    }
+}
+
+/// Point-in-time view of an account.
 ///
-/// Fields are sampled independently, without a common lock: a snapshot taken
-/// while a limit change or the shrink collector is in flight may be
-/// internally inconsistent (e.g. `used_bytes` derived from a newer effective
-/// limit than the one captured in `effective_limit_bytes`).
+/// Fields are sampled independently, so concurrent grants or resize may yield
+/// values that did not all coexist at one instant.
 #[derive(Debug, Clone)]
 pub struct AccountSnapshot {
     pub name: String,
@@ -573,6 +650,9 @@ impl MemoryLedger {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::Poll;
     use std::time::Duration;
 
     use super::*;
@@ -588,15 +668,21 @@ mod tests {
         )
     }
 
+    async fn assert_pending<F: Future>(mut future: Pin<&mut F>) {
+        poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn grow_wakes_waiter_instantly() {
         let acc = account(4);
         let held = acc.acquire(4 * KB).await.unwrap();
 
-        let acc2 = acc.clone();
-        let waiter = tokio::spawn(async move { acc2.acquire(2 * KB).await.unwrap() });
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!waiter.is_finished());
+        let mut waiter = Box::pin(acc.acquire(2 * KB));
+        assert_pending(waiter.as_mut()).await;
 
         assert_eq!(acc.set_limit_bytes(8 * KB), 0);
         let got = waiter.await.unwrap();
@@ -630,17 +716,14 @@ mod tests {
         assert_eq!(held.granted_bytes(), 8 * KB);
         assert_eq!(acc.effective_limit_bytes(), 8 * KB);
 
-        let collector = {
-            let acc = acc.clone();
-            tokio::spawn(async move { acc.collect_shrink().await })
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut collector = Box::pin(acc.collect_shrink());
+        assert_pending(collector.as_mut()).await;
         // Still not converged: nothing released yet.
         assert_eq!(acc.effective_limit_bytes(), 8 * KB);
 
         // Release 4 KB; the collector should absorb it.
         assert_eq!(held.shrink(4 * KB), 4 * KB);
-        collector.await.unwrap();
+        collector.await;
         assert_eq!(acc.effective_limit_bytes(), 4 * KB);
         assert_eq!(acc.target_limit_bytes(), 4 * KB);
         assert_eq!(acc.used_bytes(), 4 * KB);
@@ -654,29 +737,110 @@ mod tests {
         let held = acc.acquire(4 * KB).await.unwrap();
 
         // A waiter queues before the shrink starts.
-        let acc2 = acc.clone();
-        let waiter = tokio::spawn(async move { acc2.acquire(2 * KB).await.unwrap() });
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut waiter = Box::pin(acc.acquire(2 * KB));
+        assert_pending(waiter.as_mut()).await;
 
         // Shrink to 2 while 4 are held; collector queues after the waiter.
         assert_eq!(acc.set_limit_bytes(2 * KB), 2 * KB);
-        let collector = {
-            let acc = acc.clone();
-            tokio::spawn(async move { acc.collect_shrink().await })
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut collector = Box::pin(acc.collect_shrink());
+        assert_pending(collector.as_mut()).await;
 
         // Release everything: FIFO serves the earlier waiter first, then the
         // collector converges on what remains.
         drop(held);
-        let got = waiter.await.unwrap();
-        collector.await.unwrap();
+        let (got, ()) = tokio::join!(waiter.as_mut(), collector.as_mut());
+        let got = got.unwrap();
         assert_eq!(got.granted_bytes(), 2 * KB);
         assert_eq!(acc.effective_limit_bytes(), 2 * KB);
         // The account is exactly full: the waiter holds the entire capacity.
         assert_eq!(acc.used_bytes(), 2 * KB);
         assert!(acc.try_acquire(KB).is_none());
         drop(got);
+    }
+
+    #[tokio::test]
+    async fn retarget_cancels_obsolete_collector_chunk() {
+        let acc = account(8);
+        let held = acc.acquire(8 * KB).await.unwrap();
+        assert_eq!(acc.set_limit_bytes(4 * KB), 4 * KB);
+
+        let mut collector = Box::pin(acc.collect_shrink());
+        assert_pending(collector.as_mut()).await;
+        let mut waiter = Box::pin(acc.acquire(2 * KB));
+        assert_pending(waiter.as_mut()).await;
+
+        // Only two permits are added. The obsolete four-permit collector
+        // request must leave the queue so the smaller waiter can proceed.
+        assert_eq!(acc.set_limit_bytes(10 * KB), 0);
+        let ((), granted) = tokio::join!(collector.as_mut(), waiter.as_mut());
+        let granted = granted.unwrap();
+        assert_eq!(granted.granted_bytes(), 2 * KB);
+        assert_eq!(acc.effective_limit_bytes(), 10 * KB);
+        assert_eq!(acc.used_bytes(), 10 * KB);
+        drop((held, granted));
+    }
+
+    #[tokio::test]
+    async fn pending_acquire_is_revalidated_after_shrink() {
+        let acc = account(8);
+        let held = acc.acquire(8 * KB).await.unwrap();
+        let mut waiter = Box::pin(acc.acquire(6 * KB));
+        assert_pending(waiter.as_mut()).await;
+
+        assert_eq!(acc.set_limit_bytes(4 * KB), 4 * KB);
+        drop(held);
+        assert!(waiter.await.is_err());
+        assert_eq!(acc.used_bytes(), 0);
+        acc.collect_shrink().await;
+        assert_eq!(acc.effective_limit_bytes(), 4 * KB);
+    }
+
+    #[tokio::test]
+    async fn pending_grow_is_revalidated_after_shrink() {
+        let acc = account(8);
+        let mut growing = acc.acquire(4 * KB).await.unwrap();
+        let held = acc.acquire(4 * KB).await.unwrap();
+        let mut grow = Box::pin(growing.grow(4 * KB));
+        assert_pending(grow.as_mut()).await;
+
+        assert_eq!(acc.set_limit_bytes(6 * KB), 2 * KB);
+        drop(held);
+        assert!(grow.await.is_err());
+        assert_eq!(growing.granted_bytes(), 4 * KB);
+        assert_eq!(acc.used_bytes(), 4 * KB);
+    }
+
+    #[tokio::test]
+    async fn waiter_cannot_replace_usage_above_new_target() {
+        let acc = account(8);
+        let mut first = acc.acquire(6 * KB).await.unwrap();
+        let second = acc.acquire(2 * KB).await.unwrap();
+        let mut waiter = Box::pin(acc.acquire(2 * KB));
+        assert_pending(waiter.as_mut()).await;
+
+        assert_eq!(acc.set_limit_bytes(4 * KB), 4 * KB);
+        drop(second);
+        assert!(waiter.await.is_err());
+        assert_eq!(acc.used_bytes(), 6 * KB);
+        assert_eq!(first.shrink(2 * KB), 2 * KB);
+        acc.collect_shrink().await;
+        assert_eq!(acc.used_bytes(), 4 * KB);
+    }
+
+    #[tokio::test]
+    async fn used_bytes_is_independent_of_resize_bookkeeping() {
+        let acc = account(8);
+        let held = acc.acquire(6 * KB).await.unwrap();
+
+        for _ in 0..100 {
+            acc.set_limit_bytes(4 * KB);
+            assert_eq!(acc.used_bytes(), 6 * KB);
+            acc.set_limit_bytes(12 * KB);
+            assert_eq!(acc.used_bytes(), 6 * KB);
+        }
+
+        drop(held);
+        assert_eq!(acc.used_bytes(), 0);
     }
 
     #[tokio::test]
@@ -757,12 +921,8 @@ mod tests {
         assert_eq!(acc.set_limit_bytes(4 * KB), 4 * KB);
 
         // The collector blocks on its first chunk: all capacity is granted.
-        let collector = {
-            let acc = acc.clone();
-            tokio::spawn(async move { acc.collect_shrink().await })
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!collector.is_finished());
+        let mut collector = Box::pin(acc.collect_shrink());
+        assert_pending(collector.as_mut()).await;
 
         // A concurrent call early-returns (single-flight) without waiting
         // for convergence.
@@ -773,7 +933,7 @@ mod tests {
         // observe the new target and converge to it.
         assert_eq!(acc.set_limit_bytes(2 * KB), 6 * KB);
         assert_eq!(held.shrink(6 * KB), 6 * KB);
-        collector.await.unwrap();
+        collector.await;
         assert_eq!(acc.effective_limit_bytes(), 2 * KB);
         assert_eq!(acc.used_bytes(), 2 * KB);
 
@@ -794,10 +954,9 @@ mod tests {
         let held = acc.acquire(8 * KB).await.unwrap();
         assert_eq!(acc.set_limit_bytes(4 * KB), 4 * KB);
 
-        // Cancel the collector while it waits for its chunk: the future is
-        // dropped at the acquire await point.
-        let cancelled = tokio::time::timeout(Duration::from_millis(20), acc.collect_shrink()).await;
-        assert!(cancelled.is_err());
+        let mut collector = Box::pin(acc.collect_shrink());
+        assert_pending(collector.as_mut()).await;
+        drop(collector);
         assert_eq!(acc.effective_limit_bytes(), 8 * KB);
 
         // The drop backstop released the flag: a later call must win it and
@@ -829,6 +988,22 @@ mod tests {
         let mut guard = acc.acquire(KB).await.unwrap();
         assert!(!guard.try_grow(max_bytes));
         assert!(guard.grow(max_bytes).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_grow_fails_instead_of_clamping() {
+        let acc = Account::new(
+            "sat",
+            Category::Query,
+            u64::MAX,
+            PermitGranularity::Kilobyte,
+        );
+        let mut guard = acc.try_acquire(0).unwrap();
+
+        assert!(!guard.try_grow(u64::MAX));
+        assert!(guard.grow(u64::MAX).await.is_err());
+        assert_eq!(guard.granted_bytes(), 0);
+        assert_eq!(acc.used_bytes(), 0);
     }
 
     #[tokio::test]
