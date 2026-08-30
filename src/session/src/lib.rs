@@ -111,10 +111,7 @@ impl Session {
             .into()
     }
 
-    /// Returns the cursor with the given name, if it exists.
-    ///
-    /// Cursors are stored in the session's mutable inner data and shared across
-    /// all query contexts created from this session.
+    /// Cursors are shared across query contexts created from this session.
     pub fn get_cursor(&self, name: &str) -> Option<Arc<RecordBatchStreamCursor>> {
         let guard = self.mutable_inner.read().unwrap();
         guard.cursors.get(name).cloned()
