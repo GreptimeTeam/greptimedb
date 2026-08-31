@@ -38,7 +38,7 @@ use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
 use crate::prelude::{DataType as _, Value as GreptimeValue};
 use crate::value::{ListValue, StructValue};
 use crate::vectors::MutableVector;
-use crate::vectors::json::builder::JsonVectorBuilder;
+use crate::vectors::json::builder::{JsonVectorBuilder, json2_physical_data_type};
 use crate::vectors::json::variant::variant_to_json_values;
 
 pub struct JsonArray<'a> {
@@ -118,14 +118,20 @@ impl JsonArray<'_> {
         }
     }
 
-    /// Rewrites a physical JSON2 array directly into a fixed v2 layout.
+    /// Rewrites a JSON2 array from the current physical layout into the specified
+    /// v2 physical layout.
     pub fn rewrite_to_v2(
         &self,
         field: &Field,
         logical_settings: &JsonSettings,
         target_layout: &JsonSettings,
     ) -> Result<ArrayRef> {
-        let values = if json2_remainder_field(field)?.is_some() {
+        let is_v2 = json2_remainder_field(field)?.is_some();
+        if is_v2 && self.inner.data_type() == &json2_physical_data_type(target_layout) {
+            return Ok(self.inner.clone());
+        }
+
+        let values = if is_v2 {
             self.json2_values()?
         } else {
             (0..self.inner.len())
@@ -179,6 +185,9 @@ impl JsonArray<'_> {
                     continue;
                 }
                 let mut value = JsonArray::from(column).try_get_value(i)?;
+                // Arrow child nulls cannot distinguish a missing path from an explicit JSON
+                // null. Builders preserve explicit null presence in the remainder, so nulls
+                // from the explicit branch must be discarded before merging both branches.
                 remove_null_object_fields(&mut value);
                 if value.is_null() {
                     continue;
@@ -600,7 +609,7 @@ mod test {
 
     use super::*;
     use crate::extension::json::{Json2ExtensionType, JsonMetadata};
-    use crate::json::JsonSettings;
+    use crate::json::{JsonSettings, JsonTypeHint};
     use crate::vectors::json::variant::{json_values_to_variant, variant_field};
 
     #[test]
@@ -1128,6 +1137,38 @@ mod test {
             json!({"cold": null, "count": null}),
             JsonArray::from(&projected).try_get_value(1)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_rewrite_to_v2_reuses_matching_layout() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["kind".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                nullable: true,
+                default_constraint: None,
+                inverted_index: false,
+            }],
+            Some(0),
+        )?;
+        let value = settings.encode(json!({"kind": "access", "cold": 1}))?;
+        let mut builder = JsonVectorBuilder::with_settings(&settings, 1);
+        builder.try_push_value_ref(&value.as_value_ref())?;
+        let array = builder.to_vector().to_arrow_array();
+        let structs = array.as_struct();
+        assert!(structs.column_by_name("kind").is_some());
+        assert_eq!(
+            vec![Some(json!({"cold": 1}))],
+            variant_to_json_values(structs.column_by_name(JSON2_REMAINDER_FIELD_NAME).unwrap())?
+        );
+        let field = Field::new("data", array.data_type().clone(), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings.clone()))),
+        );
+
+        let rewritten = JsonArray::from(&array).rewrite_to_v2(&field, &settings, &settings)?;
+
+        assert!(Arc::ptr_eq(&array, &rewritten));
         Ok(())
     }
 

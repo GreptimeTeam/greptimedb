@@ -132,7 +132,7 @@ where
                 Ok((
                     name.clone(),
                     Json2RewriteSettings {
-                        logical_settings: metadata.take_json_settings(),
+                        logical_settings: metadata.into_json_settings(),
                         target_layout: layout.target_layout.clone(),
                     },
                 ))

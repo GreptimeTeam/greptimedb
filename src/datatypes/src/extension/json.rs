@@ -150,7 +150,8 @@ impl JsonMetadata {
         &self.json_settings
     }
 
-    pub fn take_json_settings(self) -> JsonSettings {
+    /// Consumes the metadata and returns its JSON2 settings.
+    pub fn into_json_settings(self) -> JsonSettings {
         self.json_settings
     }
 
