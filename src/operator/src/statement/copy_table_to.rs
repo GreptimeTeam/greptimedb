@@ -51,12 +51,12 @@ const WRITE_BUFFER_THRESHOLD: ReadableSize = ReadableSize::mb(8);
 /// Default number of concurrent write, it only works on object store backend(e.g., S3).
 const WRITE_CONCURRENCY: usize = 8;
 
-fn parquet_metadata(format: &Format, table_name: Option<&str>) -> Vec<(String, String)> {
+fn parquet_metadata(format: &Format, table_name: Option<&str>) -> Option<(String, String)> {
     match (format, table_name) {
         (Format::Parquet(_), Some(table_name)) => {
-            vec![(PARQUET_TABLE_NAME_KEY.to_string(), table_name.to_string())]
+            Some((PARQUET_TABLE_NAME_KEY.to_string(), table_name.to_string()))
         }
-        _ => Vec::new(),
+        _ => None,
     }
 }
 
@@ -223,10 +223,10 @@ mod tests {
         let json = Format::Json(JsonFormat::default());
 
         assert_eq!(
-            vec![(PARQUET_TABLE_NAME_KEY.to_string(), "my_table".to_string())],
+            Some((PARQUET_TABLE_NAME_KEY.to_string(), "my_table".to_string())),
             parquet_metadata(&parquet, Some("my_table"))
         );
-        assert!(parquet_metadata(&parquet, None).is_empty());
-        assert!(parquet_metadata(&json, Some("my_table")).is_empty());
+        assert!(parquet_metadata(&parquet, None).is_none());
+        assert!(parquet_metadata(&json, Some("my_table")).is_none());
     }
 }

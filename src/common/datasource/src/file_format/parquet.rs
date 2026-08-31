@@ -76,9 +76,13 @@ pub fn parquet_table_name_from_metadata(metadata: Option<&[KeyValue]>) -> Result
             }
             .fail();
         }
-        if table_name.is_some_and(|table_name| table_name != value) {
+        if let Some(table_name) = table_name
+            && table_name != value
+        {
             return InvalidParquetTableNameMetadataSnafu {
-                reason: format!("metadata key '{PARQUET_TABLE_NAME_KEY}' has conflicting values"),
+                reason: format!(
+                    "metadata key '{PARQUET_TABLE_NAME_KEY}' has conflicting values: {table_name:?} and {value:?}"
+                ),
             }
             .fail();
         }
@@ -97,18 +101,32 @@ pub fn parquet_table_name_from_metadata_batch<'a>(
     for metadata in metadata {
         match parquet_table_name_from_metadata(metadata)? {
             Some(value) => {
-                if saw_missing || table_name.is_some_and(|table_name| table_name != value) {
+                if saw_missing {
                     return InvalidParquetTableNameMetadataSnafu {
-                        reason: "Parquet files have inconsistent table names".to_string(),
+                        reason: format!(
+                            "Parquet table name metadata is missing from some files but other files use {value:?}"
+                        ),
+                    }
+                    .fail();
+                }
+                if let Some(table_name) = table_name
+                    && table_name != value
+                {
+                    return InvalidParquetTableNameMetadataSnafu {
+                        reason: format!(
+                            "Parquet files have conflicting table names: {table_name:?} and {value:?}"
+                        ),
                     }
                     .fail();
                 }
                 table_name = Some(value);
             }
             None => {
-                if table_name.is_some() {
+                if let Some(table_name) = table_name {
                     return InvalidParquetTableNameMetadataSnafu {
-                        reason: "Parquet files have inconsistent table names".to_string(),
+                        reason: format!(
+                            "Parquet table name metadata is missing from some files but other files use {table_name:?}"
+                        ),
                     }
                     .fail();
                 }
@@ -289,7 +307,7 @@ pub async fn stream_to_parquet(
     path: &str,
     concurrency: usize,
 ) -> Result<usize> {
-    stream_to_parquet_with_metadata(stream, schema, store, path, concurrency, Vec::new()).await
+    stream_to_parquet_with_metadata(stream, schema, store, path, concurrency, None).await
 }
 
 /// Output the stream to a parquet file with custom key/value footer metadata.
@@ -301,18 +319,9 @@ pub async fn stream_to_parquet_with_metadata(
     store: ObjectStore,
     path: &str,
     concurrency: usize,
-    metadata: Vec<(String, String)>,
+    metadata: Option<(String, String)>,
 ) -> Result<usize> {
-    let metadata = if metadata.is_empty() {
-        None
-    } else {
-        Some(
-            metadata
-                .into_iter()
-                .map(|(key, value)| KeyValue::new(key, value))
-                .collect(),
-        )
-    };
+    let metadata = metadata.map(|(key, value)| vec![KeyValue::new(key, value)]);
     let write_props = column_wise_config(
         WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
@@ -448,7 +457,7 @@ mod tests {
                 store.clone(),
                 &path,
                 1,
-                vec![(PARQUET_TABLE_NAME_KEY.to_string(), "my_table".to_string(),)],
+                Some((PARQUET_TABLE_NAME_KEY.to_string(), "my_table".to_string(),)),
             )
             .await
             .unwrap()
@@ -494,7 +503,11 @@ mod tests {
             None::<String>,
         )];
 
-        assert!(parquet_table_name_from_metadata(Some(&metadata)).is_err());
+        let err = parquet_table_name_from_metadata(Some(&metadata)).unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: metadata key 'greptime.table_name' has no value",
+            err.to_string()
+        );
     }
 
     #[test]
@@ -514,7 +527,11 @@ mod tests {
             KeyValue::new(PARQUET_TABLE_NAME_KEY.to_string(), "second".to_string()),
         ];
 
-        assert!(parquet_table_name_from_metadata(Some(&metadata)).is_err());
+        let err = parquet_table_name_from_metadata(Some(&metadata)).unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: metadata key 'greptime.table_name' has conflicting values: \"first\" and \"second\"",
+            err.to_string()
+        );
     }
 
     #[test]
@@ -578,12 +595,14 @@ mod tests {
             "second".to_string(),
         )];
 
-        assert!(
-            parquet_table_name_from_metadata_batch([
-                Some(first.as_slice()),
-                Some(second.as_slice())
-            ])
-            .is_err()
+        let err = parquet_table_name_from_metadata_batch([
+            Some(first.as_slice()),
+            Some(second.as_slice()),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: Parquet files have conflicting table names: \"first\" and \"second\"",
+            err.to_string()
         );
     }
 
@@ -605,19 +624,23 @@ mod tests {
         )];
         let missing = [KeyValue::new("other".to_string(), "value".to_string())];
 
-        assert!(
-            parquet_table_name_from_metadata_batch([
-                Some(present.as_slice()),
-                Some(missing.as_slice()),
-            ])
-            .is_err()
+        let err = parquet_table_name_from_metadata_batch([
+            Some(present.as_slice()),
+            Some(missing.as_slice()),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: Parquet table name metadata is missing from some files but other files use \"table\"",
+            err.to_string()
         );
-        assert!(
-            parquet_table_name_from_metadata_batch([
-                Some(missing.as_slice()),
-                Some(present.as_slice()),
-            ])
-            .is_err()
+        let err = parquet_table_name_from_metadata_batch([
+            Some(missing.as_slice()),
+            Some(present.as_slice()),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: Parquet table name metadata is missing from some files but other files use \"table\"",
+            err.to_string()
         );
     }
 
