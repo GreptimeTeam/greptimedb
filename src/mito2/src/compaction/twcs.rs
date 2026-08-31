@@ -184,35 +184,32 @@ impl TwcsPicker {
             }
         }
 
-        let num_l0_files = files_to_merge
-            .iter()
-            .filter(|file| file.level() == 0)
-            .count();
-        let num_l1_files = files_to_merge.len() - num_l0_files;
+        let (mut l0_files, l1_files): (Vec<_>, Vec<_>) = files_to_merge
+            .into_iter()
+            .partition(|file| file.level() == 0);
+        let num_l0_files = l0_files.len();
+        let num_l1_files = l1_files.len();
         // Keep fresh L0 data and compacted L1 data in separate tasks whenever either
         // level can trigger compaction on its own. This prevents each L0 batch from
         // pulling the previous L1 output into another rewrite.
-        let require_mixed_levels;
-        if num_l0_files >= self.trigger_file_num {
-            files_to_merge.retain(|file| file.level() == 0);
-            require_mixed_levels = false;
+        let (inputs, found_runs) = if num_l0_files >= self.trigger_file_num {
+            let l0_pick =
+                pick_candidate_files(l0_files, self.max_output_file_size, pick_count_first);
+            if l0_pick.0.is_empty() && num_l1_files >= self.trigger_file_num {
+                pick_candidate_files(l1_files, self.max_output_file_size, pick_count_first)
+            } else {
+                l0_pick
+            }
         } else if num_l1_files >= self.trigger_file_num {
-            files_to_merge.retain(|file| file.level() != 0);
-            require_mixed_levels = false;
+            pick_candidate_files(l1_files, self.max_output_file_size, pick_count_first)
         } else {
-            require_mixed_levels = num_l0_files > 0 && num_l1_files > 0;
-        }
-
-        let sorted_runs = if files_to_merge.len() < 1024 {
-            find_sorted_runs(&mut files_to_merge)
-        } else {
-            find_sorted_runs_by_time_range(&mut files_to_merge)
-        };
-        let found_runs = sorted_runs.len();
-        let inputs = if require_mixed_levels {
-            pick_mixed_count_first(sorted_runs, self.max_output_file_size)
-        } else {
-            pick_count_first(sorted_runs, self.max_output_file_size)
+            l0_files.extend(l1_files);
+            let picker = if num_l0_files > 0 && num_l1_files > 0 {
+                pick_mixed_count_first
+            } else {
+                pick_count_first
+            };
+            pick_candidate_files(l0_files, self.max_output_file_size, picker)
         };
         let filter_deleted = !self.append_mode
             && !window_has_overlap(files, windows)
@@ -233,6 +230,20 @@ impl TwcsPicker {
         }
         (inputs, filter_deleted)
     }
+}
+
+fn pick_candidate_files(
+    mut files: Vec<FileHandle>,
+    max_output_file_size: Option<u64>,
+    picker: fn(Vec<SortedRun<FileHandle>>, Option<u64>) -> Vec<FileHandle>,
+) -> (Vec<FileHandle>, usize) {
+    let sorted_runs = if files.len() < 1024 {
+        find_sorted_runs(&mut files)
+    } else {
+        find_sorted_runs_by_time_range(&mut files)
+    };
+    let found_runs = sorted_runs.len();
+    (picker(sorted_runs, max_output_file_size), found_runs)
 }
 
 #[derive(Debug)]
@@ -2274,6 +2285,52 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_picker_falls_back_to_l1_when_triggered_l0_cannot_make_progress() {
+        let mut files = (0..4)
+            .map(|idx| {
+                let start = idx * 20;
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    start,
+                    start + 9,
+                    0,
+                    idx as u64 + 1,
+                    600,
+                )
+            })
+            .collect::<Vec<_>>();
+        files.extend((0..4).map(|idx| {
+            let start = idx * 20 + 100;
+            new_file_handle_with_size_and_sequence(
+                FileId::random(),
+                start,
+                start + 9,
+                1,
+                idx as u64 + 10,
+                100,
+            )
+        }));
+        let windows = assign_to_windows(files.iter(), 1);
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(1),
+            max_output_file_size: Some(512),
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(1), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(4, output[0].inputs.len());
+        assert!(output[0].inputs.iter().all(|file| file.level() == 1));
     }
 
     #[test]
