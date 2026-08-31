@@ -30,6 +30,9 @@ static GREPTIME_VALUE_CELL: OnceCell<String> = OnceCell::new();
 /// Default native histogram column name.
 static GREPTIME_NATIVE_HISTOGRAM_CELL: OnceCell<String> = OnceCell::new();
 
+/// Reserved temporality label name.
+static GREPTIME_TEMPORALITY_LABEL_CELL: OnceCell<String> = OnceCell::new();
+
 pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
     // Strip surrounding double quotes as a defensive measure against upstream
     // sources (scripts, CI, template engines, incorrect shell escaping) that may
@@ -46,12 +49,14 @@ pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| GREPTIME_VALUE.to_string());
             GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| NATIVE_HISTOGRAM_FIELD.to_string());
+            GREPTIME_TEMPORALITY_LABEL_CELL.get_or_init(|| DEFAULT_TEMPORALITY_LABEL.to_string());
         }
         Some(s) if s.trim().is_empty() => {
             // use "" to disable prefix
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| "timestamp".to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| "value".to_string());
             GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| "native_histogram".to_string());
+            GREPTIME_TEMPORALITY_LABEL_CELL.get_or_init(|| "__temporality__".to_string());
         }
         Some(x) => {
             ensure!(
@@ -61,6 +66,7 @@ pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| format!("{}_timestamp", x));
             GREPTIME_VALUE_CELL.get_or_init(|| format!("{}_value", x));
             GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| format!("{}_native_histogram", x));
+            GREPTIME_TEMPORALITY_LABEL_CELL.get_or_init(|| format!("__{}_temporality__", x));
         }
     }
     Ok(())
@@ -87,12 +93,22 @@ pub fn greptime_native_histogram() -> &'static str {
         .map_or(NATIVE_HISTOGRAM_FIELD, String::as_str)
 }
 
+/// Get the reserved temporality label name.
+/// Returns the configured value, or `__greptime_temporality__` if not set.
+pub fn greptime_temporality_label() -> &'static str {
+    GREPTIME_TEMPORALITY_LABEL_CELL.get_or_init(|| DEFAULT_TEMPORALITY_LABEL.to_string())
+}
+
 /// Default timestamp column name constant for backward compatibility.
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name constant for backward compatibility.
 const GREPTIME_VALUE: &str = "greptime_value";
+/// Default temporality label name.
+const DEFAULT_TEMPORALITY_LABEL: &str = "__greptime_temporality__";
 /// Default counter column name for OTLP metrics (legacy mode).
 pub const GREPTIME_COUNT: &str = "greptime_count";
+/// Authoritative raw-delta value for [`greptime_temporality_label`].
+pub const GREPTIME_TEMPORALITY_DELTA: &str = "delta";
 /// Default physical table name
 pub const GREPTIME_PHYSICAL_TABLE: &str = "greptime_physical_table";
 
@@ -109,6 +125,7 @@ mod tests {
         assert_eq!(greptime_timestamp(), "greptime_timestamp");
         assert_eq!(greptime_value(), "greptime_value");
         assert_eq!(greptime_native_histogram(), "greptime_native_histogram");
+        assert_eq!(greptime_temporality_label(), "__greptime_temporality__");
     }
 
     #[test]
@@ -117,6 +134,7 @@ mod tests {
         assert_eq!(greptime_timestamp(), "timestamp");
         assert_eq!(greptime_value(), "value");
         assert_eq!(greptime_native_histogram(), "native_histogram");
+        assert_eq!(greptime_temporality_label(), "__temporality__");
     }
 
     #[test]
@@ -126,6 +144,7 @@ mod tests {
         assert_eq!(greptime_timestamp(), "timestamp");
         assert_eq!(greptime_value(), "value");
         assert_eq!(greptime_native_histogram(), "native_histogram");
+        assert_eq!(greptime_temporality_label(), "__temporality__");
     }
 
     #[test]
@@ -134,6 +153,7 @@ mod tests {
         assert_eq!(greptime_timestamp(), "mydb_timestamp");
         assert_eq!(greptime_value(), "mydb_value");
         assert_eq!(greptime_native_histogram(), "mydb_native_histogram");
+        assert_eq!(greptime_temporality_label(), "__mydb_temporality__");
     }
 
     #[test]

@@ -23,8 +23,10 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_function::function::FunctionContext;
 use common_query::native_histogram::native_histogram_value_type;
-use common_query::prelude::{greptime_native_histogram, greptime_value};
-use common_query::prometheus::{GREPTIME_TEMPORALITY_DELTA, GREPTIME_TEMPORALITY_LABEL};
+use common_query::prelude::{
+    GREPTIME_TEMPORALITY_DELTA, greptime_native_histogram, greptime_temporality_label,
+    greptime_value,
+};
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
@@ -3977,12 +3979,12 @@ impl PromPlanner {
             .ctx
             .tag_columns
             .iter()
-            .any(|tag| tag == GREPTIME_TEMPORALITY_LABEL)
+            .any(|tag| tag == greptime_temporality_label())
         {
-            Self::field_column_type(input_schema, GREPTIME_TEMPORALITY_LABEL)
+            Self::field_column_type(input_schema, greptime_temporality_label())
                 .filter(|data_type| Self::string_value_data_type(data_type).is_some())
                 .map(|_| {
-                    DfExpr::Column(Column::from_name(GREPTIME_TEMPORALITY_LABEL))
+                    DfExpr::Column(Column::from_name(greptime_temporality_label()))
                         .eq(lit(GREPTIME_TEMPORALITY_DELTA))
                 })
         } else {
@@ -8058,7 +8060,7 @@ mod test {
         ];
         if temporality_marker {
             columns.push(ColumnSchema::new(
-                GREPTIME_TEMPORALITY_LABEL.to_string(),
+                greptime_temporality_label().to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
             ));
@@ -8192,7 +8194,7 @@ mod test {
         )];
         if temporality_marker {
             columns.push(ColumnSchema::new(
-                GREPTIME_TEMPORALITY_LABEL.to_string(),
+                greptime_temporality_label().to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
             ));

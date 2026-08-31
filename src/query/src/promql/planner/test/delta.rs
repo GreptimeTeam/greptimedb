@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_query::logical_plan::SubstraitPlanDecoder;
+use common_query::prelude::set_default_prefix;
 use datafusion::catalog::SchemaProvider;
 
 use super::*;
@@ -27,7 +28,7 @@ fn delta_temporality_table_provider() -> (DfTableSourceProvider, QueryEngineStat
             false,
         ),
         ColumnSchema::new(
-            GREPTIME_TEMPORALITY_LABEL.to_string(),
+            greptime_temporality_label().to_string(),
             ConcreteDataType::string_datatype(),
             true,
         ),
@@ -145,6 +146,9 @@ fn delta_temporality_table_provider() -> (DfTableSourceProvider, QueryEngineStat
 
 #[tokio::test]
 async fn rate_and_increase_select_raw_delta_math_per_series() {
+    set_default_prefix(Some("custom")).unwrap();
+    assert_eq!(greptime_temporality_label(), "__custom_temporality__");
+
     let eval_time = UNIX_EPOCH.checked_add(Duration::from_secs(180)).unwrap();
     for (function, expected_delta, expected_single) in
         [("increase", 45.0, 7.0), ("rate", 0.25, 7.0 / 180.0)]
@@ -162,7 +166,7 @@ async fn rate_and_increase_select_raw_delta_math_per_series() {
             .unwrap();
         let plan = raw.display_indent_schema().to_string();
         assert!(plan.contains("prom_sum_over_time"), "{plan}");
-        assert!(plan.contains(GREPTIME_TEMPORALITY_LABEL), "{plan}");
+        assert!(plan.contains(greptime_temporality_label()), "{plan}");
         let value_field = raw
             .schema()
             .fields()
@@ -208,7 +212,7 @@ async fn rate_and_increase_select_raw_delta_math_per_series() {
                 .downcast_ref::<StringArray>()
                 .unwrap();
             let temporality = batch
-                .column_by_name(GREPTIME_TEMPORALITY_LABEL)
+                .column_by_name(greptime_temporality_label())
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -313,7 +317,7 @@ async fn mixed_range_rate_selects_delta_math_only_for_float_samples() {
     assert!(plan.contains("prom_sum_over_time"), "{plan}");
     assert!(plan.contains("prom_mixed_range_float"), "{plan}");
     assert!(plan.contains("prom_mixed_range_histogram"), "{plan}");
-    assert!(plan.contains(GREPTIME_TEMPORALITY_LABEL), "{plan}");
+    assert!(plan.contains(greptime_temporality_label()), "{plan}");
 }
 
 #[tokio::test]
