@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_telemetry::debug;
-use datatypes::arrow::array::{Array, AsArray, Int64Array, UInt64Array};
+use datatypes::arrow::array::{
+    Array, ArrayRef, AsArray, BinaryBuilder, Int64Array, UInt32Array, UInt64Array,
+};
 use datatypes::arrow::compute::interleave;
 use datatypes::arrow::datatypes::{ArrowNativeType, BinaryType, DataType, SchemaRef, Utf8Type};
 use datatypes::arrow::error::ArrowError;
@@ -94,6 +99,97 @@ fn check_interleave_overflow(
         }
     }
     Ok(())
+}
+
+/// Interleaves the non-null internal primary-key column from globally sorted rows.
+fn interleave_primary_key(
+    arrays: &[&dyn Array],
+    indices: &[(usize, usize)],
+) -> std::result::Result<ArrayRef, ArrowError> {
+    if arrays.is_empty() {
+        return Err(ArrowError::InvalidArgumentError(
+            "interleave requires input of at least one array".to_string(),
+        ));
+    }
+
+    let dictionaries = arrays
+        .iter()
+        .map(|array| {
+            let dictionary = array
+                .as_any()
+                .downcast_ref::<PrimaryKeyArray>()
+                .ok_or_else(|| {
+                    ArrowError::CastError(format!(
+                        "expected Dictionary(UInt32, Binary) primary key, got {}",
+                        array.data_type()
+                    ))
+                })?;
+            let values = dictionary
+                .values()
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| {
+                    ArrowError::CastError(format!(
+                        "expected Binary primary-key dictionary values, got {}",
+                        dictionary.values().data_type()
+                    ))
+                })?;
+            Ok((dictionary, values))
+        })
+        .collect::<std::result::Result<Vec<_>, ArrowError>>()?;
+
+    let mut keys = Vec::with_capacity(indices.len());
+    let mut values = BinaryBuilder::with_capacity(indices.len(), 0);
+    let mut previous_primary_key = None;
+    let mut current_key = 0;
+    let mut num_dictionary_values = 0_usize;
+    let mut value_bytes = 0_usize;
+
+    for &(array_idx, row_idx) in indices {
+        let (dictionary, dictionary_values) = dictionaries.get(array_idx).ok_or_else(|| {
+            ArrowError::InvalidArgumentError(format!(
+                "primary-key source index {array_idx} is out of bounds for {} arrays",
+                dictionaries.len()
+            ))
+        })?;
+        if row_idx >= dictionary.len() {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "primary-key row index {row_idx} is out of bounds for array of length {}",
+                dictionary.len()
+            )));
+        }
+        let source_key = dictionary.key(row_idx).ok_or_else(|| {
+            ArrowError::InvalidArgumentError(
+                "internal primary-key dictionary contains a null key".to_string(),
+            )
+        })?;
+        if dictionary_values.is_null(source_key) {
+            return Err(ArrowError::InvalidArgumentError(
+                "internal primary-key dictionary contains a null dictionary value".to_string(),
+            ));
+        }
+        let primary_key = dictionary_values.value(source_key);
+
+        if previous_primary_key != Some(primary_key) {
+            current_key = u32::try_from(num_dictionary_values)
+                .map_err(|_| ArrowError::DictionaryKeyOverflowError)?;
+            value_bytes = value_bytes.checked_add(primary_key.len()).ok_or_else(|| {
+                ArrowError::ArithmeticOverflow(
+                    "primary-key dictionary value length overflow".to_string(),
+                )
+            })?;
+            if value_bytes > i32::MAX as usize {
+                return Err(ArrowError::OffsetOverflowError(value_bytes));
+            }
+            values.append_value(primary_key);
+            num_dictionary_values += 1;
+            previous_primary_key = Some(primary_key);
+        }
+        keys.push(current_key);
+    }
+
+    let dictionary = PrimaryKeyArray::try_new(UInt32Array::from(keys), Arc::new(values.finish()))?;
+    Ok(Arc::new(dictionary))
 }
 
 /// Keeps track of the current position in a batch
@@ -258,6 +354,8 @@ impl BatchBuilder {
 
         check_interleave_overflow(&self.batches, &self.schema, &self.indices)?;
 
+        let primary_key_column_idx = (self.schema.fields.len() >= 3)
+            .then(|| primary_key_column_index(self.schema.fields.len()));
         let columns = (0..self.schema.fields.len())
             .map(|column_idx| {
                 let arrays: Vec<_> = self
@@ -265,7 +363,11 @@ impl BatchBuilder {
                     .iter()
                     .map(|(_, batch)| batch.column(column_idx).as_ref())
                     .collect();
-                interleave(&arrays, &self.indices).context(ComputeArrowSnafu)
+                if Some(column_idx) == primary_key_column_idx {
+                    interleave_primary_key(&arrays, &self.indices).context(ComputeArrowSnafu)
+                } else {
+                    interleave(&arrays, &self.indices).context(ComputeArrowSnafu)
+                }
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -322,6 +424,95 @@ impl BatchBuilder {
     }
 }
 
+struct RootHeap<T: Ord> {
+    data: Vec<T>,
+}
+
+impl<T: Ord> RootHeap<T> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn peek(&self) -> Option<&T> {
+        self.data.first()
+    }
+
+    fn root_mut(&mut self) -> Option<&mut T> {
+        self.data.first_mut()
+    }
+
+    fn best_child(&self) -> Option<&T> {
+        match self.data.len() {
+            0 | 1 => None,
+            2 => self.data.get(1),
+            _ if self.data[2] > self.data[1] => self.data.get(2),
+            _ => self.data.get(1),
+        }
+    }
+
+    fn push(&mut self, value: T) {
+        self.data.push(value);
+        self.sift_up(self.data.len() - 1);
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        let last = self.data.pop()?;
+        if self.data.is_empty() {
+            return Some(last);
+        }
+
+        let root = std::mem::replace(&mut self.data[0], last);
+        self.sift_down(0);
+        Some(root)
+    }
+
+    fn repair_root(&mut self) {
+        self.sift_down(0);
+    }
+
+    fn sift_up(&mut self, mut index: usize) {
+        while index > 0 {
+            let parent = (index - 1) / 2;
+            if self.data[parent] >= self.data[index] {
+                break;
+            }
+            self.data.swap(parent, index);
+            index = parent;
+        }
+    }
+
+    fn sift_down(&mut self, mut index: usize) {
+        loop {
+            let left = index * 2 + 1;
+            if left >= self.data.len() {
+                break;
+            }
+
+            let right = left + 1;
+            let child = if right < self.data.len() && self.data[right] > self.data[left] {
+                right
+            } else {
+                left
+            };
+            if self.data[index] >= self.data[child] {
+                break;
+            }
+            self.data.swap(index, child);
+            index = child;
+        }
+    }
+}
+
 /// A comparable node of the heap.
 trait NodeCmp: Eq + Ord {
     /// Returns whether the node still has batch to read.
@@ -336,13 +527,13 @@ trait NodeCmp: Eq + Ord {
 }
 
 /// Common algorithm of merging sorted batches from multiple nodes.
-struct MergeAlgo<T> {
+struct MergeAlgo<T: Ord> {
     /// Holds nodes whose key range of current batch **is** overlapped with the merge window.
     /// Each node yields batches from a `source`.
     ///
     /// Node in this heap **MUST** not be empty. A `merge window` is the (primary key, timestamp)
     /// range of the **root node** in the `hot` heap.
-    hot: BinaryHeap<T>,
+    hot: RootHeap<T>,
     /// Holds nodes whose key range of current batch **isn't** overlapped with the merge window.
     ///
     /// Nodes in this heap **MUST** not be empty.
@@ -356,7 +547,7 @@ impl<T: NodeCmp> MergeAlgo<T> {
     fn new(mut nodes: Vec<T>) -> Self {
         // Skips EOF nodes.
         nodes.retain(|node| !node.is_eof());
-        let hot = BinaryHeap::with_capacity(nodes.len());
+        let hot = RootHeap::with_capacity(nodes.len());
         let cold = BinaryHeap::from(nodes);
 
         let mut algo = MergeAlgo { hot, cold };
@@ -385,37 +576,52 @@ impl<T: NodeCmp> MergeAlgo<T> {
         }
     }
 
-    /// Push the node popped from `hot` back to a proper heap.
-    fn reheap(&mut self, node: T) {
-        if node.is_eof() {
-            // If the node is EOF, don't put it into the heap again.
-            // The merge window would be updated, need to refill the hot heap.
-            self.refill_hot();
-        } else {
-            // Find a proper heap for this node.
-            let node_is_cold = if let Some(hottest) = self.hot.peek() {
-                // If key range of this node is behind the hottest node's then we can
-                // push it to the cold heap. Otherwise we should push it to the hot heap.
-                node.is_behind(hottest)
-            } else {
-                // The hot heap is empty, but we don't known whether the current
-                // batch of this node is still the hottest.
-                true
-            };
-
-            if node_is_cold {
-                self.cold.push(node);
-            } else {
-                self.hot.push(node);
-            }
-            // Anyway, the merge window has been changed, we need to refill the hot heap.
-            self.refill_hot();
-        }
+    /// Returns the hottest node mutably.
+    fn hottest_mut(&mut self) -> Option<&mut T> {
+        self.hot.root_mut()
     }
 
-    /// Pops the hottest node.
-    fn pop_hot(&mut self) -> Option<T> {
+    /// Removes the hottest node before a transition that can fetch a batch.
+    fn pop_hot_for_batch_transition(&mut self) -> Option<T> {
         self.hot.pop()
+    }
+
+    /// Returns a node to the appropriate heap after a batch transition.
+    fn reheap_after_batch_transition(&mut self, node: T) {
+        if node.is_eof() {
+            self.refill_hot();
+            return;
+        }
+
+        let node_is_cold = self
+            .hot
+            .peek()
+            .is_none_or(|hottest| node.is_behind(hottest));
+        if node_is_cold {
+            self.cold.push(node);
+        } else {
+            self.hot.push(node);
+        }
+        self.refill_hot();
+    }
+
+    /// Repairs the hot heap after mutating its root and refills the merge window.
+    fn repair_hot_root(&mut self) {
+        if self.hot.peek().is_some_and(NodeCmp::is_eof) {
+            self.hot.pop();
+        } else {
+            let root_is_cold = self
+                .hot
+                .best_child()
+                .is_some_and(|best| self.hot.peek().unwrap().is_behind(best));
+            if root_is_cold {
+                self.cold.push(self.hot.pop().unwrap());
+            } else {
+                self.hot.repair_root();
+            }
+        }
+
+        self.refill_hot();
     }
 
     /// Returns true if there are rows in the hot heap.
@@ -433,8 +639,11 @@ impl<T: NodeCmp> MergeAlgo<T> {
 /// Columns to compare for a [RecordBatch].
 struct SortColumns {
     primary_key: PrimaryKeyArray,
+    primary_key_values: BinaryArray,
     timestamp: Int64Array,
     sequence: UInt64Array,
+    #[cfg(test)]
+    primary_key_lookups: Cell<usize>,
 }
 
 impl SortColumns {
@@ -450,6 +659,12 @@ impl SortColumns {
             .downcast_ref::<PrimaryKeyArray>()
             .unwrap()
             .clone();
+        let primary_key_values = primary_key
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap()
+            .clone();
         let timestamp = batch.column(time_index_column_index(num_columns));
         let (timestamp, _unit) = timestamp_array_to_primitive(timestamp).unwrap();
         let sequence = batch
@@ -461,20 +676,31 @@ impl SortColumns {
 
         Self {
             primary_key,
+            primary_key_values,
             timestamp,
             sequence,
+            #[cfg(test)]
+            primary_key_lookups: Cell::new(0),
         }
     }
 
     fn primary_key_at(&self, index: usize) -> &[u8] {
-        let key = self.primary_key.keys().value(index);
-        let binary_values = self
-            .primary_key
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-        binary_values.value(key as usize)
+        let range = self.primary_key_range_at(index);
+        &self.primary_key_values.value_data()[range]
+    }
+
+    fn primary_key_range_at(&self, index: usize) -> Range<usize> {
+        #[cfg(test)]
+        self.primary_key_lookups
+            .set(self.primary_key_lookups.get() + 1);
+        let key = self.primary_key.keys().value(index) as usize;
+        let offsets = self.primary_key_values.value_offsets();
+        offsets[key].as_usize()..offsets[key + 1].as_usize()
+    }
+
+    #[cfg(test)]
+    fn primary_key_lookups(&self) -> usize {
+        self.primary_key_lookups.get()
     }
 
     fn timestamp_at(&self, index: usize) -> i64 {
@@ -497,6 +723,8 @@ impl SortColumns {
 struct RowCursor {
     /// Current row offset.
     offset: usize,
+    /// Byte range of the current primary key in the dictionary values.
+    primary_key_range: Range<usize>,
     /// Keys of the batch.
     columns: SortColumns,
 }
@@ -504,8 +732,13 @@ struct RowCursor {
 impl RowCursor {
     fn new(columns: SortColumns) -> Self {
         debug_assert!(columns.num_rows() > 0);
+        let primary_key_range = columns.primary_key_range_at(0);
 
-        Self { offset: 0, columns }
+        Self {
+            offset: 0,
+            primary_key_range,
+            columns,
+        }
     }
 
     fn is_finished(&self) -> bool {
@@ -519,10 +752,13 @@ impl RowCursor {
 
     fn advance(&mut self) {
         self.offset += 1;
+        if !self.is_finished() {
+            self.primary_key_range = self.columns.primary_key_range_at(self.offset);
+        }
     }
 
     fn first_primary_key(&self) -> &[u8] {
-        self.columns.primary_key_at(self.offset)
+        &self.columns.primary_key_values.value_data()[self.primary_key_range.clone()]
     }
 
     fn first_timestamp(&self) -> i64 {
@@ -640,25 +876,29 @@ impl FlatMergeIterator {
         debug_assert!(self.in_progress.is_empty());
 
         // Safety: next_batch() ensures the heap is not empty.
-        let mut hottest = self.algo.pop_hot().unwrap();
+        let mut hottest = self.algo.pop_hot_for_batch_transition().unwrap();
         debug_assert!(!hottest.current_cursor().is_finished());
+        let node_index = hottest.node_index;
         let next = hottest.advance_batch()?;
         // The node is the heap is not empty, so it must have existing rows in the builder.
-        let batch = self
-            .in_progress
-            .take_remaining_rows(hottest.node_index, next);
+        let batch = self.in_progress.take_remaining_rows(node_index, next);
         Self::maybe_output_batch(batch, &mut self.output_batch);
-        self.algo.reheap(hottest);
+        self.algo.reheap_after_batch_transition(hottest);
 
         Ok(())
     }
 
     /// Fetches a row from the hottest node.
     fn fetch_row_from_hottest(&mut self) -> Result<()> {
-        // Safety: next_batch() ensures the heap has more than 1 element.
-        let mut hottest = self.algo.pop_hot().unwrap();
-        debug_assert!(!hottest.current_cursor().is_finished());
-        self.in_progress.push_row(hottest.node_index);
+        let (node_index, at_batch_boundary) = {
+            // Safety: next_batch() ensures the heap has more than 1 element.
+            let hottest = self.algo.hottest_mut().unwrap();
+            debug_assert!(!hottest.current_cursor().is_finished());
+            (hottest.node_index, hottest.current_cursor().is_last_row())
+        };
+        let mut boundary_node =
+            at_batch_boundary.then(|| self.algo.pop_hot_for_batch_transition().unwrap());
+        self.in_progress.push_row(node_index);
         if self.in_progress.len() >= self.batch_size {
             // We buffered enough rows.
             if let Some(output) = self.in_progress.build_record_batch()? {
@@ -666,11 +906,20 @@ impl FlatMergeIterator {
             }
         }
 
-        if let Some(next) = hottest.advance_row()? {
-            self.in_progress.push_batch(hottest.node_index, next);
+        let next = if let Some(hottest) = &mut boundary_node {
+            hottest.advance_row()?
+        } else {
+            self.algo.hottest_mut().unwrap().advance_row()?
+        };
+        if let Some(next) = next {
+            self.in_progress.push_batch(node_index, next);
         }
 
-        self.algo.reheap(hottest);
+        if let Some(hottest) = boundary_node {
+            self.algo.reheap_after_batch_transition(hottest);
+        } else {
+            self.algo.repair_hot_root();
+        }
         Ok(())
     }
 
@@ -796,27 +1045,31 @@ impl FlatMergeReader {
         debug_assert!(self.in_progress.is_empty());
 
         // Safety: next_batch() ensures the heap is not empty.
-        let mut hottest = self.algo.pop_hot().unwrap();
+        let mut hottest = self.algo.pop_hot_for_batch_transition().unwrap();
         debug_assert!(!hottest.current_cursor().is_finished());
+        let node_index = hottest.node_index;
         let start = Instant::now();
         let next = hottest.advance_batch().await?;
         self.metrics.fetch_cost += start.elapsed();
         // The node is the heap is not empty, so it must have existing rows in the builder.
-        let batch = self
-            .in_progress
-            .take_remaining_rows(hottest.node_index, next);
+        let batch = self.in_progress.take_remaining_rows(node_index, next);
         Self::maybe_output_batch(batch, &mut self.output_batch);
-        self.algo.reheap(hottest);
+        self.algo.reheap_after_batch_transition(hottest);
 
         Ok(())
     }
 
     /// Fetches a row from the hottest node.
     async fn fetch_row_from_hottest(&mut self) -> Result<()> {
-        // Safety: next_batch() ensures the heap has more than 1 element.
-        let mut hottest = self.algo.pop_hot().unwrap();
-        debug_assert!(!hottest.current_cursor().is_finished());
-        self.in_progress.push_row(hottest.node_index);
+        let (node_index, at_batch_boundary) = {
+            // Safety: next_batch() ensures the heap has more than 1 element.
+            let hottest = self.algo.hottest_mut().unwrap();
+            debug_assert!(!hottest.current_cursor().is_finished());
+            (hottest.node_index, hottest.current_cursor().is_last_row())
+        };
+        let mut boundary_node =
+            at_batch_boundary.then(|| self.algo.pop_hot_for_batch_transition().unwrap());
+        self.in_progress.push_row(node_index);
         if self.in_progress.len() >= self.batch_size {
             // We buffered enough rows.
             if let Some(output) = self.in_progress.build_record_batch()? {
@@ -824,18 +1077,24 @@ impl FlatMergeReader {
             }
         }
 
-        // Only read the clock when advancing will attempt to fetch the next batch.
-        // Check first because `None` means either no fetch or EOF after a fetch attempt.
-        let start = hottest.current_cursor().is_last_row().then(Instant::now);
-        let next = hottest.advance_row().await?;
+        let start = at_batch_boundary.then(Instant::now);
+        let next = if let Some(hottest) = &mut boundary_node {
+            hottest.advance_row().await?
+        } else {
+            self.algo.hottest_mut().unwrap().advance_row().await?
+        };
         if let Some(start) = start {
             self.metrics.fetch_cost += start.elapsed();
         }
         if let Some(next) = next {
-            self.in_progress.push_batch(hottest.node_index, next);
+            self.in_progress.push_batch(node_index, next);
         }
 
-        self.algo.reheap(hottest);
+        if let Some(hottest) = boundary_node {
+            self.algo.reheap_after_batch_transition(hottest);
+        } else {
+            self.algo.repair_hot_root();
+        }
         Ok(())
     }
 
@@ -1012,15 +1271,214 @@ impl GenericNode<BoxedRecordBatchStream> {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Reverse;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::task::Poll;
 
     use api::v1::OpType;
     use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
     use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt8Array, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
+    use futures::FutureExt;
 
     use super::*;
+    use crate::error::UnexpectedSnafu;
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct TestNode {
+        id: usize,
+        current_rank: Option<usize>,
+        end_rank: usize,
+    }
+
+    impl TestNode {
+        fn new(id: usize, current_rank: usize, end_rank: usize) -> Self {
+            Self {
+                id,
+                current_rank: Some(current_rank),
+                end_rank,
+            }
+        }
+    }
+
+    impl NodeCmp for TestNode {
+        fn is_eof(&self) -> bool {
+            self.current_rank.is_none()
+        }
+
+        fn is_behind(&self, other: &Self) -> bool {
+            self.current_rank.unwrap() > other.end_rank
+        }
+    }
+
+    impl PartialOrd for TestNode {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for TestNode {
+        fn cmp(&self, other: &Self) -> Ordering {
+            Reverse((self.current_rank, self.id)).cmp(&Reverse((other.current_rank, other.id)))
+        }
+    }
+
+    #[test]
+    fn test_merge_algo_repairs_overlapping_hot_root_in_place() {
+        let mut algo = MergeAlgo::new(vec![
+            TestNode::new(0, 0, 10),
+            TestNode::new(1, 5, 15),
+            TestNode::new(2, 20, 25),
+        ]);
+        assert_eq!(0, algo.hot.peek().unwrap().id);
+        assert_eq!((2, 1), (algo.hot.len(), algo.cold.len()));
+
+        algo.hottest_mut().unwrap().current_rank = Some(6);
+        algo.repair_hot_root();
+
+        assert_eq!(1, algo.hot.peek().unwrap().id);
+        assert_eq!((2, 1), (algo.hot.len(), algo.cold.len()));
+    }
+
+    #[test]
+    fn test_merge_algo_moves_root_beyond_remaining_hot_range_to_cold() {
+        let mut algo = MergeAlgo::new(vec![
+            TestNode::new(0, 0, 10),
+            TestNode::new(1, 5, 7),
+            TestNode::new(2, 20, 25),
+        ]);
+
+        algo.hottest_mut().unwrap().current_rank = Some(8);
+        algo.repair_hot_root();
+
+        assert_eq!(1, algo.hot.peek().unwrap().id);
+        assert_eq!((1, 2), (algo.hot.len(), algo.cold.len()));
+    }
+
+    #[test]
+    fn test_merge_algo_removes_eof_root_and_refills_hot() {
+        let mut algo = MergeAlgo::new(vec![TestNode::new(0, 0, 4), TestNode::new(1, 10, 14)]);
+        assert_eq!((1, 1), (algo.hot.len(), algo.cold.len()));
+
+        algo.hottest_mut().unwrap().current_rank = None;
+        algo.repair_hot_root();
+
+        assert_eq!(1, algo.hot.peek().unwrap().id);
+        assert_eq!((1, 0), (algo.hot.len(), algo.cold.len()));
+    }
+
+    #[test]
+    fn test_merge_algo_single_hot_node_can_fetch_batch() {
+        let algo = MergeAlgo::new(vec![TestNode::new(0, 0, 4), TestNode::new(1, 10, 14)]);
+
+        assert_eq!(0, algo.hot.peek().unwrap().id);
+        assert_eq!((1, 1), (algo.hot.len(), algo.cold.len()));
+        assert!(algo.can_fetch_batch());
+    }
+
+    fn drain_root_heap<T: Ord>(mut heap: RootHeap<T>) -> Vec<T> {
+        let mut values = Vec::with_capacity(heap.len());
+        while let Some(value) = heap.pop() {
+            values.push(value);
+        }
+        values
+    }
+
+    #[test]
+    fn test_root_heap_repairs_mutated_root() {
+        let mut heap = RootHeap::with_capacity(4);
+        for value in [7, 3, 9, 5] {
+            heap.push(value);
+        }
+
+        assert_eq!(Some(&9), heap.peek());
+        *heap.root_mut().unwrap() = 1;
+        heap.repair_root();
+
+        assert_eq!(vec![7, 5, 3, 1], drain_root_heap(heap));
+    }
+
+    #[test]
+    fn test_root_heap_sifts_across_multiple_levels() {
+        let mut heap = RootHeap::with_capacity(8);
+        for value in [7, 6, 5, 4, 3, 2, 1, 9] {
+            heap.push(value);
+        }
+
+        assert_eq!(Some(&9), heap.peek());
+        *heap.root_mut().unwrap() = 0;
+        heap.repair_root();
+
+        assert_eq!(vec![7, 6, 5, 4, 3, 2, 1, 0], drain_root_heap(heap));
+    }
+
+    #[test]
+    fn test_root_heap_empty() {
+        let mut heap = RootHeap::<i32>::with_capacity(0);
+
+        assert!(heap.is_empty());
+        assert_eq!(0, heap.len());
+        assert_eq!(None, heap.peek());
+        assert_eq!(None, heap.root_mut());
+        assert_eq!(None, heap.best_child());
+        assert_eq!(None, heap.pop());
+        heap.repair_root();
+    }
+
+    #[test]
+    fn test_root_heap_one_element() {
+        let mut heap = RootHeap::with_capacity(1);
+        heap.push(7);
+
+        assert!(!heap.is_empty());
+        assert_eq!(1, heap.len());
+        assert_eq!(Some(&7), heap.peek());
+        assert_eq!(None, heap.best_child());
+        assert_eq!(Some(7), heap.pop());
+        assert!(heap.is_empty());
+    }
+
+    #[test]
+    fn test_root_heap_repairs_root_with_only_left_child() {
+        let mut heap = RootHeap::with_capacity(2);
+        heap.push(9);
+        heap.push(7);
+
+        *heap.root_mut().unwrap() = 1;
+        heap.repair_root();
+
+        assert_eq!(Some(&7), heap.peek());
+        assert_eq!(Some(7), heap.pop());
+        assert_eq!(Some(1), heap.pop());
+    }
+
+    #[test]
+    fn test_root_heap_repairs_root_with_greater_right_child() {
+        let mut heap = RootHeap::with_capacity(3);
+        for value in [9, 3, 7] {
+            heap.push(value);
+        }
+
+        *heap.root_mut().unwrap() = 1;
+        heap.repair_root();
+
+        assert_eq!(Some(&7), heap.peek());
+        assert_eq!(Some(7), heap.pop());
+        assert_eq!(Some(3), heap.pop());
+        assert_eq!(Some(1), heap.pop());
+    }
+
+    #[test]
+    fn test_root_heap_best_child_is_greatest_node_excluding_root() {
+        let mut heap = RootHeap::with_capacity(5);
+        for value in [9, 3, 7, 1, 2] {
+            heap.push(value);
+        }
+
+        assert_eq!(Some(&7), heap.best_child());
+    }
 
     /// Creates a test RecordBatch with the specified data.
     fn create_test_record_batch(
@@ -1072,6 +1530,38 @@ mod tests {
 
     fn new_test_iter(batches: Vec<RecordBatch>) -> BoxedRecordBatchIterator {
         Box::new(batches.into_iter().map(Ok))
+    }
+
+    fn boundary_test_batches() -> (RecordBatch, RecordBatch, RecordBatch) {
+        let first = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[1, 2],
+            &[OpType::Put, OpType::Put],
+            &[10, 12],
+        );
+        let second = create_test_record_batch(
+            &[b"k1", b"k1", b"k1"],
+            &[1500, 2000, 2500],
+            &[1, 1, 1],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[11, 13, 14],
+        );
+        let pending = create_test_record_batch(
+            &[b"k1", b"k1", b"k1"],
+            &[1000, 1500, 2000],
+            &[1, 1, 2],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[10, 11, 12],
+        );
+        (first, second, pending)
+    }
+
+    fn test_source_error() -> crate::error::Error {
+        UnexpectedSnafu {
+            reason: "test source failed".to_string(),
+        }
+        .build()
     }
 
     #[test]
@@ -1261,6 +1751,76 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_iterator_retry_after_row_boundary_error_removes_source() {
+        let (first, second, pending) = boundary_test_batches();
+        let schema = first.schema();
+        let first_source = Box::new(vec![Ok(first), Err(test_source_error())].into_iter())
+            as BoxedRecordBatchIterator;
+        let second_source = new_test_iter(vec![second.clone()]);
+        let mut merge =
+            FlatMergeIterator::new(schema, vec![first_source, second_source], 1024).unwrap();
+
+        assert!(merge.next_batch().is_err());
+        assert_eq!(pending, merge.next_batch().unwrap().unwrap());
+        assert_eq!(second.slice(1, 2), merge.next_batch().unwrap().unwrap());
+        assert!(merge.next_batch().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_merge_reader_retry_after_row_boundary_error_removes_source() {
+        let (first, second, pending) = boundary_test_batches();
+        let schema = first.schema();
+        let first_source = Box::pin(futures::stream::iter(vec![
+            Ok(first),
+            Err(test_source_error()),
+        ])) as BoxedRecordBatchStream;
+        let second_source =
+            Box::pin(futures::stream::iter(vec![Ok(second.clone())])) as BoxedRecordBatchStream;
+        let mut merge = FlatMergeReader::new(schema, vec![first_source, second_source], 1024, None)
+            .await
+            .unwrap();
+
+        assert!(merge.next_batch().await.is_err());
+        assert_eq!(pending, merge.next_batch().await.unwrap().unwrap());
+        assert_eq!(
+            second.slice(1, 2),
+            merge.next_batch().await.unwrap().unwrap()
+        );
+        assert!(merge.next_batch().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_merge_reader_cancelled_row_boundary_fetch_removes_source() {
+        let (first, second, pending) = boundary_test_batches();
+        let schema = first.schema();
+        let fetch_pending = Arc::new(AtomicBool::new(false));
+        let fetch_pending_on_poll = Arc::clone(&fetch_pending);
+        let mut first_batch = Some(first);
+        let first_source = Box::pin(futures::stream::poll_fn(move |_cx| {
+            if let Some(batch) = first_batch.take() {
+                Poll::Ready(Some(Ok(batch)))
+            } else {
+                fetch_pending_on_poll.store(true, AtomicOrdering::Relaxed);
+                Poll::Pending
+            }
+        })) as BoxedRecordBatchStream;
+        let second_source =
+            Box::pin(futures::stream::iter(vec![Ok(second.clone())])) as BoxedRecordBatchStream;
+        let mut merge = FlatMergeReader::new(schema, vec![first_source, second_source], 1024, None)
+            .await
+            .unwrap();
+
+        assert!(Box::pin(merge.next_batch()).now_or_never().is_none());
+        assert!(fetch_pending.load(AtomicOrdering::Relaxed));
+        assert_eq!(pending, merge.next_batch().await.unwrap().unwrap());
+        assert_eq!(
+            second.slice(1, 2),
+            merge.next_batch().await.unwrap().unwrap()
+        );
+        assert!(merge.next_batch().await.unwrap().is_none());
+    }
+
+    #[test]
     fn test_batch_builder_basic() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("field1", DataType::Int64, false),
@@ -1294,6 +1854,111 @@ mod tests {
         assert_eq!(result_batch.num_rows(), 2);
     }
 
+    fn assert_primary_key_dictionary(
+        array: &dyn Array,
+        expected_decoded: &[&[u8]],
+        expected_values: &[&[u8]],
+    ) {
+        let dictionary = array.as_any().downcast_ref::<PrimaryKeyArray>().unwrap();
+        let values = dictionary
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let decoded: Vec<_> = dictionary
+            .keys()
+            .iter()
+            .map(|key| values.value(key.unwrap() as usize))
+            .collect();
+        let dictionary_values: Vec<_> = values.iter().map(Option::unwrap).collect();
+
+        assert_eq!(expected_decoded, decoded);
+        assert_eq!(expected_values, dictionary_values);
+    }
+
+    #[test]
+    fn test_interleave_primary_key_deduplicates_separate_dictionaries() {
+        let batch0 = create_test_record_batch(
+            &[b"k1", b"k2"],
+            &[1000, 2000],
+            &[1, 1],
+            &[OpType::Put, OpType::Put],
+            &[10, 20],
+        );
+        let batch1 = create_test_record_batch(
+            &[b"k1", b"k2"],
+            &[1000, 2000],
+            &[1, 1],
+            &[OpType::Put, OpType::Put],
+            &[11, 21],
+        );
+        let pk_idx = primary_key_column_index(batch0.num_columns());
+        let arrays: Vec<_> = [&batch0, &batch1]
+            .into_iter()
+            .map(|batch| batch.column(pk_idx).as_ref())
+            .collect();
+
+        let output = interleave_primary_key(&arrays, &[(0, 0), (1, 0), (0, 1), (1, 1)]).unwrap();
+
+        assert_primary_key_dictionary(
+            output.as_ref(),
+            &[b"k1", b"k1", b"k2", b"k2"],
+            &[b"k1", b"k2"],
+        );
+    }
+
+    #[test]
+    fn test_interleave_primary_key_rejects_null_dictionary_value() {
+        let primary_key = PrimaryKeyArray::try_new(
+            UInt32Array::from(vec![0]),
+            Arc::new(BinaryArray::from(vec![None::<&[u8]>])),
+        )
+        .unwrap();
+
+        let error = interleave_primary_key(&[&primary_key], &[(0, 0)]).unwrap_err();
+
+        assert!(error.to_string().contains("null dictionary value"));
+    }
+
+    #[test]
+    fn test_batch_builder_primary_key_has_no_state_between_builds() {
+        let long_k1 = vec![b'a'; 4096];
+        let long_k2 = vec![b'b'; 8192];
+        let batch0 =
+            create_test_record_batch(&[long_k1.as_slice()], &[1000], &[1], &[OpType::Put], &[10]);
+        let batch1 =
+            create_test_record_batch(&[long_k1.as_slice()], &[1000], &[1], &[OpType::Put], &[11]);
+        let mut builder = BatchBuilder::new(batch0.schema(), 2, 4);
+        builder.push_batch(0, batch0);
+        builder.push_batch(1, batch1);
+        builder.push_row(0);
+        builder.push_row(1);
+
+        let first = builder.build_record_batch().unwrap().unwrap();
+        let pk_idx = primary_key_column_index(first.num_columns());
+        assert_primary_key_dictionary(
+            first.column(pk_idx).as_ref(),
+            &[long_k1.as_slice(), long_k1.as_slice()],
+            &[long_k1.as_slice()],
+        );
+
+        let batch0 =
+            create_test_record_batch(&[long_k2.as_slice()], &[2000], &[2], &[OpType::Put], &[20]);
+        let batch1 =
+            create_test_record_batch(&[long_k2.as_slice()], &[2000], &[2], &[OpType::Put], &[21]);
+        builder.push_batch(0, batch0);
+        builder.push_batch(1, batch1);
+        builder.push_row(0);
+        builder.push_row(1);
+
+        let second = builder.build_record_batch().unwrap().unwrap();
+        assert_primary_key_dictionary(
+            second.column(pk_idx).as_ref(),
+            &[long_k2.as_slice(), long_k2.as_slice()],
+            &[long_k2.as_slice()],
+        );
+    }
+
     #[test]
     fn test_row_cursor_comparison() {
         // Create test batches for cursor comparison
@@ -1321,5 +1986,20 @@ mod tests {
         // cursors with same pk and timestamp should be ordered by sequence desc
         // cursor1 has sequence 22, cursor2 has sequence 23, so cursor2 < cursor1 (higher sequence comes first)
         assert!(cursor2 < cursor1);
+    }
+
+    #[test]
+    fn test_row_cursor_caches_current_primary_key() {
+        let batch1 = create_test_record_batch(&[b"k1"], &[1000], &[1], &[OpType::Put], &[11]);
+        let batch2 = create_test_record_batch(&[b"k2"], &[1000], &[1], &[OpType::Put], &[12]);
+        let cursor1 = RowCursor::new(SortColumns::new(&batch1));
+        let cursor2 = RowCursor::new(SortColumns::new(&batch2));
+
+        for _ in 0..5 {
+            assert_eq!(Ordering::Less, cursor1.cmp(&cursor2));
+        }
+
+        assert_eq!(1, cursor1.columns.primary_key_lookups());
+        assert_eq!(1, cursor2.columns.primary_key_lookups());
     }
 }
