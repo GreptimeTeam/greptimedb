@@ -148,9 +148,7 @@ use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
     SCAN_REQUESTS_REJECTED_TOTAL,
 };
-use crate::read::scan_region::{
-    ScanRegion, Scanner, exact_sequence_range, exact_sequence_range_files,
-};
+use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
@@ -1065,21 +1063,12 @@ impl EngineInner {
         // snapshot. Keep them together so the reader cannot recompute either
         // side from a different file set.
         let exact_selection = if request.exact_sequence_range {
-            let files = if request.skip_sst_files {
-                Vec::new()
-            } else {
-                exact_sequence_range_files(&request, &version)
-            };
-            let selected_files = files.len();
-            match exact_sequence_range(&request, &version, &files) {
-                Ok(sequence_range) => Some((files, sequence_range)),
+            match exact_sequence_range(&request, &version) {
+                Ok((files, sequence_range)) => Some((files, sequence_range)),
                 Err(err) => {
                     debug!(
-                        "Scan region {} exact sequence range denied: min={:?}, max={:?}, selected_files={}, denial_reason=foreign_file_missing_barrier",
-                        region_id,
-                        request.memtable_min_sequence,
-                        request.memtable_max_sequence,
-                        selected_files,
+                        "Scan region {} exact sequence range denied: min={:?}, max={:?}, denial_reason=foreign_file_missing_barrier",
+                        region_id, request.memtable_min_sequence, request.memtable_max_sequence,
                     );
                     return Err(err);
                 }
