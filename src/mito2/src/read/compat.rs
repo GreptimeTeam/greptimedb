@@ -1162,6 +1162,97 @@ mod tests {
         assert_eq!(expected_batch, result);
     }
 
+    /// A widened time index unit combined with an added column (the realistic
+    /// multi-alter sequence) must rescale and default-fill in one pass.
+    #[test]
+    fn test_flat_compat_batch_time_index_unit_change_with_added_column() {
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let mut expected_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_microsecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        );
+        expected_metadata.primary_key_encoding = PrimaryKeyEncoding::Dense;
+        let expected_metadata = Arc::new(expected_metadata);
+
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::new([0, 1, 2, 3]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .unwrap();
+
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        tag_builder.append_value("tag1");
+        tag_builder.append_value("tag1");
+        let tag_dict_array = Arc::new(tag_builder.finish());
+
+        let k1 = encode_key(&[Some("tag1")]);
+        let input_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        let expected_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(Int64Array::from(vec![None::<i64>, None::<i64>])),
+            Arc::new(TimestampMicrosecondArray::from_iter_values([
+                1_000_000, 2_000_000,
+            ])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let expected_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
+    }
+
     /// The sparse compaction compat path must also rescale a widened time
     /// index unit (metric-engine regions compact with sparse encoding).
     #[test]
