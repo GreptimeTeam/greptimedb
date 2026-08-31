@@ -178,13 +178,49 @@ fn bench_merge(c: &mut Criterion) {
             rows_per_series: 1,
             num_pk_tags: 40,
         },
+        // Rows-per-series sweep, all 32-way with 40 encoded tags.
+        Shape {
+            name: "sweep_1rps_32way_40tags",
+            num_iters: 32,
+            rows_per_iter: 100_000,
+            rows_per_series: 1,
+            num_pk_tags: 40,
+        },
+        Shape {
+            name: "sweep_10rps_32way_40tags",
+            num_iters: 32,
+            rows_per_iter: 100_000,
+            rows_per_series: 10,
+            num_pk_tags: 40,
+        },
+        Shape {
+            name: "sweep_100rps_32way_40tags",
+            num_iters: 32,
+            rows_per_iter: 100_000,
+            rows_per_series: 100,
+            num_pk_tags: 40,
+        },
+        Shape {
+            name: "sweep_1000rps_32way_40tags",
+            num_iters: 32,
+            rows_per_iter: 100_000,
+            rows_per_series: 1000,
+            num_pk_tags: 40,
+        },
+        Shape {
+            name: "sweep_10000rps_32way_40tags",
+            num_iters: 32,
+            rows_per_iter: 100_000,
+            rows_per_series: 10000,
+            num_pk_tags: 40,
+        },
     ];
 
     let selected_shape = std::env::var("FLAT_MERGE_BENCH_SHAPE").ok();
     for shape in &shapes {
         if selected_shape
             .as_deref()
-            .is_some_and(|selected| selected != shape.name)
+            .is_some_and(|selected| !shape.name.starts_with(selected))
         {
             continue;
         }
