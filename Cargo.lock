@@ -5013,18 +5013,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enum-as-inner"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1e6a265c649f3f5979b601d26f1d05ada116434c87741c9493cb56218f76cbc"
-dependencies = [
- "heck 0.5.0",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "enum_dispatch"
 version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5374,7 +5362,6 @@ dependencies = [
  "async-recursion",
  "async-trait",
  "bytes",
- "cache",
  "catalog",
  "chrono",
  "client",
@@ -5404,7 +5391,6 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-substrait",
  "datatypes",
- "enum-as-inner",
  "enum_dispatch",
  "futures",
  "get-size2",

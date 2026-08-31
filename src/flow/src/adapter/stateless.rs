@@ -14,6 +14,7 @@
 
 //! Stateless DataFusion execution for streaming flows.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::helper::{to_grpc_value, vectors_to_rows};
@@ -26,8 +27,9 @@ use common_time::Timestamp;
 use datafusion::catalog::MemTable;
 use datafusion::datasource::{TableProvider, provider_as_source};
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{DFSchema, TableReference};
-use datafusion_expr::LogicalPlan;
+use datafusion_common::{Column, DFSchema, TableReference};
+use datafusion_expr::logical_plan::Projection;
+use datafusion_expr::{Expr, LogicalPlan};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::value::Value;
 use query::QueryEngine;
@@ -78,6 +80,119 @@ fn input_provider(batch: &RecordBatch) -> Result<Arc<dyn TableProvider>, Error> 
         },
     )?;
     Ok(Arc::new(provider))
+}
+
+/// Adds the source timestamp to every supported plan node that has to carry it through a
+/// filter or projection. The expression is appended only after the visible expressions, so the
+/// sink contract remains positional.
+pub(crate) fn rewrite_source_timestamp(
+    plan: LogicalPlan,
+    source_name: &TableReference,
+    source_timestamp_name: &str,
+) -> Result<LogicalPlan, Error> {
+    let mut names = HashSet::new();
+    plan.apply(|node| {
+        names.extend(
+            node.schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone()),
+        );
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    })
+    .context(DatafusionSnafu {
+        context: "Failed to inspect streaming flow plan schema",
+    })?;
+    let mut hidden_name = "__flow_source_timestamp".to_string();
+    let mut suffix = 0;
+    while !names.insert(hidden_name.clone()) {
+        suffix += 1;
+        hidden_name = format!("__flow_source_timestamp_{suffix}");
+    }
+    let visible_count = plan.schema().fields().len();
+    let source_timestamp = Column::from_name(source_timestamp_name);
+    let mut plan = plan
+        .transform_up_with_subqueries(|node| match node {
+            LogicalPlan::TableScan(mut scan) => {
+                if scan.table_name.resolved_eq(source_name)
+                    && let Some(projection) = &mut scan.projection
+                {
+                    let timestamp_index = scan
+                        .source
+                        .schema()
+                        .index_of(source_timestamp_name)
+                        .map_err(|_| {
+                            datafusion::error::DataFusionError::Plan(
+                                "Source timestamp is absent from source scan".into(),
+                            )
+                        })?;
+                    if !projection.contains(&timestamp_index) {
+                        projection.push(timestamp_index);
+                        let schema = scan.source.schema();
+                        scan.projected_schema = Arc::new(DFSchema::new_with_metadata(
+                            projection
+                                .iter()
+                                .map(|index| {
+                                    (
+                                        Some(scan.table_name.clone()),
+                                        Arc::new(schema.field(*index).clone()),
+                                    )
+                                })
+                                .collect(),
+                            schema.metadata().clone(),
+                        )?);
+                    }
+                }
+                Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+            }
+            LogicalPlan::Projection(mut projection) => {
+                let hidden_expr = if projection
+                    .input
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| field.name() == &hidden_name)
+                {
+                    Expr::Column(Column::from_name(hidden_name.clone()))
+                } else {
+                    Expr::Column(source_timestamp.clone())
+                };
+                projection.expr.push(hidden_expr.alias(hidden_name.clone()));
+                let projection = Projection::try_new(projection.expr, projection.input)?;
+                Ok(Transformed::yes(LogicalPlan::Projection(projection)))
+            }
+            _ => Ok(Transformed::no(node)),
+        })
+        .context(DatafusionSnafu {
+            context: "Failed to add source timestamp to streaming flow plan",
+        })?
+        .data;
+
+    // A plan ending at a scan or filter has no projection at which to give the carried value its
+    // hidden name. Add one only in that case; a projection below a filter already carries it.
+    if !plan
+        .schema()
+        .fields()
+        .iter()
+        .any(|field| field.name() == &hidden_name)
+    {
+        let expressions = plan
+            .schema()
+            .fields()
+            .iter()
+            .take(visible_count)
+            .map(|field| Expr::Column(Column::from_name(field.name())))
+            .chain(std::iter::once(
+                Expr::Column(source_timestamp).alias(hidden_name),
+            ))
+            .collect::<Vec<_>>();
+        plan = Projection::try_new(expressions, Arc::new(plan))
+            .map(LogicalPlan::Projection)
+            .context(DatafusionSnafu {
+                context: "Failed to finalize source timestamp in streaming flow plan",
+            })?;
+    }
+    Ok(plan)
 }
 
 fn replace_source(
@@ -322,7 +437,7 @@ mod tests {
     use datafusion::catalog::MemTable;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::Int32Vector;
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
     use session::context::QueryContext;
 
     use super::*;
@@ -408,6 +523,56 @@ mod tests {
             true,
         );
         assert!(synthesize_auto_values(&[column], Timestamp::current_millis()).is_err());
+    }
+
+    #[test]
+    fn rewrite_source_timestamp_appends_collision_free_hidden_output() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "__flow_source_timestamp",
+                ConcreteDataType::int32_datatype(),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Vector::from_slice([2])) as datatypes::prelude::VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([42]))
+                    as datatypes::prelude::VectorRef,
+                Arc::new(Int32Vector::from_slice([7])) as datatypes::prelude::VectorRef,
+            ],
+        )
+        .unwrap();
+        let plan = datafusion_expr::LogicalPlanBuilder::scan(
+            TableReference::bare("source"),
+            provider_as_source(input_provider(&batch).unwrap()),
+            None,
+        )
+        .unwrap()
+        .filter(datafusion_expr::col("number").gt(datafusion_expr::lit(1)))
+        .unwrap()
+        .project(vec![datafusion_expr::col("number")])
+        .unwrap()
+        .build()
+        .unwrap();
+        let rewritten =
+            rewrite_source_timestamp(plan, &TableReference::bare("source"), "ts").unwrap();
+        assert_eq!(rewritten.schema().fields().len(), 2);
+        assert!(
+            rewritten
+                .schema()
+                .field(1)
+                .name()
+                .starts_with("__flow_source_timestamp")
+        );
     }
 
     #[tokio::test]

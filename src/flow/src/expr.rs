@@ -63,7 +63,7 @@ impl Batch {
         ensure!(
             rows.iter().all(|row| row.len() == builders.len()),
             error::InvalidArgumentSnafu {
-                reason: format!("row length does not match schema")
+                reason: "row length does not match schema".to_string()
             }
         );
         for row in rows {

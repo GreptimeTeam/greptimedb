@@ -26,6 +26,7 @@ use common_recordbatch::map_dictionary_to_values_data_type;
 use common_stat::get_total_cpu_cores;
 use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
+use datafusion_common::TableReference;
 use datafusion_expr::{Expr, LogicalPlan};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use itertools::Itertools;
@@ -154,6 +155,41 @@ fn default_num_workers() -> usize {
     get_total_cpu_cores().div_ceil(2)
 }
 
+/// Returns whether an existing sink uses the legacy explicit source-time-index layout.
+///
+/// This check is deliberately separate from [`resolve_sink_layout`]: ordinary auto-column
+/// resolution remains the first choice, and this compatibility path is only for a sink whose
+/// trailing column is a real, user-defined time index.
+pub(crate) fn is_explicit_source_timestamp_compatibility(
+    output_schema: &[ColumnSchema],
+    output_lineage: &[Option<usize>],
+    sink_schema: &[ColumnSchema],
+    source_schema: &SchemaRef,
+) -> bool {
+    if sink_schema.len() != output_schema.len() + 1 || output_lineage.len() != output_schema.len() {
+        return false;
+    }
+    if !output_schema
+        .iter()
+        .zip(&sink_schema[..output_schema.len()])
+        .all(|(output, sink)| output.data_type == sink.data_type)
+    {
+        return false;
+    }
+
+    let Some(source_timestamp_index) = source_schema.timestamp_index() else {
+        return false;
+    };
+    let sink_timestamp = &sink_schema[output_schema.len()];
+    sink_timestamp.data_type == source_schema.column_schemas()[source_timestamp_index].data_type
+        && sink_timestamp.data_type.is_timestamp()
+        && sink_timestamp.is_time_index()
+        && sink_timestamp.default_constraint().is_some()
+        && sink_timestamp.name != AUTO_CREATED_UPDATE_AT_TS_COL
+        && sink_timestamp.name != AUTO_CREATED_PLACEHOLDER_TS_COL
+        && !output_lineage.contains(&Some(source_timestamp_index))
+}
+
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "update_at";
 
@@ -244,7 +280,7 @@ pub(crate) fn sink_output_column_count(sink_schema: &[ColumnSchema]) -> Result<u
         count -= 1;
     }
     if sink_schema
-        .get(count.checked_sub(1).unwrap_or_default())
+        .get(count.saturating_sub(1))
         .is_some_and(|column| column.name == AUTO_CREATED_UPDATE_AT_TS_COL)
     {
         ensure!(
@@ -518,9 +554,48 @@ impl StreamingEngine {
             .context(UnexpectedSnafu {
                 reason: format!("Sink table metadata is missing: {sink_table_name:?}"),
             })?;
-        let auto_columns = resolve_sink_layout(&inferred_schema, &sink_schema)?;
         // Keep the exact layout chosen at creation time; execution must not infer it
-        // from a later sink metadata read.
+        // from a later sink metadata read. The compatibility plan is selected only after normal
+        // resolution, and has no auto columns.
+        let (auto_columns, plan) = match resolve_sink_layout(&inferred_schema, &sink_schema) {
+            Ok(auto_columns) => (auto_columns, flow_plan),
+            Err(normal_error) => {
+                if !sink_exists
+                    || !is_explicit_source_timestamp_compatibility(
+                        &inferred_schema,
+                        &lineage,
+                        &sink_schema,
+                        &source_schema,
+                    )
+                {
+                    return Err(normal_error);
+                }
+                let source_timestamp_index = source_schema.timestamp_index().unwrap();
+                let source_timestamp_name =
+                    &source_schema.column_schemas()[source_timestamp_index].name;
+                let plan = stateless::rewrite_source_timestamp(
+                    flow_plan,
+                    &TableReference::full(
+                        source_table_name[0].clone(),
+                        source_table_name[1].clone(),
+                        source_table_name[2].clone(),
+                    ),
+                    source_timestamp_name,
+                )?;
+                let (effective_output, _) = output_column_schemas(&plan, &source_schema)?;
+                ensure!(
+                    effective_output.len() == sink_schema.len()
+                        && effective_output
+                            .iter()
+                            .zip(&sink_schema)
+                            .all(|(output, sink)| output.data_type == sink.data_type),
+                    InvalidQuerySnafu {
+                        reason: "Compatibility plan output does not match the full sink schema"
+                    }
+                );
+                (vec![], plan)
+            }
+        };
 
         self.stateless_flows.write().await.insert(
             flow_id,
@@ -533,7 +608,7 @@ impl StreamingEngine {
                 sink_schema,
                 sink_primary_keys,
                 auto_columns,
-                plan: flow_plan,
+                plan,
                 query_ctx,
             },
         );
@@ -711,7 +786,7 @@ impl StreamingEngine {
                 .await
                 .map_err(|err| {
                     InsertIntoFlowSnafu {
-                        region_id: u64::from(region_id),
+                        region_id,
                         flow_ids: vec![],
                     }
                     .into_error(BoxedError::new(err))

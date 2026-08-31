@@ -984,7 +984,7 @@ mod tests {
 
         assert_eq!(affected_rows, 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(matches!(peer_desc, None));
+        assert!(peer_desc.is_none());
     }
 
     #[tokio::test]
