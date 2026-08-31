@@ -482,20 +482,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parse the interval expr to duration in seconds.
     fn parse_interval_no_month(&mut self, context: &str) -> Result<i64> {
-        let interval = self.parse_interval_month_day_nano()?.0;
-        if interval.months != 0 {
-            return InvalidIntervalSnafu {
-                reason: format!("Interval with months is not allowed in {context}"),
-            }
-            .fail();
-        }
-        Ok(
-            interval.nanoseconds / 1_000_000_000
-                + interval.days as i64 * 60 * 60 * 24
-                + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
-                                                                       // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
-                                                                       // which we use in database to parse i.e. ttl interval and many other intervals
-        )
+        Ok(self.parse_interval_no_month_whole_secs(context)?.0)
     }
 
     /// Parses an interval that must not contain months and returns the total
@@ -512,9 +499,7 @@ impl<'a> ParserContext<'a> {
             .fail();
         }
         let has_fractional_secs = interval.nanoseconds % 1_000_000_000 != 0;
-        let whole_secs = interval.nanoseconds / 1_000_000_000
-            + interval.days as i64 * 60 * 60 * 24
-            + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000;
+        let whole_secs = interval.nanoseconds / 1_000_000_000 + interval.days as i64 * 60 * 60 * 24;
         Ok((whole_secs, has_fractional_secs))
     }
 

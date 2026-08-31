@@ -236,28 +236,6 @@ fn validate_and_normalize_flow_options(
         .collect()
 }
 
-/// Rejects a raw `CreateFlowExpr` that smuggles the internal transient
-/// transport keys (`__greptime_internal_eval_offset_secs` /
-/// `__greptime_internal_eval_schedule`) through `flow_options`.
-///
-/// These keys are trusted only when inserted by the SQL path *after* user
-/// option validation (see `create_flow_procedure`). A key present on an expr
-/// arriving at a direct gRPC boundary is always a spoof attempt and must be
-/// rejected before any trusted extraction could happen.
-fn reject_spoofed_internal_flow_transport_keys(
-    flow_options: &HashMap<String, String>,
-) -> Result<()> {
-    for key in [INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY] {
-        if flow_options.contains_key(key) {
-            return InvalidSqlSnafu {
-                err_msg: format!("flow option '{key}' is reserved for internal use"),
-            }
-            .fail();
-        }
-    }
-    Ok(())
-}
-
 /// Validates `EVAL OFFSET` semantics at the operator boundary: an offset is
 /// only legal together with `EVAL INTERVAL` and must lie in
 /// `[0, eval_interval)`. Never modulo-normalized.
@@ -291,6 +269,18 @@ fn determine_flow_type_for_source_state(
     has_instant_ttl_source_table: bool,
     force_batching: bool,
 ) -> Result<Option<FlowType>> {
+    if has_instant_ttl_source_table && force_batching {
+        // The batching scheduler cannot read instant-TTL source tables, so
+        // reject this combination even when another source table is missing.
+        return InvalidSqlSnafu {
+            err_msg: format!(
+                "flow '{}' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode; use a TTL longer than the flush interval",
+                flow_name
+            ),
+        }
+        .fail();
+    }
+
     if has_missing_source_table {
         let defer_on_missing_source = flow_options
             .get(DEFER_ON_MISSING_SOURCE_KEY)
@@ -312,19 +302,6 @@ fn determine_flow_type_for_source_state(
     }
 
     if has_instant_ttl_source_table {
-        if force_batching {
-            // The batching scheduler cannot read instant-TTL source tables, so
-            // a flow with `EVAL INTERVAL` must be rejected instead of silently
-            // falling back to streaming (where the schedule/offset would be
-            // ignored).
-            return InvalidSqlSnafu {
-                err_msg: format!(
-                    "flow '{}' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode; use a TTL longer than the flush interval",
-                    flow_name
-                ),
-            }
-            .fail();
-        }
         return Ok(Some(FlowType::Streaming));
     }
 
@@ -807,30 +784,22 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         // TODO(ruihang): do some verification
-        let expr = expr_helper::to_create_flow_task_expr(stmt.clone(), &query_context)?;
+        let eval_offset_secs = stmt.eval_offset;
+        let expr = expr_helper::to_create_flow_task_expr(stmt, &query_context)?;
 
         // The typed `EVAL OFFSET` comes straight from the parsed SQL AST; it is
-        // the only trusted source of the offset at this boundary. It is
-        // transported to meta via the transient option key, inserted only after
-        // user option validation (see `create_flow_procedure`).
-        self.create_flow_procedure(expr, stmt.eval_offset, query_context)
+        // the only trusted source of the offset at this boundary.
+        self.create_flow_procedure(expr, eval_offset_secs, query_context)
             .await?;
         Ok(Output::new_with_affected_rows(0))
     }
 
     /// Direct gRPC entry point for `CREATE FLOW`.
-    ///
-    /// A `CreateFlowExpr` decoded from a raw gRPC request is never trusted to
-    /// carry the internal transport keys: only the SQL path
-    /// ([`StatementExecutor::create_flow`]) supplies a typed `EVAL OFFSET`.
-    /// Any internal key present here is a spoof attempt and is rejected before
-    /// any trusted extraction could happen.
     pub async fn create_flow_inner(
         &self,
         expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        reject_spoofed_internal_flow_transport_keys(&expr.flow_options)?;
         self.create_flow_procedure(expr, None, query_context)
             .await?;
         Ok(Output::new_with_affected_rows(0))
@@ -873,20 +842,11 @@ impl StatementExecutor {
         expr.flow_options
             .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
 
-        // Trusted insertion AFTER user option validation: this is the only
-        // place the transient offset key may be added, and it is added from the
-        // typed SQL AST value, not from anything the user supplied in options.
-        if let Some(offset_secs) = eval_offset_secs {
-            expr.flow_options.insert(
-                INTERNAL_EVAL_OFFSET_KEY.to_string(),
-                offset_secs.to_string(),
-            );
-        }
-
-        let task = CreateFlowTask::try_from(PbCreateFlowTask {
+        let mut task = CreateFlowTask::try_from(PbCreateFlowTask {
             create_flow: Some(expr),
         })
         .context(error::InvalidExprSnafu)?;
+        task.eval_offset_secs = eval_offset_secs;
         let executor_context = to_executor_context(query_context, TriggerReason::Manual);
         let request = SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task));
 
@@ -3401,11 +3361,11 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
                 .unwrap(),
             Some(FlowType::Batching)
         );
-        assert_eq!(
-            determine_flow_type_for_source_state("my_flow", &flow_options, true, true, true)
-                .unwrap(),
-            Some(FlowType::Batching)
-        );
+        let err = determine_flow_type_for_source_state("my_flow", &flow_options, true, true, true)
+            .unwrap_err();
+        assert!(err.to_string().contains(
+            "flow 'my_flow' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode"
+        ));
     }
 
     #[test]
@@ -3432,27 +3392,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             ),
             "unexpected error: {err}"
         );
-    }
-
-    #[test]
-    fn test_reject_spoofed_internal_flow_transport_keys_at_grpc_boundary() {
-        // A direct gRPC `CreateFlowExpr` (decoded from protobuf) carrying an
-        // internal transport key in flow_options is a spoof attempt. This is
-        // the exact guard `create_flow_inner` applies at the gRPC boundary.
-        for key in [INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY] {
-            let flow_options = HashMap::from([(key.to_string(), "120".to_string())]);
-            let err = reject_spoofed_internal_flow_transport_keys(&flow_options).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains(&format!("flow option '{key}' is reserved for internal use")),
-                "unexpected error for {key}: {err}"
-            );
-        }
-
-        let flow_options =
-            HashMap::from([("defer_on_missing_source".to_string(), "true".to_string())]);
-        assert!(reject_spoofed_internal_flow_transport_keys(&flow_options).is_ok());
-        assert!(reject_spoofed_internal_flow_transport_keys(&HashMap::new()).is_ok());
     }
 
     #[test]
