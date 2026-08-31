@@ -21,7 +21,7 @@ use datafusion::catalog::MemTable;
 use datafusion::datasource::provider_as_source;
 use datafusion_common::TableReference;
 use datafusion_expr::LogicalPlanBuilder;
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaBuilder};
 use store_api::storage::{ConcreteDataType, TableId};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 
@@ -75,11 +75,64 @@ fn stateless_resolves_suffix_by_output_arity() {
         .is_empty()
     );
     assert_eq!(
-        resolve_sink_layout(&[ordinary.clone()], &[ordinary, update_at])
-            .unwrap()
-            .len(),
+        resolve_sink_layout(
+            std::slice::from_ref(&ordinary),
+            &[ordinary.clone(), update_at]
+        )
+        .unwrap()
+        .len(),
         1
     );
+}
+
+#[test]
+fn stateless_explicit_timestamp_compatibility_requires_default_and_lineage_absence() {
+    let source = Arc::new(Schema::new(vec![
+        ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let output = vec![ColumnSchema::new(
+        "value",
+        ConcreteDataType::int32_datatype(),
+        false,
+    )];
+    let sink_ts = ColumnSchema::new(
+        "event_time",
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+    )
+    .with_time_index(true)
+    .with_default_constraint(Some(ColumnDefaultConstraint::Function("now()".into())))
+    .unwrap();
+    assert!(is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(0)],
+        &[output[0].clone(), sink_ts.clone()],
+        &source,
+    ));
+    assert!(!is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(1)],
+        &[output[0].clone(), sink_ts],
+        &source,
+    ));
+    let sink_ts_without_default = ColumnSchema::new(
+        "event_time",
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+    )
+    .with_time_index(true);
+    assert!(!is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(0)],
+        &[output[0].clone(), sink_ts_without_default],
+        &source,
+    ));
 }
 
 #[test]
@@ -151,7 +204,13 @@ fn stateless_allows_only_trailing_auto_columns() {
         sink_output_column_count(&[ordinary.clone(), update_at, placeholder]).unwrap(),
         1
     );
-    assert!(validate_sink_layout(&[ordinary.clone()], &[ordinary.clone()]).is_ok());
+    assert!(
+        validate_sink_layout(
+            std::slice::from_ref(&ordinary),
+            std::slice::from_ref(&ordinary)
+        )
+        .is_ok()
+    );
     assert!(
         validate_sink_layout(
             &[ordinary],
