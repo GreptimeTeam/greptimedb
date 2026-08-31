@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use api::helper::encode_json_value;
 use api::v1::helper::row;
+use api::v1::region::{StrictWindow, compact_request};
 use api::v1::value::ValueData;
 use api::v1::{ArrowIpc, ColumnDataType, Rows, SemanticType, WriteHint};
 use arrow_schema::extension::ExtensionType;
@@ -2731,7 +2732,8 @@ async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format
 async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
     let mut env =
         TestEnv::with_prefix("test_compaction_output_not_laundered_from_legacy_input").await;
-    // Suppress automatic compactions (flush- and edit-triggered) so the
+    // Suppress automatic edit-triggered compactions. The high TWCS trigger below
+    // also prevents flush-triggered compaction from consuming the inputs, so the
     // explicit Compact below is the only compaction in flight (deterministic).
     let engine = env
         .create_engine(MitoConfig {
@@ -2746,7 +2748,7 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         .insert_option("append_mode", "true")
         .insert_option("preserve_row_sequence", "true")
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
         .build();
     let column_schemas = test_util::rows_schema(&request);
 
@@ -2755,7 +2757,7 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         .await
         .unwrap();
 
-    // Two real marked SSTs on disk so the twcs compaction rewrites them.
+    // Two real marked SSTs on disk so the strict-window compaction rewrites them.
     for (start, end) in [(0, 3), (3, 6)] {
         let rows = Rows {
             schema: column_schemas.clone(),
@@ -2812,7 +2814,13 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Compact(RegionCompactRequest::default()),
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
         )
         .await
         .unwrap();
