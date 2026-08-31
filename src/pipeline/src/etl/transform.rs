@@ -751,6 +751,16 @@ type:
             ))
             .unwrap_err();
 
+            assert!(
+                matches!(
+                    &err,
+                    Error::Datatypes {
+                        source: datatypes::error::Error::InvalidJson2Settings { .. },
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
             assert!(err.to_string().contains("must be finite"), "{err}");
         }
     }
