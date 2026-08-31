@@ -34,21 +34,6 @@ pub(crate) const RECONCILE_LOGICAL_TABLES_EVENT_TYPE: &str = "reconcile_logical_
 pub(crate) const RECONCILE_TABLE_EVENT_TYPE: &str = "reconcile_table";
 const PAYLOAD_VERSION: u8 = 1;
 
-#[derive(Debug, Clone, Copy)]
-enum ReconciliationEventType {
-    LogicalTables,
-    Table,
-}
-
-impl ReconciliationEventType {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::LogicalTables => RECONCILE_LOGICAL_TABLES_EVENT_TYPE,
-            Self::Table => RECONCILE_TABLE_EVENT_TYPE,
-        }
-    }
-}
-
 /// Nullable object locators shared by all reconciliation event types.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ReconciliationLocator {
@@ -92,15 +77,149 @@ impl ReconciliationLocator {
             physical_table_id: Some(physical_table_id),
         }
     }
+
+    fn schema() -> Vec<ColumnSchema> {
+        column_schemas([
+            &CATALOG_NAME_COLUMN,
+            &SCHEMA_NAME_COLUMN,
+            &TABLE_NAME_COLUMN,
+            &TABLE_ID_COLUMN,
+            &PHYSICAL_TABLE_ID_COLUMN,
+        ])
+    }
+
+    fn row(&self) -> Row {
+        Row {
+            values: vec![
+                nullable_string(self.catalog_name.as_deref()),
+                nullable_string(self.schema_name.as_deref()),
+                nullable_string(self.table_name.as_deref()),
+                nullable_table_id(self.table_id),
+                nullable_table_id(self.physical_table_id),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-enum ReconciliationPayload {
-    LogicalTablesSubmitted(LogicalTablesSubmittedPayload),
-    LogicalTablesResult(LogicalTablesResultPayload),
-    TableSubmitted(TableSubmittedPayload),
-    TableResult(TableResultPayload),
+enum ReconcileTablePayload {
+    Submitted(TableSubmittedPayload),
+    Result(TableResultPayload),
+}
+
+#[derive(Debug, Serialize)]
+struct TableSubmittedPayload {
+    version: u8,
+    resolve_strategy: &'static str,
+    is_subprocedure: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TableResultPayload {
+    version: u8,
+    complete: bool,
+    metadata_state: Option<&'static str>,
+    resolution_strategy_applied: Option<&'static str>,
+    resolved_column_count: Option<usize>,
+    scanned_region_count: usize,
+    updated_region_count: usize,
+    table_info_updated: bool,
+    last_completed_phase: Option<&'static str>,
+}
+
+/// Event representation for physical table reconciliation.
+#[derive(Debug)]
+pub(crate) struct ReconcileTableEvent {
+    locator: ReconciliationLocator,
+    payload: Option<ReconcileTablePayload>,
+}
+
+impl ReconcileTableEvent {
+    /// Builds the bounded intent event emitted when table reconciliation is submitted.
+    pub(crate) fn table_submitted(
+        locator: ReconciliationLocator,
+        resolve_strategy: ResolveStrategy,
+        is_subprocedure: bool,
+    ) -> Self {
+        Self {
+            locator,
+            payload: Some(ReconcileTablePayload::Submitted(TableSubmittedPayload {
+                version: PAYLOAD_VERSION,
+                resolve_strategy: resolve_strategy_name(resolve_strategy),
+                is_subprocedure,
+            })),
+        }
+    }
+
+    /// Builds a terminal event from the bounded reconciliation result summary.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn table_result(
+        locator: ReconciliationLocator,
+        complete: bool,
+        metadata_state: Option<&'static str>,
+        resolution_strategy_applied: Option<ResolveStrategy>,
+        resolved_column_count: Option<usize>,
+        scanned_region_count: usize,
+        updated_region_count: usize,
+        table_info_updated: bool,
+        last_completed_phase: Option<&'static str>,
+    ) -> Self {
+        Self {
+            locator,
+            payload: Some(ReconcileTablePayload::Result(TableResultPayload {
+                version: PAYLOAD_VERSION,
+                complete,
+                metadata_state,
+                resolution_strategy_applied: resolution_strategy_applied.map(resolve_strategy_name),
+                resolved_column_count,
+                scanned_region_count,
+                updated_region_count,
+                table_info_updated,
+                last_completed_phase,
+            })),
+        }
+    }
+
+    /// Builds a table lifecycle event whose reconciliation payload is null.
+    pub(crate) fn table_lifecycle(locator: ReconciliationLocator) -> Self {
+        Self {
+            locator,
+            payload: None,
+        }
+    }
+}
+
+impl Event for ReconcileTableEvent {
+    fn event_type(&self) -> &str {
+        RECONCILE_TABLE_EVENT_TYPE
+    }
+
+    fn json_payload(&self) -> Result<serde_json::Value> {
+        match &self.payload {
+            Some(payload) => serde_json::to_value(payload).context(SerializeEventSnafu),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    fn extra_schema(&self) -> Vec<ColumnSchema> {
+        ReconciliationLocator::schema()
+    }
+
+    fn extra_rows(&self) -> Result<Vec<Row>> {
+        Ok(vec![self.locator.row()])
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ReconcileLogicalTablesPayload {
+    Submitted(LogicalTablesSubmittedPayload),
+    Result(LogicalTablesResultPayload),
 }
 
 #[derive(Debug, Serialize)]
@@ -126,45 +245,20 @@ struct LogicalTablesResultPayload {
     last_completed_phase: Option<&'static str>,
 }
 
-#[derive(Debug, Serialize)]
-struct TableSubmittedPayload {
-    version: u8,
-    resolve_strategy: &'static str,
-    is_subprocedure: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct TableResultPayload {
-    version: u8,
-    complete: bool,
-    metadata_state: Option<&'static str>,
-    resolution_strategy_applied: Option<&'static str>,
-    resolved_column_count: Option<usize>,
-    scanned_region_count: usize,
-    updated_region_count: usize,
-    table_info_updated: bool,
-    last_completed_phase: Option<&'static str>,
-}
-
-/// Event representation shared by reconciliation procedures.
+/// Event representation for logical table reconciliation.
 #[derive(Debug)]
-pub(crate) struct ReconciliationEvent {
-    event_type: ReconciliationEventType,
+pub(crate) struct ReconcileLogicalTablesEvent {
     locators: Vec<ReconciliationLocator>,
-    payload: Option<ReconciliationPayload>,
+    payload: Option<ReconcileLogicalTablesPayload>,
 }
 
-impl ReconciliationEvent {
+impl ReconcileLogicalTablesEvent {
     /// Builds the bounded intent event emitted when logical table reconciliation is submitted.
-    pub(crate) fn logical_tables_submitted(
-        locators: Vec<ReconciliationLocator>,
-        is_subprocedure: bool,
-    ) -> Self {
+    pub(crate) fn submitted(locators: Vec<ReconciliationLocator>, is_subprocedure: bool) -> Self {
         let logical_table_count = locators.len();
         Self {
-            event_type: ReconciliationEventType::LogicalTables,
             locators,
-            payload: Some(ReconciliationPayload::LogicalTablesSubmitted(
+            payload: Some(ReconcileLogicalTablesPayload::Submitted(
                 LogicalTablesSubmittedPayload {
                     version: PAYLOAD_VERSION,
                     logical_table_count,
@@ -176,7 +270,7 @@ impl ReconciliationEvent {
 
     /// Builds a terminal event from the bounded logical table result summary.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn logical_tables_result(
+    pub(crate) fn result(
         locators: Vec<ReconciliationLocator>,
         complete: bool,
         metadata_consistent_table_count: usize,
@@ -190,9 +284,8 @@ impl ReconciliationEvent {
         last_completed_phase: Option<&'static str>,
     ) -> Self {
         Self {
-            event_type: ReconciliationEventType::LogicalTables,
             locators,
-            payload: Some(ReconciliationPayload::LogicalTablesResult(
+            payload: Some(ReconcileLogicalTablesPayload::Result(
                 LogicalTablesResultPayload {
                     version: PAYLOAD_VERSION,
                     complete,
@@ -213,91 +306,18 @@ impl ReconciliationEvent {
         }
     }
 
-    /// Builds a logical table lifecycle event whose reconciliation payload is null.
-    pub(crate) fn logical_tables_lifecycle(locators: Vec<ReconciliationLocator>) -> Self {
+    /// Builds a lifecycle event whose reconciliation payload is null.
+    pub(crate) fn lifecycle(locators: Vec<ReconciliationLocator>) -> Self {
         Self {
-            event_type: ReconciliationEventType::LogicalTables,
             locators,
             payload: None,
         }
     }
-
-    /// Builds the bounded intent event emitted when table reconciliation is submitted.
-    pub(crate) fn table_submitted(
-        locator: ReconciliationLocator,
-        resolve_strategy: ResolveStrategy,
-        is_subprocedure: bool,
-    ) -> Self {
-        Self {
-            event_type: ReconciliationEventType::Table,
-            locators: vec![locator],
-            payload: Some(ReconciliationPayload::TableSubmitted(
-                TableSubmittedPayload {
-                    version: PAYLOAD_VERSION,
-                    resolve_strategy: resolve_strategy_name(resolve_strategy),
-                    is_subprocedure,
-                },
-            )),
-        }
-    }
-
-    /// Builds a terminal event from the bounded reconciliation result summary.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn table_result(
-        locator: ReconciliationLocator,
-        complete: bool,
-        metadata_state: Option<&'static str>,
-        resolution_strategy_applied: Option<ResolveStrategy>,
-        resolved_column_count: Option<usize>,
-        scanned_region_count: usize,
-        updated_region_count: usize,
-        table_info_updated: bool,
-        last_completed_phase: Option<&'static str>,
-    ) -> Self {
-        Self {
-            event_type: ReconciliationEventType::Table,
-            locators: vec![locator],
-            payload: Some(ReconciliationPayload::TableResult(TableResultPayload {
-                version: PAYLOAD_VERSION,
-                complete,
-                metadata_state,
-                resolution_strategy_applied: resolution_strategy_applied.map(resolve_strategy_name),
-                resolved_column_count,
-                scanned_region_count,
-                updated_region_count,
-                table_info_updated,
-                last_completed_phase,
-            })),
-        }
-    }
-
-    /// Builds a table lifecycle event whose reconciliation payload is null.
-    pub(crate) fn table_lifecycle(locator: ReconciliationLocator) -> Self {
-        Self::lifecycle(ReconciliationEventType::Table, locator)
-    }
-
-    fn lifecycle(event_type: ReconciliationEventType, locator: ReconciliationLocator) -> Self {
-        Self {
-            event_type,
-            locators: vec![locator],
-            payload: None,
-        }
-    }
-
-    fn schema() -> Vec<ColumnSchema> {
-        column_schemas([
-            &CATALOG_NAME_COLUMN,
-            &SCHEMA_NAME_COLUMN,
-            &TABLE_NAME_COLUMN,
-            &TABLE_ID_COLUMN,
-            &PHYSICAL_TABLE_ID_COLUMN,
-        ])
-    }
 }
 
-impl Event for ReconciliationEvent {
+impl Event for ReconcileLogicalTablesEvent {
     fn event_type(&self) -> &str {
-        self.event_type.as_str()
+        RECONCILE_LOGICAL_TABLES_EVENT_TYPE
     }
 
     fn json_payload(&self) -> Result<serde_json::Value> {
@@ -308,22 +328,14 @@ impl Event for ReconciliationEvent {
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
-        Self::schema()
+        ReconciliationLocator::schema()
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
         Ok(self
             .locators
             .iter()
-            .map(|locator| Row {
-                values: vec![
-                    nullable_string(locator.catalog_name.as_deref()),
-                    nullable_string(locator.schema_name.as_deref()),
-                    nullable_string(locator.table_name.as_deref()),
-                    nullable_table_id(locator.table_id),
-                    nullable_table_id(locator.physical_table_id),
-                ],
-            })
+            .map(ReconciliationLocator::row)
             .collect())
     }
 
@@ -355,7 +367,7 @@ mod tests {
 
     #[test]
     fn reconciliation_events_use_the_shared_locator_contract() {
-        let table = ReconciliationEvent::table_lifecycle(ReconciliationLocator::physical_table(
+        let table = ReconcileTableEvent::table_lifecycle(ReconciliationLocator::physical_table(
             "greptime", "public", "metrics", 42,
         ));
         assert_eq!(table.event_type(), RECONCILE_TABLE_EVENT_TYPE);
@@ -375,22 +387,22 @@ mod tests {
                 (
                     "catalog_name".to_string(),
                     ColumnDataType::String,
-                    SemanticType::Field,
+                    SemanticType::Field
                 ),
                 (
                     "schema_name".to_string(),
                     ColumnDataType::String,
-                    SemanticType::Field,
+                    SemanticType::Field
                 ),
                 (
                     "table_name".to_string(),
                     ColumnDataType::String,
-                    SemanticType::Field,
+                    SemanticType::Field
                 ),
                 (
                     "table_id".to_string(),
                     ColumnDataType::Uint32,
-                    SemanticType::Field,
+                    SemanticType::Field
                 ),
                 (
                     "physical_table_id".to_string(),
@@ -413,7 +425,7 @@ mod tests {
         );
         assert_eq!(table.json_payload().unwrap(), serde_json::Value::Null);
 
-        let logical_tables = ReconciliationEvent::logical_tables_lifecycle(vec![
+        let logical_tables = ReconcileLogicalTablesEvent::lifecycle(vec![
             ReconciliationLocator::logical_table("greptime", "public", "cpu", 43, 42),
             ReconciliationLocator::logical_table("greptime", "public", "memory", 44, 42),
         ]);
@@ -458,7 +470,7 @@ mod tests {
             (ResolveStrategy::UseMetasrv, "use_metasrv"),
             (ResolveStrategy::AbortOnConflict, "abort_on_conflict"),
         ] {
-            let table = ReconciliationEvent::table_submitted(
+            let table = ReconcileTableEvent::table_submitted(
                 ReconciliationLocator::physical_table("greptime", "public", "metrics", 42),
                 strategy,
                 true,
@@ -472,7 +484,8 @@ mod tests {
                 })
             );
         }
-        let logical_tables = ReconciliationEvent::logical_tables_submitted(
+
+        let logical_tables = ReconcileLogicalTablesEvent::submitted(
             vec![
                 ReconciliationLocator::logical_table("greptime", "public", "cpu", 43, 42),
                 ReconciliationLocator::logical_table("greptime", "public", "memory", 44, 42),
@@ -491,7 +504,7 @@ mod tests {
 
     #[test]
     fn terminal_payloads_distinguish_complete_and_partial_results() {
-        let table = ReconciliationEvent::table_result(
+        let table = ReconcileTableEvent::table_result(
             ReconciliationLocator::physical_table("greptime", "public", "metrics", 42),
             false,
             Some("inconsistent"),
@@ -517,7 +530,7 @@ mod tests {
             })
         );
 
-        let logical_tables = ReconciliationEvent::logical_tables_result(
+        let logical_tables = ReconcileLogicalTablesEvent::result(
             vec![ReconciliationLocator::logical_table(
                 "greptime", "public", "cpu", 43, 42,
             )],

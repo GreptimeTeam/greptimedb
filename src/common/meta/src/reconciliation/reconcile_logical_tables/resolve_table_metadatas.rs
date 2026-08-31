@@ -51,6 +51,7 @@ impl State for ResolveTableMetadatas {
         let table_ids = &ctx.persistent_ctx.logical_table_ids;
 
         ctx.volatile_ctx.result_summary.begin_resolution();
+        ctx.volatile_ctx.missing_regions_by_table.clear();
 
         let mut create_tables = vec![];
         let mut update_table_infos = vec![];
@@ -79,7 +80,7 @@ impl State for ResolveTableMetadatas {
                     .with_label_values(&[metrics::TABLE_TYPE_LOGICAL])
                     .start_timer();
                 region_metadata_lister
-                    .list(*table_id, region_routes)
+                    .list_with_ids(*table_id, region_routes)
                     .await?
             };
             ctx.volatile_ctx
@@ -103,11 +104,20 @@ impl State for ResolveTableMetadatas {
                 }
             });
 
-            if region_metadatas.iter().any(|r| r.is_none()) {
+            let missing_regions = region_metadatas
+                .iter()
+                .filter_map(|(region_id, metadata)| {
+                    metadata.is_none().then_some(region_id.region_number())
+                })
+                .collect::<Vec<_>>();
+            if !missing_regions.is_empty() {
                 create_tables_count += 1;
                 ctx.volatile_ctx
                     .result_summary
                     .record_missing_region_table();
+                ctx.volatile_ctx
+                    .missing_regions_by_table
+                    .insert(*table_id, missing_regions);
                 create_tables.push((*table_id, table_info_value.table_info.clone()));
                 continue;
             }
@@ -115,7 +125,7 @@ impl State for ResolveTableMetadatas {
             // Safety: The physical table route is set in `ReconciliationStart` state.
             let region_metadatas = region_metadatas
                 .into_iter()
-                .map(|r| r.unwrap())
+                .map(|(_, metadata)| metadata.unwrap())
                 .collect::<Vec<_>>();
             if let Some(column_metadatas) = check_column_metadatas_consistent(&region_metadatas) {
                 metadata_consistent_count += 1;

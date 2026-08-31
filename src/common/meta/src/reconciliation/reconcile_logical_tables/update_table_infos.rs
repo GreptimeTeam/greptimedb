@@ -26,7 +26,7 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context as CacheContext;
 use crate::ddl::utils::table_info::{
-    batch_update_table_info_values, get_all_table_info_values_by_table_ids,
+    batch_update_table_info_values_with_progress, get_all_table_info_values_by_table_ids,
 };
 use crate::error::Result;
 use crate::instruction::CacheIdent;
@@ -99,11 +99,14 @@ impl State for UpdateTableInfos {
         }
         let table_id = ctx.table_id();
         let updated_table_info_num = table_info_values_to_update.len();
-        batch_update_table_info_values(&ctx.table_metadata_manager, table_info_values_to_update)
-            .await?;
-        ctx.volatile_ctx
-            .result_summary
-            .record_updated_table_infos(updated_table_info_num);
+        let table_metadata_manager = ctx.table_metadata_manager.clone();
+        let result_summary = &mut ctx.volatile_ctx.result_summary;
+        batch_update_table_info_values_with_progress(
+            &table_metadata_manager,
+            table_info_values_to_update,
+            |updated_count| result_summary.record_updated_table_infos(updated_count),
+        )
+        .await?;
 
         info!(
             "Updated table infos for logical tables: {:?}, physical table: {}, table_id: {}",
