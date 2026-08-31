@@ -483,6 +483,31 @@ impl Timestamp {
         ParseTimestampSnafu { raw: s }.fail()
     }
 
+    /// Interprets a timezone-less [`NaiveDateTime`] in the given timezone and
+    /// returns the corresponding timestamp.
+    ///
+    /// Datetimes that fall into a DST gap (a local time that does not exist)
+    /// are rejected, while ambiguous datetimes (from a repeated local time)
+    /// are resolved to the earlier instant. This policy is shared with
+    /// [`Timestamp::from_str`] so that the text and binary protocols interpret
+    /// datetimes consistently.
+    pub fn from_naive_datetime(
+        datetime: NaiveDateTime,
+        timezone: &Timezone,
+    ) -> crate::error::Result<Timestamp> {
+        match datetime_to_utc(&datetime, timezone) {
+            LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
+                Timestamp::from_chrono_datetime(utc).context(ParseTimestampSnafu {
+                    raw: format!("{datetime} (timezone {timezone})"),
+                })
+            }
+            LocalResult::None => ParseTimestampSnafu {
+                raw: format!("{datetime} (timezone {timezone})"),
+            }
+            .fail(),
+        }
+    }
+
     pub fn negative(mut self) -> Self {
         self.value = -self.value;
         self
@@ -531,12 +556,8 @@ fn naive_datetime_to_timestamp(
             .context(ParseTimestampSnafu { raw: s });
     };
 
-    match datetime_to_utc(&datetime, timezone) {
-        LocalResult::None => ParseTimestampSnafu { raw: s }.fail(),
-        LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
-            Timestamp::from_chrono_datetime(utc).context(ParseTimestampSnafu { raw: s })
-        }
-    }
+    Timestamp::from_naive_datetime(datetime, timezone)
+        .map_err(|_| ParseTimestampSnafu { raw: s }.build())
 }
 
 impl From<i64> for Timestamp {
@@ -920,6 +941,48 @@ mod tests {
         check_from_str(
             "2020-09-08T13:42:29.0042+08:00",
             "2020-09-08 05:42:29.004200",
+        );
+    }
+
+    #[test]
+    fn test_from_naive_datetime() {
+        let datetime = NaiveDate::from_ymd_opt(2026, 8, 13)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap();
+
+        // A fixed-offset timezone shifts the datetime by a constant amount.
+        let shanghai = Timezone::from_tz_string("Asia/Shanghai").unwrap();
+        assert_eq!(
+            "2026-08-13 00:00:00",
+            Timestamp::from_naive_datetime(datetime, &shanghai)
+                .unwrap()
+                .to_chrono_datetime()
+                .unwrap()
+                .to_string()
+        );
+
+        // 2026-03-08 02:30 does not exist in America/New_York (DST gap).
+        let new_york = Timezone::from_tz_string("America/New_York").unwrap();
+        let gap = NaiveDate::from_ymd_opt(2026, 3, 8)
+            .unwrap()
+            .and_hms_opt(2, 30, 0)
+            .unwrap();
+        assert!(Timestamp::from_naive_datetime(gap, &new_york).is_err());
+
+        // 2026-11-01 01:30 is ambiguous in America/New_York; picks the first
+        // instant (EDT, UTC-4).
+        let ambiguous = NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+        assert_eq!(
+            "2026-11-01 05:30:00",
+            Timestamp::from_naive_datetime(ambiguous, &new_york)
+                .unwrap()
+                .to_chrono_datetime()
+                .unwrap()
+                .to_string()
         );
     }
 

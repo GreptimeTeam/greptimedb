@@ -118,8 +118,9 @@ pub async fn metrics(
         promote_scope_attrs: http_opts.promote_scope_attrs,
         with_metric_engine,
         experimental_enable_exponential_histogram,
-        // set is_legacy later
+        // set by the frontend from its config
         is_legacy: false,
+        resource_info: false,
         metric_type: MetricType::Init,
         metric_translation_strategy: http_opts.metric_translation_strategy,
     }));
@@ -128,7 +129,7 @@ pub async fn metrics(
     handler.metrics(request, query_ctx).await.map(|outcome| {
         if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
             OtlpMetricsResponse::Failure(outcome)
-        } else if outcome.rejected_data_points > 0 {
+        } else if outcome.rejected_data_points > 0 || outcome.error_message.is_some() {
             OtlpMetricsResponse::PartialSuccess(outcome)
         } else {
             OtlpMetricsResponse::FullSuccess(outcome)

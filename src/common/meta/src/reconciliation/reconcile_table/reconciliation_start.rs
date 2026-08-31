@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -46,7 +44,6 @@ impl State for ReconciliationStart {
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let table_id = ctx.table_id();
-        let table_name = ctx.table_name();
 
         let (physical_table_id, physical_table_route) = ctx
             .table_metadata_manager
@@ -58,14 +55,17 @@ impl State for ReconciliationStart {
             error::UnexpectedSnafu {
                 err_msg: format!(
                     "Reconcile table only works for physical table, but got logical table: {}, table_id: {}",
-                    table_name, table_id
+                    ctx.table_name(),
+                    table_id
                 ),
             }
         );
 
         info!(
             "Reconciling table: {}, table_id: {}, procedure_id: {}",
-            table_name, table_id, procedure_ctx.procedure_id
+            ctx.table_name(),
+            table_id,
+            procedure_ctx.procedure_id
         );
         // TODO(weny): Repairs the table route if needed.
         let region_metadata_lister = RegionMetadataLister::new(ctx.node_manager.clone());
@@ -79,6 +79,9 @@ impl State for ReconciliationStart {
                 .list(physical_table_id, &physical_table_route.region_routes)
                 .await?
         };
+        ctx.volatile_ctx
+            .result_summary
+            .record_scanned_regions(region_metadatas.len());
 
         ensure!(!region_metadatas.is_empty(), {
             metrics::METRIC_META_RECONCILIATION_STATS
@@ -92,7 +95,8 @@ impl State for ReconciliationStart {
             error::UnexpectedSnafu {
                 err_msg: format!(
                     "No region metadata found for table: {}, table_id: {}",
-                    table_name, table_id
+                    ctx.table_name(),
+                    table_id
                 ),
             }
         });
@@ -109,10 +113,13 @@ impl State for ReconciliationStart {
             error::UnexpectedSnafu {
                 err_msg: format!(
                     "Some regions are not opened, table: {}, table_id: {}",
-                    table_name, table_id
+                    ctx.table_name(),
+                    table_id
                 ),
             }
         });
+
+        ctx.volatile_ctx.result_summary.mark_start_completed();
 
         // Persist the physical table route.
         // TODO(weny): refetch the physical table route if repair is needed.
@@ -126,9 +133,5 @@ impl State for ReconciliationStart {
             // We don't persist the state of this step.
             Status::executing(false),
         ))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

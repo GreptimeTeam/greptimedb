@@ -413,12 +413,12 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
                 db.database
-                    .query_with_terminal_metrics_and_flow_extensions(
-                        request,
-                        &hints,
-                        extensions,
-                        snapshot_seqs,
-                    )
+                    .flight_request()
+                    .with_hints(&hints)
+                    .with_flow_extensions(extensions)
+                    .with_snapshot_seqs(snapshot_seqs)
+                    .with_timeout(batch_opts.experimental_flight_do_get_timeout)
+                    .query_with_terminal_metrics(request)
                     .await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)
@@ -623,6 +623,7 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
+    use api::v1::query_request::Query;
     use arrow_flight::flight_service_server::FlightServiceServer;
     use arrow_flight::{FlightData, Ticket};
     use common_query::{Output, OutputData};

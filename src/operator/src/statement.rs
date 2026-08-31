@@ -84,7 +84,7 @@ use table::table_reference::TableReference;
 pub use self::admin::{
     AdminEventRecorderHandle, AdminFunctionLayer, AdminFunctionLayerRef,
     AdminFunctionRecordingLayer, AdminFunctionRequest, AdminFunctionResponse, AdminFunctionService,
-    AdminFunctionServiceRef,
+    AdminFunctionServiceRef, admin_output_schema,
 };
 use self::set::{
     set_bytea_output, set_datestyle, set_intervalstyle, set_timezone, validate_client_encoding,

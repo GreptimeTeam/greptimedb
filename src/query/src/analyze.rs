@@ -46,6 +46,17 @@ const STAGE: &str = "stage";
 const NODE: &str = "node";
 const PLAN: &str = "plan";
 
+/// Fixed output schema of [`DistAnalyzeExec`], for `Describe` handlers:
+/// execution rewrites the plan in `optimize_physical_plan`, so this schema
+/// differs from the logical `Analyze` plan's.
+pub fn dist_analyze_output_schema() -> SchemaRef {
+    SchemaRef::new(Schema::new(vec![
+        Field::new(STAGE, DataType::UInt32, true),
+        Field::new(NODE, DataType::UInt32, true),
+        Field::new(PLAN, DataType::Utf8, true),
+    ]))
+}
+
 #[derive(Debug)]
 pub struct DistAnalyzeExec {
     input: Arc<dyn ExecutionPlan>,
@@ -58,11 +69,7 @@ pub struct DistAnalyzeExec {
 impl DistAnalyzeExec {
     /// Create a new DistAnalyzeExec
     pub fn new(input: Arc<dyn ExecutionPlan>, verbose: bool, format: AnalyzeFormat) -> Self {
-        let schema = SchemaRef::new(Schema::new(vec![
-            Field::new(STAGE, DataType::UInt32, true),
-            Field::new(NODE, DataType::UInt32, true),
-            Field::new(PLAN, DataType::Utf8, true),
-        ]));
+        let schema = dist_analyze_output_schema();
         let properties = Arc::new(Self::compute_properties(&input, schema.clone()));
         Self {
             input,
