@@ -42,6 +42,36 @@ TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
 | 1970-01-01T00:03:00 | 0.25                                                | delta      | delta                    |
 +---------------------+-----------------------------------------------------+------------+--------------------------+
 
+-- The physical plan selects raw-delta math per series while retaining cumulative rate.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (?m)^\|\s1_\|\s0_\|_(?:Projection|Filter)Exec:.*\n
+-- SQLNESS REPLACE (?m)^\|_\|_\|_FilterExec:.*\n
+-- SQLNESS REPLACE END\sas\s.*,\sseries@2\sas\sseries END as RATE_RESULT, series@2 as series
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+|_|_|_ProjectionExec: expr=[ts@0 as ts, CASE WHEN __greptime_temporality__@3 = delta THEN prom_sum_over_time(ts_range@4, greptime_value@1) / 180 ELSE prom_rate(ts_range@4, greptime_value@1, ts@0, 180000) END as RATE_RESULT, series@2 as series, __greptime_temporality__@3 as __greptime_temporality__] REDACTED
+|_|_|_PromRangeManipulateExec: req range=[180000..180000], interval=[60000], eval range=[180000], time index=[ts] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["series", "__greptime_temporality__"] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
 -- Nullable tags follow Prometheus absent-label matcher semantics.
 TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__=""};
 

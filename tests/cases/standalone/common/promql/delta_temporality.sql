@@ -22,6 +22,20 @@ TQL EVAL (180, 180, '1m') increase(delta_temporality[3m]);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
 
+-- The physical plan selects raw-delta math per series while retaining cumulative rate.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (?m)^\|\s1_\|\s0_\|_(?:Projection|Filter)Exec:.*\n
+-- SQLNESS REPLACE (?m)^\|_\|_\|_FilterExec:.*\n
+-- SQLNESS REPLACE END\sas\s.*,\sseries@2\sas\sseries END as RATE_RESULT, series@2 as series
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
+
 -- Nullable tags follow Prometheus absent-label matcher semantics.
 TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__=""};
 TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__!="delta"};
