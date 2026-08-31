@@ -399,6 +399,10 @@ impl SimpleFilterEvaluator {
             // semantics: null results are filtered out).
             return Some(TimestampUnitCast::Pruned);
         };
+        // Fast path: the literal is already in the target unit.
+        if unit == target_unit {
+            return Some(TimestampUnitCast::Filter(self.clone()));
+        }
         let cast = div_mod_units(value, unit.into(), target_unit.into())?;
         let divisible = cast.remainder == 0;
         let literal = timestamp_scalar(cast.quotient, target_unit)?;
@@ -1162,6 +1166,25 @@ mod test {
             cast_to_ms(&col("ts").eq(lit(ScalarValue::TimestampMicrosecond(None, None)))),
             Some(TimestampUnitCast::Pruned)
         ));
+    }
+
+    #[test]
+    fn cast_timestamp_unit_same_unit_returns_filter_directly() {
+        // A literal already in the target unit is returned unchanged.
+        let expr = col("ts").eq(lit(ts_us(7_000_000)));
+        let filter = SimpleFilterEvaluator::try_new(&expr).unwrap();
+        let cast = filter
+            .cast_timestamp_unit(&ConcreteDataType::timestamp_microsecond_datatype())
+            .unwrap();
+        let TimestampUnitCast::Filter(f) = cast else {
+            panic!("expected Filter, got {cast:?}")
+        };
+        assert_eq!(filter.op, f.op);
+        assert_eq!(filter.column_name(), f.column_name());
+        assert_eq!(
+            ts_us(7_000_000),
+            ScalarValue::try_from_array(f.literal.get().0, 0).unwrap()
+        );
     }
 
     #[test]

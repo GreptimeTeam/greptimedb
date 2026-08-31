@@ -57,13 +57,16 @@ use common_meta::rpc::ddl::{
     CreateFlowTask, CreatorGrantIntent, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse, TriggerReason,
 };
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
+use common_time::timestamp::{TimeUnit, div_mod_units};
 use common_time::{Timestamp, Timezone};
+use datafusion::datasource::provider_as_source;
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
+use datafusion_expr::logical_plan::LogicalPlanBuilder;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
@@ -101,6 +104,7 @@ use table::requests::{
     AlterKind, AlterTableRequest, AnnotationContext, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT,
     TableOptions, validate_and_normalize_annotation_options,
 };
+use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -1855,6 +1859,10 @@ impl StatementExecutor {
         if !need_alter {
             return Ok(Output::new_with_affected_rows(0));
         }
+        // Reject before any region alter is submitted: a region that fits
+        // must not commit the new schema while another region rejects it.
+        self.check_time_index_widening_overflow(&table, &expr, &query_context)
+            .await?;
         info!(
             "Table info before alter is {:?}, expr: {:?}",
             table.table_info(),
@@ -1933,6 +1941,115 @@ impl StatementExecutor {
             .context(error::InvalidateTableCacheSnafu)?;
 
         Ok(Output::new_with_affected_rows(0))
+    }
+
+    /// Builds a tz-naive timestamp literal in the given unit.
+    fn ts_scalar(value: i64, unit: TimeUnit) -> datafusion_common::ScalarValue {
+        use datafusion_common::ScalarValue;
+        match unit {
+            TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), None),
+            TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), None),
+            TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), None),
+            TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), None),
+        }
+    }
+
+    /// Preflights a time index unit widening: rejects the alter if any existing
+    /// timestamp would overflow the target unit's `i64` range (arrow casts such
+    /// values to NULL, which a NOT NULL time index cannot hold).
+    ///
+    /// Runs an existence scan across all regions *before* any region alter is
+    /// submitted, so no region can commit the new schema while another rejects
+    /// it. The per-region check in mito2 remains as the final guard for data
+    /// written after this scan.
+    async fn check_time_index_widening_overflow(
+        &self,
+        table: &TableRef,
+        expr: &AlterTableExpr,
+        query_context: &QueryContextRef,
+    ) -> Result<()> {
+        let Some(Kind::ModifyColumnTypes(kind)) = expr.kind.as_ref() else {
+            return Ok(());
+        };
+        if kind.modify_column_types.len() != 1 {
+            return Ok(());
+        }
+        let modify = &kind.modify_column_types[0];
+
+        let info = table.table_info();
+        let schema = &info.meta.schema;
+        let Some(ts_index) = schema.timestamp_index() else {
+            return Ok(());
+        };
+        let ts_column = &schema.column_schemas()[ts_index];
+        if modify.column_name != ts_column.name {
+            return Ok(());
+        }
+
+        let current = ts_column.data_type.clone();
+        let target: ConcreteDataType =
+            ColumnDataTypeWrapper::new(modify.target_type(), modify.target_type_extension.clone())
+                .into();
+        // Other paths reject non-widening changes; only a widening can overflow.
+        if !current.is_timestamp_unit_widening_to(&target) {
+            return Ok(());
+        }
+        // Safety: both types are timestamps.
+        let current_unit = current.as_timestamp().unwrap().unit();
+        let target_unit = target.as_timestamp().unwrap().unit();
+
+        // Bounds of current-unit values that still fit the target unit's range.
+        // `div_mod_units` floors, so the max bound is exact; the min bound must
+        // round up when not exactly representable.
+        let max_cur = div_mod_units(i64::MAX, target_unit, current_unit)
+            .map(|q| q.quotient)
+            .unwrap_or(i64::MAX);
+        let min_cur = div_mod_units(i64::MIN, target_unit, current_unit)
+            .map(|q| q.quotient + (q.remainder != 0) as i64)
+            .unwrap_or(i64::MIN);
+
+        let filter = datafusion_expr::col(&ts_column.name)
+            .gt(datafusion_expr::lit(Self::ts_scalar(max_cur, current_unit)))
+            .or(datafusion_expr::col(&ts_column.name)
+                .lt(datafusion_expr::lit(Self::ts_scalar(min_cur, current_unit))));
+
+        // An existence scan across all regions (file and row-group pruning makes
+        // it cheap when nothing overflows).
+        let provider = std::sync::Arc::new(DfTableProviderAdapter::new(table.clone()));
+        let plan = LogicalPlanBuilder::scan(
+            expr.table_name.as_str(),
+            provider_as_source(provider),
+            Some(vec![ts_index]),
+        )
+        .and_then(|builder| builder.filter(filter))
+        .and_then(|builder| builder.limit(0, Some(1)))
+        .and_then(LogicalPlanBuilder::build)
+        .map_err(|e| {
+            error::UnexpectedSnafu {
+                violated: format!("Failed to build time index overflow preflight plan: {e}"),
+            }
+            .build()
+        })?;
+        let output = self.exec_plan(plan, query_context.clone()).await?;
+
+        let has_overflow = match output.data {
+            OutputData::Stream(mut stream) => futures::StreamExt::next(&mut stream)
+                .await
+                .is_some_and(|batch| batch.map(|batch| batch.num_rows() > 0).unwrap_or(true)),
+            _ => false,
+        };
+        ensure!(
+            !has_overflow,
+            error::TimeIndexWideningOverflowSnafu {
+                table: format_full_table_name(
+                    &expr.catalog_name,
+                    &expr.schema_name,
+                    &expr.table_name
+                ),
+                column: ts_column.name.clone(),
+            }
+        );
+        Ok(())
     }
 
     #[cfg(feature = "enterprise")]

@@ -120,3 +120,19 @@ INSERT INTO ts_widen_part VALUES ("b", 2, "2024-01-02 00:00:00.000250");
 SELECT * FROM ts_widen_part ORDER BY ts;
 
 DROP TABLE ts_widen_part;
+
+CREATE TABLE ts_overflow (host STRING, ts TIMESTAMP TIME INDEX);
+-- 3000-01-01 fits milliseconds but overflows nanoseconds (max ~2262-04-11).
+INSERT INTO ts_overflow VALUES ("a", "3000-01-01 00:00:00");
+
+-- widening to nanoseconds is rejected before any region is altered
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
+
+DESCRIBE ts_overflow;
+
+-- widening to microseconds still works
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_US;
+
+DESCRIBE ts_overflow;
+
+DROP TABLE ts_overflow;

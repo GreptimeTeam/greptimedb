@@ -418,6 +418,23 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
+    #[snafu(display(
+        "Cannot widen the time index unit of column '{}' in table '{}': \
+         existing timestamps overflow the target unit's i64 range",
+        column,
+        table
+    ))]
+    TimeIndexWideningOverflow { table: String, column: String },
+
+    #[snafu(display("Failed to scan table {} for preflight check", table))]
+    PreflightScan {
+        #[snafu(implicit)]
+        location: Location,
+        table: String,
+        #[snafu(source)]
+        error: table::error::Error,
+    },
+
     #[snafu(display("Failed to build table meta for table: {}", table_name))]
     BuildTableMeta {
         table_name: String,
@@ -983,7 +1000,9 @@ impl ErrorExt for Error {
             | Error::PartitionExprToPb { .. }
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
-            | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
+            | Error::CreatePartitionRules { .. }
+            | Error::PreflightScan { .. }
+            | Error::TimeIndexWideningOverflow { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
             }
