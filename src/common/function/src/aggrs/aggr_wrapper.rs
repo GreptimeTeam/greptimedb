@@ -838,23 +838,6 @@ impl AggregateUDFImpl for DeltaMergeWrapper {
         &self.signature
     }
 
-    fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
-        if arg_types.len() != self.inner_types.len() + 1
-            || arg_types[..self.inner_types.len()]
-                .iter()
-                .zip(&self.inner_types)
-                .any(|(actual, expected)| actual != expected)
-            || arg_types[self.inner_types.len()] != self.state_type
-        {
-            return Err(datafusion_common::DataFusionError::Plan(
-                "delta merge arguments do not match its exact signature".to_string(),
-            ));
-        }
-        let mut expected = self.inner_types.clone();
-        expected.push(self.state_type.clone());
-        Ok(expected)
-    }
-
     fn state_fields(
         &self,
         args: datafusion_expr::function::StateFieldsArgs,
