@@ -1480,6 +1480,72 @@ mod tests {
         assert_eq!(Some(&7), heap.best_child());
     }
 
+    /// Drives RootHeap and a std BinaryHeap oracle with the same seeded op
+    /// sequence (push / pop / mutate-root + repair) and compares observable
+    /// behavior after every op.
+    fn assert_root_heap_matches_oracle(seed: u64, value_range: u32, num_ops: usize) {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut heap = RootHeap::<u32>::with_capacity(0);
+        let mut oracle = BinaryHeap::<u32>::new();
+        let mut next_value = 0_u32;
+
+        for _ in 0..num_ops {
+            match rng.random_range(0..3) {
+                0 => {
+                    let pushed_value = next_value % value_range;
+                    next_value += 1;
+                    heap.push(pushed_value);
+                    oracle.push(pushed_value);
+                }
+                1 => {
+                    assert_eq!(oracle.pop(), heap.pop());
+                }
+                _ => {
+                    let new_value = rng.random_range(0..value_range);
+                    if let Some(root) = heap.root_mut() {
+                        *root = new_value;
+                        heap.repair_root();
+
+                        oracle.pop();
+                        oracle.push(new_value);
+                    }
+                }
+            }
+
+            assert_eq!(oracle.peek(), heap.peek());
+            assert_eq!(oracle.len(), heap.len());
+            if let Some(best_child) = heap.best_child() {
+                let mut rest = oracle.clone();
+                rest.pop();
+                assert_eq!(rest.peek(), Some(best_child));
+            }
+        }
+
+        // Both heaps must drain in the same non-increasing order.
+        let mut oracle_values = Vec::with_capacity(oracle.len());
+        while let Some(value) = oracle.pop() {
+            oracle_values.push(value);
+        }
+        assert_eq!(oracle_values, drain_root_heap(heap));
+    }
+
+    #[test]
+    fn test_root_heap_matches_binary_heap_oracle() {
+        for seed in [0x5eed, 0xdead_beef, 42] {
+            assert_root_heap_matches_oracle(seed, 1000, 2000);
+        }
+    }
+
+    #[test]
+    fn test_root_heap_matches_oracle_with_duplicate_heavy_values() {
+        // A tiny value range makes duplicates dominate, which exercises the
+        // equal-key branches of sift_up/sift_down and best_child.
+        assert_root_heap_matches_oracle(0xc0ffee, 3, 2000);
+    }
+
     /// Creates a test RecordBatch with the specified data.
     fn create_test_record_batch(
         primary_keys: &[&[u8]],
