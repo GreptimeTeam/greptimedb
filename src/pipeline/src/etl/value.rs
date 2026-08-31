@@ -102,6 +102,7 @@ pub fn parse_str_type(t: &str) -> Result<ColumnDataType> {
         // We only consider object and array to be json types. and use Map to represent json
         // TODO(qtang): Needs to be defined with better semantics
         "json" => Ok(ColumnDataType::Binary),
+        "json2" => Ok(ColumnDataType::Json),
 
         _ => ValueParseTypeSnafu { t }.fail(),
     }
