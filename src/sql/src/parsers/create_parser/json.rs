@@ -21,6 +21,7 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
 
 use crate::ast::Ident;
+use crate::dialect::GreptimeDbDialect;
 use crate::error::{InvalidSqlSnafu, Result, SyntaxSnafu};
 use crate::parsers::create_parser::{INVERTED, SKIPPING};
 use crate::statements::create::{Json2Options, JsonTypeHint};
@@ -28,6 +29,25 @@ use crate::statements::transform::type_alias::get_type_by_alias;
 
 const JSON2_TYPE_NAME: &str = "JSON2";
 const MAX_AUTO_EXPANDED_PATHS: &str = "max_auto_expanded_paths";
+
+/// Parses a JSON2 type hint path with the same grammar used by `CREATE TABLE`.
+pub fn parse_json2_type_hint_path(path: &str) -> Result<Vec<String>> {
+    let dialect = GreptimeDbDialect {};
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql(path)
+        .context(SyntaxSnafu)?;
+    let path = parse_json2_path(&mut parser)?;
+    ensure!(
+        parser.peek_token().token == Token::EOF,
+        InvalidSqlSnafu {
+            msg: format!(
+                "unexpected token '{}' in JSON2 type hint path",
+                parser.peek_token()
+            )
+        }
+    );
+    Ok(path)
+}
 
 pub(super) fn parse_json2_type_and_options(
     parser: &mut Parser<'_>,
@@ -322,6 +342,7 @@ fn ensure_no_path_conflict(hints: &[JsonTypeHint], path: &[String]) -> Result<()
 mod tests {
     use sqlparser::ast::{DataType, ExactNumberInfo};
 
+    use super::parse_json2_type_hint_path;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::create::Column;
@@ -337,6 +358,15 @@ mod tests {
         };
 
         create_table.columns.remove(0)
+    }
+
+    #[test]
+    fn test_parse_json2_type_hint_path() {
+        assert_eq!(
+            parse_json2_type_hint_path(r#"attrs."http.status_code""#).unwrap(),
+            vec!["attrs", "http.status_code"]
+        );
+        assert!(parse_json2_type_hint_path("user.id trailing").is_err());
     }
 
     #[test]

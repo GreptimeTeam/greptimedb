@@ -29,7 +29,7 @@ use serde_json::{Map, Value as Json};
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, InvalidJson2LayoutSnafu, Result, UnsupportedJsonTypeSnafu};
+use crate::error::{self, InvalidJson2SettingsSnafu, Result, UnsupportedJsonTypeSnafu};
 use crate::json::value::{JsonValue, JsonVariant, encode_serde_json_as_jsonb};
 use crate::schema::ColumnDefaultConstraint;
 use crate::types::json_type::{JsonNativeType, JsonObjectType};
@@ -162,7 +162,7 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
     let mut object = JsonObjectType::new();
     for hint in type_hints {
         if hint.path.len() > JSON2_MAX_STRUCTURED_DEPTH {
-            return InvalidJson2LayoutSnafu {
+            return InvalidJson2SettingsSnafu {
                 reason: format!(
                     "JSON2 type hint path cannot exceed {JSON2_MAX_STRUCTURED_DEPTH} segments"
                 ),
@@ -174,7 +174,7 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
             .first()
             .is_some_and(|x| x == JSON2_REMAINDER_FIELD_NAME)
         {
-            return InvalidJson2LayoutSnafu {
+            return InvalidJson2SettingsSnafu {
                 reason: format!(
                     "JSON2 type hint path cannot be rooted at reserved field '{JSON2_REMAINDER_FIELD_NAME}'"
                 ),
@@ -195,12 +195,26 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
             | ConcreteDataType::Float64(_)
             | ConcreteDataType::String(_) => (&hint.data_type).into(),
             data_type => {
-                return InvalidJson2LayoutSnafu {
+                return InvalidJson2SettingsSnafu {
                     reason: format!("unsupported JSON2 type hint data type: {data_type}"),
                 }
                 .fail();
             }
         };
+        let non_finite_default = match &hint.default_constraint {
+            Some(ColumnDefaultConstraint::Value(Value::Float32(value))) => !value.0.is_finite(),
+            Some(ColumnDefaultConstraint::Value(Value::Float64(value))) => !value.0.is_finite(),
+            _ => false,
+        };
+        if non_finite_default {
+            return InvalidJson2SettingsSnafu {
+                reason: format!(
+                    "JSON2 type hint default for '{}' must be finite",
+                    hint.path.join(".")
+                ),
+            }
+            .fail();
+        }
         validate_type_hint(&mut object, &hint.path, data_type)?;
     }
     Ok(())
@@ -212,14 +226,14 @@ fn validate_type_hint(
     data_type: JsonNativeType,
 ) -> Result<()> {
     let Some((name, path)) = path.split_first() else {
-        return InvalidJson2LayoutSnafu {
+        return InvalidJson2SettingsSnafu {
             reason: "JSON2 type hint path must not be empty".to_string(),
         }
         .fail();
     };
     if path.is_empty() {
         if object.insert(name.clone(), data_type).is_some() {
-            return InvalidJson2LayoutSnafu {
+            return InvalidJson2SettingsSnafu {
                 reason: format!("duplicate JSON2 type hint path '{name}'"),
             }
             .fail();
@@ -231,7 +245,7 @@ fn validate_type_hint(
         .entry(name.clone())
         .or_insert_with(|| JsonNativeType::Object(JsonObjectType::new()));
     let JsonNativeType::Object(child) = child else {
-        return InvalidJson2LayoutSnafu {
+        return InvalidJson2SettingsSnafu {
             reason: format!("conflicting JSON2 type hint path at '{name}'"),
         }
         .fail();
@@ -712,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_settings_reject_invalid_type_hint_layout() {
+    fn test_json_settings_reject_invalid_type_hints() {
         for type_hints in [
             json!([{"path": [], "type": {"Int64": {}}, "nullable": true, "inverted_index": false}]),
             json!([
