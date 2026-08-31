@@ -26,11 +26,17 @@ mod test_util;
 mod union_distinct_on;
 
 pub use absent::{Absent, AbsentExec, AbsentStream};
+use common_query::native_histogram::{SUM_FIELD, native_histogram_value_type};
+use common_query::prometheus::is_prometheus_stale_nan;
+use datafusion::arrow::array::{Array, Float64Array, StructArray};
 use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 use datafusion::common::DFSchemaRef;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
-pub use histogram_fold::{HistogramFold, HistogramFoldExec, HistogramFoldStream};
+pub use histogram_fold::{
+    HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
+};
 pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;
@@ -42,6 +48,26 @@ pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctO
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
 const METRIC_NUM_SERIES: &str = "num_series";
+
+fn prometheus_stale_sample_column(column: &dyn Array) -> Option<(&dyn Array, &Float64Array)> {
+    let values = if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
+        values
+    } else {
+        let histograms = column.as_any().downcast_ref::<StructArray>()?;
+        if histograms.data_type() != &native_histogram_value_type().as_arrow_type() {
+            return None;
+        }
+        histograms
+            .column_by_name(SUM_FIELD)?
+            .as_any()
+            .downcast_ref::<Float64Array>()?
+    };
+    Some((column, values))
+}
+
+fn is_prometheus_stale_sample((column, values): (&dyn Array, &Float64Array), row: usize) -> bool {
+    column.is_valid(row) && values.is_valid(row) && is_prometheus_stale_nan(values.value(row))
+}
 
 /// Utilities for handling unfix logic in extension plans
 /// Convert column name to index for serialization

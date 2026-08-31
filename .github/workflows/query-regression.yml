@@ -32,10 +32,10 @@ on:
         type: string
         default: nightly
       runner:
-        description: Self-hosted runner label or ARC runner scale set for this query regression run
+        description: Self-hosted runner label; aliyun-ecs provisions a fresh ECS instance per run
         required: false
         type: string
-        default: perf-regression-8-cores
+        default: aliyun-ecs
   workflow_dispatch:
     inputs:
       case:
@@ -68,12 +68,20 @@ on:
           - release
           - dev
       runner:
-        description: Self-hosted runner label or ARC runner scale set for this query regression run
+        description: >-
+          Self-hosted runner label; aliyun-ecs provisions a fresh ECS instance
+          per run, any other value is used as a literal runner label
         required: true
-        type: choice
-        default: perf-regression-8-cores
-        options:
-          - perf-regression-8-cores
+        type: string
+        default: aliyun-ecs
+      keep_instance:
+        description: >-
+          Debug: keep the ECS instance after the run (skip teardown) so its
+          runner _diag logs, journal, and telemetry can be inspected; the
+          janitor still sweeps it after the TTL
+        required: false
+        type: boolean
+        default: false
   pull_request:
     types: [labeled]
 
@@ -81,19 +89,99 @@ permissions:
   contents: read
 
 jobs:
-  query-regression:
+  test-tooling:
+    # Stdlib unittests for the workflow Python (case selection, report
+    # helpers, nightly SHA picking, and rendered ECS user-data). They do
+    # not talk to Aliyun or the Actions runner process; running them on
+    # ubuntu-latest fails fast before any ECS spend. Not gated on the
+    # regression labels: those labels boot a VM, these tests should not.
+    # Ordinary PRs also run the same tests from checks.yml, because this
+    # workflow only starts on `labeled` (or dispatch / workflow_call).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Test query regression tooling
+        run: |
+          python3 tests/perf/test_query_regression_runner_compaction_toctou.py
+          python3 tests/perf/test_query_regression_runner_otlp_trace_load.py
+          python3 tests/perf/test_query_regression_summary_otlp.py
+          python3 tests/perf/test_query_regression_case_selection.py
+          python3 tests/perf/test_query_regression_nightly_refs.py
+          python3 tests/perf/test_aliyun_ecs_runner_scripts.py
+
+  provision:
+    # Runs when the aliyun-ecs path is selected: explicitly via the runner
+    # input, or for PR labels by default (a QUERY_REGRESSION_PR_RUNNER
+    # repository variable set to another value redirects PRs to that literal
+    # runner label instead). Uses trusted scripts from the PR base (or the
+    # dispatched ref), never from candidate code. Waits for test-tooling so
+    # a broken user-data template does not still create a VM.
+    needs: [test-tooling]
     if: >-
-      ${{ github.event_name != 'pull_request' ||
-           (github.event_name == 'pull_request' &&
-            !github.event.pull_request.draft &&
-            (github.event.label.name == 'query-regression' ||
-             github.event.label.name == 'heavy-regression')) }}
-    runs-on: ${{ github.event_name != 'pull_request' && inputs.runner || 'perf-regression-8-cores' }}
+      ${{ !failure() && !cancelled() &&
+           ((github.event_name != 'pull_request' && inputs.runner == 'aliyun-ecs') ||
+            (github.event_name == 'pull_request' &&
+             !github.event.pull_request.draft &&
+             (github.event.label.name == 'query-regression' ||
+              github.event.label.name == 'heavy-regression') &&
+             (vars.QUERY_REGRESSION_PR_RUNNER || 'aliyun-ecs') == 'aliyun-ecs')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      label: ${{ steps.provision.outputs.label }}
+      instance_id: ${{ steps.provision.outputs.instance_id }}
+      runner_name: ${{ steps.provision.outputs.runner_name }}
+    steps:
+      - name: Checkout trusted provisioning scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Provision ECS runner
+        id: provision
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          ALIYUN_ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          ALIYUN_ECS_VSWITCH_ID: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
+          ALIYUN_ECS_SECURITY_GROUP_ID: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
+          ALIYUN_ECS_INSTANCE_TYPE: ${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}
+          ALIYUN_ECS_RESOURCE_GROUP_ID: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
+          QUERY_REGRESSION_ECS_IMAGE_ID: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
+          QUERY_REGRESSION_RUNNER_UID: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+          QUERY_REGRESSION_RUNNER_GID: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
+        run: >-
+          uv run .github/scripts/aliyun-ecs-runner-provision.py
+
+  query-regression:
+    needs: [provision, test-tooling]
+    # `!failure() && !cancelled()` both suppresses the implicit success() and
+    # lets the job run when provision was intentionally skipped because a
+    # literal runner label was selected; a failed or cancelled provision still
+    # blocks the run because no ECS runner would be waiting.
+    if: >-
+      ${{ !failure() && !cancelled() &&
+           (github.event_name != 'pull_request' ||
+            (github.event_name == 'pull_request' &&
+             !github.event.pull_request.draft &&
+             (github.event.label.name == 'query-regression' ||
+              github.event.label.name == 'heavy-regression'))) }}
+    runs-on: >-
+      ${{ needs.provision.outputs.label ||
+          (github.event_name != 'pull_request' && inputs.runner ||
+           (vars.QUERY_REGRESSION_PR_RUNNER || 'aliyun-ecs')) }}
     timeout-minutes: 180
-    concurrency:
-      group: query-regression-persistent-cache-v1
-      queue: max
-      cancel-in-progress: false
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
       CARGO_HOME: /home/runner/.cargo
@@ -105,7 +193,8 @@ jobs:
       QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
       RUSTC_WRAPPER: /usr/local/bin/sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
-      SCCACHE_CACHE_SIZE: 40G
+      # Caps the local sccache on the system disk next to target and cargo.
+      SCCACHE_CACHE_SIZE: 10G
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
       QUERY_REGRESSION_CACHE_EPOCH: "1"
@@ -114,7 +203,55 @@ jobs:
       EVENT_MERGE_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
       EVENT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
       EVENT_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+      # Runner identity contract. The ECS image uses 1001; a manually prepared
+      # host may override via repo variables when 1001 is already taken.
+      EXPECTED_RUNNER_UID: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+      EXPECTED_RUNNER_GID: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
     steps:
+      - name: Report provisioned ECS runner
+        if: ${{ needs.provision.outputs.instance_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf -- '- ECS instance: `%s` (type `%s`, image `%s`, region `%s`)\n' \
+              "${{ needs.provision.outputs.instance_id }}" \
+              "${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}" \
+              "${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}" \
+              "${{ vars.ALIYUN_ECS_REGION_ID }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Start machine telemetry sampler
+        shell: bash
+        # The ECS instance is deleted when the run ends, so machine state must
+        # be captured while the job runs. A background sampler appends load,
+        # memory, disk, and top-memory processes to a log every 30s; the
+        # "Dump machine telemetry" step (if: always()) prints and uploads it.
+        # Note: when the job is *cancelled*, even always() steps are killed —
+        # telemetry covers failures, not cancellations.
+        run: |
+          set -euo pipefail
+          log="${GITHUB_WORKSPACE}/machine-telemetry.log"
+          {
+            echo "== baseline $(date -u +%Y-%m-%dT%H:%M:%SZ) =="
+            nproc
+            free -h
+            df -h / /home/runner
+          } >> "${log}"
+          nohup bash -c "
+            while true; do
+              {
+                date -u '+== %Y-%m-%dT%H:%M:%SZ =='
+                uptime
+                free -m
+                df -h / /home/runner
+                ps -eo pid,comm,%mem,%cpu --sort=-%mem | head -6
+              } >> '${log}' 2>&1
+              sleep 30
+            done
+          " >/dev/null 2>&1 &
+          echo "Telemetry sampler started (pid $!), logging to ${log}"
+
       - name: Checkout base source
         uses: actions/checkout@v4
         with:
@@ -263,14 +400,64 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(id -u)" == "1001" ]]
-          [[ "$(id -g)" == "1001" ]]
-          [[ "${UV_CACHE_DIR}" == "/home/runner/.cargo/uv-cache" ]]
-          [[ "$(protoc --version)" == "libprotoc 3.21.12" ]]
+          errors=()
+          record() {
+            printf 'FAIL %s\n' "$*"
+            errors+=("$*")
+          }
+          require_eq() {
+            local name="$1" actual="$2" expected="$3"
+            printf 'check %s: %s\n' "${name}" "${actual}"
+            [[ "${actual}" == "${expected}" ]] || record "${name}: expected '${expected}', got '${actual}'"
+          }
+          require_match() {
+            local name="$1" actual="$2" pattern="$3"
+            printf 'check %s: %s\n' "${name}" "${actual}"
+            [[ "${actual}" =~ $pattern ]] || record "${name}: expected to match ${pattern}, got '${actual}'"
+          }
+          require() {
+            local name="$1"
+            shift
+            printf 'check %s\n' "${name}"
+            "$@" || record "${name}"
+          }
+          capture() {
+            local out
+            if out="$("$@" 2>&1)"; then
+              printf '%s' "${out}"
+            else
+              printf '<failed to run: %s>' "$*"
+            fi
+          }
+
+          printf 'uid=%s gid=%s PATH=%s CARGO_HOME=%s\n' "$(id -u)" "$(id -g)" "${PATH}" "${CARGO_HOME}"
+          ls -la "${CARGO_HOME}" 2>&1 || printf '(CARGO_HOME missing)\n'
+
+          # Image/host hygiene: CARGO_HOME must be empty of config and
+          # install-state before cargo/rustup run. Those tools create
+          # .package-cache / bin on first use, so this cannot come after.
+          cargo_home_dirty=()
+          for entry in config config.toml credentials credentials.toml bin .crates.toml .crates2.json .global-cache .package-cache; do
+            if [[ -e "${CARGO_HOME}/${entry}" ]]; then
+              cargo_home_dirty+=("${entry}")
+              record "CARGO_HOME must not contain ${entry}"
+            fi
+          done
+          if (( ${#cargo_home_dirty[@]} > 0 )); then
+            printf 'CARGO_HOME contents:\n' >&2
+            ls -la "${CARGO_HOME}" >&2 || true
+          fi
+
+          require_eq uid "$(id -u)" "${EXPECTED_RUNNER_UID}"
+          require_eq gid "$(id -g)" "${EXPECTED_RUNNER_GID}"
+          require_eq UV_CACHE_DIR "${UV_CACHE_DIR}" "/home/runner/.cargo/uv-cache"
+          require_eq protoc "$(capture protoc --version)" "libprotoc 3.21.12"
           temporary_proto_dir="$(mktemp --directory)"
           trap 'rm -rf "${temporary_proto_dir}"' EXIT
-          test -r /usr/include/google/protobuf/any.proto
-          test -r /usr/include/google/protobuf/empty.proto
+          require "readable /usr/include/google/protobuf/any.proto" \
+            test -r /usr/include/google/protobuf/any.proto
+          require "readable /usr/include/google/protobuf/empty.proto" \
+            test -r /usr/include/google/protobuf/empty.proto
           printf '%s\n' \
             'syntax = "proto3";' \
             'package smoke;' \
@@ -278,47 +465,51 @@ jobs:
             'import "google/protobuf/empty.proto";' \
             'message Smoke { google.protobuf.Any any = 1; google.protobuf.Empty empty = 2; }' \
             > "${temporary_proto_dir}/smoke.proto"
-          protoc --proto_path="${temporary_proto_dir}" --proto_path=/usr/include \
+          if protoc --proto_path="${temporary_proto_dir}" --proto_path=/usr/include \
             --descriptor_set_out="${temporary_proto_dir}/smoke.pb" \
-            "${temporary_proto_dir}/smoke.proto"
-          test -s "${temporary_proto_dir}/smoke.pb"
-          [[ "$(uv --version)" =~ ^uv[[:space:]]0\.11\.26([[:space:]]|$) ]]
-          mold_version="$(mold --version)"
-          [[ "${mold_version}" =~ ^mold[[:space:]]2\.30\.0([[:space:]]|$) ]]
-          [[ "$(python3 --version)" == "Python 3.12.3" ]]
+            "${temporary_proto_dir}/smoke.proto"; then
+            require "protoc smoke descriptor is non-empty" test -s "${temporary_proto_dir}/smoke.pb"
+          else
+            record "protoc smoke compile failed"
+          fi
+          require_match uv "$(capture uv --version)" '^uv[[:space:]]0\.11\.26([[:space:]]|$)'
+          require_match mold "$(capture mold --version)" '^mold[[:space:]]2\.40\.4([[:space:]]|$)'
+          require_eq python3 "$(capture python3 --version)" "Python 3.14.4"
           otelgen_path="$(command -v otelgen || true)"
           otelgen_version="<unavailable>"
           if [[ -n "${otelgen_path}" ]]; then
-            otelgen_version="$("${otelgen_path}" --version 2>&1 || true)"
+            otelgen_version="$(capture "${otelgen_path}" --version)"
           fi
-          printf 'otelgen path: %s\n' "${otelgen_path:-<missing>}"
-          printf 'otelgen version: %s\n' "${otelgen_version}"
-          [[ "${otelgen_path}" == "/usr/local/bin/otelgen" ]]
-          [[ "${otelgen_version}" == *"863a3f395d062c7322cc1de08a38774b7fdaa6c8"* ]]
-          sccache_version="$(sccache --version)"
-          [[ "${sccache_version}" =~ ^sccache[[:space:]]0\.16\.0([[:space:]]|$) ]]
-          [[ "$(command -v rustup)" == "/opt/cargo/bin/rustup" ]]
-          [[ "$(command -v cargo)" == "/opt/cargo/bin/cargo" ]]
-          [[ "$(command -v rustc)" == "/opt/cargo/bin/rustc" ]]
-          [[ "$(rustup --version)" =~ ^rustup[[:space:]]1\.29\.0([[:space:]]|$) ]]
-          cargo_version="$(cargo --version)"
-          [[ "${cargo_version}" =~ ^cargo[[:space:]]1\.96\.0-nightly[[:space:]]\(cbb9bb8bd[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$ ]]
-          rustc_version="$(rustc --version)"
-          [[ "${rustc_version}" =~ ^rustc[[:space:]]1\.96\.0-nightly[[:space:]]\(ac7f9ec7d[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$ ]]
-          active_toolchain="$(rustup show active-toolchain)"
-          [[ "${active_toolchain}" =~ ^nightly-2026-03-21-x86_64-unknown-linux-gnu([[:space:]]|$) ]]
-          [[ "${RUSTUP_HOME}" == "/opt/rustup" ]]
-          [[ "${RUSTUP_TOOLCHAIN}" == "nightly-2026-03-21" ]]
-          [[ "${RUSTUP_AUTO_INSTALL}" == "0" ]]
-          test -r /opt/rustup && test -x /opt/rustup
-          test ! -w /opt/rustup
-          test ! -w /opt/cargo/bin
-          for entry in config config.toml credentials credentials.toml bin .crates.toml .crates2.json .global-cache .package-cache; do
-            test ! -e "${CARGO_HOME}/${entry}"
-          done
+          require_eq otelgen_path "${otelgen_path}" "/usr/local/bin/otelgen"
+          printf 'check otelgen_version: %s\n' "${otelgen_version}"
+          [[ "${otelgen_version}" == *"863a3f395d062c7322cc1de08a38774b7fdaa6c8"* ]] \
+            || record "otelgen_version: expected commit 863a3f395d062c7322cc1de08a38774b7fdaa6c8, got '${otelgen_version}'"
+          require_match sccache "$(capture sccache --version)" '^sccache[[:space:]]0\.16\.0([[:space:]]|$)'
+          require_eq rustup_path "$(command -v rustup || true)" "/opt/cargo/bin/rustup"
+          require_eq cargo_path "$(command -v cargo || true)" "/opt/cargo/bin/cargo"
+          require_eq rustc_path "$(command -v rustc || true)" "/opt/cargo/bin/rustc"
+          require_match rustup "$(capture rustup --version)" '^rustup[[:space:]]1\.29\.0([[:space:]]|$)'
+          require_match cargo "$(capture cargo --version)" \
+            '^cargo[[:space:]]1\.96\.0-nightly[[:space:]]\(cbb9bb8bd[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+          require_match rustc "$(capture rustc --version)" \
+            '^rustc[[:space:]]1\.96\.0-nightly[[:space:]]\(ac7f9ec7d[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+          require_match active_toolchain "$(capture rustup show active-toolchain)" \
+            '^nightly-2026-03-21-x86_64-unknown-linux-gnu([[:space:]]|$)'
+          require_eq RUSTUP_HOME "${RUSTUP_HOME}" "/opt/rustup"
+          require_eq RUSTUP_TOOLCHAIN "${RUSTUP_TOOLCHAIN}" "nightly-2026-03-21"
+          require_eq RUSTUP_AUTO_INSTALL "${RUSTUP_AUTO_INSTALL}" "0"
+          require "readable /opt/rustup" test -r /opt/rustup
+          require "executable /opt/rustup" test -x /opt/rustup
+          require "runner cannot write /opt/rustup" test ! -w /opt/rustup
+          require "runner cannot write /opt/cargo/bin" test ! -w /opt/cargo/bin
           mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
+          if (( ${#errors[@]} > 0 )); then
+            printf '\nVerify runner image tools failed (%d checks):\n' "${#errors[@]}" >&2
+            printf '  - %s\n' "${errors[@]}" >&2
+            exit 1
+          fi
 
-      - name: Prepare persistent query regression cache
+      - name: Prepare query regression cache
         shell: bash
         working-directory: src
         run: |
@@ -362,24 +553,6 @@ jobs:
             find "${root}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
           }
 
-          clear_cargo_extracted_trees() {
-            require_expected_root CARGO_REGISTRY "${CARGO_HOME}/registry" "${EXPECTED_CARGO_REGISTRY}"
-            require_expected_root CARGO_GIT "${CARGO_HOME}/git" "${EXPECTED_CARGO_GIT}"
-            rm -rf -- "${CARGO_HOME}/registry/src" "${CARGO_HOME}/git/checkouts"
-          }
-
-          cargo_size_kib() {
-            du -sk -- "${CARGO_HOME}/registry" "${CARGO_HOME}/git" | awk '{ total += $1 } END { print total }'
-          }
-
-          target_size_kib() {
-            du -sk -- "${CARGO_TARGET_DIR}" | cut -f1
-          }
-
-          free_kib() {
-            df -Pk "${CARGO_TARGET_DIR}" | awk 'NR == 2 { print $4 }'
-          }
-
           report_cache_usage() {
             du -sh -- "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
               "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
@@ -400,7 +573,7 @@ jobs:
             printf 'Refusing unexpected RUSTC_WRAPPER: %s\n' "${RUSTC_WRAPPER}" >&2
             exit 1
           }
-          [[ "${SCCACHE_CACHE_SIZE}" == "40G" ]] || {
+          [[ "${SCCACHE_CACHE_SIZE}" == "10G" ]] || {
             printf 'Refusing unexpected SCCACHE_CACHE_SIZE: %s\n' "${SCCACHE_CACHE_SIZE}" >&2
             exit 1
           }
@@ -487,46 +660,10 @@ jobs:
 
           report_cache_usage
 
-          target_size="$(target_size_kib)"
-          if (( target_size >= 400 * 1024 * 1024 )); then
-            printf 'Warning: target cache is at least 400 GiB (%s KiB)\n' "${target_size}" >&2
-          fi
-          if (( target_size >= 450 * 1024 * 1024 )); then
-            printf 'Target cache is at least 450 GiB; clearing complete target root\n' >&2
-            clear_directory "${CARGO_TARGET_DIR}"
-          fi
-
-          cargo_size="$(cargo_size_kib)"
-          if (( cargo_size >= 60 * 1024 * 1024 )); then
-            printf 'Warning: Cargo cache is at least 60 GiB (%s KiB)\n' "${cargo_size}" >&2
-          fi
-          if (( cargo_size >= 80 * 1024 * 1024 )); then
-            printf 'Cargo cache is at least 80 GiB; removing extracted sources and checkouts\n' >&2
-            clear_cargo_extracted_trees
-            cargo_size="$(cargo_size_kib)"
-            if (( cargo_size >= 80 * 1024 * 1024 )); then
-              printf 'Cargo cache remains at least 80 GiB after cleanup (%s KiB)\n' "${cargo_size}" >&2
-              exit 1
-            fi
-          fi
-
-          free_space="$(free_kib)"
-          if (( free_space < 300 * 1024 * 1024 )); then
-            printf 'Free space is below 300 GiB; clearing complete target root\n' >&2
-            clear_directory "${CARGO_TARGET_DIR}"
-            free_space="$(free_kib)"
-            if (( free_space < 300 * 1024 * 1024 )); then
-              printf 'Free space remains below 300 GiB; removing Cargo extracted sources and checkouts\n' >&2
-              clear_cargo_extracted_trees
-              free_space="$(free_kib)"
-              if (( free_space < 300 * 1024 * 1024 )); then
-                printf 'Free space remains below 300 GiB after cleanup (%s KiB)\n' "${free_space}" >&2
-                exit 1
-              fi
-            fi
-          fi
-
-          report_cache_usage
+          # Every run starts from a fresh system disk, so size/free-space
+          # watermarks from the retired retained-disk era are not restored.
+          # A run that overflows the disk fails the build outright, which the
+          # telemetry step makes diagnosable.
 
           sccache --start-server
           sccache --zero-stats
@@ -567,24 +704,17 @@ jobs:
           git reset --hard "${VERIFIED_CANDIDATE_SHA}"
           git clean -ffdx
 
-      - name: Test query regression tooling
-        working-directory: src
-        run: |
-          uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
-          uv run --no-project python tests/perf/test_query_regression_runner_otlp_trace_load.py
-          uv run --no-project python tests/perf/test_query_regression_summary_otlp.py
-          uv run --no-project python tests/perf/test_query_regression_case_selection.py
-
-      - name: Build candidate greptime and fixture generators
+      - name: Build candidate greptime and query regression helpers
         working-directory: src
         run: |
           set -euo pipefail
           SECONDS=0
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_perf_fixture --features dev-tools
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_regression_runner --features dev-tools
           candidate_build_elapsed="${SECONDS}"
-          printf 'Candidate greptime and fixture generator cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
-          printf -- '- Candidate greptime and fixture generator cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
+          printf 'Candidate greptime and query regression helper cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
+          printf -- '- Candidate greptime and query regression helper cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
           sccache --show-stats
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
@@ -595,6 +725,8 @@ jobs:
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
           cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/query_regression_runner" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_regression_runner"
 
       - name: Run query regression
         id: run
@@ -609,6 +741,7 @@ jobs:
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
           OTELGEN_BIN: /usr/local/bin/otelgen
           SUMMARY_SCRIPT: ${{ github.event_name == 'pull_request' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
+          QUERY_REGRESSION_RUNNER: ${{ github.workspace }}/query-regression-bins/candidate/query_regression_runner
         run: >-
           uv run --no-project python src/.github/scripts/query-regression-run.py
           --base-src src
@@ -639,6 +772,7 @@ jobs:
             query-regression-work/**/logs/**
             query-regression-work/**/otelgen/**
             query-regression-summary.md
+            machine-telemetry.log
           if-no-files-found: warn
           retention-days: 7
 
@@ -653,7 +787,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Report persistent cache usage
+      - name: Report cache usage
         if: ${{ always() }}
         shell: bash
         run: |
@@ -693,6 +827,55 @@ jobs:
             printf 'sccache is unavailable (report only)\n' >&2
           fi
 
+      - name: Dump machine telemetry
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          log="${GITHUB_WORKSPACE}/machine-telemetry.log"
+          if [[ -f "${log}" ]]; then
+            echo "::group::Machine telemetry (last 200 lines)"
+            tail -n 200 "${log}"
+            echo "::endgroup::"
+          else
+            echo "No telemetry log found (sampler never started?)"
+          fi
+          echo "::group::dmesg tail (OOM killer records)"
+          sudo dmesg -T 2>/dev/null | tail -n 50 || dmesg -T 2>/dev/null | tail -n 50 || \
+            echo "dmesg unavailable without root"
+          echo "::endgroup::"
+
       - name: Fail on regression failure
         if: ${{ steps.run.outputs.status != '0' }}
         run: exit 1
+
+  teardown:
+    # Releases the dynamically provisioned ECS runner. Runs even when the
+    # benchmark job fails or is cancelled; skipped when a literal runner label
+    # was selected because the provision outputs are empty, or when the
+    # dispatch set keep_instance to preserve the machine for post-mortem
+    # debugging (the janitor sweep still reclaims it after the TTL).
+    if: ${{ always() && needs.provision.outputs.instance_id != '' && !inputs.keep_instance }}
+    needs: [provision, query-regression]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout trusted teardown scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Teardown ECS runner
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          ALIYUN_ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          QUERY_REGRESSION_ECS_INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+          QUERY_REGRESSION_ECS_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
+        run: >-
+          uv run .github/scripts/aliyun-ecs-runner-teardown.py

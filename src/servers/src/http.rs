@@ -60,8 +60,8 @@ use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, i
 use crate::http::otlp::OtlpState;
 use crate::http::prom_store::PromStoreState;
 use crate::http::prometheus::{
-    build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
-    range_query, series_query,
+    build_info_query, format_query, instant_query, label_values_query, labels_query,
+    metadata_query, parse_query, range_query, series_query,
 };
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
@@ -724,11 +724,16 @@ impl HttpServerBuilder {
         self,
         handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
+        experimental_enable_exponential_histogram: bool,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                HttpServer::route_otlp(handler, with_metric_engine),
+                HttpServer::route_otlp(
+                    handler,
+                    with_metric_engine,
+                    experimental_enable_exponential_histogram,
+                ),
             ),
             ..self
         }
@@ -1341,6 +1346,7 @@ impl HttpServer {
             .route("/query", routing::post(instant_query).get(instant_query))
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))
+            .route("/metadata", routing::get(metadata_query))
             .route("/series", routing::post(series_query).get(series_query))
             .route("/parse_query", routing::post(parse_query).get(parse_query))
             .route(
@@ -1385,6 +1391,7 @@ impl HttpServer {
     fn route_otlp<S>(
         otlp_handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
+        experimental_enable_exponential_histogram: bool,
     ) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
@@ -1396,6 +1403,7 @@ impl HttpServer {
             )
             .with_state(OtlpState {
                 with_metric_engine,
+                experimental_enable_exponential_histogram,
                 handler: otlp_handler,
             })
     }

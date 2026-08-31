@@ -24,6 +24,8 @@ use api::v1::{Rows, SemanticType};
 use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
+use datafusion_expr::expr::InList;
+use datafusion_expr::{Expr, col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
 use datatypes::prelude::ConcreteDataType;
@@ -38,14 +40,16 @@ use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::{CacheManager, CacheStrategy};
 use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::put_and_flush;
 use crate::engine::listener::{EventListener, GateIndexBuildListener, IndexBuildListener};
 use crate::manifest::action::RegionEdit;
-use crate::read::scan_region::Scanner;
+use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::location;
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
@@ -96,6 +100,215 @@ fn assert_listener_counts(
 ) {
     assert_eq!(listener.begin_count(), expected_begin_count);
     assert_eq!(listener.finish_count(), expected_success_count);
+}
+
+fn bloom_filter_test_cache() -> Arc<CacheManager> {
+    const CACHE_SIZE: u64 = 64 * 1024;
+
+    Arc::new(
+        CacheManager::builder()
+            .index_metadata_size(CACHE_SIZE)
+            .index_content_size(CACHE_SIZE)
+            .index_content_page_size(CACHE_SIZE)
+            .puffin_metadata_size(CACHE_SIZE)
+            .build(),
+    )
+}
+
+async fn scan_with_bloom_filter(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+    cache_manager: Arc<CacheManager>,
+    ignore_bloom_filter: bool,
+) -> RecordBatches {
+    let region = engine.get_region(region_id).unwrap();
+    let scanner = ScanRegion::new(
+        region.version(),
+        region.access_layer.clone(),
+        request,
+        CacheStrategy::EnableAll(cache_manager),
+    )
+    .with_ignore_bloom_filter(ignore_bloom_filter)
+    .scanner()
+    .await
+    .unwrap();
+
+    RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn bloom_mixed_in_index_on_off_equivalent() {
+    let mut env = TestEnv::with_prefix("bloom_mixed_in_index_on_off_equivalent_").await;
+    let listener = Arc::new(IndexBuildListener::default());
+    let engine = env
+        .create_engine_with(
+            async_build_mode_config(true),
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let mut request = CreateRequestBuilder::new().build();
+    let bloom_options =
+        SkippingIndexOptions::new_unchecked(1, 0.0001, SkippingIndexType::BloomFilter);
+    request.column_metadatas[0]
+        .column_schema
+        .set_skipping_options(&bloom_options)
+        .unwrap();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    listener.wait_finish(1).await;
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+    assert!(
+        engine
+            .all_index_metas()
+            .await
+            .iter()
+            .any(|meta| meta.index_type == "bloom_filter")
+    );
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(2, 4),
+        },
+    )
+    .await;
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(scanner.num_memtables(), 1);
+
+    let mixed_in = Expr::InList(InList {
+        expr: Box::new(col("tag_0")),
+        list: vec![
+            lit("definitely_absent_0"),
+            lit("definitely_absent_1"),
+            lit("definitely_absent_2"),
+            lit("definitely_absent_3"),
+            col("tag_0"),
+        ],
+        negated: false,
+    });
+    let filtered_request = ScanRequest {
+        filters: vec![mixed_in],
+        ..Default::default()
+    };
+    let cache_manager = bloom_filter_test_cache();
+
+    let indexed = scan_with_bloom_filter(
+        &engine,
+        region_id,
+        filtered_request.clone(),
+        cache_manager.clone(),
+        false,
+    )
+    .await;
+    let unindexed = scan_with_bloom_filter(
+        &engine,
+        region_id,
+        filtered_request.clone(),
+        cache_manager,
+        true,
+    )
+    .await;
+    let memtable_only = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    skip_sst_files: true,
+                    ..filtered_request.clone()
+                },
+            )
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let full_scan = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let indexed_rows = sort_batches_and_print(&indexed, &["ts"]);
+    let unindexed_rows = sort_batches_and_print(&unindexed, &["ts"]);
+    let memtable_rows = sort_batches_and_print(&memtable_only, &["ts"]);
+    let full_rows = sort_batches_and_print(&full_scan, &["ts"]);
+    assert_eq!(
+        memtable_rows,
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
++-------+---------+---------------------+"
+    );
+    assert_eq!(
+        full_rows,
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
++-------+---------+---------------------+"
+    );
+    assert_eq!(
+        unindexed_rows, full_rows,
+        "disabling the Bloom filter must retain all matching SST rows"
+    );
+    assert_eq!(
+        indexed_rows, unindexed_rows,
+        "Bloom filtering must not prune rows matched by a nonliteral IN member"
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -291,7 +291,7 @@ impl Procedure for CreateDatabaseProcedure {
                 &self.data.options,
             )
         } else {
-            DatabaseDdlEvent::create_lifecycle()
+            DatabaseDdlEvent::create_lifecycle(&self.data.catalog, &self.data.schema)
         };
         Some(Box::new(event))
     }

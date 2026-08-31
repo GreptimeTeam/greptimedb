@@ -284,19 +284,3 @@ impl<'a> DroppedRegionCollector<'a> {
         Ok(assignment)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dropped_region_info() {
-        let info = DroppedRegionInfo {
-            region_id: RegionId::new(1, 1),
-            table_id: 1,
-            dst_regions: HashSet::new(),
-        };
-        assert_eq!(info.region_id, RegionId::new(1, 1));
-        assert_eq!(info.table_id, 1);
-    }
-}

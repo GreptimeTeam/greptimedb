@@ -1,0 +1,45 @@
+# Copyright 2023 Greptime Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[Unit]
+Description=Ephemeral GitHub Actions runner
+After=network-online.target
+Wants=network-online.target
+# cloud-final runs the provision user data, which writes
+# /etc/ephemeral-github-runner.env and the drop-ins below. Ordering after it
+# makes the runner come up configured on first boot, no restart needed.
+# (cloud-init's `systemctl restart` in user data remains as the bridge for
+# images built before this ordering existed.)
+After=cloud-final.service
+
+[Service]
+Type=simple
+# The toolchain lives in the image at /opt/cargo/bin (the Dockerfile's ENV
+# PATH does not survive materialization onto the host). Publish it here so
+# every runner job inherits it. /etc/ephemeral-github-runner.env currently
+# carries the same PATH line as a bridge for images built before this
+# directive existed; EnvironmentFile is applied after Environment=, and the
+# two values are kept identical, so there is no conflict.
+Environment=PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/ephemeral-github-runner.env
+ExecStart=/opt/ephemeral-github-runner/start-runner.sh
+Restart=no
+# If the kernel OOM killer kills a job child (rustc/cargo), keep the runner
+# service alive so the job is reported as a normal failure with logs instead
+# of the runner vanishing and GitHub reporting a cancellation. cloud-init's
+# oom.conf drop-in carries the same directive for images built before this.
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

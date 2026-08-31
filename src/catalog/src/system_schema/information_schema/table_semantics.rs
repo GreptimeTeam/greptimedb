@@ -453,4 +453,21 @@ mod tests {
         assert!(row.source.is_none());
         assert!(row.options_json.is_none());
     }
+
+    #[test]
+    fn extract_folds_entity_keys_into_json_tail() {
+        // Entity keys are not promoted columns; they surface verbatim (prefix-
+        // stripped, sorted) in the JSON tail with no code change to this table.
+        let info = table_info(&[
+            (SEMANTIC_SIGNAL_TYPE, "trace"),
+            ("greptime.semantic.entity.service.id", "service_name"),
+            ("greptime.semantic.entity.host.id", "host_id"),
+        ]);
+        let row = SemanticRow::extract(&info).unwrap();
+        assert_eq!(row.signal_type, Some("trace"));
+        assert_eq!(
+            row.options_json.as_deref(),
+            Some(r#"{"entity.host.id":"host_id","entity.service.id":"service_name"}"#)
+        );
+    }
 }

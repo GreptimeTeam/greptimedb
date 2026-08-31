@@ -65,14 +65,6 @@ order by json_get(j, 'a.b');
 | 2                                                 | 1        |
 +---------------------------------------------------+----------+
 
-select j, j.a from json2_whole_and_path_read;
-
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Binary but found Struct("a": Utf8View) at column index 0
-
-select j from json2_whole_and_path_read where j.a.b = 1;
-
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Binary but found Struct("a": Struct("b": Int64)) at column index 0
-
 drop table json2_whole_and_path_read;
 
 Affected Rows: 0

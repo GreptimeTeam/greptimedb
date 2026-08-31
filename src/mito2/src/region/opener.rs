@@ -32,6 +32,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{is_object_storage, normalize_dir};
 use parquet::file::metadata::PageIndexPolicy;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
 use store_api::metadata::{
@@ -832,6 +833,7 @@ where
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
     let replay_from_entry_id = flushed_entry_id + 1;
+    let region_metadata = version_control.current().version.metadata.clone();
 
     let mut wal_stream = wal_entry_reader.read(provider, replay_from_entry_id)?;
     while let Some(res) = wal_stream.next().await {
@@ -876,7 +878,16 @@ where
         }
 
         for bulk_entry in entry.bulk_entries {
-            let part = BulkPart::try_from(bulk_entry)?;
+            let mut part = BulkPart::try_from(bulk_entry)?;
+            // The entry may miss columns added by a concurrent alter if it was
+            // written by a writer with a stale schema (older versions kept the
+            // stale raw data when filling missing columns). Fills missing
+            // columns like the write path, otherwise the memtable rejects the
+            // batch. Skips sparse batches as they don't carry tag columns by
+            // design.
+            if region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse {
+                part.fill_missing_columns(&region_metadata)?;
+            }
             rows_replayed += part.num_rows();
             // During replay, we should adopt the sequence from WAL.
             let bulk_sequence_from_wal = part.sequence;
@@ -897,6 +908,9 @@ where
         region_write_ctx.set_next_entry_id(last_entry_id + 1);
         region_write_ctx.write_memtable().await;
         region_write_ctx.write_bulk().await;
+        // Publish the replayed sequences only after all rows (including bulk
+        // parts) are installed, matching the write path ordering.
+        region_write_ctx.publish_sequence_and_entry_id();
     }
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest

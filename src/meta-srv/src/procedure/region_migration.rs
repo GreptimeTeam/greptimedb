@@ -32,7 +32,7 @@ use std::fmt::{Debug, Display};
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
-use common_event_recorder::Event;
+use common_event_recorder::{Event, PersistentEventContext};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::CacheIdent;
@@ -45,6 +45,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
+use common_meta::rpc::ddl::TriggerReason;
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
@@ -121,9 +122,9 @@ pub struct PersistentContext {
     /// The timeout for downgrading leader region and upgrading candidate region operations.
     #[serde(with = "humantime_serde", default = "default_timeout")]
     pub(crate) timeout: Duration,
-    /// The trigger reason of region migration.
+    /// The trigger reason persisted for compatibility with versions without procedure context.
     #[serde(default)]
-    pub(crate) trigger_reason: RegionMigrationTriggerReason,
+    trigger_reason: RegionMigrationTriggerReason,
 }
 
 impl PersistentContext {
@@ -145,6 +146,26 @@ impl PersistentContext {
             region_ids,
             timeout,
             trigger_reason,
+        }
+    }
+}
+
+impl RegionMigrationTriggerReason {
+    fn to_trigger_reason(self) -> TriggerReason {
+        match self {
+            Self::Manual => TriggerReason::Manual,
+            Self::AutoRebalance => TriggerReason::AutoRebalance,
+            Self::Failover => TriggerReason::RegionFailover,
+            Self::Unknown => TriggerReason::Unknown,
+        }
+    }
+
+    pub(crate) fn from_trigger_reason(reason: TriggerReason) -> Self {
+        match reason {
+            TriggerReason::Manual => Self::Manual,
+            TriggerReason::AutoRebalance => Self::AutoRebalance,
+            TriggerReason::RegionFailover => Self::Failover,
+            _ => Self::Unknown,
         }
     }
 }
@@ -423,6 +444,14 @@ pub struct Context {
 }
 
 impl Context {
+    pub(crate) fn trigger_reason(
+        &self,
+        event_context: Option<&PersistentEventContext>,
+    ) -> RegionMigrationTriggerReason {
+        event_context
+            .map(|ctx| RegionMigrationTriggerReason::from_trigger_reason(ctx.reason))
+            .unwrap_or(self.persistent_ctx.trigger_reason)
+    }
     /// Returns the next operation's timeout.
     pub fn next_operation_timeout(&self) -> Option<Duration> {
         self.persistent_ctx
@@ -971,6 +1000,9 @@ impl Procedure for RegionMigrationProcedure {
 
         Some(Box::new(RegionMigrationEvent::from_persistent_ctx(
             &self.context.persistent_ctx,
+            self.context
+                .trigger_reason(ctx.event_context)
+                .to_trigger_reason(),
         )))
     }
 }
@@ -1056,6 +1088,7 @@ mod tests {
                     lifecycle_state: &state,
                     trigger,
                     event_type_filter: Arc::new(common_event_recorder::EventTypeFilter::All),
+                    event_context: None,
                 })
                 .unwrap();
             assert_eq!(event.event_type(), "region_migration");
@@ -1075,13 +1108,98 @@ mod tests {
             to_peer: Peer::empty(2),
             region_ids: vec![RegionId::new(1024, 1)],
             timeout: Duration::from_secs(10),
-            trigger_reason: RegionMigrationTriggerReason::default(),
+            trigger_reason: RegionMigrationTriggerReason::Unknown,
         };
         // NOTES: Changes it will break backward compatibility.
         let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
 
         assert_eq!(persistent_ctx, deserialized);
+    }
+
+    #[test]
+    fn test_legacy_trigger_reason_survives_recovery_and_repersistence() {
+        let serialized = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"trigger_reason":"Failover"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let env = TestingEnv::new();
+        let procedure = RegionMigrationProcedure::from_json(
+            serialized,
+            env.context_factory(),
+            RegionMigrationProcedureTracker::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            procedure.context.persistent_ctx.trigger_reason,
+            RegionMigrationTriggerReason::Failover
+        );
+        let repersisted = procedure.dump().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&repersisted).unwrap()["persistent_ctx"]["trigger_reason"],
+            "Failover"
+        );
+
+        let recovered = RegionMigrationProcedure::from_json(
+            &repersisted,
+            env.context_factory(),
+            RegionMigrationProcedureTracker::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered.context.trigger_reason(None),
+            RegionMigrationTriggerReason::Failover
+        );
+        let event_context = PersistentEventContext::new(TriggerReason::AutoRebalance);
+        assert_eq!(
+            recovered.context.trigger_reason(Some(&event_context)),
+            RegionMigrationTriggerReason::AutoRebalance
+        );
+
+        let state = common_procedure::ProcedureState::Running;
+        let event = recovered
+            .event(&EventContext {
+                procedure_id: common_procedure::ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: common_procedure::EventTrigger::Recovered,
+                event_type_filter: Arc::new(common_event_recorder::EventTypeFilter::All),
+                event_context: None,
+            })
+            .unwrap();
+        assert_eq!(
+            event.extra_rows().unwrap()[0].values[3].value_data,
+            Some(api::v1::value::ValueData::StringValue(
+                "Failover".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_migration_reason_uses_event_context() {
+        let env = TestingEnv::new();
+        let context = env.context_factory().new_context(new_persistent_context());
+        let event_context = PersistentEventContext::new(TriggerReason::RegionFailover);
+
+        assert_eq!(
+            context.trigger_reason(Some(&event_context)),
+            RegionMigrationTriggerReason::Failover
+        );
+
+        let procedure =
+            RegionMigrationProcedure::new(new_persistent_context(), env.context_factory(), vec![]);
+        let state = common_procedure::ProcedureState::Running;
+        let event = procedure
+            .event(&EventContext {
+                procedure_id: common_procedure::ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: common_procedure::EventTrigger::Submitted,
+                event_type_filter: Arc::new(common_event_recorder::EventTypeFilter::All),
+                event_context: Some(&event_context),
+            })
+            .unwrap();
+        assert_eq!(
+            event.extra_rows().unwrap()[0].values[3].value_data,
+            Some(api::v1::value::ValueData::StringValue(
+                "Failover".to_string()
+            ))
+        );
     }
 
     #[derive(Debug, Serialize, Deserialize, Default)]

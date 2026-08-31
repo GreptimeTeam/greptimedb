@@ -718,11 +718,7 @@ mod tests {
                         "true".to_string(),
                     ),
                 ])),
-                vector_options: None,
-                skipping_index_options: None,
-                inverted_index_options: None,
-                json_type_hints: vec![],
-                vector_index_options: None,
+                ..Default::default()
             },
         };
 
@@ -749,17 +745,13 @@ mod tests {
                 options: vec![],
             },
             extensions: ColumnExtensions {
-                fulltext_index_options: None,
-                vector_options: None,
-                skipping_index_options: None,
-                inverted_index_options: None,
-                json_type_hints: vec![],
                 vector_index_options: Some(OptionMap::from([
                     ("metric".to_string(), "cosine".to_string()),
                     ("connectivity".to_string(), "32".to_string()),
                     ("expansion_add".to_string(), "200".to_string()),
                     ("expansion_search".to_string(), "100".to_string()),
                 ])),
+                ..Default::default()
             },
         };
 
@@ -790,12 +782,8 @@ mod tests {
                 options: vec![],
             },
             extensions: ColumnExtensions {
-                fulltext_index_options: None,
-                vector_options: None,
-                skipping_index_options: None,
-                inverted_index_options: None,
-                json_type_hints: vec![],
                 vector_index_options: Some(OptionMap::default()),
+                ..Default::default()
             },
         };
 

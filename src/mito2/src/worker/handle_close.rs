@@ -16,7 +16,6 @@
 
 use common_telemetry::info;
 use store_api::logstore::LogStore;
-use store_api::logstore::provider::Provider;
 use store_api::region_request::{RegionCloseRequest, RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
@@ -37,10 +36,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
-        // If the close request asks for a flush, or the region is using Noop WAL,
+        // If the close request asks for a flush, or the region skips WAL,
         // and has data in memtable and region is flushable (like, not in follower state),
         // we should flush it before closing to ensure durability.
-        if (request.flush_on_close || region.provider == Provider::Noop)
+        if (request.flush_on_close || region.skip_wal())
             && !region
                 .version_control
                 .current()

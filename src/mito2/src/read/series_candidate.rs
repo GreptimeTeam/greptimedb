@@ -30,7 +30,6 @@ use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use mito_codec::row_converter::{PrimaryKeyFilter, SparsePrimaryKeyCodec};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -51,6 +50,7 @@ use crate::read::range_cache::{
 };
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
+use crate::series_index::{METRIC_SERIES_ID_BATCH_SIZE, MetricSeriesId, MetricSeriesIdStream};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::prefilter::{
@@ -59,19 +59,7 @@ use crate::sst::parquet::prefilter::{
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
-const CANDIDATE_SERIES_BATCH_SIZE: usize = 500;
-
-/// Identifies one series in a physical metric region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct MetricSeriesId {
-    pub(crate) table_id: u32,
-    pub(crate) tsid: u64,
-}
-
-pub(crate) type MetricSeriesIdStream = BoxStream<'static, Result<Vec<MetricSeriesId>>>;
-
 /// Builds candidate metric series from the ranges assigned to a [`SeriesScan`](super::series_scan::SeriesScan).
-#[allow(dead_code)]
 pub(crate) struct SeriesCandidateScanner {
     stream_ctx: Arc<StreamContext>,
     partitions: Vec<Vec<PartitionRange>>,
@@ -82,12 +70,15 @@ pub(crate) struct SeriesCandidateScanner {
     part_metrics: PartitionMetrics,
 }
 
-#[allow(dead_code)]
 impl SeriesCandidateScanner {
     /// Creates a candidate-series scanner for native memtable and SST ranges.
     ///
     /// Callers must fall back to the legacy series-scan path when the scan contains
     /// extension ranges. Candidate-series discovery does not support other range types.
+    ///
+    /// `pruner` must be built with `PrunerOptions::enable_predicate_prefilter` set to
+    /// `false`: both scan phases share its file range builders, and the two-stage path
+    /// applies simple filters on the precise-filter path instead.
     pub(crate) fn try_new(
         stream_ctx: Arc<StreamContext>,
         partitions: Vec<Vec<PartitionRange>>,
@@ -104,6 +95,15 @@ impl SeriesCandidateScanner {
             InvalidRequestSnafu {
                 region_id: stream_ctx.input.region_metadata().region_id,
                 reason: "candidate-series scan does not support extension ranges; use the legacy series-scan path",
+            }
+        );
+        ensure!(
+            !pruner.predicate_prefilter_enabled(),
+            UnexpectedSnafu {
+                reason: format!(
+                    "candidate-series scan for region {} requires a pruner without predicate prefiltering",
+                    stream_ctx.input.region_metadata().region_id
+                ),
             }
         );
         let all_ranges = partitions.iter().flatten().copied().collect::<Vec<_>>();
@@ -253,12 +253,15 @@ impl SeriesCandidateRangeBuilder {
             );
             let filter = build_primary_key_filter(
                 &metadata,
+                None,
                 self.stream_ctx.input.predicate_group().predicate(),
             );
             return Ok(Some(candidate_primary_key_stream(Box::pin(raw), filter)));
         }
 
         if self.stream_ctx.is_file_range_index(index) {
+            let file = self.stream_ctx.input.file_from_index(index);
+            let predicate = self.stream_ctx.input.predicate_for_file(file);
             if self
                 .partition_pruner
                 .try_skip_manifest_pruned_file_range(index, &self.part_metrics)
@@ -277,9 +280,15 @@ impl SeriesCandidateRangeBuilder {
             self.part_metrics
                 .merge_reader_metrics(&reader_metrics, None);
 
-            // Reuse the exact encoded-PK filter selected by the file's reader plan, but
-            // execute it in `candidate_primary_key_stream` after the PK-only read.
-            let filter = ranges.first().and_then(|range| range.primary_key_filter());
+            // Build a fresh encoded-PK filter from this SST's metadata so schema
+            // compatibility is evaluated independently for each file.
+            let filter = ranges.first().and_then(|range| {
+                build_primary_key_filter(
+                    range.region_metadata(),
+                    Some(metadata.as_ref()),
+                    predicate.as_ref(),
+                )
+            });
             let part_metrics = self.part_metrics.clone();
             let raw = Box::pin(try_stream! {
                 let fetch_metrics = part_metrics
@@ -324,8 +333,7 @@ impl SeriesCandidateRangeBuilder {
     }
 }
 
-pub(crate) fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()> {
-    let metadata = stream_ctx.input.region_metadata();
+pub(crate) fn is_sparse_metric_metadata(metadata: &store_api::metadata::RegionMetadataRef) -> bool {
     let valid_prefix = metadata
         .primary_key
         .starts_with(&[ReservedColumnId::table_id(), ReservedColumnId::tsid()]);
@@ -336,8 +344,14 @@ pub(crate) fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()>
             table_id.column_schema.data_type == ConcreteDataType::uint32_datatype()
                 && tsid.column_schema.data_type == ConcreteDataType::uint64_datatype()
         });
+
+    metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse && valid_prefix && valid_types
+}
+
+pub(crate) fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()> {
+    let metadata = stream_ctx.input.region_metadata();
     ensure!(
-        metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse && valid_prefix && valid_types,
+        is_sparse_metric_metadata(metadata),
         InvalidRequestSnafu {
             region_id: metadata.region_id,
             reason: "candidate-series scan requires sparse (__table_id, __tsid) primary keys",
@@ -512,7 +526,7 @@ fn decode_metric_series(
     let codec = SparsePrimaryKeyCodec::new(&metadata);
     Ok(Box::pin(try_stream! {
         let mut last_series = None;
-        let mut output = Vec::with_capacity(CANDIDATE_SERIES_BATCH_SIZE);
+        let mut output = Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE);
         while let Some(batch) = input.try_next().await? {
             let array = batch
                 .column(0)
@@ -531,10 +545,10 @@ fn decode_metric_series(
                 }
                 last_series = Some(series);
                 output.push(series);
-                if output.len() == CANDIDATE_SERIES_BATCH_SIZE {
+                if output.len() == METRIC_SERIES_ID_BATCH_SIZE {
                     yield std::mem::replace(
                         &mut output,
-                        Vec::with_capacity(CANDIDATE_SERIES_BATCH_SIZE),
+                        Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE),
                     );
                 }
             }
@@ -547,6 +561,8 @@ fn decode_metric_series(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use datafusion::execution::memory_pool::UnboundedMemoryPool;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{ArrayRef, DictionaryArray, UInt32Array};
@@ -556,7 +572,54 @@ mod tests {
     use table::predicate::Predicate;
 
     use super::*;
+    use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::scan_region::ScanInput;
+    use crate::read::scan_util::PartitionMetrics;
+    use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
+
+    #[tokio::test]
+    async fn candidate_scanner_rejects_predicate_prefilter_pruner() {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let mapper =
+            FlatProjectionMapper::new(&metadata, 0..metadata.column_metadatas.len()).unwrap();
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(ScanInput::new(
+            env.access_layer.clone(),
+            mapper,
+        )));
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), 1));
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let part_metrics = PartitionMetrics::new(
+            metadata.region_id,
+            0,
+            "candidate-test",
+            Instant::now(),
+            false,
+            &metrics_set,
+        );
+
+        let error = SeriesCandidateScanner::try_new(
+            stream_ctx,
+            Vec::new(),
+            pruner,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(UnboundedMemoryPool::default()),
+            metrics_set,
+            part_metrics,
+        )
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, crate::error::Error::Unexpected { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("requires a pruner without predicate prefiltering")
+        );
+    }
 
     fn binary_batch(values: &[&[u8]]) -> RecordBatch {
         RecordBatch::try_new(
@@ -621,7 +684,7 @@ mod tests {
         let predicate = Predicate::new(vec![
             col(store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(1_u32)),
         ]);
-        let filter = build_primary_key_filter(&metadata, Some(&predicate));
+        let filter = build_primary_key_filter(&metadata, None, Some(&predicate));
         let input = Box::pin(futures::stream::iter(vec![Ok(dictionary_batch(
             &[table_1.as_slice(), table_2.as_slice()],
             &[0, 1],

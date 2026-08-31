@@ -17,9 +17,12 @@ use std::time::Duration;
 
 use api::v1::Rows;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
+use store_api::logstore::provider::Provider;
+use store_api::mito_engine_options::SKIP_WAL_KEY;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
+    AlterKind, RegionAlterRequest, RegionCloseRequest, RegionOpenRequest, RegionPutRequest,
+    RegionRequest, RegionTruncateRequest, SetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -37,6 +40,184 @@ async fn test_close_region_skip_wal_with_pending_data() {
 #[tokio::test]
 async fn test_close_region_skip_wal_without_pending_data() {
     test_close_region_skip_wal(false).await;
+}
+
+#[tokio::test]
+async fn test_alter_skip_wal_stops_wal_and_flushes_on_close() {
+    let mut env = TestEnv::with_prefix("alter-skip-wal").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+
+    let before_alter = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current();
+    assert!(!matches!(
+        &engine.get_region(region_id).unwrap().provider,
+        Provider::Noop
+    ));
+    assert!(!before_alter.version.memtables.is_empty());
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::SkipWal],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::SkipWal],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let after_alter = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current();
+    assert!(after_alter.version.options.skip_wal);
+    assert_eq!(before_alter.last_entry_id, after_alter.last_entry_id);
+    assert_eq!(
+        before_alter.version.flushed_sequence,
+        after_alter.version.flushed_sequence
+    );
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(3, 6),
+        },
+    )
+    .await;
+    assert_eq!(
+        before_alter.last_entry_id,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version_control
+            .current()
+            .last_entry_id
+    );
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    request
+        .options
+        .insert(SKIP_WAL_KEY.to_string(), "true".to_string());
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir,
+                path_type: store_api::region_request::PathType::Bare,
+                options: request.options,
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let batches = common_recordbatch::RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        6,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
+#[tokio::test]
+async fn test_alter_skip_wal_on_follower_survives_promotion() {
+    let mut env = TestEnv::with_prefix("alter-skip-wal-follower").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::SkipWal],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.is_follower());
+    assert!(region.version().options.skip_wal);
+
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    let last_entry_id = region.version_control.current().last_entry_id;
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+    assert_eq!(
+        last_entry_id,
+        region.version_control.current().last_entry_id
+    );
 }
 
 async fn test_close_region_skip_wal(insert: bool) {

@@ -27,7 +27,7 @@ use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, SkippingIndexOptions,
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions,
 };
 use greptime_proto::v1::region::compact_request;
 use once_cell::sync::Lazy;
@@ -58,6 +58,19 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
+
+/// Returns true if the table stores spans in the `greptime_trace_v1` data model
+/// (fixed span columns), the shape the Jaeger query path and the entity-graph
+/// derivation rely on.
+pub fn is_trace_v1_table(table_info: &crate::metadata::TableInfo) -> bool {
+    table_info
+        .meta
+        .options
+        .extra_options
+        .get(TABLE_DATA_MODEL)
+        .map(|v| v == TABLE_DATA_MODEL_TRACE_V1)
+        .unwrap_or(false)
+}
 
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
@@ -227,7 +240,7 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", TTL_KEY, ttl));
         }
 
-        if self.skip_wal {
+        if self.skip_wal && !self.extra_options.contains_key(SKIP_WAL_KEY) {
             key_vals.push(format!("{}={}", SKIP_WAL_KEY, self.skip_wal));
         }
 
@@ -241,7 +254,7 @@ impl fmt::Display for TableOptions {
 
 impl From<&TableOptions> for HashMap<String, String> {
     fn from(opts: &TableOptions) -> Self {
-        let mut res = HashMap::with_capacity(2 + opts.extra_options.len());
+        let mut res = HashMap::with_capacity(3 + opts.extra_options.len());
         if let Some(write_buffer_size) = opts.write_buffer_size {
             let _ = res.insert(
                 WRITE_BUFFER_SIZE_KEY.to_string(),
@@ -251,11 +264,10 @@ impl From<&TableOptions> for HashMap<String, String> {
         if let Some(ttl_str) = opts.ttl.map(|ttl| ttl.to_string()) {
             let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
-        res.extend(
-            opts.extra_options
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
+        if opts.skip_wal {
+            let _ = res.insert(SKIP_WAL_KEY.to_string(), true.to_string());
+        }
+        res.extend(opts.extra_options.clone());
         res
     }
 }
@@ -289,6 +301,211 @@ pub struct ModifyColumnTypeRequest {
     pub target_type: ConcreteDataType,
 }
 
+/// A family of annotation table options: pure metadata markers that no region
+/// consumes. Setting or unsetting them only rewrites the table's
+/// `extra_options`, so the alter skips region dispatch entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnnotationFamily {
+    /// `greptime.semantic.*` options (see the [`semantic`] module).
+    Semantic,
+    /// `repartition.column.hint`, consumed by the auto-repartition planner.
+    RepartitionHint,
+}
+
+impl AnnotationFamily {
+    /// The key namespace: a prefix for [`Self::Semantic`], the exact key for
+    /// [`Self::RepartitionHint`].
+    pub fn namespace(self) -> &'static str {
+        match self {
+            Self::Semantic => SEMANTIC_PREFIX,
+            Self::RepartitionHint => REPARTITION_COLUMN_HINT_KEY,
+        }
+    }
+
+    pub fn of_key(key: &str) -> Option<Self> {
+        if key.starts_with(SEMANTIC_PREFIX) {
+            Some(Self::Semantic)
+        } else if key == REPARTITION_COLUMN_HINT_KEY {
+            Some(Self::RepartitionHint)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this family may be altered on logical metric tables. Only
+    /// families whose values nothing on the physical side consumes qualify;
+    /// the repartition hint drives physical region repartitioning.
+    pub fn allows_logical_tables(self) -> bool {
+        match self {
+            Self::Semantic => true,
+            Self::RepartitionHint => false,
+        }
+    }
+
+    /// Whether this family's SET/UNSET batch must contain exactly one key.
+    /// The repartition hint is a single marker; a batch with several hint
+    /// entries (duplicates included) has no meaningful order.
+    pub fn requires_single_key(self) -> bool {
+        matches!(self, Self::RepartitionHint)
+    }
+
+    /// The error for a SET/UNSET batch mixing this family with other options.
+    pub fn mixed_batch_error(self) -> String {
+        match self {
+            Self::Semantic => format!(
+                "`{SEMANTIC_PREFIX}*` options must be altered separately from other table options"
+            ),
+            Self::RepartitionHint => {
+                format!("{REPARTITION_COLUMN_HINT_KEY} must be altered separately")
+            }
+        }
+    }
+}
+
+/// Table shape an annotation option is validated against.
+pub struct AnnotationContext<'a> {
+    pub schema: &'a Schema,
+    pub partition_key_indices: &'a [usize],
+}
+
+/// Why an annotation option was rejected. Typed so each DDL entry point maps
+/// rules onto its existing error variants and status codes: ALTER keeps
+/// missing columns as `TableColumnNotFound` (4002), CREATE keeps its
+/// `InvalidArguments` family — the rules converge, the contracts do not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationValidationError {
+    UnknownKey {
+        key: String,
+    },
+    InvalidValue {
+        key: String,
+        value: String,
+    },
+    ColumnNotFound {
+        column: String,
+    },
+    ColumnNotStringForm {
+        key: String,
+        column: String,
+        ty: ConcreteDataType,
+    },
+    NotSingleColumn,
+    PartitionMetadataConflict,
+    TimeIndexConflict,
+}
+
+impl fmt::Display for AnnotationValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownKey { key } => write!(f, "unknown semantic option `{key}`"),
+            Self::InvalidValue { key, value } => {
+                write!(f, "invalid value `{value}` for semantic option `{key}`")
+            }
+            Self::ColumnNotFound { column } => write!(f, "column `{column}` not found"),
+            Self::ColumnNotStringForm { key, column, ty } => write!(
+                f,
+                "entity column `{column}` (option `{key}`) has type `{ty}`, \
+                 which cannot render as a string"
+            ),
+            Self::NotSingleColumn => write!(
+                f,
+                "{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"
+            ),
+            Self::PartitionMetadataConflict => write!(
+                f,
+                "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
+            ),
+            Self::TimeIndexConflict => write!(
+                f,
+                "cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"
+            ),
+        }
+    }
+}
+
+/// Validates one annotation option and returns the value to store — the
+/// repartition hint is trimmed to the bare column name, semantic values pass
+/// through unchanged.
+pub(crate) fn validate_and_normalize_annotation(
+    family: AnnotationFamily,
+    cx: &AnnotationContext<'_>,
+    key: &str,
+    value: &str,
+) -> std::result::Result<String, AnnotationValidationError> {
+    match family {
+        AnnotationFamily::Semantic => {
+            if !is_semantic_option_key(key) {
+                return Err(AnnotationValidationError::UnknownKey {
+                    key: key.to_string(),
+                });
+            }
+            if !validate_semantic_option(key, value) {
+                return Err(AnnotationValidationError::InvalidValue {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                });
+            }
+            if parse_entity_option_key(key).is_some() {
+                for column in parse_entity_columns(value) {
+                    let schema = cx.schema.column_schema_by_name(&column).ok_or_else(|| {
+                        AnnotationValidationError::ColumnNotFound {
+                            column: column.clone(),
+                        }
+                    })?;
+                    if !has_stable_string_form(&schema.data_type) {
+                        return Err(AnnotationValidationError::ColumnNotStringForm {
+                            key: key.to_string(),
+                            column,
+                            ty: schema.data_type.clone(),
+                        });
+                    }
+                }
+            }
+            Ok(value.to_string())
+        }
+        AnnotationFamily::RepartitionHint => {
+            let column_name = value.trim();
+            if column_name.is_empty() || column_name.contains(',') {
+                return Err(AnnotationValidationError::NotSingleColumn);
+            }
+            if !cx.partition_key_indices.is_empty() {
+                return Err(AnnotationValidationError::PartitionMetadataConflict);
+            }
+            let column_index = cx.schema.column_index_by_name(column_name).ok_or_else(|| {
+                AnnotationValidationError::ColumnNotFound {
+                    column: column_name.to_string(),
+                }
+            })?;
+            if cx.schema.timestamp_index() == Some(column_index) {
+                return Err(AnnotationValidationError::TimeIndexConflict);
+            }
+            Ok(column_name.to_string())
+        }
+    }
+}
+
+/// CREATE-side entry: validates every annotation option present in `options`
+/// and writes normalized values back in place.
+pub fn validate_and_normalize_annotation_options(
+    options: &mut TableOptions,
+    cx: &AnnotationContext<'_>,
+) -> std::result::Result<(), AnnotationValidationError> {
+    let mut normalized = Vec::new();
+    for (key, value) in &options.extra_options {
+        let Some(family) = AnnotationFamily::of_key(key) else {
+            continue;
+        };
+        let checked = validate_and_normalize_annotation(family, cx, key, value)?;
+        if checked != *value {
+            normalized.push((key.clone(), checked));
+        }
+    }
+    for (key, value) in normalized {
+        options.extra_options.insert(key, value);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlterKind {
     AddColumns {
@@ -309,10 +526,14 @@ pub enum AlterKind {
     UnsetTableOptions {
         keys: Vec<UnsetRegionOption>,
     },
-    SetRepartitionColumnHint {
-        column_name: String,
+    SetAnnotations {
+        family: AnnotationFamily,
+        options: Vec<(String, String)>,
     },
-    UnsetRepartitionColumnHint,
+    UnsetAnnotations {
+        family: AnnotationFamily,
+        keys: Vec<String>,
+    },
     SetIndexes {
         options: Vec<SetIndexOption>,
     },
@@ -557,6 +778,20 @@ mod tests {
 
         let options = TableOptions {
             write_buffer_size: None,
+            ttl: None,
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), true.to_string())]),
+            skip_wal: true,
+        };
+        let serialized_map = HashMap::from(&options);
+        assert_eq!(
+            Some("true"),
+            serialized_map.get(SKIP_WAL_KEY).map(String::as_str)
+        );
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
+        assert_eq!(options, serialized);
+
+        let options = TableOptions {
+            write_buffer_size: None,
             ttl: Default::default(),
             extra_options: HashMap::new(),
             skip_wal: false,
@@ -570,6 +805,15 @@ mod tests {
             ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
             skip_wal: false,
+        };
+        let serialized_map = HashMap::from(&options);
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
+        assert_eq!(options, serialized);
+
+        let options = TableOptions {
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), false.to_string())]),
+            skip_wal: false,
+            ..Default::default()
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
@@ -612,5 +856,13 @@ mod tests {
             "write_buffer_size=128.0MiB ttl=16m 40s skip_wal=true",
             options.to_string()
         );
+
+        let options = TableOptions {
+            write_buffer_size: None,
+            ttl: None,
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), "false".to_string())]),
+            skip_wal: false,
+        };
+        assert_eq!("skip_wal=false", options.to_string());
     }
 }

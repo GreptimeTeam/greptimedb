@@ -38,10 +38,6 @@ from json2_whole_and_path_read
 group by json_get(j, 'a.b')
 order by json_get(j, 'a.b');
 
-select j, j.a from json2_whole_and_path_read;
-
-select j from json2_whole_and_path_read where j.a.b = 1;
-
 drop table json2_whole_and_path_read;
 
 create table json2_without_append_mode (

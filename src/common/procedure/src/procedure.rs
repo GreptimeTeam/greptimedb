@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_event_recorder::{Event, EventTypeFilterRef};
+use common_event_recorder::{Event, EventTypeFilterRef, PersistentEventContext};
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, Snafu};
@@ -31,6 +31,30 @@ use crate::local::DynamicKeyLockGuard;
 use crate::watcher::Watcher;
 
 pub type Output = Arc<dyn Any + Send + Sync>;
+
+/// Context attached to a procedure submission and inherited by its children.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcedureContext {
+    /// Effective user that submitted the procedure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// Context describing why and how the procedure was submitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_context: Option<PersistentEventContext>,
+}
+
+impl ProcedureContext {
+    pub fn from_event_context(event_context: PersistentEventContext) -> Self {
+        Self {
+            actor: None,
+            event_context: Some(event_context),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.actor.is_none() && self.event_context.is_none()
+    }
+}
 
 /// Procedure execution status.
 #[derive(Debug)]
@@ -175,6 +199,8 @@ pub struct Context {
     pub procedure_id: ProcedureId,
     /// [ProcedureManager] context provider.
     pub provider: ContextProviderRef,
+    /// Event context inherited from the root submission.
+    pub event_context: Option<PersistentEventContext>,
 }
 
 impl Context {
@@ -252,6 +278,8 @@ pub struct EventContext<'a> {
     pub trigger: EventTrigger,
     /// Event types retained by the configured recorder.
     pub event_type_filter: EventTypeFilterRef,
+    /// Event context inherited from the root submission.
+    pub event_context: Option<&'a PersistentEventContext>,
 }
 
 /// Lifecycle action that causes the framework to invoke [`Procedure::event`].
@@ -459,6 +487,8 @@ pub struct ProcedureWithId {
     /// Id of the procedure.
     pub id: ProcedureId,
     pub procedure: BoxedProcedure,
+    /// Context associated with this procedure submission.
+    pub context: ProcedureContext,
 }
 
 impl ProcedureWithId {
@@ -468,7 +498,14 @@ impl ProcedureWithId {
         ProcedureWithId {
             id: ProcedureId::random(),
             procedure,
+            context: ProcedureContext::default(),
         }
+    }
+
+    /// Attaches a complete persisted context to this procedure submission.
+    pub fn with_context(mut self, context: ProcedureContext) -> Self {
+        self.context = context;
+        self
     }
 }
 
@@ -726,6 +763,7 @@ mod tests {
             lifecycle_state: &state,
             trigger: EventTrigger::Succeeded,
             event_type_filter: Arc::new(common_event_recorder::EventTypeFilter::All),
+            event_context: None,
         };
 
         assert!(DefaultEventProcedure.event(&context).is_none());

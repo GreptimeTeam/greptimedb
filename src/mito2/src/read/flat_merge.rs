@@ -512,6 +512,11 @@ impl RowCursor {
         self.offset >= self.columns.num_rows()
     }
 
+    /// Returns whether advancing this cursor will finish the current batch.
+    fn is_last_row(&self) -> bool {
+        self.offset.checked_add(1) == Some(self.columns.num_rows())
+    }
+
     fn advance(&mut self) {
         self.offset += 1;
     }
@@ -819,12 +824,15 @@ impl FlatMergeReader {
             }
         }
 
-        let start = Instant::now();
-        if let Some(next) = hottest.advance_row().await? {
+        // Only read the clock when advancing will attempt to fetch the next batch.
+        // Check first because `None` means either no fetch or EOF after a fetch attempt.
+        let start = hottest.current_cursor().is_last_row().then(Instant::now);
+        let next = hottest.advance_row().await?;
+        if let Some(start) = start {
             self.metrics.fetch_cost += start.elapsed();
+        }
+        if let Some(next) = next {
             self.in_progress.push_batch(hottest.node_index, next);
-        } else {
-            self.metrics.fetch_cost += start.elapsed();
         }
 
         self.algo.reheap(hottest);
@@ -1064,6 +1072,24 @@ mod tests {
 
     fn new_test_iter(batches: Vec<RecordBatch>) -> BoxedRecordBatchIterator {
         Box::new(batches.into_iter().map(Ok))
+    }
+
+    #[test]
+    fn test_row_cursor_last_row() {
+        let batch = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[21, 22],
+            &[OpType::Put, OpType::Put],
+            &[11, 12],
+        );
+        let mut cursor = RowCursor::new(SortColumns::new(&batch));
+
+        assert!(!cursor.is_last_row());
+        cursor.advance();
+        assert!(cursor.is_last_row());
+        cursor.advance();
+        assert!(!cursor.is_last_row());
     }
 
     /// Helper function to check if two record batches are equivalent.

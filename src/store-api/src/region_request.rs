@@ -56,8 +56,8 @@ use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
-    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
+    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
+    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -458,6 +458,10 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
                 RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges { time_ranges }),
             )])
         }
+        Some(truncate_request::Kind::Unflushed(_)) => Ok(vec![(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )]),
     }
 }
 
@@ -1436,6 +1440,10 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
     }
 }
 
+/// Region option changes used by ALTER requests.
+///
+/// This type currently derives serde for request persistence. Keep future changes
+/// backward compatible with previously serialized variants.
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetRegionOption {
     WriteBufferSize(Option<ReadableSize>),
@@ -1450,6 +1458,8 @@ pub enum SetRegionOption {
     AutoFlushInterval(Option<Duration>),
     // Modifying the max number of rows in a parquet row group.
     MaxRowGroupRowCount(Option<usize>),
+    // Stops writing new WAL entries. This operation is irreversible.
+    SkipWal,
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1507,6 +1517,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::MaxRowGroupRowCount(Some(row_count)))
             }
+            SKIP_WAL_KEY if value == "true" => Ok(Self::SkipWal),
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1805,6 +1816,41 @@ mod tests {
     }
 
     #[test]
+    fn test_make_region_truncate_unflushed() {
+        let region_id = RegionId::new(42, 3);
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: region_id.as_u64(),
+                kind: Some(truncate_request::Kind::Unflushed(
+                    api::v1::region::Unflushed {},
+                )),
+            }))
+            .unwrap();
+
+        assert_eq!(region_id, requests[0].0);
+        assert!(matches!(
+            requests[0].1,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
+        ));
+    }
+
+    #[test]
+    fn test_make_region_truncate_requires_kind() {
+        let error =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: RegionId::new(42, 3).as_u64(),
+                kind: None,
+            }))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing kind in TruncateRequest")
+        );
+    }
+
+    #[test]
     fn test_from_proto_location() {
         let proto_location = v1::AddColumnLocation {
             location_type: LocationType::First as i32,
@@ -1877,6 +1923,28 @@ mod tests {
             value: "not_a_duration".to_string(),
         };
         assert!(SetRegionOption::try_from(&pb).is_err());
+    }
+
+    #[test]
+    fn test_set_region_option_skip_wal_try_from() {
+        let pb = PbOption {
+            key: SKIP_WAL_KEY.to_string(),
+            value: "true".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::SkipWal,
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        for value in ["false", "", "invalid"] {
+            let pb = PbOption {
+                key: SKIP_WAL_KEY.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert!(UnsetRegionOption::try_from(SKIP_WAL_KEY).is_err());
     }
 
     #[test]

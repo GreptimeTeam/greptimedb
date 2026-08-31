@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -28,14 +29,18 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
-    trace_services_table_name,
+    DEFAULT_PRIVATE_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
+    TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
+    trace_operations_table_name, trace_services_table_name,
 };
+use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
+use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
+use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{greptime_timestamp, greptime_value};
@@ -488,9 +493,9 @@ impl Inserter {
         Ok(inserts)
     }
 
-    /// Returns `None` if auto table creation is allowed, or `Some(reason)` if
-    /// disabled by either the global config or the request hint. The reason tells
-    /// which one, for a clearer error.
+    /// Returns `Some(reason)` if the config or request hint disables automatic
+    /// table creation. Exempt private system tables are handled by
+    /// [`Self::is_auto_create_exempt_private_table`].
     fn auto_create_disabled_reason(&self, ctx: &QueryContextRef) -> Result<Option<&'static str>> {
         let auto_create_table_hint = ctx
             .extension(AUTO_CREATE_TABLE_KEY)
@@ -510,6 +515,16 @@ impl Inserter {
         } else {
             None
         })
+    }
+
+    /// Returns whether a private system table may infer and reconcile its schema
+    /// even when automatic table creation is disabled.
+    fn is_auto_create_exempt_private_table(schema: &str, table: &str) -> bool {
+        schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            && matches!(
+                table,
+                DEFAULT_EVENTS_TABLE_NAME | SLOW_QUERY_TABLE_NAME | REGION_STATS_HISTORY_TABLE_NAME
+            )
     }
 
     /// Ensures a trace table has the request-global schema without requiring a
@@ -569,23 +584,42 @@ impl Inserter {
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
-
         let catalog = ctx.current_catalog();
         let schema = ctx.current_schema();
 
+        let auto_create_disabled_reason = self.auto_create_disabled_reason(ctx)?;
+        // Enabled batches permit every table, so only disabled batches need a whitelist scan.
+        let has_auto_create_exempt_table = auto_create_disabled_reason.is_some()
+            && requests
+                .inserts
+                .iter()
+                .any(|req| Self::is_auto_create_exempt_private_table(&schema, &req.table_name));
         let mut table_infos = HashMap::new();
-        if let Some(disabled_reason) = self.auto_create_disabled_reason(ctx)? {
+        // Without exempt tables, verify existing tables and reject missing ones without inferring schemas.
+        if let Some(disabled_reason) = auto_create_disabled_reason
+            && !has_auto_create_exempt_table
+        {
             let mut instant_table_ids = HashSet::new();
             for req in &requests.inserts {
-                let table = self
-                    .get_table(catalog, &schema, &req.table_name)
-                    .await?
-                    .context(InvalidInsertRequestSnafu {
-                        reason: format!(
-                            "Table `{}` does not exist, and {}",
-                            req.table_name, disabled_reason
-                        ),
-                    })?;
+                let table = match self.get_table(catalog, &schema, &req.table_name).await? {
+                    Some(table) => table,
+                    // System-defined table: created canonically by the system,
+                    // so the auto-create config/hint does not apply.
+                    None if is_ddl_reserved_table(&schema, &req.table_name) => {
+                        statement_executor
+                            .create_declared_relationships_table(catalog, ctx.clone())
+                            .await?
+                    }
+                    None => {
+                        return InvalidInsertRequestSnafu {
+                            reason: format!(
+                                "Table `{}` does not exist, and {}",
+                                req.table_name, disabled_reason
+                            ),
+                        }
+                        .fail();
+                    }
+                };
                 let table_info = table.table_info();
                 if table_info.is_ttl_instant_table() {
                     instant_table_ids.insert(table_info.table_id());
@@ -603,22 +637,28 @@ impl Inserter {
         let mut alter_tables = vec![];
         let mut need_refresh_table_infos = HashSet::new();
         let mut instant_table_ids = HashSet::new();
+        let mut per_table_semantics: Option<Option<PerTableSemanticIndex>> = None;
 
         for req in &mut requests.inserts {
+            // Mixed batches need a per-table decision so an exempt table cannot authorize others.
+            let auto_create_allowed = auto_create_disabled_reason.is_none()
+                || Self::is_auto_create_exempt_private_table(&schema, &req.table_name);
             match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
-                    if let Some(alter_expr) = self.get_alter_table_expr_on_demand(
-                        req,
-                        &table,
-                        ctx,
-                        accommodate_existing_schema,
-                        is_single_value,
-                        auto_create_table_type.alter_existing(),
-                    )? {
+                    if auto_create_allowed
+                        && let Some(alter_expr) = self.get_alter_table_expr_on_demand(
+                            req,
+                            &table,
+                            ctx,
+                            accommodate_existing_schema,
+                            is_single_value,
+                            auto_create_table_type.alter_existing(),
+                        )?
+                    {
                         alter_tables.push(alter_expr);
                         need_refresh_table_infos.insert((
                             catalog.to_string(),
@@ -629,9 +669,40 @@ impl Inserter {
                         table_infos.insert(table_info.table_id(), table.table_info());
                     }
                 }
+                // A DDL-reserved table's definition never derives from the
+                // write request; the system creates it canonically, below the
+                // user-DDL guard that rejects the generic create path.
+                None if is_ddl_reserved_table(&schema, &req.table_name) => {
+                    let table = statement_executor
+                        .create_declared_relationships_table(catalog, ctx.clone())
+                        .await?;
+                    let table_info = table.table_info();
+                    if table_info.is_ttl_instant_table() {
+                        instant_table_ids.insert(table_info.table_id());
+                    }
+                    table_infos.insert(table_info.table_id(), table_info);
+                }
+                None if !auto_create_allowed
+                    && let Some(disabled_reason) = auto_create_disabled_reason =>
+                {
+                    return InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "Table `{}` does not exist, and {}",
+                            req.table_name, disabled_reason,
+                        ),
+                    }
+                    .fail();
+                }
                 None => {
-                    let create_expr =
-                        self.get_create_table_expr_on_demand(req, &auto_create_table_type, ctx)?;
+                    let semantic_index = per_table_semantics
+                        .get_or_insert_with(|| parse_per_table_semantic_index(ctx))
+                        .as_ref();
+                    let create_expr = self.get_create_table_expr_on_demand(
+                        req,
+                        &auto_create_table_type,
+                        ctx,
+                        semantic_index,
+                    )?;
                     create_tables.push(create_expr);
                 }
             }
@@ -656,7 +727,7 @@ impl Inserter {
                 if !alter_tables.is_empty() {
                     // Alter logical tables in batch.
                     statement_executor
-                        .alter_logical_tables(alter_tables, ctx.clone())
+                        .alter_logical_tables(alter_tables, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -677,7 +748,7 @@ impl Inserter {
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone())
+                        .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -786,7 +857,7 @@ impl Inserter {
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone())
+                        .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -872,7 +943,12 @@ impl Inserter {
 
         // create physical table
         let res = statement_executor
-            .create_table_inner(create_table_expr, None, ctx.clone())
+            .create_table_inner(
+                create_table_expr,
+                None,
+                ctx.clone(),
+                TriggerReason::AutoCreate,
+            )
             .await;
 
         match res {
@@ -904,10 +980,17 @@ impl Inserter {
         req: &RowInsertRequest,
         create_type: &AutoCreateTableType,
         ctx: &QueryContextRef,
+        semantic_index: Option<&PerTableSemanticIndex>,
     ) -> Result<CreateTableExpr> {
+        let schema = ctx.current_schema();
         let mut table_options = std::collections::HashMap::with_capacity(4);
         fill_table_options_for_create(&mut table_options, create_type, ctx);
-        apply_per_table_semantic_options(&mut table_options, ctx, &req.table_name);
+        apply_per_table_semantic_options(
+            &mut table_options,
+            semantic_index,
+            ctx.current_schema().as_str(),
+            &req.table_name,
+        );
 
         let engine_name = if let AutoCreateTableType::Logical(_) = create_type {
             // engine should be metric engine when creating logical tables.
@@ -916,7 +999,6 @@ impl Inserter {
             default_engine()
         };
 
-        let schema = ctx.current_schema();
         let table_ref = TableReference::full(ctx.current_catalog(), &schema, &req.table_name);
         // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_row_inserts_with_create_type()`.
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
@@ -938,8 +1020,8 @@ impl Inserter {
     /// When `accommodate_existing_schema` is true, it may modify the input `req` to
     /// accommodate it with existing schema. See [`create_or_alter_tables_on_demand`](Self::create_or_alter_tables_on_demand)
     /// for more details.
-    /// When `accommodate_existing_schema` is true and `is_single_value` is true, it also consider fields when modifying the
-    /// input `req`.
+    /// When `is_single_value` is true, it also rejects native-histogram/float kind changes.
+    /// When both options are true, it considers fields when modifying the input `req`.
     fn get_alter_table_expr_on_demand(
         &self,
         req: &mut RowInsertRequest,
@@ -957,6 +1039,12 @@ impl Inserter {
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
 
+        // Never auto-alter a system-defined table to fit a write; a request
+        // with unknown columns fails instead.
+        if is_ddl_reserved_table(&schema_name, &table_name) {
+            return Ok(None);
+        }
+
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let request_field_count = request_schema
             .iter()
@@ -968,8 +1056,7 @@ impl Inserter {
             return Ok(None);
         };
 
-        // If accommodate_existing_schema is true, update request schema for Timestamp/Field columns
-        if accommodate_existing_schema {
+        if is_single_value {
             let request_is_native_histogram = request_is_native_histogram(request_schema);
             let table_is_native_histogram = table_is_native_histogram(table);
             ensure!(
@@ -980,6 +1067,10 @@ impl Inserter {
                     ),
                 }
             );
+        }
+
+        // If accommodate_existing_schema is true, update request schema for Timestamp/Field columns
+        if accommodate_existing_schema {
             let table_schema = table.schema();
             // Find timestamp column name
             let ts_col_name = table_schema.timestamp_column().map(|c| c.name.clone());
@@ -1060,7 +1151,12 @@ impl Inserter {
             info!("Table `{table_ref}` does not exist, try creating table");
         }
         let res = statement_executor
-            .create_table_inner(&mut create_table_expr, partitions, ctx.clone())
+            .create_table_inner(
+                &mut create_table_expr,
+                partitions,
+                ctx.clone(),
+                TriggerReason::AutoCreate,
+            )
             .await;
 
         let table_ref = TableReference::full(
@@ -1091,7 +1187,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
     ) -> Result<Vec<TableRef>> {
         let res = statement_executor
-            .create_logical_tables(&create_table_exprs, ctx.clone())
+            .create_logical_tables(&create_table_exprs, ctx.clone(), TriggerReason::AutoCreate)
             .await;
 
         match res {
@@ -1244,32 +1340,45 @@ pub fn fill_table_options_for_create(
     }
 }
 
-/// Folds the semantic keys for `table_name` carried on the internal per-table
-/// index extension into `table_options`.
+/// The parsed per-table semantic index: `{schema -> {table -> {key -> value}}}`,
+/// produced by the OTLP metrics encode path (where one metric can fan out into
+/// several tables with distinct keys) and the Prometheus remote write v2 path
+/// (where per-series metadata declares type/unit, and a series may override its
+/// target schema).
+pub type PerTableSemanticIndex = BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>;
+
+/// Parses the per-table semantic index off the context extension. Call once per
+/// create-planning round: a first write creating N tables would otherwise
+/// re-parse the whole index N times. `None` when the request carries no index
+/// (logs, traces, Prom RW v1) or it fails to parse.
+pub fn parse_per_table_semantic_index(ctx: &QueryContextRef) -> Option<PerTableSemanticIndex> {
+    let raw = ctx.extension(SEMANTIC_PER_TABLE_INDEX_KEY)?;
+    match serde_json::from_str(raw) {
+        Ok(index) => Some(index),
+        Err(_) => {
+            warn!("failed to parse semantic per-table index, skipping per-table options");
+            None
+        }
+    }
+}
+
+/// Folds the semantic keys of the table being created into `table_options`.
 ///
-/// The index is a `{table_name -> {semantic_key: value}}` JSON blob produced by
-/// the OTLP metrics encode path (where one metric can fan out into several
-/// tables with distinct keys). Common keys shared by every table in a request
-/// travel as plain semantic extensions and are handled by
-/// [`fill_table_options_for_create`]; this carries only the per-table tail.
-/// Keys are re-checked against the vocabulary defensively. Ingestion paths
-/// without a per-table index (logs, traces, Prom RW) carry no extension, so this
-/// is a no-op for them.
-fn apply_per_table_semantic_options(
+/// Common keys shared by every table in a request travel as plain semantic
+/// extensions and are handled by [`fill_table_options_for_create`]; this
+/// carries only the per-table tail and is applied after it, so a per-table
+/// value (e.g. `declared` quality) wins. Keys are re-checked against the
+/// vocabulary defensively.
+pub fn apply_per_table_semantic_options(
     table_options: &mut std::collections::HashMap<String, String>,
-    ctx: &QueryContextRef,
+    index: Option<&PerTableSemanticIndex>,
+    schema: &str,
     table_name: &str,
 ) {
-    let Some(raw) = ctx.extension(SEMANTIC_PER_TABLE_INDEX_KEY) else {
-        return;
-    };
-    let Ok(index) = serde_json::from_str::<
-        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-    >(raw) else {
-        warn!("failed to parse semantic per-table index, skipping per-table options");
-        return;
-    };
-    let Some(entry) = index.get(table_name) else {
+    let Some(entry) = index
+        .and_then(|index| index.get(schema))
+        .and_then(|tables| tables.get(table_name))
+    else {
         return;
     };
     for (key, value) in entry {
@@ -1496,7 +1605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_accommodate_existing_schema_logic() {
+    async fn test_accommodate_existing_schema_and_reject_kind_changes() {
         let ts_name = "my_ts";
         let field_name = "my_field";
         let table =
@@ -1548,6 +1657,66 @@ mod tests {
         let req_schema = req.rows.as_ref().unwrap().schema.clone();
         assert_eq!(req_schema[0].column_name, ts_name);
         assert_eq!(req_schema[1].column_name, field_name);
+
+        let (datatype, datatype_extension) =
+            ColumnDataTypeWrapper::try_from(native_histogram_value_type().clone())
+                .unwrap()
+                .into_parts();
+        let mut histogram_req = RowInsertRequest {
+            table_name: "test_table".to_string(),
+            rows: Some(Rows {
+                schema: vec![
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    api::v1::ColumnSchema {
+                        column_name: greptime_native_histogram().to_string(),
+                        datatype: datatype as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension,
+                        options: None,
+                    },
+                ],
+                rows: vec![],
+            }),
+        };
+        let error = inserter
+            .get_alter_table_expr_on_demand(&mut histogram_req, &table, &ctx, false, true, true)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mix native histogram and float sample fields")
+        );
+
+        let histogram_table = make_table_ref_with_schema(
+            "ts",
+            greptime_native_histogram(),
+            native_histogram_value_type().clone(),
+        );
+        let mut sample_req = RowInsertRequest {
+            table_name: "test_table".to_string(),
+            rows: Some(Rows {
+                schema: vec![
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    field_column_schema(greptime_value(), ColumnDataType::Float64),
+                ],
+                rows: vec![],
+            }),
+        };
+        let error = inserter
+            .get_alter_table_expr_on_demand(
+                &mut sample_req,
+                &histogram_table,
+                &ctx,
+                false,
+                true,
+                true,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mix native histogram and float sample fields")
+        );
     }
 
     #[test]
@@ -1634,22 +1803,41 @@ mod tests {
             SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT, SEMANTIC_PER_TABLE_INDEX_KEY,
         };
 
-        let index = r#"{
-            "http_requests_total": {
-                "greptime.semantic.metric.type": "counter",
-                "greptime.semantic.metric.unit": "By",
-                "greptime.semantic.metric.type_BOGUS": "x"
-            },
-            "other_table": {
-                "greptime.semantic.metric.type": "gauge"
-            }
-        }"#;
+        let index = format!(
+            r#"{{
+            "{DEFAULT_SCHEMA_NAME}": {{
+                "http_requests_total": {{
+                    "greptime.semantic.metric.type": "counter",
+                    "greptime.semantic.metric.unit": "By",
+                    "greptime.semantic.metric.type_BOGUS": "x"
+                }},
+                "other_table": {{
+                    "greptime.semantic.metric.type": "gauge"
+                }}
+            }},
+            "other_schema": {{
+                "http_requests_total": {{
+                    "greptime.semantic.metric.type": "gauge"
+                }}
+            }}
+        }}"#
+        );
         let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
         let ctx = Arc::new(ctx);
 
+        let index = parse_per_table_semantic_index(&ctx);
+        assert!(index.is_some());
+        let index = index.as_ref();
+
         let mut table_options = std::collections::HashMap::new();
-        apply_per_table_semantic_options(&mut table_options, &ctx, "http_requests_total");
+        apply_per_table_semantic_options(
+            &mut table_options,
+            index,
+            DEFAULT_SCHEMA_NAME,
+            "http_requests_total",
+        );
+        // The write schema's entry applies — not other_schema's `gauge`.
         assert_eq!(
             table_options.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
             Some("counter")
@@ -1664,16 +1852,33 @@ mod tests {
         assert_eq!(table_options.len(), 2);
 
         let mut empty = std::collections::HashMap::new();
-        apply_per_table_semantic_options(&mut empty, &ctx, "not_in_index");
+        apply_per_table_semantic_options(&mut empty, index, DEFAULT_SCHEMA_NAME, "not_in_index");
         assert!(empty.is_empty());
 
-        // No extension at all is a no-op (e.g. logs / Prom RW).
+        // A schema with no entry is a no-op even when the table name matches
+        // elsewhere.
+        let mut opts = std::collections::HashMap::new();
+        apply_per_table_semantic_options(
+            &mut opts,
+            index,
+            "schema_without_entry",
+            "http_requests_total",
+        );
+        assert!(opts.is_empty());
+
+        // No extension at all parses to no index (e.g. logs / Prom RW v1).
         let bare = Arc::new(QueryContext::with(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
         ));
+        assert!(parse_per_table_semantic_index(&bare).is_none());
         let mut opts = std::collections::HashMap::new();
-        apply_per_table_semantic_options(&mut opts, &bare, "http_requests_total");
+        apply_per_table_semantic_options(
+            &mut opts,
+            None,
+            DEFAULT_SCHEMA_NAME,
+            "http_requests_total",
+        );
         assert!(opts.is_empty());
     }
 

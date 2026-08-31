@@ -246,6 +246,7 @@ mod tests {
                 receiver: rx,
                 inner: MockContextProvider::default(),
             }),
+            event_context: None,
         };
         let mut state = Collect {
             inflight_procedures: vec![ProcedureMeta {

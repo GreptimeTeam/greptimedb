@@ -41,7 +41,7 @@ release-level realism.
 
 ## Prometheus remote-write scenario
 
-The runner also supports `scenario.kind = "prom_remote_write_then_query"` for a
+The outer driver supports `scenario.kind = "prom_remote_write_then_query"` for a
 bounded write-path smoke/regression flow. This path is explicit and separate from
 the direct-SST fixture path: it starts the base and candidate distributed clusters,
 writes deterministic Prometheus remote-write v1 samples through
@@ -111,11 +111,10 @@ helper so non-linear value patterns use a stable global/per-series ordinal acros
 chunks.
 
 Case schema, value distribution defaults, storage defaults, and read-bench
-defaults are owned by Rust. The Python runner calls
-`query_perf_fixture plan --case <case.toml>` and orchestrates the normalized JSON.
-The same helper exposes `direct-sst`, `prom-remote-write`, and `inspect-footer`
-subcommands; the old direct invocation (`query_perf_fixture --case ... --out-dir
-...`) remains compatible.
+defaults are owned by Rust. The outer CI driver calls
+`query_perf_fixture plan --case <case.toml>` once, then uses the normalized plan
+to select the Rust runner lifecycle. The fixture helper exposes `direct-sst`,
+`prom-remote-write`, and `inspect-footer` subcommands.
 
 Remote-write cases that need to validate storage output can add
 `[scenario.remote_write.storage]`. When present, the scenario body becomes:
@@ -163,17 +162,15 @@ measures region scan cost, and query measurements still exercise the SQL/TQL
 frontend path. Treat all performance conclusions as release-only; debug builds
 are suitable only for command wiring and correctness checks.
 
-The runner creates the configured database if needed, writes a per-target
+`prepare-remote` creates the configured database if needed. The outer driver writes a per-target
 frontend config enabling `[prom_store]` with metric engine storage and a non-zero
 `pending_rows_flush_interval`, and validates that the logical metric table reaches
 `series_count * samples_per_series` rows before trusting the query measurements.
-Use `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper.
-Deprecated `--remote-write-generator` and `--storage-inspector` options are kept
-only for CLI compatibility. `--fixture-only` is rejected for remote-write cases;
-use `--dry-run` for planning.
+Use `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper
+to the outer driver.
 
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
-time. For each chunk, the runner invokes `query_perf_fixture prom-remote-write` with the
+time. For each chunk, `prepare-remote` invokes `query_perf_fixture prom-remote-write` with the
 same series cardinality but a shorter `--samples-per-series` and an advanced
 `--start-unix-millis`. `flush_every_sample_chunks` controls periodic
 `ADMIN FLUSH_TABLE('<physical_table>')` calls; with `flush_every_sample_chunks = 1`,
@@ -213,34 +210,27 @@ workflow dispatch accepts the `heavy` token to select this case.
 ## OTLP trace load scenario
 
 `scenario.kind = "otlp_trace_load"` runs a bounded native `otelgen` process
-against each local distributed cluster. The runner excludes the configured
-warmup window, derives throughput and mean request latency from GreptimeDB's
-OTLP-specific metrics, flushes the trace table, and verifies its row count
-against the accepted-span counter. The case is intentionally outside the
-default set until its variance is known.
+against each local distributed cluster. The outer driver runs the base target
+alone with Rust `run-otlp-target`, fully stops it, then runs the candidate alone
+and calls Rust `finalize-otlp` to aggregate metrics, thresholds, and the final
+report. The case is intentionally outside the default set until its variance is
+known.
 
-Build base/candidate `greptime` binaries with the same profile, build the
-candidate `query_perf_fixture`, then run the case explicitly:
+Build base/candidate `greptime` binaries with the same profile and build the
+candidate `query_perf_fixture` and `query_regression_runner`, then run the outer
+driver explicitly:
 
 ```bash
 WORK_DIR="$(mktemp -d /tmp/query-perf-otlp.XXXXXX)"
-REPORT="$WORK_DIR/trace-report.json"
-python3 tests/perf/query_regression_runner.py \
-  --case tests/perf/query_cases/otlp_trace_load/case.toml \
+uv run --no-project python .github/scripts/query-regression-run.py \
+  --cases tests/perf/query_cases/otlp_trace_load/case.toml \
   --base-bin /path/to/base/target/nightly/greptime \
   --candidate-bin /path/to/candidate/target/nightly/greptime \
   --fixture-generator /path/to/candidate/target/nightly/query_perf_fixture \
+  --runner /path/to/candidate/target/nightly/query_regression_runner \
   --otelgen-bin /path/to/otelgen \
-  --work-dir "$WORK_DIR" \
-  --output "$REPORT"
-```
-
-Install [YouPlot](https://github.com/red-data-tools/YouPlot) once, then render
-all comparison metrics and threshold results in the terminal:
-
-```bash
-brew install youplot
-tests/perf/plot_otlp_trace_report.sh "$REPORT"
+  --work-dir "$WORK_DIR"
+REPORT="$WORK_DIR/otlp_trace_load/query-regression-report.json"
 ```
 
 For each target, `accepted_spans` should equal `table_rows`, and `failures`
@@ -265,11 +255,12 @@ gh workflow run query-regression.yml \
   -f candidate_ref=<full-candidate-sha> \
   -f cargo_profile=nightly \
   -f http_timeout=300 \
-  -f runner=perf-regression-8-cores
+  -f runner=aliyun-ecs
 ```
 
-The selected ARC scale set must already be deployed with the runner-image
-digest built from the current query-regression Dockerfile.
+The `aliyun-ecs` path provisions a fresh ECS instance per run from the custom
+image built from the current query-regression Dockerfile; see
+`.github/runner-scale-sets/query-regression/README.md` for its configuration.
 
 ## Generator contract
 
@@ -323,8 +314,8 @@ seed = 12345
 # query, warmups, iterations, thresholds
 ```
 
-The runner currently supports `direct_readable_sst` and
-`prom_remote_write_then_query`.
+The outer driver currently supports `direct_readable_sst`,
+`prom_remote_write_then_query`, and `otlp_trace_load`.
 
 ## Metrics
 
@@ -340,120 +331,49 @@ Primary gates should compare query work rather than plan text:
 Plan details such as pushed filters are useful diagnostics, but should not be the
 main pass/fail signal.
 
-## Runner MVP
+## Runner lifecycle
 
-`query_regression_runner.py` is the base-vs-candidate orchestration layer. The
-current MVP parses a case, creates per-target work directories, and in real query
-mode starts a local distributed cluster for each target: metasrv (memory-store,
-region failover disabled), one datanode (`node_id=0`), and one frontend. It
-creates the configured Mito table(s) through frontend HTTP SQL, discovers the
-real one-region-per-table metadata via `information_schema`, stops only the
-owning datanode, generates one shared direct-SST fixture per table using the
-discovered `--region-id`, `--table-dir`, and `--table`, injects those region
-subtrees into the datanode data home, restarts the datanode, then validates and
-measures through frontend. Reports are written as JSON under the work directory.
+`.github/scripts/query-regression-run.py` is the outer CI driver. It resolves the
+base and candidate `greptime` binaries, candidate `query_perf_fixture`, and
+candidate `query_regression_runner`; allocates disjoint localhost
+meta/datanode/frontend HTTP, gRPC, MySQL, and Postgres ports for each target; and
+writes component logs below `<work-dir>/<target>/logs/`.
 
-The runner intentionally keeps metasrv alive for the whole target run because
-memory-store metadata would otherwise be lost. It replaces only the discovered
-datanode region directory under `data/greptime/<schema>/<table_id>/...` with
-generated SST files and a manifest checkpoint. For multi-table cases this is
-repeated per table, enabling true JOIN fixtures while still requiring exactly one
-region per table. Base and candidate must discover identical per-table
-`table_dir` and `region_id`; otherwise the run fails.
+The Rust runner consumes the normalized plan and endpoint ports. For
+`direct_readable_sst`, the driver starts both clusters, runs `prepare-direct`,
+stops only both datanodes, writes File-object-store destination TOMLs, invokes
+`materialize` for every fixture and target, restarts datanodes, then runs
+`measure` (with one frontend restart retry). `materialize` uses OpenDAL and only
+replaces the fixture's exact region prefix in each target data home.
 
-Multi-table direct-SST cases must use unique table names as well as unique
-`(database, name)` pairs because the generator currently selects a table with
-`--table <name>`. Per-table fixture directories are derived from table index,
-database, and table name with path-unsafe characters sanitized.
+For `prom_remote_write_then_query`, it renders a target frontend configuration
+with `render-remote-config`, starts both clusters, runs `prepare-remote` and
+`measure`, stops both datanodes, then runs `finalize-remote`. Finalization owns
+storage inspection and read-bench against the quiescent data homes. Both paths
+write `query-regression-report.json` in the case work directory and always clean
+up the remaining components.
 
-Currently enforced threshold:
-
-- `max_candidate_latency_regression_pct`, based on client-side median latency.
-
-Server-side scan thresholds such as file ranges and scanned rows are planned for
-a follow-up PR that extracts them from structured `EXPLAIN ANALYZE VERBOSE`
-output. Do not add those threshold keys until the runner enforces them.
-
-Dry-run example:
+For local orchestration after building the three binaries, invoke the outer
+driver directly:
 
 ```bash
-uv run --no-project python tests/perf/query_regression_runner.py \
-  --case tests/perf/query_cases/promql_pushdown_7913/case.toml \
-  --base-bin /path/to/base/greptime \
-  --candidate-bin /path/to/candidate/greptime \
-  --work-dir /tmp/query-perf-work \
-  --dry-run
-```
-
-With a fixture generator:
-
-```bash
-uv run --no-project python tests/perf/query_regression_runner.py \
-  --case tests/perf/query_cases/promql_pushdown_7913/case.toml \
+uv run --no-project python .github/scripts/query-regression-run.py \
+  --cases tests/perf/query_cases/smoke_direct_sst/case.toml \
   --base-bin /path/to/base/greptime \
   --candidate-bin /path/to/candidate/greptime \
   --fixture-generator /path/to/query_perf_fixture \
-  --fixture-cache-dir /mnt/query-regression-fixtures \
-  --allow-large-fixture \
-  --work-dir /tmp/query-perf-work
+  --runner /path/to/query_regression_runner \
+  --work-dir /tmp/query-regression-work
 ```
 
-This mode launches metasrv, datanode, and frontend for each target with explicit
-localhost HTTP/gRPC/MySQL/Postgres ports and writes component stdout/stderr under
-each target's `logs/` directory.
-
-By default query mode requires fresh base/candidate work directories and fails if
-either target directory already exists with contents. Use `--reuse-work-dir` only
-when intentionally debugging an existing run directory. SQL HTTP requests default
-to a 120 second timeout; override with `--http-timeout <seconds>` for slow lab
-runs.
-
-For large direct-SST fixtures, pass `--fixture-cache-dir <dir>` to store generated
-fixtures in a persistent content-addressed cache keyed by case name and fixture
-data configuration. Query and threshold edits reuse the same cached data as long
-as the scenario layout and table definitions do not change. Cached fixtures are
-reused automatically when their `summary.json`
-matches the discovered table/region metadata; incompatible entries are
-regenerated instead of reused. Fixture materialization keeps base and candidate
-data directories isolated, but copies files efficiently by trying filesystem
-reflinks first, hardlinks for immutable SST/object files next, and normal copies
-as a fallback. Manifest files are reflinked or copied, not hardlinked.
-
-Fixture generator smoke test:
+The Rust runner subcommands are also useful for focused diagnostics:
 
 ```bash
-cargo run -p cmd --bin query_perf_fixture --features dev-tools -- \
-  direct-sst \
-  --case tests/perf/query_cases/smoke_direct_sst/case.toml \
-  --out-dir /tmp/query-perf-smoke
-```
-
-Runner smoke test with fixture generation only:
-
-```bash
-uv run --no-project python tests/perf/query_regression_runner.py \
-  --case tests/perf/query_cases/smoke_direct_sst/case.toml \
-  --base-bin /path/to/query_perf_fixture \
-  --candidate-bin /path/to/query_perf_fixture \
-  --fixture-generator /path/to/query_perf_fixture \
-  --work-dir /tmp/query-perf-runner-smoke \
-  --fixture-only
-```
-
-`--fixture-only` preserves the earlier smoke behavior: it does not start
-standalone servers, and it materializes the generated fixture into base and
-candidate data directories for plumbing validation.
-
-Remote-write runner dry-run:
-
-```bash
-uv run --no-project python tests/perf/query_regression_runner.py \
-  --case tests/perf/query_cases/prom_remote_write_seeded_random/case.toml \
-  --base-bin /path/to/base/greptime \
-  --candidate-bin /path/to/candidate/greptime \
-  --fixture-generator /path/to/query_perf_fixture \
-  --work-dir /tmp/query-perf-remote-write \
-  --dry-run
+query_regression_runner prepare-direct --case <case.toml> --fixture-generator <fixture> \
+  --base-http-port <port> --candidate-http-port <port> --fixture-dir <dir> --output <json>
+query_regression_runner materialize --fixture-dir <dir> --destination <toml>
+query_regression_runner measure --case <case.toml> --fixture-generator <fixture> \
+  --base-http-port <port> --candidate-http-port <port> --output <report.json>
 ```
 
 ## GitHub Actions
@@ -462,14 +382,14 @@ uv run --no-project python tests/perf/query_regression_runner.py \
 query regression runs. It builds its own binaries for now:
 
 - base `greptime` from the PR base commit, or `workflow_dispatch` `base_ref`
-- candidate `greptime` and `query_perf_fixture` from the PR merge ref/current
-  candidate checkout
-- runner and summary formatter from the candidate checkout
+- candidate `greptime`, `query_perf_fixture`, and `query_regression_runner` from
+  the PR merge ref/current candidate checkout
+- outer driver and summary formatter from the candidate checkout
 
 The workflow builds base and candidate `greptime` as normal release-equivalent
-binaries. Candidate `query_perf_fixture` is the extra head-side helper binary;
-the runner uses candidate `greptime datanode parquetbench/scanbench` as the
-read-bench tool against each target's data directory.
+binaries. Candidate `query_perf_fixture` and `query_regression_runner` are the
+extra head-side helpers; `finalize-remote` uses candidate `greptime datanode
+parquetbench/scanbench` as the read-bench tool against each target's data directory.
 
 The workflow runs automatically only when `query-regression` or `heavy-regression`
 is added to a non-draft PR; it does not rerun on pushes, ready-for-review, or

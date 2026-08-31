@@ -204,21 +204,13 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             return Ok(());
         };
 
-        // Convert all non-null literals to predicates
-        let predicates = in_list
-            .list
-            .iter()
-            .filter_map(Self::nonnull_lit)
-            .map(|lit| encode_lit(lit, data_type.clone()));
-
-        // Collect successful conversions
         let mut valid_predicates = BTreeSet::new();
-        for predicate in predicates {
-            match predicate {
-                Ok(p) => {
-                    valid_predicates.insert(p);
-                }
-                Err(e) => warn!(e; "Failed to convert value in InList"),
+        for expr in &in_list.list {
+            let Expr::Literal(lit, _) = expr else {
+                return Ok(());
+            };
+            if !lit.is_null() {
+                valid_predicates.insert(encode_lit(lit, data_type.clone())?);
             }
         }
 
@@ -309,14 +301,6 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         }
 
         Ok(false)
-    }
-
-    /// Helper function to get non-null literal value
-    fn nonnull_lit(expr: &Expr) -> Option<&ScalarValue> {
-        match expr {
-            Expr::Literal(lit, _) if !lit.is_null() => Some(lit),
-            _ => None,
-        }
     }
 
     /// Helper function to get the column and literal value from an equality expr (column = lit)
@@ -433,6 +417,125 @@ mod tests {
 
     fn int64_lit(i: i64) -> Expr {
         i.lit()
+    }
+
+    fn build_bloom_predicates(exprs: &[Expr]) -> Option<BTreeMap<ColumnId, Vec<InListPredicate>>> {
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("bloom_builder_");
+        let metadata = test_region_metadata();
+        BloomFilterIndexApplierBuilder::new(
+            "test".to_string(),
+            PathType::Bare,
+            test_object_store(),
+            &metadata,
+            factory,
+        )
+        .build(exprs)
+        .unwrap()
+        .map(|applier| (*applier.default_predicates).clone())
+    }
+
+    fn int64_inlist_predicate(values: impl IntoIterator<Item = i64>) -> InListPredicate {
+        InListPredicate {
+            list: values
+                .into_iter()
+                .map(|value| {
+                    encode_lit(
+                        &ScalarValue::Int64(Some(value)),
+                        ConcreteDataType::int64_datatype(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn bloom_pure_literal_in_extracts_exact_predicate() {
+        let expr = Expr::InList(InList {
+            expr: Box::new(column("column2")),
+            list: vec![int64_lit(1), int64_lit(2), int64_lit(3)],
+            negated: false,
+        });
+
+        assert_eq!(
+            build_bloom_predicates(&[expr]),
+            Some(BTreeMap::from([(
+                2,
+                vec![int64_inlist_predicate([1, 2, 3])]
+            )]))
+        );
+    }
+
+    #[test]
+    fn bloom_pure_nonliteral_in_does_not_extract_predicate() {
+        let expr = Expr::InList(InList {
+            expr: Box::new(column("column1")),
+            list: vec![column("column1")],
+            negated: false,
+        });
+
+        assert_eq!(build_bloom_predicates(&[expr]), None);
+    }
+
+    #[test]
+    fn bloom_mixed_literal_null_in_extracts_exact_predicate() {
+        let expr = Expr::InList(InList {
+            expr: Box::new(column("column2")),
+            list: vec![
+                int64_lit(1),
+                Expr::Literal(ScalarValue::Int64(None), None),
+                int64_lit(3),
+            ],
+            negated: false,
+        });
+
+        assert_eq!(
+            build_bloom_predicates(&[expr]),
+            Some(BTreeMap::from([(2, vec![int64_inlist_predicate([1, 3])])]))
+        );
+    }
+
+    #[test]
+    fn bloom_all_literal_null_in_does_not_extract_predicate() {
+        let expr = Expr::InList(InList {
+            expr: Box::new(column("column2")),
+            list: vec![
+                Expr::Literal(ScalarValue::Int64(None), None),
+                Expr::Literal(ScalarValue::Int64(None), None),
+            ],
+            negated: false,
+        });
+
+        assert_eq!(build_bloom_predicates(&[expr]), None);
+    }
+
+    #[test]
+    fn bloom_mixed_nonliteral_in_keeps_only_independent_predicate() {
+        let expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::InList(InList {
+                expr: Box::new(column("column1")),
+                list: vec!["definitely_absent".lit(), column("column1")],
+                negated: false,
+            })),
+            op: Operator::And,
+            right: Box::new(column("column2").eq(int64_lit(42))),
+        });
+
+        assert_eq!(
+            build_bloom_predicates(&[expr]),
+            Some(BTreeMap::from([(2, vec![int64_inlist_predicate([42])])]))
+        );
+    }
+
+    #[test]
+    fn bloom_encoding_failure_in_does_not_extract_predicate() {
+        let expr = Expr::InList(InList {
+            expr: Box::new(column("column2")),
+            list: vec![int64_lit(1), "not_an_int64".lit()],
+            negated: false,
+        });
+
+        assert_eq!(build_bloom_predicates(&[expr]), None);
     }
 
     #[test]

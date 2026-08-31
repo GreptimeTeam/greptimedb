@@ -102,6 +102,7 @@ use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{info, tracing, warn};
 use common_wal::options::WalOptions;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
@@ -236,6 +237,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
                 .on_update(|usage| {
@@ -254,6 +256,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             config,
             wal_raw_entry_reader,
             scan_memory_tracker,
+            scan_memory_pool,
             region_hook,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
@@ -739,6 +742,8 @@ struct EngineInner {
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
+    /// Memory pool shared by internal scan operators across all queries.
+    scan_memory_pool: Arc<dyn MemoryPool>,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
     /// to fire [`RegionHook::on_region_gc`].
     region_hook: Option<RegionHookRef>,
@@ -1097,6 +1102,8 @@ impl EngineInner {
         )
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
+        .with_scan_memory_pool(self.scan_memory_pool.clone())
+        .with_experimental_series_scan_v2(self.config.experimental_series_scan_v2)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
@@ -1443,6 +1450,7 @@ impl MitoEngine {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
                 .on_update(|usage| {
@@ -1472,6 +1480,7 @@ impl MitoEngine {
                 config,
                 wal_raw_entry_reader,
                 scan_memory_tracker,
+                scan_memory_pool,
                 region_hook: None,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
@@ -1485,9 +1494,19 @@ impl MitoEngine {
     }
 }
 
+fn new_scan_memory_pool(scan_memory_limit: usize) -> Arc<dyn MemoryPool> {
+    if scan_memory_limit == 0 {
+        Arc::new(UnboundedMemoryPool::default())
+    } else {
+        Arc::new(GreedyMemoryPool::new(scan_memory_limit))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    use datafusion::execution::memory_pool::MemoryConsumer;
 
     use super::*;
     use crate::sst::file::FileMeta;
@@ -1573,5 +1592,18 @@ mod tests {
             committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
+    }
+
+    #[test]
+    fn test_scan_memory_pool_is_shared_across_consumers() {
+        let pool = new_scan_memory_pool(100);
+        let cloned_pool = pool.clone();
+        let first = MemoryConsumer::new("first-scan").register(&pool);
+        let second = MemoryConsumer::new("second-scan").register(&cloned_pool);
+
+        first.try_grow(60).unwrap();
+        assert!(second.try_grow(50).is_err());
+        second.try_grow(40).unwrap();
+        assert_eq!(100, pool.reserved());
     }
 }

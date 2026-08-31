@@ -536,4 +536,274 @@ mod tests {
             unreachable!();
         }
     }
+
+    /// The entity-graph derivation must run as the caller: a source table the
+    /// caller cannot read contributes neither entities nor edges.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_entity_graph_derivation_runs_as_caller() {
+        common_telemetry::init_default_ut_logging();
+
+        /// Denies the entity-graph derivation on `secret_traces` only.
+        struct DenySecretTraces;
+
+        impl auth::PermissionChecker for DenySecretTraces {
+            fn check_permission(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: auth::UserInfoRef,
+                req: auth::PermissionReq,
+                targets: auth::PermissionTableTargets,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                if matches!(req, auth::PermissionReq::Action(auth::SEMANTIC_GRAPH_QUERY))
+                    && let auth::PermissionTableTargets::Resolved(targets) = targets
+                    && targets
+                        .iter()
+                        .any(|target| target.table.starts_with("secret_"))
+                {
+                    return Ok(auth::PermissionResp::Reject);
+                }
+                Ok(auth::PermissionResp::Allow)
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(Arc::new(DenySecretTraces));
+
+        let standalone = GreptimeDbStandaloneBuilder::new("test_entity_graph_runs_as_caller")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.fe_instance().clone();
+
+        for (table, trace_id) in [("open_traces", "t0"), ("secret_traces", "t1")] {
+            let create = format!(
+                r#"create table {table} (
+                    "timestamp" timestamp(9) time index,
+                    trace_id string,
+                    span_id string,
+                    parent_span_id string,
+                    span_kind string,
+                    span_status_code string,
+                    service_name string,
+                    duration_nano bigint unsigned,
+                    primary key (service_name)
+                ) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true')"#
+            );
+            create_table(&instance, &create).await;
+            let insert = format!(
+                "insert into {table} values \
+                 (now(), '{trace_id}', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'client-{table}', 0), \
+                 (now(), '{trace_id}', 's1', 'c1', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'server-{table}', 100)"
+            );
+            let output = query(&instance, &insert).await;
+            let OutputData::AffectedRows(x) = output.data else {
+                unreachable!()
+            };
+            assert_eq!(x, 2);
+        }
+
+        // A pair split across tables (client here, server in a denied table):
+        // a join-derived edge needs read access to all of its input tables.
+        create_table(
+            &instance,
+            r#"create table cross_clients (
+                "timestamp" timestamp(9) time index,
+                trace_id string,
+                span_id string,
+                parent_span_id string,
+                span_kind string,
+                span_status_code string,
+                service_name string,
+                duration_nano bigint unsigned,
+                primary key (service_name)
+            ) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true')"#,
+        )
+        .await;
+        create_table(
+            &instance,
+            r#"create table secret_cross_servers (
+                "timestamp" timestamp(9) time index,
+                trace_id string,
+                span_id string,
+                parent_span_id string,
+                span_kind string,
+                span_status_code string,
+                service_name string,
+                duration_nano bigint unsigned,
+                primary key (service_name)
+            ) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true')"#,
+        )
+        .await;
+        for insert in [
+            "insert into cross_clients values \
+             (now(), 't9', 'c9', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'client-cross', 0)",
+            "insert into secret_cross_servers values \
+             (now(), 't9', 's9', 'c9', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'server-cross', 100)",
+        ] {
+            let output = query(&instance, insert).await;
+            let OutputData::AffectedRows(x) = output.data else {
+                unreachable!()
+            };
+            assert_eq!(x, 1);
+        }
+
+        let sql = "select src_id, dst_id from greptime_private.semantic_relationships \
+                   order by src_id";
+        let output = query(&instance, sql).await;
+        let OutputData::Stream(s) = output.data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty_print = batches.pretty_print().unwrap();
+        assert!(
+            pretty_print.contains("client-open_traces"),
+            "allowed edge missing:\n{pretty_print}"
+        );
+        assert!(
+            !pretty_print.contains("secret_traces"),
+            "denied source leaked into edges:\n{pretty_print}"
+        );
+        assert!(
+            !pretty_print.contains("client-cross"),
+            "edge with a denied join side leaked:\n{pretty_print}"
+        );
+
+        let sql = "select entity_id from greptime_private.semantic_entities order by entity_id";
+        let output = query(&instance, sql).await;
+        let OutputData::Stream(s) = output.data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty_print = batches.pretty_print().unwrap();
+        assert!(
+            pretty_print.contains("client-open_traces"),
+            "allowed entity missing:\n{pretty_print}"
+        );
+        assert!(
+            !pretty_print.contains("secret_traces") && !pretty_print.contains("server-cross"),
+            "denied source leaked into entities:\n{pretty_print}"
+        );
+    }
+
+    /// Denying the descriptor's table must not fail the request: the metric
+    /// data is already committed, so the client would retry what the server
+    /// accepted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_descriptor_permission_denial_degrades() {
+        use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+        use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+            Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
+        };
+        use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
+        use servers::query_handler::OpenTelemetryProtocolHandler;
+
+        common_telemetry::init_default_ut_logging();
+
+        /// Denies writes to the descriptor table only.
+        struct DenyResourceInfo;
+
+        impl auth::PermissionChecker for DenyResourceInfo {
+            fn check_permission(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+                targets: auth::PermissionTableTargets,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                if let auth::PermissionTableTargets::Resolved(targets) = targets
+                    && targets
+                        .iter()
+                        .any(|target| target.table == "greptime_otel_resource_info")
+                {
+                    return Ok(auth::PermissionResp::Reject);
+                }
+                Ok(auth::PermissionResp::Allow)
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(Arc::new(DenyResourceInfo));
+
+        let standalone = GreptimeDbStandaloneBuilder::new("test_otlp_descriptor_denied")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.fe_instance().clone();
+
+        let attr = |key: &str, value: &str| KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(value.to_string())),
+            }),
+        };
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![attr("service.name", "api"), attr("host.id", "h-1")],
+                    ..Default::default()
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        name: "denied_descriptor_gauge".to_string(),
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(Value::AsDouble(1.0)),
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let outcome =
+            OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc())
+                .await
+                .unwrap();
+        let warning = outcome
+            .error_message
+            .expect("denial must surface as a warning");
+        assert!(
+            warning.contains("greptime_otel_resource_info"),
+            "unexpected warning: {warning}"
+        );
+
+        // the metric data is committed, the descriptor table was never created
+        let sql = "select table_name from information_schema.tables \
+                   where table_schema = 'public' order by table_name";
+        let output = query(&instance, sql).await;
+        let OutputData::Stream(s) = output.data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty_print = batches.pretty_print().unwrap();
+        assert!(
+            pretty_print.contains("denied_descriptor_gauge"),
+            "metric data was not committed:\n{pretty_print}"
+        );
+        assert!(
+            !pretty_print.contains("greptime_otel_resource_info"),
+            "denied descriptor table was created:\n{pretty_print}"
+        );
+    }
 }

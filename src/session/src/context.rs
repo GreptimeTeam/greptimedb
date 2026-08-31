@@ -22,6 +22,7 @@ use api::v1::ExplainOptions;
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
+pub use common_base::protocol::Channel;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
@@ -618,85 +619,12 @@ impl ConnInfo {
     }
 }
 
-#[derive(Debug, PartialEq, Default, Clone, Copy)]
-#[repr(u8)]
-pub enum Channel {
-    #[default]
-    Unknown = 0,
-
-    Mysql = 1,
-    Postgres = 2,
-    HttpSql = 3,
-    Prometheus = 4,
-    Otlp = 5,
-    Grpc = 6,
-    Influx = 7,
-    Opentsdb = 8,
-    Loki = 9,
-    Elasticsearch = 10,
-    Jaeger = 11,
-    Log = 12,
-    Promql = 13,
-    Splunk = 14,
-}
-
-impl From<u32> for Channel {
-    fn from(value: u32) -> Self {
-        match value {
-            1 => Self::Mysql,
-            2 => Self::Postgres,
-            3 => Self::HttpSql,
-            4 => Self::Prometheus,
-            5 => Self::Otlp,
-            6 => Self::Grpc,
-            7 => Self::Influx,
-            8 => Self::Opentsdb,
-            9 => Self::Loki,
-            10 => Self::Elasticsearch,
-            11 => Self::Jaeger,
-            12 => Self::Log,
-            13 => Self::Promql,
-            14 => Self::Splunk,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-impl Channel {
-    pub fn dialect(&self) -> Arc<dyn Dialect + Send + Sync> {
-        match self {
-            Channel::Mysql => Arc::new(MySqlDialect {}),
-            Channel::Postgres => Arc::new(PostgreSqlDialect {}),
-            _ => Arc::new(GenericDialect {}),
-        }
-    }
-}
-
-impl Display for Channel {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.as_ref())
-    }
-}
-
-impl AsRef<str> for Channel {
-    fn as_ref(&self) -> &str {
-        match self {
-            Channel::Mysql => "mysql",
-            Channel::Postgres => "postgres",
-            Channel::HttpSql => "httpsql",
-            Channel::Prometheus => "prometheus",
-            Channel::Otlp => "otlp",
-            Channel::Grpc => "grpc",
-            Channel::Influx => "influx",
-            Channel::Opentsdb => "opentsdb",
-            Channel::Loki => "loki",
-            Channel::Elasticsearch => "elasticsearch",
-            Channel::Jaeger => "jaeger",
-            Channel::Log => "log",
-            Channel::Promql => "promql",
-            Channel::Splunk => "splunk",
-            Channel::Unknown => "unknown",
-        }
+/// Returns the SQL dialect for the given query channel.
+pub fn dialect_for_channel(channel: Channel) -> Arc<dyn Dialect + Send + Sync> {
+    match channel {
+        Channel::Mysql => Arc::new(MySqlDialect {}),
+        Channel::Postgres => Arc::new(PostgreSqlDialect {}),
+        _ => Arc::new(GenericDialect {}),
     }
 }
 

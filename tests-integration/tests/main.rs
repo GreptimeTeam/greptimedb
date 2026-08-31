@@ -14,7 +14,9 @@
 
 #![recursion_limit = "256"]
 
+mod admin_function_event;
 mod database_ddl_event;
+mod dict_groupby_sst;
 mod event_recorder_test_util;
 #[macro_use]
 mod grpc;
@@ -35,6 +37,7 @@ mod repartition_event;
 #[macro_use]
 mod repartition_expr_version;
 mod mysql;
+mod reconciliation_event;
 mod view_ddl_event;
 mod wal_prune_event;
 

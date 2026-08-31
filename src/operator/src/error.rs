@@ -65,6 +65,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Admin function execution was cancelled"))]
+    AdminFunctionCancelled,
+
     #[snafu(display("Expected {expected} args, but actual {actual}"))]
     FunctionArityMismatch { expected: usize, actual: usize },
 
@@ -337,6 +340,22 @@ pub enum Error {
 
     #[snafu(display("Schema `{name}` is read-only"))]
     SchemaReadOnly {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Table `{name}` is read-only"))]
+    TableReadOnly {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "The definition of table `{name}` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)"
+    ))]
+    TableDdlReserved {
         name: String,
         #[snafu(implicit)]
         location: Location,
@@ -970,7 +989,9 @@ impl ErrorExt for Error {
             }
             Error::NotSupported { .. }
             | Error::ShowCreateTableBaseOnly { .. }
-            | Error::SchemaReadOnly { .. } => StatusCode::Unsupported,
+            | Error::SchemaReadOnly { .. }
+            | Error::TableReadOnly { .. }
+            | Error::TableDdlReserved { .. } => StatusCode::Unsupported,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::ParseSql { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
@@ -997,6 +1018,7 @@ impl ErrorExt for Error {
             | Error::EncodeJson { .. }
             | Error::DeserializePartitionExpr { .. }
             | Error::SerializePartitionExpr { .. } => StatusCode::Unexpected,
+            Error::AdminFunctionCancelled => StatusCode::Cancelled,
             Error::ViewNotFound { .. }
             | Error::ViewInfoNotFound { .. }
             | Error::TableNotFound { .. } => StatusCode::TableNotFound,

@@ -60,7 +60,6 @@ use flow::{
     FrontendInvoker, GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
-use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
@@ -72,7 +71,10 @@ use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
 use snafu::{OptionExt, ResultExt};
 use standalone::options::StandaloneOptions;
-use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
+use standalone::{
+    StandaloneDatanodeManager, StandaloneInformationExtension,
+    StandaloneRepartitionProcedureFactory,
+};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
@@ -150,6 +152,11 @@ impl Command {
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         self.subcmd.load_options(global_options)
     }
+
+    /// Whether the `standalone start` command requested daemonization.
+    pub fn is_daemon(&self) -> bool {
+        self.subcmd.is_daemon()
+    }
 }
 
 #[derive(Parser)]
@@ -170,6 +177,12 @@ impl SubCommand {
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
+        }
+    }
+
+    fn is_daemon(&self) -> bool {
+        match self {
+            SubCommand::Start(cmd) => cmd.is_daemon(),
         }
     }
 }
@@ -289,9 +302,24 @@ pub struct StartCommand {
     /// The working home directory of this standalone instance.
     #[clap(long)]
     data_home: Option<String>,
+    /// Run in the background as a daemon.
+    #[cfg(unix)]
+    #[clap(short, long)]
+    daemon: bool,
 }
 
 impl StartCommand {
+    /// Whether the `standalone start` command requested daemonization.
+    #[cfg(unix)]
+    pub(crate) fn is_daemon(&self) -> bool {
+        self.daemon
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn is_daemon(&self) -> bool {
+        false
+    }
+
     /// Load the GreptimeDB options from various sources (command line, config file or env).
     pub fn load_options(
         &self,
@@ -393,8 +421,6 @@ impl StartCommand {
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
     pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -402,6 +428,8 @@ impl StartCommand {
             None,
             Some(&opts.component.slow_query),
         );
+
+        common_runtime::init_global_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
@@ -1127,7 +1155,9 @@ mod tests {
     fn test_toml() {
         let opts = StandaloneOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+        assert!(toml_string.contains("experimental_enable_exponential_histogram = false"));
+        let parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed.otlp, opts.otlp);
     }
 
     #[test]
@@ -1350,6 +1380,19 @@ mod tests {
         let command =
             StartCommand::try_parse_from(["standalone", "--rpc-addr", "127.0.0.1:34001"]).unwrap();
         assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_daemon_flag() {
+        let command = StartCommand::try_parse_from(["standalone", "--daemon"]).unwrap();
+        assert!(command.is_daemon());
+
+        let command = StartCommand::try_parse_from(["standalone", "-d"]).unwrap();
+        assert!(command.is_daemon());
+
+        let command = StartCommand::try_parse_from(["standalone"]).unwrap();
+        assert!(!command.is_daemon());
     }
 
     #[test]

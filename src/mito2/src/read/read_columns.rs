@@ -12,119 +12,72 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::mem;
+use std::sync::Arc;
 
-use store_api::storage::{ColumnId, NestedPath};
+use datatypes::types::json_type::JsonNativeType;
+use store_api::storage::ColumnId;
+
+pub(crate) type JsonTargetTypes = Arc<BTreeMap<ColumnId, JsonNativeType>>;
 
 /// Logical columns to read from a region.
 ///
-/// Read columns describe which logical columns and nested fields should be read
-/// from storage. Each read column is identified by its [`ColumnId`],
-/// which represents the root column in the storage schema.
-///
-/// Nested fields under the column are specified by [`NestedPath`] entries.
-/// Each path includes the root column name as its first element.
-///
-/// For example, assume column id `9` corresponds to a root column named `j`
-/// with nested fields:
-///
-/// ```text
-/// j
-/// ├── a
-/// └── b
-///     └── c
-/// ```
-///
-/// The following SQL:
-///
-/// SELECT j.a, j.b.c FROM t
-///
-/// may produce read columns like:
-///
-/// ```text
-/// ReadColumn {
-///     column_id: 9,
-///     nested_paths: [
-///         ["j", "a"],
-///         ["j", "b", "c"],
-///     ]
-/// }
-/// ```
-///
-/// If `nested_paths` is empty, the whole column will be read.
+/// Read columns describe which logical root columns should be read from storage.
+/// JSON2 columns can carry query-time target types that are later translated to
+/// physical nested parquet paths by the parquet reader.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumns {
-    pub cols: Vec<ReadColumn>,
+    pub col_ids: Vec<ColumnId>,
+    json_target_types: JsonTargetTypes,
 }
 
 impl ReadColumns {
-    pub fn from_deduped_column_ids<I>(column_ids: I) -> Self
+    /// Creates read columns from logical column ids.
+    ///
+    /// This preserves the input order and duplicate ids.
+    pub fn new<I>(col_ids: I) -> Self
     where
         I: IntoIterator<Item = ColumnId>,
     {
-        let cols = column_ids
-            .into_iter()
-            .map(|col_id| ReadColumn::new(col_id, vec![]))
-            .collect();
-        ReadColumns { cols }
+        Self {
+            col_ids: col_ids.into_iter().collect(),
+            json_target_types: Arc::default(),
+        }
+    }
+
+    pub fn with_json_target_types(
+        mut self,
+        json_target_types: BTreeMap<ColumnId, JsonNativeType>,
+    ) -> Self {
+        self.json_target_types = Arc::new(json_target_types);
+        self
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cols.is_empty()
+        self.col_ids.is_empty()
     }
 
     pub fn column_ids_iter(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.cols.iter().map(|column| column.column_id)
+        self.col_ids.iter().copied()
     }
 
     pub fn column_ids(&self) -> Vec<ColumnId> {
         self.column_ids_iter().collect()
     }
 
-    pub fn columns(&self) -> &[ReadColumn] {
-        &self.cols
+    pub fn json_target_types(&self) -> &JsonTargetTypes {
+        &self.json_target_types
+    }
+
+    pub fn json_target_type(&self, column_id: ColumnId) -> Option<&JsonNativeType> {
+        self.json_target_types.get(&column_id)
     }
 
     pub fn estimated_size(&self) -> usize {
-        self.cols.capacity() * mem::size_of::<ReadColumn>()
-            + self
-                .cols
-                .iter()
-                .map(ReadColumn::estimated_size)
-                .sum::<usize>()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ReadColumn {
-    pub column_id: ColumnId,
-    /// Nested field paths under this column.
-    /// Empty means reading the whole column.
-    pub nested_paths: Vec<NestedPath>,
-}
-
-impl ReadColumn {
-    pub fn new(column_id: ColumnId, nested_paths: Vec<NestedPath>) -> Self {
-        Self {
-            column_id,
-            nested_paths,
-        }
-    }
-
-    pub fn nested_paths(&self) -> &[NestedPath] {
-        &self.nested_paths
-    }
-
-    pub fn estimated_size(&self) -> usize {
-        mem::size_of::<ColumnId>()
-            + self.nested_paths.capacity() * mem::size_of::<NestedPath>()
-            + self
-                .nested_paths
-                .iter()
-                .map(|path| {
-                    path.capacity() * mem::size_of::<String>()
-                        + path.iter().map(|node| node.capacity()).sum::<usize>()
-                })
-                .sum::<usize>()
+        self.col_ids.capacity() * mem::size_of::<ColumnId>()
+            + self.col_ids.len() * mem::size_of::<ColumnId>()
+            + self.json_target_types.len()
+                * (mem::size_of::<ColumnId>() + mem::size_of::<JsonNativeType>())
     }
 }

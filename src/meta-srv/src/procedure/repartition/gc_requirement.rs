@@ -244,6 +244,7 @@ mod tests {
                     block_after_persist: true,
                     persisted_tx: Some(persisted_tx),
                 }),
+                context: Default::default(),
             })
             .await
             .unwrap();

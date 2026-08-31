@@ -18,8 +18,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_query::prometheus::is_prometheus_stale_nan;
-use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, UInt64Array};
+use common_query::prelude::{greptime_native_histogram, greptime_value};
+use datafusion::arrow::array::{Array, TimestampMillisecondArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -46,11 +46,21 @@ use snafu::ResultExt;
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::series_divide::SeriesDivide;
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, prometheus_stale_sample_column,
+    resolve_column_name, serialize_column_index,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 const MAX_INSTANT_MANIPULATE_OUTPUT_POINTS: usize = 1_000_000;
+
+fn mixed_sample_fields(field: Option<&str>) -> [Option<&str>; 2] {
+    let companion = match field {
+        Some(field) if field == greptime_value() => Some(greptime_native_histogram()),
+        Some(field) if field == greptime_native_histogram() => Some(greptime_value()),
+        _ => None,
+    };
+    [field, companion]
+}
 
 /// Manipulate the input record batch to make it suitable for Instant Operator.
 ///
@@ -66,7 +76,7 @@ pub struct InstantManipulate {
     time_index_column: String,
     // Planner-provided tag-column hint for execution fast paths.
     tag_columns: Vec<String>,
-    /// A optional column for validating staleness
+    /// Primary sample column used to derive the columns checked for staleness.
     field_column: Option<String>,
     input: LogicalPlan,
     unfix: Option<UnfixIndices>,
@@ -97,9 +107,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
         }
 
         let mut exprs = vec![col(&self.time_index_column)];
-        if let Some(field) = &self.field_column {
-            exprs.push(col(field));
-        }
+        exprs.extend(self.staleness_field_columns().map(col));
         exprs
     }
 
@@ -116,7 +124,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
 
         let mut required = output_columns.to_vec();
         required.push(input_schema.index_of_column_by_name(None, &self.time_index_column)?);
-        if let Some(field) = &self.field_column {
+        for field in self.staleness_field_columns() {
             required.push(input_schema.index_of_column_by_name(None, field)?);
         }
 
@@ -221,6 +229,21 @@ impl InstantManipulate {
 
     pub const fn name() -> &'static str {
         "InstantManipulate"
+    }
+
+    fn staleness_field_columns(&self) -> impl Iterator<Item = &str> {
+        let [field, companion] = mixed_sample_fields(self.field_column.as_deref());
+        [
+            field,
+            companion.filter(|companion| {
+                self.input
+                    .schema()
+                    .index_of_column_by_name(None, companion)
+                    .is_some()
+            }),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     fn resolve_tag_columns(input: &LogicalPlan, tag_columns: &[String]) -> Vec<String> {
@@ -385,11 +408,9 @@ impl ExecutionPlan for InstantManipulateExec {
             .column_with_name(&self.time_index_column)
             .expect("time index column not found")
             .0;
-        let field_index = self
-            .field_column
-            .as_ref()
-            .and_then(|name| schema.column_with_name(name))
-            .map(|x| x.0);
+        let field_indices = mixed_sample_fields(self.field_column.as_deref()).map(|field| {
+            field.and_then(|field| schema.column_with_name(field).map(|(index, _)| index))
+        });
         let tsid_index = schema
             .column_with_name("__tsid")
             .filter(|(_, field)| field.data_type() == &DataType::UInt64)
@@ -400,7 +421,7 @@ impl ExecutionPlan for InstantManipulateExec {
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index,
-            field_index,
+            field_indices,
             tsid_index,
             reuse_tsid_column: self.reuse_tsid_column && tsid_index.is_some(),
             schema,
@@ -467,7 +488,7 @@ pub struct InstantManipulateStream {
     interval: Millisecond,
     // Column index of TIME INDEX column's position in schema
     time_index: usize,
-    field_index: Option<usize>,
+    field_indices: [Option<usize>; 2],
     tsid_index: Option<usize>,
     reuse_tsid_column: bool,
 
@@ -510,11 +531,12 @@ impl Stream for InstantManipulateStream {
 }
 
 impl InstantManipulateStream {
-    // Refer to Prometheus `vectorSelectorSingle` / lookback semantics.
-    //
-    // Prometheus `v3.9.1` uses a start-exclusive lookback window:
-    //   (eval_ts - lookback_delta, eval_ts]
-    // i.e. a sample at exactly `eval_ts - lookback_delta` is considered too old.
+    /// Manipulates one complete series sorted by timestamp. The planner enforces
+    /// this input contract with a sort followed by [`SeriesDivide`].
+    ///
+    /// Prometheus `v3.9.1`'s `vectorSelectorSingle` uses a start-exclusive
+    /// lookback window `(eval_ts - lookback_delta, eval_ts]`; a sample at exactly
+    /// `eval_ts - lookback_delta` is too old.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         let ts_column = input
             .column(self.time_index)
@@ -531,10 +553,16 @@ impl InstantManipulateStream {
             return Ok(input);
         }
 
-        // field column for staleness check
-        let field_column = self
-            .field_index
-            .and_then(|index| input.column(index).as_any().downcast_ref::<Float64Array>());
+        // Field columns for staleness checks, classified once per batch.
+        let stale_sample_columns = self.field_indices.map(|index| {
+            index.and_then(|index| prometheus_stale_sample_column(input.column(index).as_ref()))
+        });
+        let is_stale = |row| {
+            stale_sample_columns
+                .iter()
+                .flatten()
+                .any(|column| is_prometheus_stale_sample(*column, row))
+        };
 
         // Optimize iteration range based on actual data bounds
         let first_ts = ts_column.value(0);
@@ -579,10 +607,7 @@ impl InstantManipulateStream {
                 let curr = ts_column.value(cursor);
                 match curr.cmp(&expected_ts) {
                     Ordering::Equal => {
-                        if let Some(field_column) = &field_column
-                            && field_column.is_valid(cursor)
-                            && is_prometheus_stale_nan(field_column.value(cursor))
-                        {
+                        if is_stale(cursor) {
                             // Ignore the stale marker.
                         } else {
                             take_indices.push(cursor as u64);
@@ -614,10 +639,7 @@ impl InstantManipulateStream {
                     let prev_ts = ts_column.value(prev_cursor);
                     if prev_ts + self.lookback_delta > expected_ts {
                         // only use the point in the time range
-                        if let Some(field_column) = &field_column
-                            && field_column.is_valid(prev_cursor)
-                            && is_prometheus_stale_nan(field_column.value(prev_cursor))
-                        {
+                        if is_stale(prev_cursor) {
                             // Do not use a stale marker as the newest value.
                             continue;
                         }
@@ -626,10 +648,7 @@ impl InstantManipulateStream {
                         aligned_ts.push(expected_ts);
                     }
                 }
-            } else if let Some(field_column) = &field_column
-                && field_column.is_valid(cursor)
-                && is_prometheus_stale_nan(field_column.value(cursor))
-            {
+            } else if is_stale(cursor) {
                 // Do not use a stale marker as the newest value.
             } else {
                 // use this point
@@ -692,6 +711,9 @@ fn reuse_constant_column(array: &Arc<dyn Array>, len: usize) -> DataFusionResult
 
 #[cfg(test)]
 mod test {
+    use common_query::native_histogram::build_histogram_array;
+    use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
+    use datafusion::arrow::array::Float64Array;
     use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::common::ToDFSchema;
@@ -702,7 +724,7 @@ mod test {
 
     use super::*;
     use crate::extension_plan::test_util::{
-        TIME_INDEX_COLUMN, prepare_test_data, prepare_test_data_with_stale_marker,
+        TIME_INDEX_COLUMN, native_histogram, prepare_test_data, prepare_test_data_with_stale_marker,
     };
 
     async fn do_normalize_test(
@@ -1386,7 +1408,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn prometheus_stale_nan_suppresses_exact_and_lookback() {
+    async fn prometheus_stale_nan_selects_before_and_suppresses_after_marker() {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 TIME_INDEX_COLUMN,
@@ -1410,6 +1432,69 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let exec = Arc::new(InstantManipulateExec {
+            start: 750,
+            end: 1_500,
+            lookback_delta: 1_001,
+            interval: 250,
+            time_index_column: TIME_INDEX_COLUMN.to_string(),
+            field_column: Some("value".to_string()),
+            reuse_tsid_column: false,
+            input,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+
+        let context = SessionContext::default();
+        let batches = datafusion::physical_plan::collect(exec, context.task_ctx())
+            .await
+            .unwrap();
+
+        let row_count = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let batch = batches.iter().find(|batch| batch.num_rows() > 0).unwrap();
+        let timestamp = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .value(0);
+        let value = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(
+            (row_count, timestamp, value),
+            (1, 750, 42.0),
+            "only the evaluation before the stale marker should select 42.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_histogram_stale_nan_suppresses_exact_and_lookback() {
+        let histograms = build_histogram_array(&[
+            Some(native_histogram(42.0)),
+            Some(native_histogram(f64::from_bits(PROMETHEUS_STALE_NAN_BITS))),
+        ]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", histograms.data_type().clone(), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![500, 1_000])),
+                histograms,
+            ],
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let exec = Arc::new(InstantManipulateExec {
             start: 1_000,
             end: 1_500,
             lookback_delta: 1_001,
@@ -1426,12 +1511,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(
-            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
-            0,
-            "the stale marker must suppress both the exact and lookback selections rather than \
-             falling back to 42.0"
-        );
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
     }
 
     #[tokio::test]

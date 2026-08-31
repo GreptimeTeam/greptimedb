@@ -18,9 +18,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
+use api::v1::Basic;
+use auth::{
+    DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef, user_provider_from_option,
+};
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
+use client::{Client, Database};
 use common_base::Plugins;
 use common_config::Configurable;
 use common_meta::key::TableMetadataManager;
@@ -486,7 +490,7 @@ pub async fn setup_test_http_app_with_frontend_and_slow_query_threshold(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone(), true)
+        .with_otlp_handler(instance.fe_instance().clone(), true, false)
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap())
         .build();
@@ -506,6 +510,18 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
         user_provider,
         None,
         None,
+        false,
+    )
+    .await
+}
+
+pub async fn setup_test_http_app_with_otlp_exponential_histogram(
+    store_type: StorageType,
+    name: &str,
+    enabled: bool,
+) -> (Router, TestGuard) {
+    setup_test_http_app_with_frontend_and_custom_options(
+        store_type, name, None, None, None, enabled,
     )
     .await
 }
@@ -516,6 +532,7 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
     user_provider: Option<UserProviderRef>,
     http_opts: Option<HttpOptions>,
     memory_limiter: Option<ServerMemoryLimiter>,
+    experimental_enable_exponential_histogram: bool,
 ) -> (Router, TestGuard) {
     let plugins = Plugins::new();
     if let Some(user_provider) = user_provider.clone() {
@@ -537,7 +554,12 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone(), true)
+        .with_otlp_handler(
+            instance.fe_instance().clone(),
+            true,
+            experimental_enable_exponential_histogram,
+        )
+        .with_prometheus_handler(instance.fe_instance().clone())
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_dashboard_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
@@ -732,13 +754,56 @@ async fn setup_grpc_server_for_instance(
     grpc_config: Option<GrpcServerConfig>,
     memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
+    let grpc_server = setup_grpc_server_for_frontend_instance_with(
+        instance.fe_instance().clone(),
+        user_provider,
+        grpc_config,
+        memory_limiter,
+    )
+    .await;
+    (instance, grpc_server)
+}
+
+/// Builds and starts an authenticated gRPC server on an existing frontend instance.
+pub async fn setup_grpc_server_for_frontend_instance(
+    instance: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+) -> Arc<GrpcServer> {
+    setup_grpc_server_for_frontend_instance_with(instance, user_provider, None, None).await
+}
+
+/// Starts a gRPC server backed by `instance` and returns a client authenticated
+/// as the supplied test user. The server handle keeps the listener alive.
+pub async fn setup_authenticated_grpc_database(
+    instance: Arc<Instance>,
+    username: &str,
+    password: &str,
+) -> (Database, Arc<GrpcServer>) {
+    let user_provider =
+        user_provider_from_option(&format!("static_user_provider:cmd:{username}={password}"))
+            .unwrap();
+    let grpc_server = setup_grpc_server_for_frontend_instance(instance, Some(user_provider)).await;
+    let grpc_addr = grpc_server.bind_addr().unwrap().to_string();
+    let mut database =
+        Database::new_with_dbname("greptime-public", Client::with_urls(vec![grpc_addr]));
+    database.set_auth(api::v1::auth_header::AuthScheme::Basic(Basic {
+        username: username.to_string(),
+        password: password.to_string(),
+    }));
+    (database, grpc_server)
+}
+
+async fn setup_grpc_server_for_frontend_instance_with(
+    fe_instance_ref: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+    grpc_config: Option<GrpcServerConfig>,
+    memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
+) -> Arc<GrpcServer> {
     let runtime: Runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("grpc-handlers")
         .build()
         .unwrap();
-
-    let fe_instance_ref = instance.fe_instance().clone();
 
     let greptime_request_handler = GreptimeRequestHandler::new(
         fe_instance_ref.clone(),
@@ -769,7 +834,7 @@ async fn setup_grpc_server_for_instance(
     let fe_grpc_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     grpc_server.start(fe_grpc_addr).await.unwrap();
 
-    (instance, Arc::new(grpc_server))
+    Arc::new(grpc_server)
 }
 
 pub async fn setup_mysql_server(

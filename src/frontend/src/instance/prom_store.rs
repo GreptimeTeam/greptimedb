@@ -30,12 +30,14 @@ use auth::{
 use client::OutputData;
 use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
 use common_error::ext::BoxedError;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
-use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::{
-    AutoCreateTableType, InserterRef, build_create_table_expr, fill_table_options_for_create,
+    AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
+    build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -45,7 +47,7 @@ use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF, coll
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
 use servers::pending_rows_batcher::PendingRowsSchemaAlterer;
-use servers::prom_store::{self, Metrics};
+use servers::prom_store;
 use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
 };
@@ -53,16 +55,24 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::SST_FORMAT_KEY;
+use table::TableRef;
 use table::table_reference::TableReference;
 use tracing::instrument;
 
 use crate::error::{
-    CatalogSnafu, ExecLogicalPlanSnafu, PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
-    TableNotFoundSnafu,
+    AmbiguousValueColumnSnafu, CatalogSnafu, ColumnNotFoundSnafu, ExecLogicalPlanSnafu,
+    PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result, TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
+
+struct RemoteQueryOutput {
+    table_name: String,
+    timestamp_column_name: String,
+    value_column_name: String,
+    output: Output,
+}
 
 fn auto_create_table_type_for_prom_remote_write(
     ctx: &QueryContextRef,
@@ -140,7 +150,12 @@ fn resolve_remote_query_target(
 }
 
 #[instrument(skip_all, fields(table_name))]
-async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
+async fn to_query_result(
+    table_name: &str,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+    output: Output,
+) -> ServerResult<QueryResult> {
     let OutputData::Stream(stream) = output.data else {
         unreachable!()
     };
@@ -148,8 +163,39 @@ async fn to_query_result(table_name: &str, output: Output) -> ServerResult<Query
         .await
         .context(error::CollectRecordbatchSnafu)?;
     Ok(QueryResult {
-        timeseries: prom_store::recordbatches_to_timeseries(table_name, recordbatches)?,
+        timeseries: prom_store::recordbatches_to_timeseries(
+            table_name,
+            timestamp_column_name,
+            value_column_name,
+            recordbatches,
+        )?,
     })
+}
+
+fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
+    let columns = table
+        .field_columns()
+        .map(|column| column.name)
+        .collect::<Vec<_>>();
+
+    match columns.as_slice() {
+        [] => ColumnNotFoundSnafu {
+            msg: format!("value field in table '{table_name}'"),
+        }
+        .fail(),
+
+        [only] => Ok(only.clone()),
+
+        columns if columns.iter().any(|name| name == greptime_value()) => {
+            Ok(greptime_value().to_string())
+        }
+
+        columns => AmbiguousValueColumnSnafu {
+            table_name: table_name.to_string(),
+            field_columns: columns.to_vec(),
+        }
+        .fail(),
+    }
 }
 
 impl Instance {
@@ -161,7 +207,7 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         query: &Query,
-    ) -> Result<Output> {
+    ) -> Result<RemoteQueryOutput> {
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name, Some(ctx))
@@ -171,6 +217,17 @@ impl Instance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
+        let timestamp_column_name = table
+            .schema()
+            .timestamp_column()
+            .with_context(|| ColumnNotFoundSnafu {
+                msg: format!("time index in table '{table_name}'"),
+            })?
+            .name
+            .clone();
+
+        let value_column_name = resolve_column_names(table_name, &table)?;
+
         let dataframe = self
             .query_engine
             .read_table(table)
@@ -178,8 +235,8 @@ impl Instance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
-        let logical_plan =
-            prom_store::query_to_plan(dataframe, query).context(PromStoreRemoteQueryPlanSnafu)?;
+        let logical_plan = prom_store::query_to_plan(dataframe, query, &timestamp_column_name)
+            .context(PromStoreRemoteQueryPlanSnafu)?;
 
         debug!(
             "Prometheus remote read, table: {}, logical plan: {}",
@@ -187,10 +244,18 @@ impl Instance {
             logical_plan.display_indent(),
         );
 
-        self.query_engine
+        let output = self
+            .query_engine
             .execute(logical_plan, ctx.clone())
             .await
-            .context(ExecLogicalPlanSnafu)
+            .context(ExecLogicalPlanSnafu)?;
+
+        Ok(RemoteQueryOutput {
+            table_name: table_name.to_string(),
+            timestamp_column_name,
+            value_column_name,
+            output,
+        })
     }
 
     #[tracing::instrument(skip_all)]
@@ -199,17 +264,17 @@ impl Instance {
         ctx: QueryContextRef,
         queries: &[Query],
         query_targets: &[PermissionTableTarget],
-    ) -> ServerResult<Vec<(String, Output)>> {
+    ) -> ServerResult<Vec<RemoteQueryOutput>> {
         let mut results = Vec::with_capacity(queries.len());
 
         for (query, target) in queries.iter().zip(query_targets) {
-            let output = self
+            let result = self
                 .handle_remote_query(&ctx, &target.catalog, &target.schema, &target.table, query)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteQuerySnafu)?;
 
-            results.push((target.table.clone(), output));
+            results.push(result);
         }
         Ok(results)
     }
@@ -249,6 +314,7 @@ impl PendingRowsSchemaAlterer for Instance {
         // Check which tables actually still need to be created (may have been
         // concurrently created by another request).
         let mut create_exprs: Vec<CreateTableExpr> = Vec::with_capacity(tables.len());
+        let mut per_table_semantics: Option<Option<PerTableSemanticIndex>> = None;
         for &(table_name, request_schema) in tables {
             let existing = self
                 .catalog_manager()
@@ -267,6 +333,17 @@ impl PendingRowsSchemaAlterer for Instance {
 
             let mut table_options = std::collections::HashMap::with_capacity(4);
             fill_table_options_for_create(&mut table_options, &create_type, &ctx);
+            // The batched create path bypasses the operator's auto-create, so
+            // fold the per-table semantic index in here too.
+            let semantic_index = per_table_semantics
+                .get_or_insert_with(|| parse_per_table_semantic_index(&ctx))
+                .as_ref();
+            apply_per_table_semantic_options(
+                &mut table_options,
+                semantic_index,
+                schema,
+                table_name,
+            );
             create_table_expr.table_options.extend(table_options);
             create_exprs.push(create_table_expr);
         }
@@ -279,7 +356,7 @@ impl PendingRowsSchemaAlterer for Instance {
             AutoCreateTableType::Logical(_) => {
                 // Use the batch API for logical tables.
                 self.statement_executor
-                    .create_logical_tables(&create_exprs, ctx)
+                    .create_logical_tables(&create_exprs, ctx, TriggerReason::AutoCreate)
                     .await
                     .map_err(BoxedError::new)
                     .context(error::ExecuteGrpcQuerySnafu)?;
@@ -290,7 +367,7 @@ impl PendingRowsSchemaAlterer for Instance {
                     expr.table_options
                         .insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
                     self.statement_executor
-                        .create_table_inner(&mut expr, None, ctx.clone())
+                        .create_table_inner(&mut expr, None, ctx.clone(), TriggerReason::AutoCreate)
                         .await
                         .map_err(BoxedError::new)
                         .context(error::ExecuteGrpcQuerySnafu)?;
@@ -357,7 +434,7 @@ impl PendingRowsSchemaAlterer for Instance {
         }
 
         self.statement_executor
-            .alter_logical_tables(alter_exprs, ctx)
+            .alter_logical_tables(alter_exprs, ctx, TriggerReason::AutoAlter)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
@@ -526,9 +603,23 @@ impl PromStoreProtocolHandler for Instance {
             ResponseType::Samples => {
                 let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
-                for (table_name, output) in results {
+                for result in results {
+                    let RemoteQueryOutput {
+                        table_name,
+                        timestamp_column_name,
+                        value_column_name,
+                        output,
+                    } = result;
                     let plan = output.meta.plan.clone();
-                    query_results.push(to_query_result(&table_name, output).await?);
+                    query_results.push(
+                        to_query_result(
+                            &table_name,
+                            &timestamp_column_name,
+                            &value_column_name,
+                            output,
+                        )
+                        .await?,
+                    );
                     if let Some(ref plan) = plan {
                         collect_plan_metrics(plan, &mut [&mut map]);
                     }
@@ -556,10 +647,6 @@ impl PromStoreProtocolHandler for Instance {
             }
             .fail(),
         }
-    }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
-        todo!();
     }
 }
 
@@ -609,7 +696,7 @@ impl Instance {
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor
-            .create_table_inner(&mut create_table_expr, None, ctx)
+            .create_table_inner(&mut create_table_expr, None, ctx, TriggerReason::AutoCreate)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
@@ -698,10 +785,6 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
         _request: ReadRequest,
         _ctx: QueryContextRef,
     ) -> ServerResult<PromStoreResponse> {
-        unreachable!();
-    }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
         unreachable!();
     }
 }

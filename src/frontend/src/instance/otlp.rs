@@ -27,7 +27,7 @@ use client::Output;
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
-use common_telemetry::tracing;
+use common_telemetry::{tracing, warn};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -38,7 +38,7 @@ use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtoc
 use servers::otlp;
 use servers::otlp::trace::span::TraceSpanGroup;
 use servers::query_handler::{
-    OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
+    MetricsIngestOutcome, OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -50,7 +50,7 @@ use table::requests::{
 
 use self::trace_ingest::trace_conventions;
 use crate::instance::Instance;
-use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS};
+use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_RESOURCE_INFO_WRITE_ERRORS};
 
 fn trace_permission_targets(
     table_name: &str,
@@ -90,7 +90,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> ServerResult<Output> {
+    ) -> ServerResult<MetricsIngestOutcome> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -119,9 +119,26 @@ impl OpenTelemetryProtocolHandler for Instance {
             .cloned()
             .unwrap_or_default();
         metric_ctx.is_legacy = is_legacy;
+        metric_ctx.resource_info = self.otlp_resource_info;
 
-        let (requests, rows, semantic_index) =
-            otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
+        let otlp::metrics::MetricsConversion {
+            requests,
+            rows,
+            semantic_index,
+            resource_info,
+            mut outcome,
+        } = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
+        if outcome.rejected_data_points > 0 {
+            warn!(
+                "Rejected {} OTLP exponential histogram data points: {}",
+                outcome.rejected_data_points,
+                outcome.error_message.as_deref().unwrap_or_default()
+            );
+        }
+        if outcome.accepted_data_points == 0 {
+            return Ok(outcome);
+        }
+
         self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
@@ -132,8 +149,9 @@ impl OpenTelemetryProtocolHandler for Instance {
             c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
             c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
             // Per-table metric specifics + resource/scope lineage ride this
-            // internal channel; the auto-create path folds them per table name.
-            if let Some(index) = semantic_index.encode() {
+            // internal channel; the auto-create path folds them per schema and
+            // table name.
+            if let Some(index) = semantic_index.encode(&c.current_schema()) {
                 c.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
             }
             if !is_legacy {
@@ -142,9 +160,9 @@ impl OpenTelemetryProtocolHandler for Instance {
             Arc::new(c)
         };
 
-        // If the user uses the legacy path, it is by default without metric engine.
-        if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
-            self.handle_row_inserts(requests, ctx, false, false)
+        // OTLP tables have one sample field in both the legacy and physical paths.
+        let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+            self.handle_row_inserts(requests, ctx.clone(), false, true)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
@@ -153,11 +171,44 @@ impl OpenTelemetryProtocolHandler for Instance {
                 .extension(PHYSICAL_TABLE_PARAM)
                 .unwrap_or(GREPTIME_PHYSICAL_TABLE)
                 .to_string();
-            self.handle_metric_row_inserts(requests, ctx, physical_table.clone())
+            self.handle_metric_row_inserts(requests, ctx.clone(), physical_table)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
+        }?;
+        outcome.write_cost = output.meta.cost;
+
+        // Derived enrichment, written after the metric data is committed:
+        // failing here would make the client retry data the server already
+        // accepted, so every failure degrades to a warning instead.
+        if let Some(resource_info) = resource_info {
+            let written = match self.check_row_insert_permission(
+                &resource_info,
+                &ctx,
+                PermissionReq::Action(OTLP_WRITE),
+            ) {
+                Ok(_) => self
+                    .handle_row_inserts(resource_info, ctx, false, false)
+                    .await
+                    .map_err(BoxedError::new)
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            match written {
+                Ok(descriptor_output) => outcome.write_cost += descriptor_output.meta.cost,
+                Err(e) => {
+                    OTLP_RESOURCE_INFO_WRITE_ERRORS.inc();
+                    warn!("Failed to write the OTLP resource descriptor table: {e}");
+                    outcome.error_message.get_or_insert(format!(
+                        "metric data was accepted, but writing the resource \
+                         descriptor table `{}` failed: {e}",
+                        otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME
+                    ));
+                }
+            }
         }
+
+        Ok(outcome)
     }
 
     #[tracing::instrument(skip_all)]
@@ -291,6 +342,7 @@ mod tests {
                         value: Some(AnyValue {
                             value: Some(any_value::Value::StringValue("frontend".to_string())),
                         }),
+                        ..Default::default()
                     }],
                     ..Default::default()
                 }),

@@ -67,6 +67,7 @@ FROM
 |_|_AggregateExec: mode=Final, gby=[], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)]_|
 |_|_CoalescePartitionsExec_|
 |_|_AggregateExec: mode=Partial, gby=[], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)]_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -96,6 +97,7 @@ FROM
 |_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(integers.i), __sum_state(integers.i), __uddsketch_state_state(Int64(128),Float64(0.01),integers.i), __hll_state(integers.i)] REDACTED
@@ -148,6 +150,7 @@ FROM
 | physical_plan | AggregateExec: mode=Final, gby=[], aggr=[avg(integers.i)]_|
 |_|_CoalescePartitionsExec_|
 |_|_AggregateExec: mode=Partial, gby=[], aggr=[avg(integers.i)]_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -172,6 +175,7 @@ FROM
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[avg(integers.i)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[avg(integers.i)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__avg_state(integers.i)] REDACTED
@@ -249,6 +253,7 @@ ORDER BY
 |_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)]_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)]_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -285,6 +290,7 @@ ORDER BY
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[__count_state(integers.i), __sum_state(integers.i), __uddsketch_state_state(Int64(128),Float64(0.01),integers.i), __hll_state(integers.i)] REDACTED
@@ -362,6 +368,7 @@ ORDER BY
 |_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("2 seconds"),integers.ts)@0 as date_bin(Utf8("2 seconds"),integers.ts)], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)]_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_AggregateExec: mode=Partial, gby=[date_bin(Utf8("2 seconds"),integers.ts)@0 as date_bin(Utf8("2 seconds"),integers.ts)], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)]_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -398,6 +405,7 @@ ORDER BY
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("2 seconds"),integers.ts)@0 as date_bin(Utf8("2 seconds"),integers.ts)], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(Utf8("2 seconds"),integers.ts)@0 as date_bin(Utf8("2 seconds"),integers.ts)], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("2 seconds"),integers.ts)@0 as date_bin(Utf8("2 seconds"),integers.ts)], aggr=[__count_state(integers.i), __sum_state(integers.i), __uddsketch_state_state(Int64(128),Float64(0.01),integers.i), __hll_state(integers.i)] REDACTED

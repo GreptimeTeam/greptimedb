@@ -18,7 +18,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Rows};
 use bytes::Bytes;
 use common_query::native_histogram::{
-    COUNT_U64_FIELD, NATIVE_HISTOGRAM_FIELD_NAMES, POSITIVE_BUCKETS_F64_FIELD,
+    COUNT_I64_FIELD, NATIVE_HISTOGRAM_FIELD_NAMES, POSITIVE_BUCKETS_F64_FIELD,
     POSITIVE_BUCKETS_I64_FIELD, POSITIVE_SPAN_OFFSETS_FIELD, SCHEMA_FIELD,
 };
 use common_query::prelude::greptime_native_histogram;
@@ -77,7 +77,7 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
     assert_eq!(histogram.timestamp, 1782358160412);
 
     let (sample_inserts, histogram_inserts, sample_count, histogram_count) =
-        remote_write_v2::write_requests(decoded).unwrap();
+        remote_write_v2::decode_write_requests(false, Bytes::from_static(BODY), true).unwrap();
     assert!(sample_inserts.is_empty());
     assert_eq!(sample_count, 0);
     assert_eq!(histogram_count, 1);
@@ -100,8 +100,8 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
         Some(ValueData::I32Value(3))
     );
     assert_eq!(
-        histogram_field_value(rows, 0, COUNT_U64_FIELD),
-        Some(ValueData::U64Value(24))
+        histogram_field_value(rows, 0, COUNT_I64_FIELD),
+        Some(ValueData::I64Value(24))
     );
     assert_eq!(
         list_i32_values(histogram_field_value(rows, 0, POSITIVE_SPAN_OFFSETS_FIELD)),

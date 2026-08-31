@@ -23,6 +23,7 @@ pub mod ddl;
 mod describe;
 mod dml;
 mod kill;
+pub mod semantic_graph;
 mod set;
 mod show;
 mod tql;
@@ -80,6 +81,11 @@ use table::requests::{CopyDatabaseRequest, CopyDirection, CopyQueryToRequest, Co
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
+pub use self::admin::{
+    AdminEventRecorderHandle, AdminFunctionLayer, AdminFunctionLayerRef,
+    AdminFunctionRecordingLayer, AdminFunctionRequest, AdminFunctionResponse, AdminFunctionService,
+    AdminFunctionServiceRef, admin_output_schema,
+};
 use self::set::{
     set_bytea_output, set_datestyle, set_intervalstyle, set_timezone, validate_client_encoding,
 };
@@ -138,6 +144,7 @@ pub struct StatementExecutor {
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
     origin_frontend_addr: String,
+    admin_function_service: AdminFunctionServiceRef,
     pub(crate) local_file_access: LocalFileAccess,
     #[cfg(feature = "enterprise")]
     create_database_handler: Option<CreateDatabaseHandlerRef>,
@@ -179,6 +186,7 @@ impl StatementExecutor {
         origin_frontend_addr: String,
         local_file_access: LocalFileAccess,
     ) -> Self {
+        let admin_function_service = admin::new_admin_function_service(query_engine.clone());
         Self {
             catalog_manager,
             query_engine,
@@ -191,12 +199,21 @@ impl StatementExecutor {
             inserter,
             process_manager,
             origin_frontend_addr,
+            admin_function_service,
             local_file_access,
             #[cfg(feature = "enterprise")]
             create_database_handler: None,
             #[cfg(feature = "enterprise")]
             trigger_querier: None,
         }
+    }
+
+    /// Adds a layer around the ADMIN function execution service.
+    ///
+    /// The last added layer is the outermost layer.
+    pub fn with_admin_function_layer(mut self, layer: AdminFunctionLayerRef) -> Self {
+        self.admin_function_service = layer.layer(self.admin_function_service);
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -259,6 +276,7 @@ impl StatementExecutor {
             Statement::ShowViews(stmt) => self.show_views(stmt, query_ctx).await,
 
             Statement::ShowFlows(stmt) => self.show_flows(stmt, query_ctx).await,
+            Statement::ShowFlowStatus(stmt) => self.show_flow_status(stmt, query_ctx).await,
 
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(stmt) => self.show_triggers(stmt, query_ctx).await,

@@ -9,6 +9,7 @@ Error: 1004(InvalidArguments), Schema information_schema already exists
 select *
 from information_schema.tables
 where table_name != 'scripts'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name;
 
 +++++++++++++++++++++++++
@@ -26,6 +27,7 @@ order by table_schema, table_name;
 |greptime|information_schema|engines|LOCALTEMPORARY|5|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|events|LOCALTEMPORARY|13|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|files|LOCALTEMPORARY|14|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
+|greptime|information_schema|flow_statistics|LOCALTEMPORARY|45|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|flows|LOCALTEMPORARY|33|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|global_status|LOCALTEMPORARY|25|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|key_column_usage|LOCALTEMPORARY|16|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
@@ -55,7 +57,10 @@ order by table_schema, table_name;
 |greptime|public|numbers|LOCALTEMPORARY|2|0|0|0|0|0|test_engine|11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 +++++++++++++++++++++++++
 
-select * from information_schema.columns order by table_schema, table_name, column_name;
+select *
+from information_schema.columns
+where table_schema != 'greptime_private'
+order by table_schema, table_name, column_name;
 
 +---------------+--------------------+---------------------------------------+-----------------------------------+------------------+--------------------------+------------------------+-------------------+---------------+--------------------+--------------------+----------------+------------+-------+---------------+-----------------------+----------------------+---------------------+---------------+----------------+-------------+---------------------+----------------+--------+
 | table_catalog | table_schema       | table_name                            | column_name                       | ordinal_position | character_maximum_length | character_octet_length | numeric_precision | numeric_scale | datetime_precision | character_set_name | collation_name | column_key | extra | privileges    | generation_expression | greptime_data_type   | data_type           | semantic_type | column_default | is_nullable | column_type         | column_comment | srs_id |
@@ -198,6 +203,12 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | information_schema | files                                 | update_count                      | 13               |                          |                        | 19                | 0             |                    |                    |                |            |       | select,insert |                       | Int64                | bigint              | FIELD         |                | NO          | bigint              |                |        |
 | greptime      | information_schema | files                                 | update_time                       | 34               |                          |                        |                   |               | 6                  |                    |                |            |       | select,insert |                       | TimestampMicrosecond | timestamp(6)        | FIELD         |                | NO          | timestamp(6)        |                |        |
 | greptime      | information_schema | files                                 | version                           | 25               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | information_schema | flow_statistics                       | flow_id                           | 1                |                          |                        | 10                | 0             |                    |                    |                |            |       | select,insert |                       | UInt32               | int unsigned        | FIELD         |                | NO          | int unsigned        |                |        |
+| greptime      | information_schema | flow_statistics                       | flow_name                         | 2                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | information_schema | flow_statistics                       | last_execution_time               | 4                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | YES         | timestamp(3)        |                |        |
+| greptime      | information_schema | flow_statistics                       | start_time                        | 3                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | YES         | timestamp(3)        |                |        |
+| greptime      | information_schema | flow_statistics                       | state_size                        | 6                |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | YES         | bigint unsigned     |                |        |
+| greptime      | information_schema | flow_statistics                       | uptime_seconds                    | 5                |                          |                        | 19                | 0             |                    |                    |                |            |       | select,insert |                       | Int64                | bigint              | FIELD         |                | YES         | bigint              |                |        |
 | greptime      | information_schema | flows                                 | comment                           | 6                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
 | greptime      | information_schema | flows                                 | created_time                      | 12               |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | NO          | timestamp(3)        |                |        |
 | greptime      | information_schema | flows                                 | expire_after                      | 7                |                          |                        | 19                | 0             |                    |                    |                |            |       | select,insert |                       | Int64                | bigint              | FIELD         |                | YES         | bigint              |                |        |
@@ -425,6 +436,7 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | information_schema | ssts_manifest                         | index_file_size                   | 13               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | YES         | bigint unsigned     |                |        |
 | greptime      | information_schema | ssts_manifest                         | index_version                     | 8                |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | NO          | bigint unsigned     |                |        |
 | greptime      | information_schema | ssts_manifest                         | level                             | 9                |                          |                        | 3                 | 0             |                    |                    |                |            |       | select,insert |                       | UInt8                | tinyint unsigned    | FIELD         |                | NO          | tinyint unsigned    |                |        |
+| greptime      | information_schema | ssts_manifest                         | max_row_group_uncompressed_size   | 25               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | NO          | bigint unsigned     |                |        |
 | greptime      | information_schema | ssts_manifest                         | max_ts                            | 18               |                          |                        |                   |               | 9                  |                    |                |            |       | select,insert |                       | TimestampNanosecond  | timestamp(9)        | FIELD         |                | YES         | timestamp(9)        |                |        |
 | greptime      | information_schema | ssts_manifest                         | min_ts                            | 17               |                          |                        |                   |               | 9                  |                    |                |            |       | select,insert |                       | TimestampNanosecond  | timestamp(9)        | FIELD         |                | YES         | timestamp(9)        |                |        |
 | greptime      | information_schema | ssts_manifest                         | node_id                           | 21               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | YES         | bigint unsigned     |                |        |
@@ -432,6 +444,7 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | information_schema | ssts_manifest                         | num_rows                          | 14               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | NO          | bigint unsigned     |                |        |
 | greptime      | information_schema | ssts_manifest                         | num_series                        | 16               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | YES         | bigint unsigned     |                |        |
 | greptime      | information_schema | ssts_manifest                         | origin_region_id                  | 20               |                          |                        | 20                | 0             |                    |                    |                |            |       | select,insert |                       | UInt64               | bigint unsigned     | FIELD         |                | NO          | bigint unsigned     |                |        |
+| greptime      | information_schema | ssts_manifest                         | partition_expr                    | 26               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
 | greptime      | information_schema | ssts_manifest                         | primary_key_max                   | 24               |                          |                        |                   |               |                    |                    |                |            |       | select,insert |                       | Binary               | varbinary           | FIELD         |                | YES         | varbinary           |                |        |
 | greptime      | information_schema | ssts_manifest                         | primary_key_min                   | 23               |                          |                        |                   |               |                    |                    |                |            |       | select,insert |                       | Binary               | varbinary           | FIELD         |                | YES         | varbinary           |                |        |
 | greptime      | information_schema | ssts_manifest                         | region_group                      | 5                |                          |                        | 3                 | 0             |                    |                    |                |            |       | select,insert |                       | UInt8                | tinyint unsigned    | FIELD         |                | NO          | tinyint unsigned    |                |        |
@@ -616,7 +629,7 @@ order by table_name;
 
 select table_name
 from information_schema.tables
-where table_schema not in ('my_db', 'information_schema', 'pg_catalog')
+where table_schema not in ('my_db', 'information_schema', 'pg_catalog', 'greptime_private')
 order by table_name;
 
 +------------+
@@ -631,6 +644,7 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
   and table_schema != 'pg_catalog'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name;
 
 +---------------+--------------+------------+------------+--------+
@@ -645,6 +659,7 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
   and table_schema != 'pg_catalog'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name, column_name;
 
 +---------------+--------------+------------+-------------+--------------+---------------+
@@ -682,12 +697,12 @@ use information_schema;
 Affected Rows: 0
 
 -- test query filter for key_column_usage --
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX' and TABLE_SCHEMA != 'greptime_private';
 
 ++
 ++
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX' and TABLE_SCHEMA != 'greptime_private';
 
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |
@@ -695,12 +710,12 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
 | def                | public            | PRIMARY         | def           | greptime           | public       | numbers    | number      | 1                |                               |                         |                       |                        | dense               |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX' and TABLE_SCHEMA != 'greptime_private';
 
 ++
 ++
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX' and TABLE_SCHEMA != 'greptime_private';
 
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |
@@ -708,7 +723,7 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
 | def                | public            | PRIMARY         | def           | greptime           | public       | numbers    | number      | 1                |                               |                         |                       |                        | dense               |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db' and TABLE_SCHEMA != 'greptime_private';
 
 ++
 ++
@@ -787,7 +802,7 @@ desc table key_column_usage;
 | greptime_index_type           | String |     | YES  |         | FIELD         |
 +-------------------------------+--------+-----+------+---------+---------------+
 
-select * from key_column_usage;
+select * from key_column_usage where table_schema != 'greptime_private';
 
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |

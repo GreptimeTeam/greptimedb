@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
+use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
@@ -35,18 +36,18 @@ use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::extension::json::is_json2_extension_type;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
-use itertools::Itertools;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    ColumnId, NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange,
-    TimeSeriesDistribution, TimeSeriesRowSelector,
+    ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
+    TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -64,7 +65,7 @@ use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
-use crate::read::read_columns::{ReadColumn, ReadColumns};
+use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
@@ -238,6 +239,10 @@ pub(crate) struct ScanRegion {
     cache_strategy: CacheStrategy,
     /// Maximum number of SST files to scan concurrently.
     max_concurrent_scan_files: usize,
+    /// Memory pool shared by internal scan operators across all queries.
+    scan_memory_pool: Arc<dyn MemoryPool>,
+    /// Whether to enable the experimental two-phase metric series scan.
+    experimental_series_scan_v2: bool,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -269,6 +274,8 @@ impl ScanRegion {
             request,
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+            scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+            experimental_series_scan_v2: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
@@ -294,6 +301,20 @@ impl ScanRegion {
         max_concurrent_scan_files: usize,
     ) -> Self {
         self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    /// Sets the memory pool shared by internal scan operators.
+    #[must_use]
+    pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
+        self.scan_memory_pool = scan_memory_pool;
+        self
+    }
+
+    /// Sets whether eligible metric series scans use the two-phase implementation.
+    #[must_use]
+    pub(crate) fn with_experimental_series_scan_v2(mut self, enabled: bool) -> Self {
+        self.experimental_series_scan_v2 = enabled;
         self
     }
 
@@ -387,8 +408,9 @@ impl ScanRegion {
     /// Scans by series.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
+        let experimental_series_scan_v2 = self.experimental_series_scan_v2;
         let input = self.scan_input().await?;
-        Ok(SeriesScan::new(input))
+        Ok(SeriesScan::new(input, experimental_series_scan_v2))
     }
 
     /// Returns true if the region can use unordered scan for current request.
@@ -420,23 +442,7 @@ impl ScanRegion {
 
         let read_col_ids =
             self.build_read_col_ids(self.request.projection.as_deref(), &predicate)?;
-
-        // Narrow JSON2 columns to avoid reading unnecessary nested fields.
-        //
-        // `read_col_ids` selects the root columns required by the projection and predicates,
-        // while nested projection is currently only applied to JSON2 columns, whose type hints
-        // further narrow them to the requested nested fields.
-        let has_structured_json = metadata
-            .schema
-            .arrow_schema()
-            .fields()
-            .iter()
-            .any(is_json2_extension_type);
-        let read_cols = if has_structured_json {
-            self.read_columns_with_json_type_hint(&read_col_ids)
-        } else {
-            ReadColumns::from_deduped_column_ids(read_col_ids.iter().copied())
-        };
+        let read_cols = self.build_read_columns(&read_col_ids)?;
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let projection = self
@@ -444,23 +450,7 @@ impl ScanRegion {
             .projection
             .clone()
             .unwrap_or_else(|| (0..metadata.column_metadatas.len()).collect());
-        let json_type_hint = has_structured_json
-            .then_some(&self.request.json_type_hint)
-            .inspect(|json_type_hint| {
-                debug!(
-                    "Concretized JSON type: {{{}}}",
-                    json_type_hint
-                        .iter()
-                        .map(|(k, v)| format!("{}: {}", k, v))
-                        .join(", ")
-                );
-            });
-        let mapper = FlatProjectionMapper::new_with_read_columns(
-            metadata,
-            projection,
-            read_cols,
-            json_type_hint,
-        )?;
+        let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
         let mapper = if self.request.preserve_pk_dictionary_encoding {
             mapper.with_pk_dictionary_encoding()
         } else {
@@ -573,6 +563,7 @@ impl ScanRegion {
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
             .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
+            .with_scan_memory_pool(self.scan_memory_pool)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(self.filter_deleted)
@@ -609,7 +600,8 @@ impl ScanRegion {
         Ok(input)
     }
 
-    /// Builds the ordered root column ids required by the pushed-down projection and predicate.
+    /// Builds the deduplicated root column ids required by the projection and
+    /// predicate.
     fn build_read_col_ids(
         &self,
         projection: Option<&[usize]>,
@@ -688,27 +680,50 @@ impl ScanRegion {
         Ok(read_col_ids)
     }
 
-    /// Builds read columns with nested paths derived from JSON type hints.
-    fn read_columns_with_json_type_hint(&self, col_ids: &[ColumnId]) -> ReadColumns {
-        let cols = col_ids
+    /// Builds logical read columns and attaches JSON2 target types when needed.
+    ///
+    /// The behavior about JSON2 is as follows:
+    /// - JSON2 columns without hints use Variant to read the whole column.
+    /// - Hints targeting non-JSON2 read columns are rejected.
+    fn build_read_columns(&self, col_ids: &[ColumnId]) -> Result<ReadColumns> {
+        let metadata = &self.version.metadata;
+        let json_type_hint = &self.request.json_type_hint;
+
+        let has_json2 = metadata
+            .schema
+            .arrow_schema()
+            .fields()
             .iter()
-            .map(|&col_id| {
-                let nested_paths = self
-                    .version
-                    .metadata
-                    .column_by_id(col_id)
-                    .and_then(|column| {
-                        let col_name = &column.column_schema.name;
-                        self.request
-                            .json_type_hint
-                            .get(col_name)
-                            .map(|json_type| json_nested_paths(col_name, json_type))
-                    })
-                    .unwrap_or_default();
-                ReadColumn::new(col_id, nested_paths)
-            })
-            .collect();
-        ReadColumns { cols }
+            .any(is_json2_extension_type);
+
+        if !has_json2 && json_type_hint.is_empty() {
+            return Ok(ReadColumns::new(col_ids.iter().copied()));
+        }
+
+        let mut json_target_types = BTreeMap::new();
+        for &col_id in col_ids {
+            let Some(col) = metadata.column_by_id(col_id) else {
+                continue;
+            };
+            let col_name = &col.column_schema.name;
+            let hint = json_type_hint.get(col_name);
+            if !col.column_schema.data_type.is_json2() {
+                ensure!(
+                    hint.is_none(),
+                    InvalidRequestSnafu {
+                        region_id: metadata.region_id,
+                        reason: format!(
+                            "JSON type hint targets non-JSON2 column {} (id: {}, type: {})",
+                            col_name, col_id, col.column_schema.data_type
+                        ),
+                    }
+                );
+                continue;
+            }
+            let target_type = hint.cloned().unwrap_or(JsonNativeType::Variant);
+            json_target_types.insert(col_id, target_type);
+        }
+        Ok(ReadColumns::new(col_ids.iter().copied()).with_json_target_types(json_target_types))
     }
 
     fn region_id(&self) -> RegionId {
@@ -907,6 +922,8 @@ pub struct ScanInput {
     ignore_file_not_found: bool,
     /// Maximum number of SST files to scan concurrently.
     pub(crate) max_concurrent_scan_files: usize,
+    /// Memory pool shared by internal scan operators across all queries.
+    pub(crate) scan_memory_pool: Arc<dyn MemoryPool>,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
@@ -958,6 +975,7 @@ impl ScanInput {
             cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+            scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
@@ -1042,6 +1060,13 @@ impl ScanInput {
         max_concurrent_scan_files: usize,
     ) -> Self {
         self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    /// Sets the memory pool shared by internal scan operators.
+    #[must_use]
+    pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
+        self.scan_memory_pool = scan_memory_pool;
         self
     }
 
@@ -1269,7 +1294,7 @@ impl ScanInput {
             return Ok(FileRangeBuilder::default());
         }
 
-        self.prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+        self.prune_file_after_manifest_check(file, pre_filter_mode, true, predicate, reader_metrics)
             .await
     }
 
@@ -1284,6 +1309,7 @@ impl ScanInput {
         &self,
         file: &FileHandle,
         pre_filter_mode: PreFilterMode,
+        enable_predicate_prefilter: bool,
         predicate: Option<Predicate>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
@@ -1320,6 +1346,7 @@ impl ScanInput {
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
+            .enable_predicate_prefilter(enable_predicate_prefilter)
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;
@@ -1581,30 +1608,6 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
-fn json_nested_paths(column_name: &str, json_type: &JsonNativeType) -> Vec<NestedPath> {
-    let mut paths = Vec::new();
-    let mut current = vec![column_name.to_string()];
-    collect_json_nested_paths(json_type, &mut current, &mut paths);
-    paths
-}
-
-fn collect_json_nested_paths(
-    json_type: &JsonNativeType,
-    current: &mut NestedPath,
-    paths: &mut Vec<NestedPath>,
-) {
-    match json_type {
-        JsonNativeType::Object(fields) if !fields.is_empty() => {
-            for (field, child) in fields {
-                current.push(field.clone());
-                collect_json_nested_paths(child, current, paths);
-                current.pop();
-            }
-        }
-        _ => paths.push(current.clone()),
-    }
-}
-
 /// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
 /// implied time range used to decide whether the cache key can drop the time
 /// predicates for a given partition (see `build_range_cache_key`).
@@ -1701,9 +1704,15 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanFingerprin
         read_column_types: read_columns
             .column_ids_iter()
             .map(|id| {
-                metadata
-                    .column_by_id(id)
-                    .map(|col| col.column_schema.data_type.clone())
+                read_columns
+                    .json_target_type(id)
+                    .cloned()
+                    .map(ConcreteDataType::json2)
+                    .or_else(|| {
+                        metadata
+                            .column_by_id(id)
+                            .map(|col| col.column_schema.data_type.clone())
+                    })
             })
             .collect(),
         read_columns,
@@ -2094,6 +2103,7 @@ impl PredicateGroup {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use common_time::timestamp::{TimeUnit, Timestamp};
@@ -2223,30 +2233,6 @@ mod tests {
         assert_eq!(256, input.batch_size());
     }
 
-    #[test]
-    fn test_fill_json_nested_paths_from_hint() -> Result<()> {
-        let hint = JsonNativeType::Object(JsonObjectType::from([
-            ("a".to_string(), JsonNativeType::i64()),
-            (
-                "b".to_string(),
-                JsonNativeType::Object(JsonObjectType::from([(
-                    "c".to_string(),
-                    JsonNativeType::String,
-                )])),
-            ),
-        ]));
-
-        fn nested_path(parts: &[&str]) -> NestedPath {
-            parts.iter().map(|part| part.to_string()).collect()
-        }
-
-        assert_eq!(
-            json_nested_paths("j", &hint),
-            vec![nested_path(&["j", "a"]), nested_path(&["j", "b", "c"])]
-        );
-        Ok(())
-    }
-
     #[tokio::test]
     async fn test_build_scan_fingerprint_for_eligible_scan() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
@@ -2366,6 +2352,158 @@ mod tests {
         .build();
         assert_eq!(expected, fingerprint.fingerprint);
         assert_ne!(0, metadata.partition_expr_version);
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_uses_json_target_types() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "j".to_string(),
+                    ConcreteDataType::json2(JsonNativeType::Variant),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let make_input = |target_type| async {
+            let env = SchedulerEnv::new().await;
+            let read_cols = ReadColumns::new([0, 1, 2])
+                .with_json_target_types(BTreeMap::from([(2, target_type)]));
+            let mapper =
+                FlatProjectionMapper::new_with_read_columns(&metadata, vec![0, 1, 2], read_cols)
+                    .unwrap();
+            let predicate =
+                PredicateGroup::new(metadata.as_ref(), &[col("k0").eq(lit("foo"))]).unwrap();
+            let file = FileHandle::new(
+                FileMeta::default(),
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+            );
+            ScanInput::new(env.access_layer.clone(), mapper)
+                .with_predicate(predicate)
+                .with_cache(CacheStrategy::EnableAll(Arc::new(
+                    CacheManager::builder()
+                        .range_result_cache_size(1024)
+                        .build(),
+                )))
+                .with_files(vec![file])
+        };
+
+        let int_target = JsonNativeType::i64();
+        let string_target = JsonNativeType::String;
+        let int_fingerprint = build_scan_fingerprint(&make_input(int_target.clone()).await)
+            .unwrap()
+            .fingerprint;
+        let string_fingerprint = build_scan_fingerprint(&make_input(string_target).await)
+            .unwrap()
+            .fingerprint;
+
+        assert_ne!(int_fingerprint, string_fingerprint);
+        assert_eq!(
+            Some(&Some(ConcreteDataType::json2(int_target))),
+            int_fingerprint.read_column_types().get(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_input_rejects_json_type_hint_for_non_json2_column() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "j".to_string(),
+                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::i64(),
+                    )]))),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "v0".to_string(),
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![0]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+            metadata.clone(),
+            Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
+            0,
+            None,
+        ));
+        let version = Arc::new(
+            crate::region::version::VersionBuilder::new(metadata.clone(), mutable).build(),
+        );
+        let env = SchedulerEnv::new().await;
+        let request = ScanRequest {
+            projection: Some(vec![0, 1, 2, 3]),
+            json_type_hint: std::collections::HashMap::from([(
+                "v0".to_string(),
+                JsonNativeType::i64(),
+            )]),
+            ..Default::default()
+        };
+
+        let err = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        )
+        .scan_input()
+        .await;
+        let Err(err) = err else {
+            panic!("scan input should reject JSON type hint for non-JSON2 column");
+        };
+
+        assert!(err.to_string().contains("non-JSON2 column v0"));
     }
 
     #[test]
