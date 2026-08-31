@@ -3,7 +3,7 @@ reason = "Verify WLF1 states persisted by an old binary retain their binary layo
 introduced_by = "PR #8972"
 topologies = ["distributed", "standalone"]
 from_range = [">=v1.3.0"]
-to_range = ["*"]
+to_range = [">=v1.3.0"]
 features = ["table", "query", "aggregate"]
 owner = "query"
 namespace = "stddev_pop_state"
