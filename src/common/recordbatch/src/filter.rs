@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_time::timestamp::div_mod_units;
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::{Expr, Literal, Operator};
 use datafusion::physical_plan::PhysicalExpr;
@@ -372,7 +373,7 @@ impl SimpleFilterEvaluator {
                 let Some(value) = value else {
                     continue;
                 };
-                let cast = div_mod_units(value, unit, target_unit)?;
+                let cast = div_mod_units(value, unit.into(), target_unit.into())?;
                 if cast.remainder == 0 {
                     literal_list.push(timestamp_scalar(cast.quotient, target_unit)?);
                 }
@@ -398,7 +399,7 @@ impl SimpleFilterEvaluator {
             // semantics: null results are filtered out).
             return Some(TimestampUnitCast::Pruned);
         };
-        let cast = div_mod_units(value, unit, target_unit)?;
+        let cast = div_mod_units(value, unit.into(), target_unit.into())?;
         let divisible = cast.remainder == 0;
         let literal = timestamp_scalar(cast.quotient, target_unit)?;
         let filter = |op: Operator| Self {
@@ -445,17 +446,6 @@ pub enum TimestampUnitCast {
     Matched,
 }
 
-/// Number of units in one second; the ratio of two units' scales converts
-/// values between them.
-fn timestamp_unit_scale(unit: TimeUnit) -> i128 {
-    match unit {
-        TimeUnit::Second => 1,
-        TimeUnit::Millisecond => 1_000,
-        TimeUnit::Microsecond => 1_000_000,
-        TimeUnit::Nanosecond => 1_000_000_000,
-    }
-}
-
 /// Extracts the value and unit from a tz-naive timestamp scalar.
 fn timestamp_scalar_parts(scalar: &ScalarValue) -> Option<(Option<i64>, TimeUnit)> {
     let (value, unit, timezone) = match scalar {
@@ -479,32 +469,6 @@ fn timestamp_scalar(value: i64, unit: TimeUnit) -> Option<Scalar<ArrayRef>> {
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), None),
     };
     scalar.to_scalar().ok()
-}
-
-/// The exact division of a literal's instant into the target unit:
-/// `quotient * literal_scale + remainder == literal * target_scale` with
-/// `0 <= remainder < literal_scale`. `remainder == 0` iff the literal is
-/// representable in the target unit.
-struct UnitQuotient {
-    quotient: i64,
-    remainder: i128,
-}
-
-/// Divides a `literal` (in `literal_unit`) by the `target_unit`, i.e.
-/// computes its value in `target_unit` exactly (floor division).
-fn div_mod_units(
-    literal: i64,
-    literal_unit: TimeUnit,
-    target_unit: TimeUnit,
-) -> Option<UnitQuotient> {
-    let literal_scale = timestamp_unit_scale(literal_unit);
-    let target_scale = timestamp_unit_scale(target_unit);
-    let instant = i128::from(literal) * target_scale;
-    let quotient = i64::try_from(instant.div_euclid(literal_scale)).ok()?;
-    Some(UnitQuotient {
-        quotient,
-        remainder: instant.rem_euclid(literal_scale),
-    })
 }
 
 /// Evaluate the predicate on the input [RecordBatch], and return a new [RecordBatch].
