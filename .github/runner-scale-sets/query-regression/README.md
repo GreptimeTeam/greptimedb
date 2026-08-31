@@ -49,7 +49,7 @@ Configuration lives in repository variables/secrets:
 | vars | `ALIYUN_ECS_INSTANCE_TYPE` | Dedicated (non-burstable, non-shared) instance family. Prefer 32 GiB (e.g. `ecs.g8i.2xlarge`); `ecs.c9i.2xlarge` is 8c16g and nightly thin-LTO of greptime peaks above that. Both base and candidate clusters run on the same machine, so noisy neighbors break thresholds. |
 | vars | `QUERY_REGRESSION_ECS_IMAGE_ID` | Custom image built by `ecs-image/build-ecs-image.py`. |
 
-The system disk is 40 GiB, which covers the image, a 16 GiB swapfile, the
+The system disk is 50 GiB, which covers the image, a 16 GiB swapfile, the
 checkout, and cold build caches (target dir, cargo registry, sccache). ENOSPC
 stops the runner itself from writing logs, which GitHub reports as `The
 operation was canceled` with no telemetry, indistinguishable from a
@@ -164,7 +164,7 @@ reintroduce those actions unless the image contract changes.
 Each run provisions its own ECS instance, so overlapping dispatches proceed
 in parallel. There is no workflow `concurrency` group. All Cargo state
 (`CARGO_HOME` including registry/git, `CARGO_TARGET_DIR`, sccache, cache
-metadata) lives on the 40 GiB system disk and is discarded with the VM.
+metadata) lives on the 50 GiB system disk and is discarded with the VM.
 `RUSTUP_HOME=/opt/rustup` and `/opt/cargo/bin` are image-owned. The runner
 sets `RUSTC_WRAPPER=/usr/local/bin/sccache`,
 `SCCACHE_DIR=/home/runner/.cache/sccache`, `SCCACHE_CACHE_SIZE=10G`, and
@@ -173,7 +173,7 @@ at 10G. Base and candidate builds share the target on that disk; Cargo
 fingerprints invalidate source and dependency changes.
 
 The workflow reports `du` / `df` in telemetry. It does not try to reclaim
-space across runs: a cold 40 GiB disk that fills up fails the build.
+space across runs: a cold 50 GiB disk that fills up fails the build.
 
 ## Future optional phases
 
