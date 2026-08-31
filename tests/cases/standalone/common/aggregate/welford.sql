@@ -19,6 +19,16 @@ INSERT INTO test_welford (`id`, `value`) VALUES
 
 SELECT stddev_pop_calc(stddev_pop_state(`value`)) FROM test_welford;
 
+-- A second DISTINCT argument set prevents DataFusion from rewriting this to GROUP BY.
+SELECT
+    stddev_pop_calc(stddev_pop_state(DISTINCT `value`)),
+    count(DISTINCT `id`)
+FROM (
+    SELECT `id`, `value` FROM test_welford
+    UNION ALL
+    SELECT 12 AS `id`, 100.0 AS `value`
+) AS duplicated_welford;
+
 SELECT stddev_pop_calc(stddev_pop_state(`value`)) FROM test_welford WHERE false;
 
 CREATE TABLE grouped_welford (
@@ -34,6 +44,16 @@ INSERT INTO grouped_welford (`id`, `state`)
 SELECT 2, stddev_pop_state(`value`) FROM test_welford WHERE id > 5;
 
 SELECT stddev_pop_calc(stddev_pop_merge(`state`)) FROM grouped_welford;
+
+-- A second DISTINCT argument set prevents DataFusion from rewriting this to GROUP BY.
+SELECT
+    stddev_pop_calc(stddev_pop_merge(DISTINCT `state`)),
+    count(DISTINCT `id`)
+FROM (
+    SELECT `id`, `state` FROM grouped_welford
+    UNION ALL
+    SELECT 3 AS `id`, `state` FROM grouped_welford WHERE id = 1
+) AS duplicated_states;
 
 DROP TABLE grouped_welford;
 DROP TABLE test_welford;

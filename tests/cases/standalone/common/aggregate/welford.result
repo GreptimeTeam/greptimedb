@@ -29,6 +29,18 @@ SELECT stddev_pop_calc(stddev_pop_state(`value`)) FROM test_welford;
 | 28.722813232690143                                    |
 +-------------------------------------------------------+
 
+-- A second DISTINCT argument set prevents DataFusion from rewriting this to GROUP BY.
+SELECT
+    stddev_pop_calc(stddev_pop_state(DISTINCT `value`)),
+    count(DISTINCT `id`)
+FROM (
+    SELECT `id`, `value` FROM test_welford
+    UNION ALL
+    SELECT 12 AS `id`, 100.0 AS `value`
+) AS duplicated_welford;
+
+Error: 1001(Unsupported), This feature is not implemented: Welford DISTINCT aggregations are not available
+
 SELECT stddev_pop_calc(stddev_pop_state(`value`)) FROM test_welford WHERE false;
 
 +-------------------------------------------------------+
@@ -62,6 +74,18 @@ SELECT stddev_pop_calc(stddev_pop_merge(`state`)) FROM grouped_welford;
 +----------------------------------------------------------+
 | 28.722813232690143                                       |
 +----------------------------------------------------------+
+
+-- A second DISTINCT argument set prevents DataFusion from rewriting this to GROUP BY.
+SELECT
+    stddev_pop_calc(stddev_pop_merge(DISTINCT `state`)),
+    count(DISTINCT `id`)
+FROM (
+    SELECT `id`, `state` FROM grouped_welford
+    UNION ALL
+    SELECT 3 AS `id`, `state` FROM grouped_welford WHERE id = 1
+) AS duplicated_states;
+
+Error: 1001(Unsupported), This feature is not implemented: Welford DISTINCT aggregations are not available
 
 DROP TABLE grouped_welford;
 

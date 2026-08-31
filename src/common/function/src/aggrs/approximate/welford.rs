@@ -211,7 +211,10 @@ impl WelfordAccumulator {
         )
     }
 
-    fn create_accumulator(_: AccumulatorArgs) -> DfResult<Box<dyn DfAccumulator>> {
+    fn create_accumulator(args: AccumulatorArgs) -> DfResult<Box<dyn DfAccumulator>> {
+        if args.is_distinct {
+            return not_impl_err!("Welford DISTINCT aggregations are not available");
+        }
         Ok(Box::new(Self::default()))
     }
 }
