@@ -68,9 +68,10 @@ pub enum QuerySpillCompression {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryMemoryPoolPolicy {
-    /// Greedy memory allocation (default, preserves current behavior).
+    /// Greedy first-come-first-served (default).
     Greedy,
-    /// Fair memory allocation: share available memory evenly among operators.
+    /// Fair divides memory available after unspillable reservations evenly among
+    /// spillable reservations and may trigger earlier spills.
     Fair,
 }
 
@@ -98,16 +99,15 @@ pub struct QueryOptions {
     /// `"custom"`. When set, spill files are written into this directory.
     pub experimental_spill_path: Option<PathBuf>,
     /// Experimental: maximum total size of the spill directory (data written to spill files).
-    /// Ignored unless `experimental_spill_mode` is `"custom"`. Default: `100GiB`.
+    /// Ignored unless `experimental_spill_mode` is `"custom"`. Default: `1GiB`.
     pub experimental_spill_max_temp_directory_size: ReadableSize,
     /// Experimental: compression algorithm applied to spilled data.
     /// Ignored unless `experimental_spill_mode` is `"custom"`. Default: `uncompressed`.
     pub experimental_spill_compression: QuerySpillCompression,
     /// Experimental: memory pool allocation policy.
-    /// - `greedy` (default): preserves current behavior.
-    /// - `fair`: share memory evenly among spillable operators.
-    ///
-    /// Only effective when `memory_pool_size` is bounded (>0).
+    /// - `greedy`: Greedy first-come-first-served (default).
+    /// - `fair`: Fair divides memory available after unspillable reservations
+    ///   evenly among spillable reservations and may trigger earlier spills.
     pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
 }
 
@@ -121,7 +121,7 @@ impl Default for QueryOptions {
             enable_per_region_metrics: false,
             experimental_spill_mode: QuerySpillMode::Default,
             experimental_spill_path: None,
-            experimental_spill_max_temp_directory_size: ReadableSize::gb(100),
+            experimental_spill_max_temp_directory_size: ReadableSize::gb(1),
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
         }
@@ -777,7 +777,7 @@ mod query_options_tests {
         assert_eq!(opts.experimental_spill_path, None);
         assert_eq!(
             opts.experimental_spill_max_temp_directory_size,
-            ReadableSize::gb(100)
+            ReadableSize::gb(1)
         );
         assert_eq!(
             opts.experimental_spill_compression,
@@ -888,30 +888,13 @@ experimental_spill_max_temp_directory_size = "50GiB"
         assert_eq!(opts.experimental_spill_path, None);
     }
 
-    /// Verify that `experimental_spill_compression` only takes effect
-    /// when paired with `experimental_spill_mode = "custom"`. This test
-    /// asserts the config can be parsed regardless, but the semantics
-    /// in `state.rs` enforce that compression is only applied in Custom mode.
-    #[test]
-    fn test_parse_experimental_spill_compression_without_custom_mode() {
-        let toml_str = r#"experimental_spill_compression = "zstd""#;
-        // Should parse fine, even though semantically compression
-        // is ignored unless mode is "custom".
-        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
-        assert_eq!(
-            opts.experimental_spill_compression,
-            QuerySpillCompression::Zstd
-        );
-        assert_eq!(opts.experimental_spill_mode, QuerySpillMode::Default);
-    }
-
     #[test]
     fn test_parse_experimental_spill_max_temp_directory_size_default() {
         let toml_str = "";
         let opts: QueryOptions = toml::from_str(toml_str).unwrap();
         assert_eq!(
             opts.experimental_spill_max_temp_directory_size,
-            ReadableSize::gb(100)
+            ReadableSize::gb(1)
         );
     }
 

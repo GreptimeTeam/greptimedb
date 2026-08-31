@@ -883,8 +883,6 @@ mod tests {
         );
     }
 
-    // --- spill / memory pool tests ---
-
     /// Builds a runtime env through the default provider seam, mirroring what
     /// [`QueryEngineState::try_new`] does.
     fn build_runtime_env(options: &QueryOptions, memory_pool_size: usize) -> Arc<RuntimeEnv> {
@@ -895,18 +893,13 @@ mod tests {
             .expect("Failed to build RuntimeEnv")
     }
 
-    /// Default mode: unbounded memory, OS temp dir disk manager.
     #[test]
     fn test_build_runtime_env_default_mode_unbounded() {
         let opts = QueryOptions::default();
         let env = build_runtime_env(&opts, 0);
-        // Default mode + unbounded pool: no custom disk manager override,
-        // so tmp files should be enabled (DataFusion default).
         assert!(env.disk_manager.tmp_files_enabled());
     }
 
-    /// Default mode with bounded memory: pool is attached but disk manager
-    /// remains default.
     #[test]
     fn test_build_runtime_env_default_mode_bounded() {
         let opts = QueryOptions {
@@ -914,19 +907,14 @@ mod tests {
             ..Default::default()
         };
         let env = build_runtime_env(&opts, 128 * 1024 * 1024);
-        // Bounded pool is attached
         assert!(env.memory_pool.reserved() == 0);
-        // Disk manager remains default (OS temp dir)
         assert!(env.disk_manager.tmp_files_enabled());
     }
 
-    /// Custom mode with explicit path: disk manager is configured with the
-    /// custom directory and the directory actually gets created.
     #[test]
     fn test_build_runtime_env_custom_mode_with_path() {
         // Use a temp directory managed manually so we don't need the `tempfile` crate.
         let spill_dir = std::env::temp_dir().join(format!("df_spill_test_{}", std::process::id()));
-        // Clean up if exists from a previous run
         let _ = std::fs::remove_dir_all(&spill_dir);
         let opts = QueryOptions {
             experimental_spill_mode: QuerySpillMode::Custom,
@@ -937,17 +925,13 @@ mod tests {
         let env = build_runtime_env(&opts, 0);
 
         assert!(env.disk_manager.tmp_files_enabled());
-        // Creating a temp file should succeed
         let tmp_file = env.disk_manager.create_tmp_file("test spill");
         assert!(tmp_file.is_ok());
-        // The directory should have been created
         assert!(spill_dir.exists());
 
-        // Cleanup
         let _ = std::fs::remove_dir_all(&spill_dir);
     }
 
-    /// Disabled mode: tmp files are disabled; creating a temp file returns an error.
     #[test]
     fn test_build_runtime_env_disabled_mode() {
         let opts = QueryOptions {
@@ -962,12 +946,10 @@ mod tests {
         assert!(format!("{}", result.unwrap_err()).contains("DiskManager is disabled"));
     }
 
-    /// MetricsMemoryPool defaults to greedy with TrackConsumersPool wrapping.
     #[test]
     fn test_metrics_memory_pool_default_greedy() {
         let pool = MetricsMemoryPool::new(1024, QueryMemoryPoolPolicy::Greedy);
         assert!(matches!(pool.memory_limit(), DfMemoryLimit::Finite(1024)));
-        // Smoke test: register a consumer and grow
         let pool: Arc<dyn MemoryPool> = Arc::new(pool);
         let consumer = MemoryConsumer::new("test");
         let reservation = consumer.register(&pool);
@@ -975,7 +957,6 @@ mod tests {
         assert!(pool.reserved() > 0);
     }
 
-    /// MetricsMemoryPool with fair policy: still wrapped in TrackConsumersPool.
     #[test]
     fn test_metrics_memory_pool_fair() {
         let pool = MetricsMemoryPool::new(1024, QueryMemoryPoolPolicy::Fair);
@@ -987,7 +968,6 @@ mod tests {
         assert!(pool.reserved() > 0);
     }
 
-    /// Bounded fair pool rejects over-limit growth.
     #[test]
     fn test_metrics_memory_pool_fair_rejects_over_limit() {
         let pool = MetricsMemoryPool::new(200, QueryMemoryPoolPolicy::Fair);
@@ -998,7 +978,6 @@ mod tests {
         assert!(result.is_err(), "expected error but got Ok");
     }
 
-    /// Bounded greedy pool rejects over-limit growth.
     #[test]
     fn test_metrics_memory_pool_greedy_rejects_over_limit() {
         let pool = MetricsMemoryPool::new(200, QueryMemoryPoolPolicy::Greedy);
@@ -1009,8 +988,6 @@ mod tests {
         assert!(result.is_err(), "expected error but got Ok");
     }
 
-    // --- end-to-end spill smoke test ---
-
     /// Builds a runtime with custom spill configuration and a bounded memory
     /// pool, then runs sort queries that probe spill-to-disk behaviour:
     ///
@@ -1019,24 +996,18 @@ mod tests {
     ///   than the total data.  Executes the physical plan directly so we can
     ///   walk the plan tree afterwards and sum `spill_count` / `spilled_rows` /
     ///   `spilled_bytes` on `SortExec` nodes.  All three must be > 0.
-    ///
-    /// Also checks the custom spill-path directory was initialised, pool
-    /// reserved returns to 0, and output is correctly sorted.
     #[tokio::test]
     async fn test_sort_spill_smoke_with_custom_runtime() {
-        // ---- shared imports (in-function to avoid polluting the module) ----
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
         use datafusion::datasource::MemTable;
         use datafusion::physical_plan::collect as df_collect;
 
-        // ---- setup: spill directory ----
         let spill_dir =
             std::env::temp_dir().join(format!("greptime_spill_smoke_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&spill_dir);
 
-        // ---- shared options ----
         let opts = QueryOptions {
             experimental_spill_mode: QuerySpillMode::Custom,
             experimental_spill_path: Some(spill_dir.clone()),
@@ -1045,13 +1016,11 @@ mod tests {
             ..Default::default()
         };
 
-        // ---- shared session config ----
         let session_config = SessionConfig::new()
             .with_target_partitions(1)
             .with_sort_in_place_threshold_bytes(0)
             .with_sort_spill_reservation_bytes(64 * 1024);
 
-        // ---- data: 200 K rows Int32×2, split into 40 batches of 5 K ----
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("val", DataType::Int32, false),
@@ -1088,7 +1057,6 @@ mod tests {
             table_partitions.push(batches);
         }
 
-        // ---- helper: build a SessionContext from options + data ----
         fn build_ctx(
             session_config: &SessionConfig,
             runtime: &Arc<RuntimeEnv>,
@@ -1106,7 +1074,6 @@ mod tests {
             ctx
         }
 
-        // ---- Phase 1: 64 KB pool → OOM (proves pool is active) ----
         {
             let mem_limit: usize = 64 * 1024;
             let runtime = build_runtime_env(&opts, mem_limit);
@@ -1129,7 +1096,6 @@ mod tests {
             assert_eq!(runtime.memory_pool.reserved(), 0);
         }
 
-        // ---- Phase 2: 512 KB pool → spilling to disk ----
         {
             let mem_limit: usize = 512 * 1024; // 512 KB pool, 64 KB reserved for merge
 
@@ -1137,7 +1103,6 @@ mod tests {
             assert_eq!(runtime.memory_pool.reserved(), 0);
             let ctx = build_ctx(&session_config, &runtime, &schema, &table_partitions);
 
-            // Execute via direct physical-plan path so we can inspect metrics.
             let df = ctx
                 .sql("SELECT val FROM t ORDER BY val ASC")
                 .await
@@ -1152,7 +1117,6 @@ mod tests {
                 .await
                 .expect("executing ORDER BY");
 
-            // ---- spill metrics on SortExec nodes ----
             let (spill_count, spilled_rows, spilled_bytes, _sort_elapsed_ns) =
                 sum_sort_spill_metrics(&plan);
             assert!(
@@ -1171,7 +1135,6 @@ mod tests {
                  (spill_count={spill_count}, spilled_rows={spilled_rows})",
             );
 
-            // ---- correctness: row count & sorted order ----
             let vals: Vec<i32> = batches
                 .iter()
                 .flat_map(|b| {
@@ -1184,7 +1147,6 @@ mod tests {
                 assert!(w[0] <= w[1], "sort order violation: {} > {}", w[0], w[1]);
             }
 
-            // ---- spill-path directory was initialised ----
             assert!(
                 std::fs::read_dir(&spill_dir)
                     .ok()
@@ -1199,11 +1161,9 @@ mod tests {
                 spill_dir,
             );
 
-            // Memory pool fully released.
             assert_eq!(runtime.memory_pool.reserved(), 0);
         }
 
-        // ---- cleanup ----
         let _ = std::fs::remove_dir_all(&spill_dir);
     }
 

@@ -446,8 +446,8 @@ parallelism = 0
 memory_pool_size = "50%"
 
 ## Experimental memory pool allocation policy:
-## - "greedy" (default): preserves current greedy allocation behavior.
-## - "fair": shares memory evenly among spillable operators.
+## - "greedy" (default): first-come-first-served allocation; preserves current behavior.
+## - "fair": divides available memory among spillable operators and may spill earlier.
 ## Only effective when `memory_pool_size` is bounded (>0).
 #+ experimental_memory_pool_policy = "greedy"
 
@@ -461,9 +461,9 @@ memory_pool_size = "50%"
 ## Spill directory path. Ignored unless mode is "custom".
 ## @toml2docs:none-default
 #+ experimental_spill_path = "/path/to/spill"
-## Maximum total size of spill directory (default: "100GiB").
+## Maximum total size of spill directory (default: "1GiB").
 ## Ignored unless mode is "custom".
-#+ experimental_spill_max_temp_directory_size = "100GiB"
+#+ experimental_spill_max_temp_directory_size = "1GiB"
 ## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
 ## Ignored unless mode is "custom".
 #+ experimental_spill_compression = "uncompressed"

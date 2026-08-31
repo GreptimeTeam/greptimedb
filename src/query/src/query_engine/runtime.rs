@@ -91,10 +91,15 @@ impl DefaultQueryRuntimeProvider {
                     dm_builder =
                         dm_builder.with_mode(DiskManagerMode::Directories(vec![path.clone()]));
                 }
-                dm_builder = dm_builder.with_max_temp_directory_size(
-                    ctx.query_options
-                        .experimental_spill_max_temp_directory_size
-                        .as_bytes(),
+                let max_temp_directory_size =
+                    ctx.query_options.experimental_spill_max_temp_directory_size;
+                dm_builder =
+                    dm_builder.with_max_temp_directory_size(max_temp_directory_size.as_bytes());
+                common_telemetry::info!(
+                    "Configured custom query spill: path={:?}, max_temp_directory_size={}, compression={:?}",
+                    ctx.query_options.experimental_spill_path,
+                    max_temp_directory_size,
+                    ctx.query_options.experimental_spill_compression,
                 );
                 builder = builder.with_disk_manager_builder(dm_builder);
             }
