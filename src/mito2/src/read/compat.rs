@@ -109,7 +109,7 @@ impl FlatCompatBatch {
 
         if actual.primary_key_encoding == PrimaryKeyEncoding::Sparse && compaction {
             // Special handling for sparse encoding in compaction.
-            return FlatCompatBatch::try_new_compact_sparse(mapper, &actual_schema);
+            return FlatCompatBatch::try_new_compact_sparse(mapper, actual);
         }
 
         let (index_or_defaults, fields) =
@@ -215,7 +215,7 @@ impl FlatCompatBatch {
 
     fn try_new_compact_sparse(
         mapper: &FlatProjectionMapper,
-        actual_schema: &[(ColumnId, ConcreteDataType)],
+        actual: &RegionMetadataRef,
     ) -> Result<Option<Self>> {
         // Currently, we don't support converting sparse encoding back to dense encoding in
         // flat format.
@@ -228,6 +228,11 @@ impl FlatCompatBatch {
 
         // For sparse encoding, we don't need to check the primary keys.
         // Since this is for compaction, we always read all columns.
+        let actual_schema: Vec<_> = actual
+            .field_columns()
+            .chain([actual.time_index_column()])
+            .map(|col| (col.column_id, col.column_schema.data_type.clone()))
+            .collect();
         let expect_schema: Vec<_> = mapper
             .metadata()
             .field_columns()
@@ -236,7 +241,7 @@ impl FlatCompatBatch {
             .collect();
 
         let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(actual_schema, &expect_schema, mapper.metadata())?;
+            Self::compute_index_and_fields(&actual_schema, &expect_schema, mapper.metadata())?;
 
         let compat_pk = FlatCompatPrimaryKey::default();
 
