@@ -268,34 +268,32 @@ fn build_parquet_leaves_indices(
     // children should not enter this fallback path.
     for col in &projection.cols {
         let path_matches = &prefix_matched[&col.root_index];
-        let needs_remainder = col
-            .nested_paths
-            .iter()
-            .zip(path_matches)
-            .any(|(path, matched)| {
-                !*matched || path_points_to_struct(parquet_schema_desc, col.root_index, path)
-            });
+        let mut needs_remainder = false;
+        for (matched, nested_path) in path_matches.iter().zip(&col.nested_paths) {
+            if *matched {
+                if !needs_remainder {
+                    needs_remainder =
+                        path_points_to_struct(parquet_schema_desc, col.root_index, nested_path);
+                }
+                continue;
+            }
+
+            if let Some(leaf_idx) =
+                find_nearest_variant_parent(parquet_schema_desc, col.root_index, nested_path)
+            {
+                matched_leaves.insert(leaf_idx);
+                matched_roots.insert(col.root_index);
+            } else {
+                needs_remainder = true;
+            }
+        }
+
         if needs_remainder {
             let remainder_leaves = find_remainder_leaves(parquet_schema_desc, col.root_index);
             if !remainder_leaves.is_empty() {
                 matched_leaves.extend(remainder_leaves);
                 matched_roots.insert(col.root_index);
             }
-        }
-
-        for (matched, nested_path) in path_matches.iter().zip(&col.nested_paths) {
-            if *matched {
-                continue;
-            }
-
-            let Some(leaf_idx) =
-                find_nearest_variant_parent(parquet_schema_desc, col.root_index, nested_path)
-            else {
-                continue;
-            };
-
-            matched_leaves.insert(leaf_idx);
-            matched_roots.insert(col.root_index);
         }
     }
 
@@ -550,8 +548,11 @@ mod tests {
         Ok(())
     }
 
+    // A nested path under an explicit Variant is stored entirely in that Variant parent. The
+    // remainder may preserve `opaque: null`, but it cannot contain `opaque.leaf`, so reading the
+    // nearest Variant parent is sufficient.
     #[test]
-    fn test_v2_variant_parent_path_reads_remainder_and_parent() -> Result<(), ParquetError> {
+    fn test_v2_variant_parent_path_reads_parent() -> Result<(), ParquetError> {
         let parquet = build_test_v2_schema()?;
         let projection =
             ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
@@ -565,7 +566,7 @@ mod tests {
         let plan = build_projection_plan(&projection, &parquet);
 
         assert_eq!(vec![true], plan.projected_root_presence);
-        assert_eq!(ProjectionMask::leaves(&parquet, [0, 1, 4]), plan.mask);
+        assert_eq!(ProjectionMask::leaves(&parquet, [4]), plan.mask);
         Ok(())
     }
 
@@ -837,6 +838,9 @@ mod tests {
                 .with_repetition(Repetition::OPTIONAL)
                 .build()?,
         );
+        // Normally there are no other explicit Variant fields exist if a remainder field is present.
+        // However, when structured values reach JSON2_MAX_STRUCTURED_DEPTH, there are. `opaque`
+        // models such a deep leaf without building a deeply nested test schema.
         let opaque = Arc::new(
             Type::primitive_type_builder("opaque", parquet::basic::Type::BYTE_ARRAY)
                 .with_repetition(Repetition::OPTIONAL)
