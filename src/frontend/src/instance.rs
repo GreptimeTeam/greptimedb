@@ -59,6 +59,7 @@ use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
 use dashmap::DashMap;
+use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt, future};
@@ -134,6 +135,7 @@ pub struct Instance {
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
     trace_ingest_chunk_size: usize,
+    otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
 
     // cache for otlp metrics
@@ -846,6 +848,22 @@ impl Instance {
 
         query_interceptor.pre_execute(stmt.as_ref(), Some(&plan), query_ctx.clone())?;
 
+        // TQL EXPLAIN/ANALYZE formats are consumed from the query context at
+        // execution time (see `optimize_physical_plan`); re-apply the side
+        // effect of `plan_tql` that was lost when the plan was built during
+        // Describe. `explain_format` is per-query state, so this never
+        // overwrites anything.
+        if let Some(Statement::Tql(tql)) = &stmt {
+            let format = match tql {
+                Tql::Explain(explain) => explain.format.as_ref(),
+                Tql::Analyze(analyze) => analyze.format.as_ref(),
+                Tql::Eval(_) => None,
+            };
+            if let Some(format) = format {
+                query_ctx.set_explain_format(format.to_string());
+            }
+        }
+
         let query = stmt
             .as_ref()
             .map(|s| s.to_string())
@@ -927,6 +945,59 @@ impl Instance {
         vec![result]
     }
 
+    /// Builds the [`DataFrame`] for an information-schema-backed `SHOW`
+    /// statement; `None` for other statements. The future is boxed to keep
+    /// `do_describe_inner`'s state machine small.
+    fn show_statement_dataframe<'a>(
+        &'a self,
+        stmt: &'a Statement,
+        query_ctx: &'a QueryContextRef,
+    ) -> Pin<Box<dyn Future<Output = Option<query::error::Result<DataFrame>>> + Send + 'a>> {
+        Box::pin(async move {
+            let engine = &self.query_engine;
+            let catalog_manager = self.catalog_manager();
+            let ctx = query_ctx.clone();
+            let dataframe = match stmt {
+                Statement::ShowDatabases(show) => {
+                    query::sql::show_databases_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowTables(show) => {
+                    query::sql::show_tables_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowViews(show) => {
+                    query::sql::show_views_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowFlows(show) => {
+                    query::sql::show_flows_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowColumns(show) => {
+                    query::sql::show_columns_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowTableStatus(show) => {
+                    query::sql::show_table_status_dataframe(show, engine, catalog_manager, ctx)
+                        .await
+                }
+                Statement::ShowCharset(kind) => {
+                    query::sql::show_charsets_dataframe(kind, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowCollation(kind) => {
+                    query::sql::show_collations_dataframe(kind, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowIndex(show) => {
+                    query::sql::show_index_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowRegion(show) => {
+                    query::sql::show_region_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowProcesslist(show) => {
+                    query::sql::show_processlist_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                _ => return None,
+            };
+            Some(dataframe)
+        })
+    }
+
     async fn do_describe_inner(
         &self,
         stmt: Statement,
@@ -945,6 +1016,37 @@ impl Instance {
         };
         let plannable = is_inner_plannable(&stmt)
             || matches!(&stmt, Statement::Explain(explain) if is_inner_plannable(explain.statement.as_ref()));
+
+        if let Statement::Tql(tql) = stmt {
+            // TQL produces a logical plan; describe it from the plan so the
+            // extended-protocol RowDescription matches the executed DataRows.
+            self.check_sql_permission(&Statement::Tql(tql.clone()), &query_ctx)
+                .await?;
+            let plan = self.statement_executor.plan_tql(tql, &query_ctx).await?;
+            return self
+                .query_engine
+                .describe(plan, query_ctx)
+                .await
+                .map(Some)
+                .context(error::DescribeStatementSnafu);
+        }
+
+        // Describe SHOW statements from the same projection the executor builds.
+        if let Some(dataframe) = self
+            .show_statement_dataframe(&stmt, &query_ctx)
+            .await
+            .transpose()
+            .context(PlanStatementSnafu)?
+        {
+            self.check_sql_permission(&stmt, &query_ctx).await?;
+            let plan = dataframe.into_unoptimized_plan();
+            return self
+                .query_engine
+                .describe(plan, query_ctx)
+                .await
+                .map(Some)
+                .context(error::DescribeStatementSnafu);
+        }
 
         if plannable {
             self.check_sql_permission(&stmt, &query_ctx).await?;

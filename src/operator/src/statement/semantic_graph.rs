@@ -41,8 +41,9 @@ use common_catalog::consts::{
     ENTITY_DESCRIPTIVE_COLUMN, ENTITY_ID_ATTRS_COLUMN, ENTITY_ID_COLUMN, ENTITY_SCOPE_COLUMN,
     ENTITY_TYPE_COLUMN, ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, GENERATION_ID_COLUMN,
     OBSERVED_AT_COLUMN, PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN,
-    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SOURCE_TABLES_COLUMN, SRC_ID_COLUMN,
-    SRC_TYPE_COLUMN, VALID_FROM_COLUMN, VALID_UNTIL_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
+    SEMANTIC_GRAPH_WINDOW_NANOS, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SOURCE_TABLES_COLUMN,
+    SRC_ID_COLUMN, SRC_TYPE_COLUMN, VALID_FROM_COLUMN, VALID_UNTIL_COLUMN, WINDOW_END_COLUMN,
+    WINDOW_START_COLUMN,
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
@@ -60,7 +61,7 @@ use datafusion::dataframe::DataFrame;
 use datafusion::functions::{core as core_fns, datetime as datetime_fns, string as string_fns};
 use datafusion::functions_nested::expr_fn::make_array;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
-use datafusion_expr::{Expr, LogicalPlan, ScalarUDF, cast, ident, lit};
+use datafusion_expr::{Case, Expr, LogicalPlan, ScalarUDF, cast, ident, lit, not};
 pub use relationships::{
     CallsSource, CoDeclaredSource, DeclaredSource, RelationshipSources, build_relationships_plan,
 };
@@ -122,9 +123,10 @@ pub fn declared_relationships_schema_matches(table_info: &table::metadata::Table
         })
 }
 
-/// Bin width for the temporal window of derived rows: 60s buckets, matching the
-/// service-graph convention.
-const BIN_NANOS: i64 = 60 * 1_000_000_000;
+/// Bin width for the temporal window of derived rows, matching the
+/// service-graph convention. Shared so ingestion-synthesized observations
+/// land in the same buckets.
+const BIN_NANOS: i64 = SEMANTIC_GRAPH_WINDOW_NANOS;
 
 /// Default retention for the declared-edge table; expiry slides the topology window.
 const DEFAULT_DECLARED_RELATIONSHIPS_TTL: &str = "90d";
@@ -284,8 +286,17 @@ pub struct EntityDeclaration {
     /// The table's time index column, used for the temporal window filter.
     pub time_index: String,
     pub entity_type: String,
-    /// Identifying columns (>= 1). One column → id verbatim; several → composite.
+    /// Identifying columns (>= 1), ordered broad to narrow.
     pub id_columns: Vec<String>,
+    /// Optional column qualifying the first identity component, so a source
+    /// carrying the parts separately (a trace table's `service.namespace`)
+    /// yields the same id as one carrying them pre-composed (`job`).
+    pub id_qualifier: Option<String>,
+    /// Identity columns of a more specific entity type that takes over on the
+    /// rows carrying all of them (a pod's container is the `k8s.container`, not
+    /// a generic `container`). Empty for explicit declarations: a user who
+    /// declares a type means it unconditionally.
+    pub superseded_by_columns: Vec<String>,
     /// Descriptive columns snapshotted into the `descriptive` JSON (may be empty).
     pub descriptive_columns: Vec<String>,
     /// Scope columns (namespace/environment). One column → scope verbatim;
@@ -417,28 +428,110 @@ fn cast_string_or_empty(column: &str) -> Expr {
     core_fns::coalesce().call(vec![cast(ident(column), DataType::Utf8), lit("")])
 }
 
-/// The canonical entity-id expression for `id_columns`: the value verbatim for
-/// a single column, the sorted `k=v,k=v` rendering for a composite. `col`
-/// constructs the column reference (unqualified for registry branches,
-/// join-side-qualified for the calls derivation).
 /// A row identifies an entity only when every identity component is present
 /// and non-empty: kube-state-metrics descriptors emit empty-string labels (an
 /// unscheduled pod's `node`, an owner-less pod's `owner_*`), and an empty
-/// string is never a meaningful entity id.
-pub(crate) fn identifies(column: &str) -> Expr {
+/// string is never a meaningful entity id. The qualifier is optional by
+/// construction and so is not guarded.
+fn identifies(column: &str) -> Expr {
     ident(column)
         .is_not_null()
         .and(cast(ident(column), DataType::Utf8).not_eq(lit("")))
 }
 
-fn entity_id_expr(id_columns: &[String], col: &dyn Fn(&str) -> Expr) -> Expr {
-    if let [id] = id_columns {
-        cast(col(id), DataType::Utf8)
-    } else {
-        let mut cols = id_columns.to_vec();
-        cols.sort();
-        sorted_kv_expr_with(&cols, false, col)
+/// The row-level guard a declaration carries: every identity component present,
+/// and the superseding type's identity not complete. Every branch that turns a
+/// declaration into rows applies this, so the guard cannot drift between them.
+pub(crate) fn declaration_predicate(declaration: &EntityDeclaration) -> Expr {
+    let mut predicate = lit(true);
+    for column in &declaration.id_columns {
+        predicate = predicate.and(identifies(column));
     }
+    if let Some(superseding) = declaration
+        .superseded_by_columns
+        .iter()
+        .map(|column| identifies(column))
+        .reduce(Expr::and)
+    {
+        predicate = predicate.and(not(superseding));
+    }
+    predicate
+}
+
+const ID_SEPARATOR: &str = ",";
+const ID_ESCAPE: &str = "\\";
+/// Left unescaped: `<namespace>/<name>` is how Prometheus renders `job`.
+const ID_QUALIFIER_SEPARATOR: &str = "/";
+
+/// Escapes so a composite id decodes back to its components. The escape
+/// character goes first, or it would double the escapes the separator pass
+/// introduces.
+fn escaped_id_value(value: Expr) -> Expr {
+    let escape_escape = string_fns::replace().call(vec![
+        value,
+        lit(ID_ESCAPE),
+        lit(format!("{ID_ESCAPE}{ID_ESCAPE}")),
+    ]);
+    string_fns::replace().call(vec![
+        escape_escape,
+        lit(ID_SEPARATOR),
+        lit(format!("{ID_ESCAPE}{ID_SEPARATOR}")),
+    ])
+}
+
+/// The identity values in declared order (broad to narrow), escaped and
+/// joined.
+///
+/// The identifying *column names* are deliberately absent: the same identity
+/// reaches us under different names per source — a trace table's
+/// `service_name` against a metric table's `job` — and encoding them would
+/// split one entity into one per signal. `entity_id_attrs` carries the names
+/// beside the id, where they document its origin without dividing it.
+///
+/// `col` constructs the column reference (unqualified for registry branches,
+/// join-side-qualified for the calls derivation).
+fn entity_id_expr(
+    id_columns: &[String],
+    qualifier: Option<&str>,
+    col: &dyn Fn(&str) -> Expr,
+) -> Expr {
+    let mut parts = Vec::with_capacity(id_columns.len() * 2);
+    for (index, column) in id_columns.iter().enumerate() {
+        if index > 0 {
+            parts.push(lit(ID_SEPARATOR));
+        }
+        let value = escaped_id_value(cast(col(column), DataType::Utf8));
+        parts.push(match qualifier {
+            Some(qualifier) if index == 0 => qualified_id_expr(qualifier, value, col),
+            _ => value,
+        });
+    }
+    if let [single] = parts.as_slice() {
+        single.clone()
+    } else {
+        concat_expr(parts)
+    }
+}
+
+/// `<qualifier>/<value>`, or bare `value` when the qualifier is empty on this
+/// row — the spec's rule composing `job` from `service.namespace` and
+/// `service.name`.
+fn qualified_id_expr(qualifier: &str, value: Expr, col: &dyn Fn(&str) -> Expr) -> Expr {
+    let qualifier = escaped_id_value(
+        core_fns::coalesce().call(vec![cast(col(qualifier), DataType::Utf8), lit("")]),
+    );
+    Expr::Case(Case::new(
+        None,
+        vec![(
+            Box::new(qualifier.clone().eq(lit(""))),
+            Box::new(value.clone()),
+        )],
+        Some(Box::new(concat_expr(vec![
+            qualifier,
+            lit(ID_QUALIFIER_SEPARATOR),
+            value,
+        ]))),
+    ))
 }
 
 /// The `parse_json` UDF, shared by all derivation plans. Resolved from the
@@ -583,15 +676,19 @@ fn registry_source(
     let mut rows = Vec::with_capacity(1 + rest.len());
     for decl in std::iter::once(first).chain(rest) {
         // CAST even a single-column id: id columns need not be strings, and
-        // the computed table declares entity_id STRING. Composite ids
-        // additionally carry a JSON object of the id columns in
-        // entity_id_attrs.
-        let entity_id = entity_id_expr(&decl.id_columns, &|c| ident(c));
-        let entity_id_attrs = if decl.id_columns.len() == 1 {
-            null_json()
-        } else {
-            json_object_expr(&decl.id_columns)
-        };
+        // the computed table declares entity_id STRING.
+        let entity_id = entity_id_expr(&decl.id_columns, decl.id_qualifier.as_deref(), &|c| {
+            ident(c)
+        });
+        let id_parts = decl
+            .id_qualifier
+            .iter()
+            .chain(&decl.id_columns)
+            .cloned()
+            .collect::<Vec<_>>();
+        // Carried for single-column ids too. Entity equality reads entity_id
+        // alone, so this is not part of the identity.
+        let entity_id_attrs = json_object_expr(&id_parts);
 
         let scope = match decl.scope_columns.as_slice() {
             [] => lit(""),
@@ -617,10 +714,7 @@ fn registry_source(
 
         // Keep this predicate per declaration so an absent identity for one
         // entity does not remove other entities on the row.
-        let valid = decl
-            .id_columns
-            .iter()
-            .fold(lit(true), |predicate, id| predicate.and(identifies(id)));
+        let valid = declaration_predicate(decl);
 
         rows.push(vec![
             valid,
@@ -811,9 +905,73 @@ mod tests {
             time_index: "ts".to_string(),
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
+            id_qualifier: None,
+            superseded_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
+    }
+
+    /// The id string must decode back to its components, and a qualifier must
+    /// reproduce the identity a source that pre-composed it already emits.
+    #[tokio::test]
+    async fn registry_id_escaping_and_qualifier() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("service_name", DataType::Utf8, false),
+            Field::new("instance", DataType::Utf8, false),
+            Field::new("namespace", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 2_000, 3_000])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["cart", "a,b", "we\\ird"])),
+                Arc::new(StringArray::from(vec!["i-1", "c", "i-3"])),
+                Arc::new(StringArray::from(vec![Some("shop"), None, Some("")])),
+            ],
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "svc",
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+
+        let mut declaration = decl("service.instance", &["service_name", "instance"]);
+        declaration.id_qualifier = Some("namespace".to_string());
+        declaration.time_index = "ts".to_string();
+        let plan = build_registry_plan(
+            vec![RegistrySource {
+                declarations: vec![declaration],
+                scan: ctx.table("svc").await.unwrap(),
+            }],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut ids: Vec<String> = collect(&ctx, plan)
+            .await
+            .iter()
+            .flat_map(|batch| strings(batch, 5))
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                // an absent qualifier leaves the identity bare, and a value
+                // holding the separator stays distinguishable from two values
+                "a\\,b,c".to_string(),
+                "shop/cart,i-1".to_string(),
+                "we\\\\ird,i-3".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -859,8 +1017,11 @@ mod tests {
         let batch = &batches[0];
         assert_eq!(strings(batch, 4), vec!["service"; batch.num_rows()]);
         assert_eq!(strings(batch, 5), vec!["cart"; batch.num_rows()]);
-        // Single-column id -> entity_id_attrs and descriptive are typed-JSON NULLs.
-        assert!(json_texts(batch, 6).iter().all(Option::is_none));
+        // A single-column id still names its attribute.
+        assert_eq!(
+            json_texts(batch, 6),
+            vec![Some(r#"{"service_name":"cart"}"#.to_string()); batch.num_rows()]
+        );
         assert!(json_texts(batch, 8).iter().all(Option::is_none));
         assert_eq!(
             json_texts(batch, 9),
@@ -900,24 +1061,24 @@ mod tests {
             .collect();
         rows.sort();
 
-        // Composite id -> sorted `k=v,k=v` plus a JSON object of the id columns;
-        // descriptive JSON keeps `\`, `"` and control characters intact in
-        // runtime values, NULL -> "".
+        // Composite id -> values in declared order plus a JSON object of the
+        // id columns; descriptive JSON keeps `\`, `"` and control characters
+        // intact in runtime values, NULL -> "".
         assert_eq!(
             rows,
             vec![
                 (
-                    "pid=42,service_name=cart".to_string(),
+                    "cart,42".to_string(),
                     Some(r#"{"pid":"42","service_name":"cart"}"#.to_string()),
                     Some(r#"{"host":""}"#.to_string()),
                 ),
                 (
-                    "pid=42,service_name=cart".to_string(),
+                    "cart,42".to_string(),
                     Some(r#"{"pid":"42","service_name":"cart"}"#.to_string()),
                     Some(r#"{"host":"h2"}"#.to_string()),
                 ),
                 (
-                    "pid=42,service_name=cart".to_string(),
+                    "cart,42".to_string(),
                     Some(r#"{"pid":"42","service_name":"cart"}"#.to_string()),
                     Some(r#"{"host":"we\"ird\\\nhost"}"#.to_string()),
                 ),
@@ -1012,6 +1173,95 @@ mod tests {
         let batches = collect(&ctx, plan).await;
         let ids: Vec<String> = batches.iter().flat_map(|b| strings(b, 5)).collect();
         assert_eq!(ids, vec!["h2"]);
+    }
+
+    #[tokio::test]
+    async fn registry_superseding_is_per_row_and_never_drops_an_entity() {
+        // One table holds pod rows and bare-runtime rows, so the rule is per
+        // row: each must end up with exactly one container node, the specific
+        // type where its identity is complete and the generic one elsewhere.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("container_id", DataType::Utf8, false),
+            Field::new("pod_uid", DataType::Utf8, true),
+            Field::new("container_name", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1_000, 2_000, 3_000, 4_000,
+                ])) as ArrayRef,
+                Arc::new(StringArray::from(vec![
+                    "c-pod",
+                    "c-docker",
+                    "c-empty",
+                    "c-partial",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("uid-1"),
+                    None,
+                    Some(""),
+                    Some("uid-2"),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("api"),
+                    Some("api"),
+                    Some("api"),
+                    None,
+                ])),
+            ],
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "descriptors",
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+
+        let mut generic = decl("container", &["container_id"]);
+        generic.table = "descriptors".to_string();
+        generic.superseded_by_columns = vec!["pod_uid".to_string(), "container_name".to_string()];
+        let mut specific = decl("k8s.container", &["pod_uid", "container_name"]);
+        specific.table = "descriptors".to_string();
+        let plan = build_registry_plan(
+            vec![RegistrySource {
+                declarations: vec![generic, specific],
+                scan: ctx.table("descriptors").await.unwrap(),
+            }],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut rows: Vec<(String, String)> = collect(&ctx, plan)
+            .await
+            .iter()
+            .flat_map(|b| {
+                strings(b, 4)
+                    .into_iter()
+                    .zip(strings(b, 5))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                // an empty uid is no uid: it supersedes nothing
+                ("container".to_string(), "c-docker".to_string()),
+                ("container".to_string(), "c-empty".to_string()),
+                // the pod row with no container name cannot produce the
+                // specific entity, so the generic one has to stand
+                ("container".to_string(), "c-partial".to_string()),
+                ("k8s.container".to_string(), "uid-1,api".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ default = [
     "meta-srv/mysql_kvbackend",
 ]
 enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
-# Developer-only helper binary gate for `query_perf_fixture`.
+# Developer-only helper binaries and diagnostic datanode commands.
 # Kept out of `default` so normal/release builds don't compile them.
 dev-tools = []
 mysql-object-store = ["object-store/mysql-object-store"]
@@ -118,6 +118,7 @@ tonic.workspace = true
 tracing-appender.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+daemonize = "0.5"
 pprof = { version = "0.14", features = [
     "flamegraph",
 ] }

@@ -24,6 +24,7 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
+pub use json::parse_json2_type_hint_path;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::{
     ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDisplay, NullsDistinctOption,

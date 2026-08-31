@@ -41,6 +41,7 @@ use crate::scalars::primary_key::DecodePrimaryKeyFunction;
 use crate::scalars::string::register_string_functions;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
+use crate::scalars::uddsketch_rank::UddSketchRankFunction;
 use crate::scalars::vector::VectorFunction as VectorScalarFunction;
 use crate::system::SystemFunction;
 
@@ -214,6 +215,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
     UddSketchCalcFunction::register(&function_registry);
+    UddSketchRankFunction::register(&function_registry);
     HllCalcFunction::register(&function_registry);
     DecodePrimaryKeyFunction::register(&function_registry);
 
@@ -366,6 +368,11 @@ mod tests {
         registry.register_scalar(TestAndFunction::default());
         let _ = registry.get_function("test_and").unwrap();
         assert_eq!(1, registry.scalar_functions().len());
+    }
+
+    #[test]
+    fn test_uddsketch_rank_registered() {
+        assert!(FUNCTION_REGISTRY.get_function("uddsketch_rank").is_some());
     }
 
     #[test]

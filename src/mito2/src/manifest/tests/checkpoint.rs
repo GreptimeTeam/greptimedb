@@ -18,13 +18,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common_datasource::compression::CompressionType;
+use common_error::ext::{ErrorExt, RetryHint};
+use common_error::status_code::StatusCode;
 use object_store::layers::mock::{
-    Error as MockError, ErrorKind, MockLayerBuilder, OpDelete, Result as MockResult, oio,
+    Buffer, Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, OpDelete,
+    Result as MockResult, oio,
 };
 use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
 
-use crate::error::Error::ChecksumMismatch;
+use crate::error::Error::{ChecksumMismatch, ManifestDeltaNotFound};
 use crate::manifest::action::{
     RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
@@ -33,7 +36,7 @@ use crate::manifest::storage::checkpoint::CheckpointMetadata;
 use crate::manifest::storage::is_delta_file;
 use crate::manifest::tests::utils::basic_region_metadata;
 use crate::sst::file::FileMeta;
-use crate::test_util::TestEnv;
+use crate::test_util::{CheckpointTaskBlocker, TestEnv};
 
 async fn build_manager(
     checkpoint_distance: u64,
@@ -83,6 +86,31 @@ fn nop_action() -> RegionMetaActionList {
         flushed_sequence: None,
         committed_sequence: None,
     })])
+}
+
+struct NotFoundReader;
+
+impl oio::Read for NotFoundReader {
+    async fn read(&mut self) -> MockResult<Buffer> {
+        Err(MockError::new(
+            ErrorKind::NotFound,
+            "mock listed manifest delta not found",
+        ))
+    }
+}
+
+fn fail_manifest_delta_reads_layer() -> MockLayer {
+    MockLayerBuilder::default()
+        .reader_factory(Arc::new(|path, _args, inner| {
+            let file_name = path.rsplit('/').next().unwrap_or(path);
+            if is_delta_file(file_name) {
+                Box::new(NotFoundReader)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -588,4 +616,168 @@ async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
         .unwrap()
         .expect("manifest should be recoverable");
     assert_eq!(reopened.manifest().manifest_version, 10);
+}
+
+#[tokio::test]
+async fn open_preserves_listed_delta_not_found_retry_hint() {
+    let env = TestEnv::new()
+        .await
+        .with_mock_layer(fail_manifest_delta_reads_layer());
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    manager.stop().await;
+
+    let error = env
+        .create_manifest_manager(CompressionType::Uncompressed, 0, None)
+        .await
+        .expect_err("reopen must fail on the mocked delta read");
+    assert_matches!(
+        &error,
+        ManifestDeltaNotFound {
+            version: 0,
+            path,
+            error,
+            ..
+        } if path.ends_with("00000000000000000000.json")
+            && error.kind() == object_store::ErrorKind::NotFound
+    );
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    assert_eq!(RetryHint::Retryable, error.retry_hint());
+}
+
+#[tokio::test]
+async fn install_preserves_listed_delta_not_found_retry_hint() {
+    let env = TestEnv::new()
+        .await
+        .with_mock_layer(fail_manifest_delta_reads_layer());
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut store = manager.store();
+    store
+        .save(1, &nop_action().encode().unwrap(), false)
+        .await
+        .unwrap();
+
+    let error = manager.install_manifest_to(1).await.unwrap_err();
+    assert_matches!(
+        &error,
+        ManifestDeltaNotFound {
+            version: 1,
+            path,
+            ..
+        } if path.ends_with("00000000000000000001.json")
+    );
+    assert_eq!(RetryHint::Retryable, error.retry_hint());
+}
+
+#[tokio::test]
+async fn cancelled_waiter_keeps_pending_checkpoint_handle() {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    manager.update(nop_action(), false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+        .await
+        .expect("checkpoint cleanup did not start");
+
+    let wait_started = manager.checkpointer().pending_checkpoint_wait_started();
+    let wait_started = wait_started.notified();
+    let mut first_wait = Box::pin(manager.wait_for_pending_checkpoint());
+    tokio::select! {
+        _ = wait_started => {}
+        _ = &mut first_wait => panic!("checkpoint waiter returned before cleanup finished"),
+    }
+    drop(first_wait);
+    assert!(manager.checkpointer().is_doing_checkpoint());
+
+    blocker.release();
+    manager.wait_for_pending_checkpoint().await;
+    assert!(!manager.checkpointer().is_doing_checkpoint());
+
+    let (version, _) = manager
+        .store()
+        .load_last_checkpoint()
+        .await
+        .unwrap()
+        .expect("checkpoint must be published");
+    assert_eq!(1, version);
+}
+
+#[tokio::test]
+async fn running_checkpoint_prevents_scheduling_another_checkpoint() {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    manager.update(nop_action(), false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+        .await
+        .expect("checkpoint cleanup did not start");
+
+    // The second update is eligible for checkpointing, but the first task still
+    // owns the pending handle and must prevent another task from being scheduled.
+    manager.update(nop_action(), false).await.unwrap();
+    blocker.release();
+    manager.wait_for_pending_checkpoint().await;
+
+    assert_eq!(2, manager.manifest().manifest_version);
+    assert_eq!(1, manager.checkpointer().last_checkpoint_version());
+}
+
+#[tokio::test]
+async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    manager.update(nop_action(), false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+        .await
+        .expect("first checkpoint cleanup did not start");
+    blocker.release();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first checkpoint did not finish");
+    assert_eq!(1, manager.checkpointer().last_checkpoint_version());
+
+    // Do not explicitly wait/reap the completed handle. The next eligible
+    // update must reap it before scheduling another checkpoint.
+    blocker.arm_next_close();
+    manager.update(nop_action(), false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+        .await
+        .expect("second checkpoint cleanup did not start");
+    blocker.release();
+    manager.wait_for_pending_checkpoint().await;
+
+    assert_eq!(2, manager.checkpointer().last_checkpoint_version());
 }

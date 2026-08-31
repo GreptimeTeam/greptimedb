@@ -27,6 +27,7 @@ use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
 use common_datasource::object_store::LocalFileAccess;
+use common_event_recorder::EventRecorderOptions;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
@@ -84,6 +85,7 @@ pub struct GreptimeDbStandaloneBuilder {
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
     slow_query_options: SlowQueryOptions,
+    event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
 }
 
@@ -102,6 +104,7 @@ impl GreptimeDbStandaloneBuilder {
                 threshold: Duration::from_secs(1),
                 ..Default::default()
             },
+            event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
         }
     }
@@ -109,6 +112,16 @@ impl GreptimeDbStandaloneBuilder {
     #[must_use]
     pub fn with_auto_create_table(mut self, auto_create_table: bool) -> Self {
         self.auto_create_table = auto_create_table;
+        self
+    }
+
+    /// Sets the event recorder options for the standalone instance.
+    #[must_use]
+    pub fn with_event_recorder_options(
+        mut self,
+        event_recorder_options: EventRecorderOptions,
+    ) -> Self {
+        self.event_recorder_options = event_recorder_options;
         self
     }
 
@@ -368,7 +381,13 @@ impl GreptimeDbStandaloneBuilder {
             wal: self.metasrv_wal_config.clone().into(),
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             slow_query: self.slow_query_options.clone(),
+            event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            // Tests cover the descriptor, so they run with it enabled.
+            otlp: frontend::service_config::OtlpOptions {
+                experimental_enable_resource_info: true,
+                ..Default::default()
+            },
             ..StandaloneOptions::default()
         };
 

@@ -12,10 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::{options_from_fulltext, options_from_inverted, options_from_skipping};
 use api::v1::{ColumnDataTypeExtension, ColumnOptions, JsonTypeExtension};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+use datatypes::json::JsonSettings;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use datatypes::value::Value;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -28,7 +36,9 @@ use crate::error::{
     UnsupportedTypeInPipelineSnafu, VrlRegexValueSnafu,
 };
 use crate::etl::transform::index::Index;
-use crate::etl::transform::transformer::greptime::vrl_value_to_jsonb_value;
+use crate::etl::transform::transformer::greptime::{
+    vrl_value_to_jsonb_value, vrl_value_to_serde_json,
+};
 use crate::etl::transform::{OnFailure, Transform, TransformIndexOptions};
 
 pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>> {
@@ -128,7 +138,7 @@ fn build_skipping_index_options(transform: &Transform) -> Result<SkippingIndexOp
 fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
     validate_transform_index_state(transform)?;
 
-    match transform.index {
+    let mut options = match transform.index {
         Some(Index::Fulltext) => {
             let options = build_fulltext_index_options(transform)?;
             options_from_fulltext(&options).context(ColumnOptionsSnafu)
@@ -139,10 +149,32 @@ fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
         }
         Some(Index::Inverted) => Ok(Some(options_from_inverted())),
         _ => Ok(None),
+    }?;
+
+    if transform.type_ == ColumnDataType::Json {
+        let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            transform.json_settings.clone().unwrap_or_default(),
+        )));
+        let options = options.get_or_insert_default();
+        options.options.insert(
+            EXTENSION_TYPE_NAME_KEY.to_string(),
+            Json2ExtensionType::NAME.to_string(),
+        );
+        if let Some(metadata) = extension.serialize_metadata() {
+            options
+                .options
+                .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
+        }
     }
+
+    Ok(options)
 }
 
-pub(crate) fn coerce_value(val: &VrlValue, transform: &Transform) -> Result<Option<ValueData>> {
+pub(crate) fn coerce_value(
+    val: &VrlValue,
+    transform: &Transform,
+    json_settings: Option<&JsonSettings>,
+) -> Result<Option<ValueData>> {
     match val {
         VrlValue::Null => Ok(None),
         VrlValue::Integer(n) => coerce_i64_value(*n, transform),
@@ -169,7 +201,9 @@ pub(crate) fn coerce_value(val: &VrlValue, transform: &Transform) -> Result<Opti
             }
             .fail(),
         },
-        VrlValue::Array(_) | VrlValue::Object(_) => coerce_json_value(val, transform),
+        VrlValue::Array(_) | VrlValue::Object(_) => {
+            coerce_json_value(val, transform, json_settings)
+        }
         VrlValue::Regex(_) => VrlRegexValueSnafu.fail(),
     }
 }
@@ -205,7 +239,7 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
             }
         },
 
-        ColumnDataType::Binary => {
+        ColumnDataType::Binary | ColumnDataType::Json => {
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
@@ -294,7 +328,7 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> 
         ColumnDataType::TimestampMillisecond => ValueData::TimestampMillisecondValue(n),
         ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(n),
 
-        ColumnDataType::Binary => {
+        ColumnDataType::Binary | ColumnDataType::Json => {
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
@@ -363,7 +397,7 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> 
             Err(_) => return integer_out_of_range(n, transform),
         },
 
-        ColumnDataType::Binary => {
+        ColumnDataType::Binary | ColumnDataType::Json => {
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
@@ -407,7 +441,7 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>> 
             }
         },
 
-        ColumnDataType::Binary => {
+        ColumnDataType::Binary | ColumnDataType::Json => {
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
@@ -486,7 +520,7 @@ fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueDat
             None => CoerceUnsupportedEpochTypeSnafu { ty: "String" }.fail(),
         },
 
-        ColumnDataType::Binary => CoerceStringToTypeSnafu {
+        ColumnDataType::Binary | ColumnDataType::Json => CoerceStringToTypeSnafu {
             s,
             ty: transform.type_.as_str_name(),
         }
@@ -496,23 +530,48 @@ fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueDat
     }
 }
 
-fn coerce_json_value(v: &VrlValue, transform: &Transform) -> Result<Option<ValueData>> {
-    match &transform.type_ {
-        ColumnDataType::Binary => (),
+fn coerce_json_value(
+    v: &VrlValue,
+    transform: &Transform,
+    json_settings: Option<&JsonSettings>,
+) -> Result<Option<ValueData>> {
+    let value = match transform.type_ {
+        ColumnDataType::Binary => {
+            let data: jsonb::Value = vrl_value_to_jsonb_value(v);
+            ValueData::BinaryValue(data.to_vec())
+        }
+        ColumnDataType::Json => {
+            let json = vrl_value_to_serde_json(v);
+            let encoded = if let Some(settings) = json_settings.or(transform.json_settings.as_ref())
+            {
+                settings.encode(json)
+            } else {
+                JsonSettings::default().encode(json)
+            };
+            let value = match encoded {
+                Ok(value) => value,
+                Err(error) => return handle_coercion_failure(transform, error.into()),
+            };
+            let Value::Json(value) = value else {
+                unreachable!()
+            };
+            ValueData::JsonValue(api::helper::encode_json_value(*value))
+        }
         t => {
             return CoerceTypeToJsonSnafu {
                 ty: t.as_str_name(),
             }
             .fail();
         }
-    }
-    let data: jsonb::Value = vrl_value_to_jsonb_value(v);
-    Ok(Some(ValueData::BinaryValue(data.to_vec())))
+    };
+    Ok(Some(value))
 }
 
 #[cfg(test)]
 mod tests {
 
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::json::JsonTypeHint;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, SkippingIndexType};
     use vrl::prelude::Bytes;
 
@@ -523,6 +582,7 @@ mod tests {
         Transform {
             fields: Fields::default(),
             type_,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -666,6 +726,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -676,14 +737,14 @@ mod tests {
         // valid string
         {
             let val = VrlValue::Integer(123);
-            let result = coerce_value(&val, &transform).unwrap();
+            let result = coerce_value(&val, &transform, None).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(123)));
         }
 
         // invalid string
         {
             let val = VrlValue::Bytes(Bytes::from("hello"));
-            let result = coerce_value(&val, &transform);
+            let result = coerce_value(&val, &transform, None);
             assert!(result.is_err());
         }
     }
@@ -693,6 +754,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -701,8 +763,35 @@ mod tests {
         };
 
         let val = VrlValue::Bytes(Bytes::from("hello"));
-        let result = coerce_value(&val, &transform).unwrap();
+        let result = coerce_value(&val, &transform, None).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_coerce_json2_with_on_failure() {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["age".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                nullable: false,
+                default_constraint: None,
+                inverted_index: false,
+            }],
+            None,
+        )
+        .unwrap();
+        let mut transform = transform(ColumnDataType::Json);
+        transform.json_settings = Some(settings);
+        transform.on_failure = Some(OnFailure::Ignore);
+        let value: VrlValue = serde_json::json!({"age": "42"}).into();
+
+        assert_eq!(coerce_value(&value, &transform, None).unwrap(), None);
+
+        transform.on_failure = Some(OnFailure::Default);
+        assert_eq!(
+            coerce_value(&value, &transform, None).unwrap(),
+            Some(ValueData::JsonValue(Default::default()))
+        );
     }
 
     #[test]
@@ -710,6 +799,7 @@ mod tests {
         let mut transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -720,7 +810,7 @@ mod tests {
         // with no explicit default value
         {
             let val = VrlValue::Bytes(Bytes::from("hello"));
-            let result = coerce_value(&val, &transform).unwrap();
+            let result = coerce_value(&val, &transform, None).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(0)));
         }
 
@@ -728,7 +818,7 @@ mod tests {
         {
             transform.default = Some(ValueData::I32Value(42));
             let val = VrlValue::Bytes(Bytes::from("hello"));
-            let result = coerce_value(&val, &transform).unwrap();
+            let result = coerce_value(&val, &transform, None).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(42)));
         }
     }
@@ -738,6 +828,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: Some(Index::Fulltext),
             index_options: Some(TransformIndexOptions::Fulltext(
@@ -769,6 +860,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int64,
+            json_settings: None,
             default: None,
             index: Some(Index::Skipping),
             index_options: Some(TransformIndexOptions::Skipping(
@@ -792,6 +884,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: Some(Index::Fulltext),
             index_options: Some(TransformIndexOptions::Skipping(
@@ -809,6 +902,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: None,
             index_options: Some(TransformIndexOptions::Fulltext(

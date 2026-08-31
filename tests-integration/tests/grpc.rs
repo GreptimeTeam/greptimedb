@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::alter_table_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::value::ValueData;
@@ -24,16 +26,31 @@ use api::v1::{
 use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
-use common_catalog::consts::MITO_ENGINE;
+use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE};
+use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
+use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_memory_manager::OnExhaustedPolicy;
+use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_runtime::Runtime;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_test_util::find_workspace_path;
-use otel_arrow_rust::proto::opentelemetry::arrow::v1::BatchArrowRecords;
+use datatypes::arrow::array::{
+    Array, ArrayRef, Float64Array, Int32Array, ListBuilder, StringArray, StructArray,
+    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array, UInt64Builder,
+};
+use datatypes::arrow::datatypes::{DataType, Field};
+use datatypes::arrow::ipc::writer::StreamWriter;
+use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
+use otel_arrow_rust::otlp::metrics::MetricType as ArrowMetricType;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_client::ArrowMetricsServiceClient;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
+    ArrowPayload, ArrowPayloadType, BatchArrowRecords, StatusCode as ArrowStatusCode,
+};
+use otel_arrow_rust::proto::opentelemetry::metrics::v1::AggregationTemporality;
+use otel_arrow_rust::schema::consts as arrow_consts;
 use servers::grpc::GrpcServerConfig;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::http::prometheus::{
@@ -84,7 +101,10 @@ macro_rules! grpc_tests {
                 test_auto_create_table,
                 test_auto_create_table_with_hints,
                 test_auto_create_table_disabled_by_config,
+                test_private_system_tables_auto_create_table_with_global_disabled,
+                test_private_system_tables_bypass_auto_create_hint,
                 test_otel_arrow_auth,
+                test_otel_arrow_exponential_histogram,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
@@ -378,6 +398,188 @@ pub async fn test_otel_arrow_auth(store_type: StorageType) {
     let _ = fe_grpc_server.shutdown().await;
 }
 
+// The pinned otel-arrow Producer cannot hash List-typed bucket schemas yet, so
+// serialize these test-only record batches directly into the same Arrow stream format.
+fn serialize_arrow_record_batch(record_batch: &ArrowRecordBatch) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut bytes, record_batch.schema_ref()).unwrap();
+    writer.write(record_batch).unwrap();
+    writer.finish().unwrap();
+    drop(writer);
+    bytes
+}
+
+fn exponential_histogram_arrow_batch(batch_id: i64, scales: &[i32]) -> BatchArrowRecords {
+    let resource = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let scope = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let metrics = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+        ),
+        (arrow_consts::RESOURCE, Arc::new(resource) as ArrayRef),
+        (arrow_consts::SCOPE, Arc::new(scope) as ArrayRef),
+        (
+            arrow_consts::METRIC_TYPE,
+            Arc::new(UInt8Array::from(vec![
+                ArrowMetricType::ExponentialHistogram as u8,
+            ])) as ArrayRef,
+        ),
+        (
+            arrow_consts::NAME,
+            Arc::new(StringArray::from(vec!["otel.arrow.exponential.latency"])) as ArrayRef,
+        ),
+        (
+            arrow_consts::AGGREGATION_TEMPORALITY,
+            Arc::new(Int32Array::from(vec![
+                AggregationTemporality::Cumulative as i32,
+            ])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+
+    let point_count = scales.len();
+    let mut positive_counts = ListBuilder::new(UInt64Builder::new());
+    let mut negative_counts = ListBuilder::new(UInt64Builder::new());
+    for _ in scales {
+        positive_counts.values().append_slice(&[1, 2]);
+        positive_counts.append(true);
+        negative_counts.append(true);
+    }
+    let positive_counts = positive_counts.finish();
+    let negative_counts = negative_counts.finish();
+    let positive = StructArray::from(vec![
+        (
+            Arc::new(Field::new(
+                arrow_consts::EXP_HISTOGRAM_OFFSET,
+                DataType::Int32,
+                true,
+            )),
+            Arc::new(Int32Array::from(vec![-1; point_count])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(
+                arrow_consts::EXP_HISTOGRAM_BUCKET_COUNTS,
+                positive_counts.data_type().clone(),
+                true,
+            )),
+            Arc::new(positive_counts) as ArrayRef,
+        ),
+    ]);
+    let negative = StructArray::from(vec![
+        (
+            Arc::new(Field::new(
+                arrow_consts::EXP_HISTOGRAM_OFFSET,
+                DataType::Int32,
+                true,
+            )),
+            Arc::new(Int32Array::from(vec![0; point_count])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(
+                arrow_consts::EXP_HISTOGRAM_BUCKET_COUNTS,
+                negative_counts.data_type().clone(),
+                true,
+            )),
+            Arc::new(negative_counts) as ArrayRef,
+        ),
+    ]);
+    let data_points = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt32Array::from_iter_values(
+                (0..point_count).map(|id| u32::try_from(id).unwrap()),
+            )) as ArrayRef,
+        ),
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt16Array::from(vec![0_u16; point_count])) as ArrayRef,
+        ),
+        (
+            arrow_consts::START_TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![
+                1_000_000_000;
+                point_count
+            ])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![
+                3_000_000_000;
+                point_count
+            ])) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_COUNT,
+            Arc::new(UInt64Array::from(vec![4_u64; point_count])) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_SUM,
+            Arc::new(Float64Array::from(vec![8.0; point_count])) as ArrayRef,
+        ),
+        (
+            arrow_consts::EXP_HISTOGRAM_SCALE,
+            Arc::new(Int32Array::from(scales.to_vec())) as ArrayRef,
+        ),
+        (
+            arrow_consts::EXP_HISTOGRAM_ZERO_COUNT,
+            Arc::new(UInt64Array::from(vec![1_u64; point_count])) as ArrayRef,
+        ),
+        (
+            arrow_consts::EXP_HISTOGRAM_POSITIVE,
+            Arc::new(positive) as ArrayRef,
+        ),
+        (
+            arrow_consts::EXP_HISTOGRAM_NEGATIVE,
+            Arc::new(negative) as ArrayRef,
+        ),
+        (
+            arrow_consts::FLAGS,
+            Arc::new(UInt32Array::from(vec![0_u32; point_count])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    BatchArrowRecords {
+        batch_id,
+        arrow_payloads: vec![
+            ArrowPayload {
+                schema_id: format!("metrics-{batch_id}"),
+                r#type: ArrowPayloadType::UnivariateMetrics as i32,
+                record: serialize_arrow_record_batch(&metrics),
+            },
+            ArrowPayload {
+                schema_id: format!("exp-histogram-{batch_id}"),
+                r#type: ArrowPayloadType::ExpHistogramDataPoints as i32,
+                record: serialize_arrow_record_batch(&data_points),
+            },
+        ],
+        headers: vec![],
+    }
+}
+
+pub async fn test_otel_arrow_exponential_histogram(store_type: StorageType) {
+    let (_instance, server) =
+        setup_grpc_server(store_type, "test_otel_arrow_exponential_histogram").await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let batch = exponential_histogram_arrow_batch(0, &[0]);
+    let request = Request::new(futures::stream::once(async { batch }));
+    let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+    let status = response.message().await.unwrap().unwrap();
+    assert_eq!(0, status.batch_id);
+    assert_eq!(ArrowStatusCode::InvalidArgument as i32, status.status_code);
+    assert!(status.status_message.contains("omits zero_threshold"));
+    let _ = server.shutdown().await;
+}
+
 fn basic_auth(username: &str, password: &str) -> String {
     format!("Basic {}", basic_auth_credentials(username, password))
 }
@@ -477,6 +679,154 @@ pub async fn test_auto_create_table_disabled_by_config(store_type: StorageType) 
     assert!(
         !tables.contains("greptime_physical_table"),
         "physical table leaked despite disabled auto-create:\n{tables}"
+    );
+
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+pub async fn test_private_system_tables_auto_create_table_with_global_disabled(
+    store_type: StorageType,
+) {
+    let (_db, fe_grpc_server) = setup_grpc_server_with_auto_create_table_disabled(
+        store_type,
+        "test_private_system_tables_auto_create_table_with_global_disabled",
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_PRIVATE_SCHEMA_NAME,
+        grpc_client,
+    );
+    let (host, cpu, mem, ts) = expect_data();
+
+    for table_name in [
+        DEFAULT_EVENTS_TABLE_NAME,
+        SLOW_QUERY_TABLE_NAME,
+        REGION_STATS_HISTORY_TABLE_NAME,
+    ] {
+        let result = db
+            .insert(InsertRequests {
+                inserts: vec![InsertRequest {
+                    table_name: table_name.to_string(),
+                    columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                    row_count: 4,
+                }],
+            })
+            .await;
+        assert_eq!(result.unwrap(), 4);
+    }
+
+    let load = Column {
+        column_name: "load".to_string(),
+        values: Some(column::Values {
+            f64_values: vec![0.4, 0.5, 0.6, 0.7],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Field as i32,
+        datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
+    };
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![InsertRequest {
+                table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+                columns: vec![host, cpu, mem, ts, load],
+                row_count: 4,
+            }],
+        })
+        .await;
+    assert_eq!(result.unwrap(), 4);
+
+    let output = db
+        .sql(format!("SHOW CREATE TABLE {DEFAULT_EVENTS_TABLE_NAME}"))
+        .await
+        .unwrap();
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    assert!(record_batches.pretty_print().unwrap().contains("\"load\""));
+
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+pub async fn test_private_system_tables_bypass_auto_create_hint(store_type: StorageType) {
+    let (_db, fe_grpc_server) = setup_grpc_server(
+        store_type,
+        "test_private_system_tables_bypass_auto_create_hint",
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_PRIVATE_SCHEMA_NAME,
+        grpc_client,
+    );
+    let (host, cpu, mem, ts) = expect_data();
+
+    for table_name in [
+        DEFAULT_EVENTS_TABLE_NAME,
+        SLOW_QUERY_TABLE_NAME,
+        REGION_STATS_HISTORY_TABLE_NAME,
+    ] {
+        let result = db
+            .insert_with_hints(
+                InsertRequests {
+                    inserts: vec![InsertRequest {
+                        table_name: table_name.to_string(),
+                        columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                        row_count: 4,
+                    }],
+                },
+                &[("auto_create_table", "false")],
+            )
+            .await;
+        assert_eq!(result.unwrap(), 4);
+    }
+
+    let ordinary_table = "ordinary_private_table";
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![
+                    InsertRequest {
+                        table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+                        columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                        row_count: 4,
+                    },
+                    InsertRequest {
+                        table_name: ordinary_table.to_string(),
+                        columns: vec![host, cpu, mem, ts],
+                        row_count: 4,
+                    },
+                ],
+            },
+            &[("auto_create_table", "false")],
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains(ordinary_table) && err.contains("auto_create_table"),
+        "unexpected error: {err}"
+    );
+
+    let output = db.sql("SHOW TABLES").await.unwrap();
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    assert!(
+        !record_batches
+            .pretty_print()
+            .unwrap()
+            .contains(ordinary_table)
     );
 
     let _ = fe_grpc_server.shutdown().await;
@@ -874,7 +1224,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                value: Some((5.0, "1".to_string())),
+                value: Some((5.0, "1.0".to_string())),
                 ..Default::default()
             },
             PromSeriesVector {
@@ -884,7 +1234,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                value: Some((5.0, "2".to_string())),
+                value: Some((5.0, "2.0".to_string())),
                 ..Default::default()
             },
         ]
@@ -936,7 +1286,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+                values: vec![(5.0, "1.0".to_string()), (10.0, "1.0".to_string())],
                 ..Default::default()
             },
             PromSeriesMatrix {
@@ -946,7 +1296,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+                values: vec![(5.0, "2.0".to_string()), (10.0, "2.0".to_string())],
                 ..Default::default()
             },
         ]

@@ -28,6 +28,7 @@ use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
+use operator::statement::admin_output_schema;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
@@ -40,8 +41,10 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::CopyData;
 use pgwire::messages::data::DataRow;
+use query::dist_analyze_output_schema;
 use query::planner::DfLogicalPlanner;
 use query::query_engine::DescribeResult;
+use query::sql::DESCRIBE_TABLE_OUTPUT_SCHEMA;
 use session::Session;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -554,6 +557,13 @@ fn describe_fields(
     session: &Arc<Session>,
 ) -> PgWireResult<Vec<FieldInfo>> {
     match sql_plan {
+        // Execution swaps in DistAnalyzeExec (stage/node/plan), whose schema
+        // differs from the logical `Analyze` plan's (plan_type/plan).
+        SqlPlan::Plan(LogicalPlan::Analyze(_), _) => {
+            let schema: Schema =
+                Schema::try_from(dist_analyze_output_schema()).map_err(convert_err)?;
+            schema_to_pg(&schema, format, None).map_err(convert_err)
+        }
         // query
         SqlPlan::Plan(plan, _) if !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_)) => {
             let schema: Schema = plan.schema().clone().try_into().map_err(convert_err)?;
@@ -647,17 +657,6 @@ fn describe_fields(
             ),
         ]),
 
-        // single column show statements
-        SqlPlan::Statement(
-            Statement::ShowTables(_) | Statement::ShowFlows(_) | Statement::ShowViews(_),
-            _,
-        ) => Ok(vec![FieldInfo::new(
-            "name".to_string(),
-            None,
-            None,
-            Type::TEXT,
-            format.format_for(0),
-        )]),
         #[cfg(feature = "enterprise")]
         SqlPlan::Statement(Statement::ShowTriggers(_), _) => Ok(vec![FieldInfo::new(
             "name".to_string(),
@@ -677,6 +676,61 @@ fn describe_fields(
             } else {
                 // fallback to NoData
                 Ok(vec![])
+            }
+        }
+        // Single column named after the variable (see `query::sql::show_variable`).
+        SqlPlan::Statement(Statement::ShowVariables(show), _) => Ok(vec![FieldInfo::new(
+            show.variable.to_string().to_uppercase(),
+            None,
+            None,
+            Type::TEXT,
+            format.format_for(0),
+        )]),
+        // Mirrors `query::sql::show_status` (currently always empty).
+        SqlPlan::Statement(Statement::ShowStatus(_), _) => Ok(vec![
+            FieldInfo::new(
+                "Variable_name".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(0),
+            ),
+            FieldInfo::new(
+                "Value".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(1),
+            ),
+        ]),
+        SqlPlan::Statement(Statement::ShowSearchPath(_), _) => Ok(vec![FieldInfo::new(
+            "search_path".to_string(),
+            None,
+            None,
+            Type::TEXT,
+            format.format_for(0),
+        )]),
+        // Mirrors `query::sql::describe_table`.
+        SqlPlan::Statement(Statement::DescribeTable(_), _) => {
+            schema_to_pg(&DESCRIBE_TABLE_OUTPUT_SCHEMA, format, None).map_err(convert_err)
+        }
+        // Single column typed with the function's return type (see
+        // `operator::statement::admin_output_schema`).
+        SqlPlan::Statement(Statement::Admin(admin), _) => {
+            let query_ctx = session.new_query_context();
+            match admin_output_schema(admin, &query_ctx) {
+                Some(schema) => schema_to_pg(&schema, format, None).map_err(convert_err),
+                // Unresolvable; execution will surface the error.
+                None => Ok(vec![]),
+            }
+        }
+        // Describe from the declared cursor's schema.
+        SqlPlan::Statement(Statement::FetchCursor(fetch), _) => {
+            let cursor_name = fetch.cursor_name.to_string();
+            match session.get_cursor(&cursor_name) {
+                Some(cursor) => schema_to_pg(&cursor.schema(), format, None).map_err(convert_err),
+                // Cursor not declared yet; execution will error.
+                None => Ok(vec![]),
             }
         }
         _ => {

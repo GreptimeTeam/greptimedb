@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use std::fmt::Debug;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,6 +63,7 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
+type HeartbeatExtensionSetupFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
 pub struct Instance {
     frontend: Frontend,
@@ -117,7 +120,35 @@ pub struct Command {
 
 impl Command {
     pub async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
-        self.subcmd.build(opts).await
+        self.build_with_heartbeat_extensions(opts, FrontendHeartbeatExtensions::default())
+            .await
+    }
+
+    /// Builds a frontend with pre-registered heartbeat extensions.
+    ///
+    /// Register extensions before calling this method. The supplied registry is installed before
+    /// normal plugin setup. After plugin heartbeat setup completes, the registry is frozen before
+    /// heartbeat handlers and the heartbeat task are built, so later registrations are rejected
+    /// and every heartbeat consumer observes the same extension membership.
+    pub async fn build_with_heartbeat_extensions(
+        &self,
+        opts: FrontendOptions,
+        heartbeat_extensions: FrontendHeartbeatExtensions,
+    ) -> Result<Instance> {
+        let plugins = plugins_with_heartbeat_extensions(heartbeat_extensions);
+        self.forward_build_with_plugins(opts, plugins, |command, opts, plugins| {
+            command.build_with_plugins(opts, plugins)
+        })
+        .await
+    }
+
+    fn forward_build_with_plugins<'a, T>(
+        &'a self,
+        opts: FrontendOptions,
+        plugins: Plugins,
+        build: impl FnOnce(&'a StartCommand, FrontendOptions, Plugins) -> T,
+    ) -> T {
+        self.subcmd.forward_build_with_plugins(opts, plugins, build)
     }
 
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
@@ -131,9 +162,14 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+    fn forward_build_with_plugins<'a, T>(
+        &'a self,
+        opts: FrontendOptions,
+        plugins: Plugins,
+        build: impl FnOnce(&'a StartCommand, FrontendOptions, Plugins) -> T,
+    ) -> T {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
+            SubCommand::Start(cmd) => build(cmd, opts, plugins),
         }
     }
 
@@ -329,7 +365,11 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build_with_plugins(
+        &self,
+        opts: FrontendOptions,
+        plugins: Plugins,
+    ) -> Result<Instance> {
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -380,15 +420,8 @@ impl StartCommand {
         .await
         .context(error::MetaClientInitSnafu)?;
 
-        let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins_pre_build(
-            &mut plugins,
-            &plugin_opts,
-            &opts,
-            Some(&meta_config),
-        )
-        .await
-        .context(error::StartFrontendSnafu)?;
+        let mut plugins =
+            prepare_frontend_plugins(plugins, &plugin_opts, &opts, Some(&meta_config)).await?;
 
         // now initialize the meta_client with plugins
         let meta_client = meta_client::create_meta_client(
@@ -434,6 +467,8 @@ impl StartCommand {
         // Some queries are expected to take long time.
         let mut channel_config = opts.datanode.client.channel_config();
         channel_config.timeout = None;
+        // Source Flight streams and sink unary responses share pooled connections.
+        channel_config.http2_adaptive_window = Some(true);
         if opts.grpc.flight_compression.transport_compression() {
             channel_config.accept_compression = true;
             channel_config.send_compression = true;
@@ -497,12 +532,20 @@ impl StartCommand {
 
         let instance = Arc::new(instance);
 
-        plugins::setup_frontend_heartbeat_extensions(&mut plugins, &plugin_opts, &instance)
-            .await
-            .context(error::StartFrontendSnafu)?;
-        let heartbeat_extensions = plugins
-            .get::<FrontendHeartbeatExtensions>()
-            .unwrap_or_default();
+        let heartbeat_instance = instance.clone();
+        let heartbeat_extensions =
+            setup_and_freeze_frontend_heartbeat_extensions(&mut plugins, move |plugins| {
+                Box::pin(async move {
+                    plugins::setup_frontend_heartbeat_extensions(
+                        plugins,
+                        &plugin_opts,
+                        &heartbeat_instance,
+                    )
+                    .await
+                    .context(error::StartFrontendSnafu)
+                })
+            })
+            .await?;
         let heartbeat_task = Some(create_heartbeat_task_with_extensions(
             &opts,
             meta_client,
@@ -522,6 +565,36 @@ impl StartCommand {
 
         Ok(Instance::new(frontend, guard))
     }
+}
+
+async fn prepare_frontend_plugins(
+    mut plugins: Plugins,
+    plugin_opts: &[PluginOptions],
+    opts: &frontend::frontend::FrontendOptions,
+    meta_config: Option<&[PluginOptions]>,
+) -> Result<Plugins> {
+    plugins::setup_frontend_plugins_pre_build(&mut plugins, plugin_opts, opts, meta_config)
+        .await
+        .context(error::StartFrontendSnafu)?;
+    Ok(plugins)
+}
+
+fn plugins_with_heartbeat_extensions(heartbeat_extensions: FrontendHeartbeatExtensions) -> Plugins {
+    let plugins = Plugins::new();
+    plugins.insert(heartbeat_extensions);
+    plugins
+}
+
+async fn setup_and_freeze_frontend_heartbeat_extensions(
+    plugins: &mut Plugins,
+    setup: impl for<'a> FnOnce(&'a mut Plugins) -> HeartbeatExtensionSetupFuture<'a>,
+) -> Result<FrontendHeartbeatExtensions> {
+    setup(plugins).await?;
+    let extensions = plugins
+        .get::<FrontendHeartbeatExtensions>()
+        .unwrap_or_default();
+    extensions.freeze();
+    Ok(extensions)
 }
 
 pub fn create_heartbeat_task(
@@ -563,6 +636,7 @@ fn create_heartbeat_task_with_extensions(
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use auth::{Identity, Password, UserProviderRef};
@@ -575,6 +649,109 @@ mod tests {
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    #[derive(Debug)]
+    struct TestExtension(&'static str);
+
+    #[async_trait]
+    impl frontend::heartbeat::FrontendHeartbeatExtension for TestExtension {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_command_forwards_heartbeat_extensions_to_start_build() {
+        let command = Command {
+            subcmd: SubCommand::Start(StartCommand::default()),
+        };
+        let extensions = FrontendHeartbeatExtensions::default();
+        let shared_extensions = extensions.clone();
+
+        let forwarded_plugins = command.forward_build_with_plugins(
+            FrontendOptions::default(),
+            plugins_with_heartbeat_extensions(extensions),
+            |_, _, plugins| plugins,
+        );
+        let forwarded_extensions = forwarded_plugins
+            .get::<FrontendHeartbeatExtensions>()
+            .unwrap();
+
+        assert_registry_identity(&shared_extensions, &forwarded_extensions);
+    }
+
+    #[tokio::test]
+    async fn test_prefilled_heartbeat_extensions_survive_pre_build_setup() {
+        let extensions = FrontendHeartbeatExtensions::default();
+        let shared_extensions = extensions.clone();
+
+        let options = frontend::frontend::FrontendOptions {
+            meta_client: Some(MetaClientOptions::default()),
+            ..Default::default()
+        };
+        let plugins = prepare_frontend_plugins(
+            plugins_with_heartbeat_extensions(extensions),
+            &[],
+            &options,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let setup_extensions = plugins.get_or_insert(FrontendHeartbeatExtensions::default);
+        assert_registry_identity(&shared_extensions, &setup_extensions);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_extension_setup_completes_before_freeze() {
+        let extensions = FrontendHeartbeatExtensions::default();
+        assert_eq!(
+            extensions.try_register(Arc::new(TestExtension("caller"))),
+            Ok(())
+        );
+        let mut plugins = plugins_with_heartbeat_extensions(extensions.clone());
+
+        let finalized = setup_and_freeze_frontend_heartbeat_extensions(&mut plugins, |plugins| {
+            Box::pin(async move {
+                let setup_extensions = plugins.get_or_insert(FrontendHeartbeatExtensions::default);
+                assert_eq!(
+                    setup_extensions.try_register(Arc::new(TestExtension("plugin"))),
+                    Ok(())
+                );
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            finalized
+                .extensions()
+                .iter()
+                .map(|extension| extension.name())
+                .collect::<Vec<_>>(),
+            ["caller", "plugin"]
+        );
+        assert_eq!(
+            extensions.try_register(Arc::new(TestExtension("late"))),
+            Err(frontend::heartbeat::RegistrationError::Frozen)
+        );
+        assert_eq!(finalized.len(), 2);
+    }
+
+    fn assert_registry_identity(
+        expected: &FrontendHeartbeatExtensions,
+        actual: &FrontendHeartbeatExtensions,
+    ) {
+        let extension = Arc::new(TestExtension("cmd-test-extension"));
+        assert!(expected.register(extension.clone()));
+        let registered = actual.extensions();
+        assert_eq!(registered.len(), 1);
+        assert!(Arc::ptr_eq(
+            &(extension as Arc<dyn frontend::heartbeat::FrontendHeartbeatExtension>),
+            &registered[0]
+        ));
+    }
 
     #[test]
     fn test_try_from_start_command() {

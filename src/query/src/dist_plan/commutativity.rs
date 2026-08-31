@@ -315,7 +315,10 @@ impl Categorizer {
             | Expr::Exists(_)
             | Expr::InList(_)
             | Expr::Case(_) => Commutativity::Commutative,
-            Expr::ScalarFunction(_udf) => Commutativity::Commutative,
+            // Annotation collection must not affect distribution. Keep scalar UDFs pushdownable;
+            // TODO: Preserve datanode PromQL annotations through plan decoding, return them in
+            // Flight stream metadata, and merge them on the frontend.
+            Expr::ScalarFunction(_) => Commutativity::Commutative,
             Expr::AggregateFunction(_udaf) => Commutativity::Commutative,
 
             Expr::Like(_)
@@ -376,6 +379,11 @@ mod tests {
 
     use datafusion_common::Column;
     use datafusion_expr::LogicalPlanBuilder;
+    use datafusion_expr::expr::ScalarFunction;
+    use datafusion_functions::core::coalesce;
+    use promql::functions::{
+        NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
+    };
 
     use super::*;
 
@@ -395,6 +403,22 @@ mod tests {
 
         let commutativity = Categorizer::check_extension_plan(&series_divide, &partition_cols);
         assert!(matches!(commutativity, Commutativity::Commutative));
+    }
+
+    #[test]
+    fn annotated_histogram_helpers_do_not_block_pushdown() {
+        for udf in [
+            NativeHistogramQuantile::scalar_udf(),
+            NativeHistogramFraction::scalar_udf(),
+            NativeHistogramDrop::warning_bool_false_udf(String::new(), None),
+        ] {
+            let helper = Expr::ScalarFunction(ScalarFunction::new_udf(Arc::new(udf), vec![]));
+            let expr = Expr::ScalarFunction(ScalarFunction::new_udf(coalesce(), vec![helper]));
+            assert!(matches!(
+                Categorizer::check_expr(&expr),
+                Commutativity::Commutative
+            ));
+        }
     }
 }
 

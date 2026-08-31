@@ -20,15 +20,23 @@ const DEFAULT_TRACE_INGEST_CHUNK_SIZE: usize = 512;
 #[serde(default)]
 pub struct OtlpOptions {
     pub enable: bool,
+    pub experimental_enable_exponential_histogram: bool,
     /// Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
     pub trace_ingest_chunk_size: usize,
+    /// Whether to synthesize the `greptime_otel_resource_info` descriptor
+    /// table from the resource attributes of OTLP metrics, so metrics-only
+    /// services reach the semantic graph. Off by default: it creates and
+    /// writes a table the user did not send.
+    pub experimental_enable_resource_info: bool,
 }
 
 impl Default for OtlpOptions {
     fn default() -> Self {
         Self {
             enable: true,
+            experimental_enable_exponential_histogram: false,
             trace_ingest_chunk_size: DEFAULT_TRACE_INGEST_CHUNK_SIZE,
+            experimental_enable_resource_info: false,
         }
     }
 }
@@ -41,10 +49,13 @@ mod tests {
     fn test_otlp_options() {
         let default = OtlpOptions::default();
         assert!(default.enable);
+        assert!(!default.experimental_enable_exponential_histogram);
         assert_eq!(default.trace_ingest_chunk_size, 512);
+        assert!(!default.experimental_enable_resource_info);
 
         let options: OtlpOptions = toml::from_str("enable = false").unwrap();
         assert!(!options.enable);
+        assert!(!options.experimental_enable_exponential_histogram);
         assert_eq!(
             options.trace_ingest_chunk_size,
             DEFAULT_TRACE_INGEST_CHUNK_SIZE
@@ -52,6 +63,15 @@ mod tests {
 
         let options: OtlpOptions = toml::from_str("trace_ingest_chunk_size = 0").unwrap();
         assert!(options.enable);
+        assert!(!options.experimental_enable_exponential_histogram);
         assert_eq!(options.trace_ingest_chunk_size, 0);
+
+        let options: OtlpOptions =
+            toml::from_str("experimental_enable_exponential_histogram = true").unwrap();
+        assert!(options.experimental_enable_exponential_histogram);
+
+        let serialized = toml::to_string(&options).unwrap();
+        assert!(serialized.contains("experimental_enable_exponential_histogram = true"));
+        assert_eq!(toml::from_str::<OtlpOptions>(&serialized).unwrap(), options);
     }
 }

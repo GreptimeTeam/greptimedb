@@ -115,6 +115,7 @@ rust_decimal = { workspace = true, features = ["db-postgres"] }
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
+ryu.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
@@ -166,8 +167,8 @@ servers = { workspace = true, features = ["testing"] }
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
-tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.12"
+tokio-postgres.workspace = true
+tokio-postgres-rustls = "0.14"
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }

@@ -150,7 +150,8 @@ insert into graph_traces_malformed values (now(), 'not a trace');
 
 -- SQLNESS PROTOCOL MYSQL
 select src_id, dst_id, rel_type, provenance, confidence,
-  request_count, error_count, duration_sum, duration_count, attributes
+  request_count, unmatched_count, error_count,
+  duration_sum, duration_count, duration_max, attributes
 from greptime_private.semantic_relationships
 order by dst_id;
 
@@ -387,3 +388,114 @@ drop table kube_service_info;
 drop table target_info;
 
 drop table http_requests_total;
+
+-- OTel conventions: the ingestion-synthesized greptime_otel_resource_info descriptor
+-- (stamped signal_type=metric + source=opentelemetry + metric.type=info) gets implicit
+-- declarations under the raw OTel column names. host/container identities are
+-- the stable ids only, so rows with an empty host.id / container.id link no
+-- infrastructure, and a row without an instance value declares no
+-- service.instance. The same table name stamped source=prometheus is not
+-- whitelisted. Container rows show the superseding rule: a pod's container is
+-- the k8s.container entity where the row names it, and stays a generic
+-- container where it does not — one node per container either way, with no
+-- kube-state-metrics deployed.
+create table greptime_otel_resource_info (
+  greptime_timestamp timestamp(3) time index,
+  job string,
+  instance string,
+  "service.name" string,
+  "service.namespace" string,
+  "host.id" string,
+  "host.name" string,
+  "container.id" string,
+  "container.name" string,
+  "k8s.pod.uid" string,
+  "k8s.pod.name" string,
+  "k8s.container.name" string,
+  greptime_value double,
+  primary key (job, instance, "service.name", "service.namespace",
+    "host.id", "host.name", "container.id", "container.name",
+    "k8s.pod.uid", "k8s.pod.name", "k8s.container.name")
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.metric.type' = 'info'
+);
+
+insert into greptime_otel_resource_info values
+  (now(), 'shop/api', 'inst-1', 'api', 'shop', 'h-1', 'node-a', 'c-1', 'api-ctr', '', '', '', 1),
+  (now(), 'shop/api', 'inst-2', 'api', 'shop', '', 'laptop', '', '', '', '', '', 1),
+  (now(), 'worker', '', 'worker', '', 'h-1', 'node-a', '', '', '', '', '', 1),
+  (now(), 'shop/api', 'inst-3', 'api', 'shop', 'h-2', 'node-b', 'c-2', 'api-ctr', 'uid-1', 'api-pod', 'api', 1),
+  (now(), 'shop/api', 'inst-4', 'api', 'shop', 'h-2', 'node-b', 'c-3', 'api-ctr', 'uid-2', 'api-pod-2', '', 1);
+
+-- SQLNESS PROTOCOL MYSQL
+select entity_type, entity_id, source_tables
+from greptime_private.semantic_entities
+order by entity_type, entity_id, source_tables;
+
+-- Superseding must not cost the row an attribute it carried: the runtime
+-- container id stays reachable as a descriptive attribute of k8s.container.
+-- SQLNESS PROTOCOL MYSQL
+select entity_id, descriptive
+from greptime_private.semantic_entities
+where entity_type = 'k8s.container';
+
+-- SQLNESS PROTOCOL MYSQL
+select src_type, src_id, dst_type, dst_id, rel_type, provenance
+from greptime_private.semantic_relationships
+order by rel_type, src_id, dst_id;
+
+drop table greptime_otel_resource_info;
+
+-- Cross-signal identity: the same service reaches the graph as trace spans and
+-- as an ingestion-synthesized descriptor. The two sources name their identity
+-- columns differently and only the metric side pre-composes the namespace into
+-- job, so this asserts one entity per service and per instance, sourced from
+-- both tables.
+create table graph_xsignal_traces (
+  "timestamp" timestamp(9) time index,
+  trace_id string,
+  span_id string,
+  parent_span_id string,
+  span_kind string,
+  span_status_code string,
+  service_name string,
+  duration_nano bigint unsigned,
+  "resource_attributes.service.namespace" string,
+  "resource_attributes.service.instance.id" string,
+  primary key (service_name, "resource_attributes.service.namespace",
+    "resource_attributes.service.instance.id")
+) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
+
+create table greptime_otel_resource_info (
+  greptime_timestamp timestamp(3) time index,
+  job string,
+  instance string,
+  "service.name" string,
+  "service.namespace" string,
+  greptime_value double,
+  primary key (job, instance, "service.name", "service.namespace")
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.metric.type' = 'info'
+);
+
+insert into graph_xsignal_traces values
+  (now(), 't1', 's1', NULL, 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'api', 100, 'shop', 'inst-1'),
+  (now(), 't2', 's2', NULL, 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'worker', 100, '', 'inst-2');
+
+insert into greptime_otel_resource_info values
+  (now(), 'shop/api', 'inst-1', 'api', 'shop', 1),
+  (now(), 'worker', 'inst-2', 'worker', '', 1);
+
+-- SQLNESS PROTOCOL MYSQL
+select entity_type, entity_id, source_tables
+from greptime_private.semantic_entities
+where entity_type in ('service', 'service.instance')
+order by entity_type, entity_id, source_tables;
+
+drop table graph_xsignal_traces;
+
+drop table greptime_otel_resource_info;

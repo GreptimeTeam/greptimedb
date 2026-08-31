@@ -33,8 +33,8 @@ use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ExprSchema, JoinType, ScalarValue};
 use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::{
-    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
-    col, lit,
+    AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
+    binary_expr, col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
@@ -44,6 +44,7 @@ use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
+use promql::extension_plan::{HistogramFold, HistogramFoldOperation};
 use regex::Regex;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
@@ -298,6 +299,72 @@ fn find_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
     }
 
     plan.inputs().into_iter().find_map(find_merge_scan)
+}
+
+#[test]
+fn frontend_only_histogram_folds_stay_above_merge_scan() {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let input = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    for (name, operation, histogram_column) in [
+        (
+            "mixed",
+            HistogramFoldOperation::Quantile(0.5.into()),
+            Some("pk2".to_string()),
+        ),
+        (
+            "fraction",
+            HistogramFoldOperation::Fraction {
+                lower: 0.0.into(),
+                upper: 1.0.into(),
+            },
+            None,
+        ),
+    ] {
+        let fold = HistogramFold::new_with_operation(
+            "pk1".to_string(),
+            "number".to_string(),
+            "ts".to_string(),
+            operation,
+            histogram_column,
+            input.clone(),
+        )
+        .unwrap();
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(fold),
+        });
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err(),
+            "{name}"
+        );
+
+        let result = DistPlannerAnalyzer {}
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let result_text = result.to_string();
+        assert!(
+            result_text.contains("HistogramFold:"),
+            "{name}\n{result_text}"
+        );
+
+        let remote_input = find_merge_scan(&result).unwrap().input();
+        let remote_text = remote_input.to_string();
+        assert!(
+            !remote_text.contains("HistogramFold:"),
+            "{name}\n{remote_text}"
+        );
+        DFLogicalSubstraitConvertor
+            .encode(remote_input, DefaultSerializer)
+            .unwrap();
+    }
 }
 
 #[test]

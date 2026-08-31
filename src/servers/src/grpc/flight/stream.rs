@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -39,6 +40,37 @@ use tokio::time;
 use crate::error;
 use crate::grpc::FlightCompression;
 use crate::grpc::flight::TonicResult;
+
+pub enum FlightRecordBatchSource {
+    RecordBatches(SendableRecordBatchStream),
+    AffectedRows {
+        rows: usize,
+        metrics: Option<String>,
+    },
+}
+
+/// Determines whether a Flight result is ready now or initialized asynchronously.
+pub enum FlightRecordBatchStreamInput<F = std::future::Ready<TonicResult<FlightRecordBatchSource>>>
+{
+    Ready(FlightRecordBatchSource),
+    Initializer(F),
+}
+
+impl FlightRecordBatchStreamInput {
+    /// Creates an input from a source that is already available.
+    pub fn ready(source: FlightRecordBatchSource) -> Self {
+        Self::Ready(source)
+    }
+}
+
+impl<F> FlightRecordBatchStreamInput<F> {
+    /// Creates an input that obtains its source asynchronously.
+    ///
+    /// Errors from the initializer are returned through the Flight response stream.
+    pub fn initializer(initializer: F) -> Self {
+        Self::Initializer(initializer)
+    }
+}
 
 /// Metrics collector for Flight stream with RAII logging pattern
 struct StreamMetrics {
@@ -135,30 +167,74 @@ impl FlightRecordBatchStream {
         Self::send_metrics(tx, metrics, metrics_str).await
     }
 
-    pub fn new(
-        recordbatches: SendableRecordBatchStream,
+    pub fn new<F>(
+        input: FlightRecordBatchStreamInput<F>,
         tracing_context: TracingContext,
         compression: FlightCompression,
         query_ctx: QueryContextRef,
-    ) -> Self {
-        let should_send_partial_metrics = query_ctx.explain_verbose();
-        let can_send_metrics_before_batch = query_ctx.explain_verbose()
-            && query_ctx.live_analyze_metrics_enabled()
-            && query_ctx
-                .remote_query_id()
-                .zip(query_ctx.extension(SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY))
-                .is_some_and(|(remote_query_id, capability)| capability == remote_query_id);
-        let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
-        let join_handle = common_runtime::spawn_global(async move {
-            Self::flight_data_stream(
-                recordbatches,
-                tx,
-                should_send_partial_metrics,
-                can_send_metrics_before_batch,
-            )
-            .trace(tracing_context.attach(info_span!("flight_data_stream")))
-            .await
-        });
+    ) -> Self
+    where
+        F: Future<Output = TonicResult<FlightRecordBatchSource>> + Send + 'static,
+    {
+        let (mut tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
+        let source_type = match &input {
+            FlightRecordBatchStreamInput::Ready(FlightRecordBatchSource::RecordBatches(_)) => {
+                "record_batches"
+            }
+            FlightRecordBatchStreamInput::Ready(FlightRecordBatchSource::AffectedRows {
+                ..
+            }) => "affected_rows",
+            FlightRecordBatchStreamInput::Initializer(_) => "initializer",
+        };
+        let initializer_tracing_context = tracing_context.clone();
+        let join_handle = common_runtime::spawn_global(
+            async move {
+                let source = async move {
+                    match input {
+                        FlightRecordBatchStreamInput::Ready(source) => Ok(source),
+                        FlightRecordBatchStreamInput::Initializer(initializer) => initializer.await,
+                    }
+                }
+                .trace(
+                    initializer_tracing_context
+                        .attach(info_span!("flight_data_stream_init", source_type)),
+                )
+                .await;
+
+                match source {
+                    Ok(FlightRecordBatchSource::RecordBatches(recordbatches)) => {
+                        let should_send_partial_metrics = query_ctx.explain_verbose();
+                        let can_send_metrics_before_batch =
+                            query_ctx.explain_verbose()
+                                && query_ctx.live_analyze_metrics_enabled()
+                                && query_ctx
+                                    .remote_query_id()
+                                    .zip(query_ctx.extension(
+                                        SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+                                    ))
+                                    .is_some_and(|(remote_query_id, capability)| {
+                                        capability == remote_query_id
+                                    });
+                        Self::flight_data_stream(
+                            recordbatches,
+                            tx,
+                            should_send_partial_metrics,
+                            can_send_metrics_before_batch,
+                        )
+                        .await;
+                    }
+                    Ok(FlightRecordBatchSource::AffectedRows { rows, metrics }) => {
+                        let _ = tx
+                            .send(Ok(FlightMessage::AffectedRows { rows, metrics }))
+                            .await;
+                    }
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                    }
+                }
+            }
+            .trace(tracing_context.attach(info_span!("flight_data_stream"))),
+        );
         let encoder = if compression.arrow_compression() {
             FlightEncoder::default()
         } else {
@@ -434,7 +510,9 @@ mod test {
             .unwrap()
             .as_stream();
         let mut stream = FlightRecordBatchStream::new(
-            recordbatches,
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
             TracingContext::default(),
             FlightCompression::default(),
             QueryContext::arc(),
@@ -469,6 +547,47 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_flight_record_batch_stream_encodes_affected_rows() {
+        let mut stream = FlightRecordBatchStream::new(
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::AffectedRows {
+                rows: 42,
+                metrics: Some(r#"{"region_watermarks":[]}"#.to_string()),
+            }),
+            TracingContext::default(),
+            FlightCompression::default(),
+            QueryContext::arc(),
+        );
+
+        let data = stream.next().await.unwrap().unwrap();
+        let message = FlightDecoder::default().try_decode(&data).unwrap().unwrap();
+        assert!(matches!(
+            message,
+            FlightMessage::AffectedRows {
+                rows: 42,
+                metrics: Some(_),
+            }
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_flight_record_batch_stream_forwards_initializer_error() {
+        let mut stream = FlightRecordBatchStream::new(
+            FlightRecordBatchStreamInput::initializer(async {
+                Err(tonic::Status::unavailable(
+                    "remote read initialization failed",
+                ))
+            }),
+            TracingContext::default(),
+            FlightCompression::default(),
+            QueryContext::arc(),
+        );
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(tonic::Code::Unavailable, error.code());
+        assert!(stream.next().await.is_none());
+    }
+    #[tokio::test]
     async fn test_flight_record_batch_stream_emits_metrics_while_pending() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
@@ -484,9 +603,12 @@ mod test {
             metrics,
         });
         let query_ctx = query_context_with_live_metrics_and_matching_capability();
-        query_ctx.set_explain_verbose(true);
+        let initializer_query_ctx = query_ctx.clone();
         let mut stream = FlightRecordBatchStream::new(
-            recordbatches,
+            FlightRecordBatchStreamInput::initializer(async move {
+                initializer_query_ctx.set_explain_verbose(true);
+                Ok(FlightRecordBatchSource::RecordBatches(recordbatches))
+            }),
             TracingContext::default(),
             FlightCompression::default(),
             query_ctx,
@@ -541,7 +663,9 @@ mod test {
         let query_ctx = query_context_with_live_metrics_and_matching_capability();
         query_ctx.set_explain_verbose(true);
         let mut stream = FlightRecordBatchStream::new(
-            recordbatches,
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
             TracingContext::default(),
             FlightCompression::default(),
             query_ctx,
@@ -595,7 +719,9 @@ mod test {
         let query_ctx = query_context_with_matching_capability();
         query_ctx.set_explain_verbose(true);
         let mut stream = FlightRecordBatchStream::new(
-            recordbatches,
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
             TracingContext::default(),
             FlightCompression::default(),
             query_ctx,
@@ -638,7 +764,9 @@ mod test {
         let query_ctx = Arc::new(query_ctx);
         query_ctx.set_explain_verbose(true);
         let mut stream = FlightRecordBatchStream::new(
-            recordbatches,
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
             TracingContext::default(),
             FlightCompression::default(),
             query_ctx,
@@ -677,7 +805,9 @@ mod test {
         });
         let query_ctx = query_context_with_matching_capability();
         let mut stream = FlightRecordBatchStream::new(
-            recordbatches,
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
             TracingContext::default(),
             FlightCompression::default(),
             query_ctx,

@@ -52,6 +52,23 @@ select uddsketch_calc(0.95, uddsketch_state(128, 0.01, `value`)) from test_uddsk
 | 100.49456770856492                                                                           |
 +----------------------------------------------------------------------------------------------+
 
+SELECT
+    ROUND(uddsketch_rank(5, `state`), 4) AS below_min_rank,
+    ROUND(uddsketch_rank(10, `state`), 4) AS equal_min_rank,
+    ROUND(uddsketch_rank(55, `state`), 4) AS middle_rank,
+    ROUND(uddsketch_rank(100, `state`), 4) AS equal_max_rank,
+    ROUND(uddsketch_rank(110, `state`), 4) AS above_max_rank
+FROM (
+    SELECT uddsketch_state(128, 0.01, `value`) AS `state`
+    FROM test_uddsketch
+);
+
++----------------+----------------+-------------+----------------+----------------+
+| below_min_rank | equal_min_rank | middle_rank | equal_max_rank | above_max_rank |
++----------------+----------------+-------------+----------------+----------------+
+| 0.0            | 0.05           | 0.5         | 0.95           | 1.0            |
++----------------+----------------+-------------+----------------+----------------+
+
 CREATE TABLE grouped_uddsketch (
     `state` BINARY,
     id_group INT PRIMARY KEY,
@@ -71,6 +88,15 @@ SELECT uddsketch_calc(0.1, uddsketch_merge(128, 0.01, `state`)) FROM grouped_udd
 +------------------------------------------------------------------------------------------------+
 | 19.886670240866184                                                                             |
 +------------------------------------------------------------------------------------------------+
+
+SELECT ROUND(uddsketch_rank(55, uddsketch_merge(128, 0.01, `state`)), 4) AS merged_rank
+FROM grouped_uddsketch;
+
++-------------+
+| merged_rank |
++-------------+
+| 0.5         |
++-------------+
 
 CREATE TABLE delta_uddsketch (
     `id` INT PRIMARY KEY,
@@ -113,6 +139,16 @@ Error: 3001(EngineExecuteQuery), Error during planning: Merging UDDSketch with d
 SELECT uddsketch_calc(0.1, uddsketch_merge(64, 0.01, `state`)) FROM grouped_uddsketch;
 
 Error: 3001(EngineExecuteQuery), Error during planning: Merging UDDSketch with different parameters: arguments=(64, 0.01) vs actual input=(128, 0.01)
+
+SELECT uddsketch_rank(55, uddsketch_state(128, 0.01, `value`)) IS NULL AS empty_rank_is_null
+FROM test_uddsketch
+WHERE `id` < 0;
+
++--------------------+
+| empty_rank_is_null |
++--------------------+
+| true               |
++--------------------+
 
 drop table test_uddsketch;
 
