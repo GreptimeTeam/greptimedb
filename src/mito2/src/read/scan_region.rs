@@ -916,6 +916,15 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
     file_ts_range.intersects(predicate)
 }
 
+/// Returns true if `time_range` contains the inclusive time range of `file`.
+fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle) -> bool {
+    let Some(time_range) = time_range else {
+        return false;
+    };
+    let (start, end) = file.time_range();
+    time_range.contains(&start) && time_range.contains(&end)
+}
+
 /// Common input for different scanners.
 pub struct ScanInput {
     /// Region SST access layer.
@@ -1358,6 +1367,7 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let may_build_selective_row_selection = predicate.is_some();
+        let postpone_time_index_filter = time_range_covers_file(self.time_range.as_ref(), file);
         let decode_pk_values = !self.compaction
             && self
                 .mapper
@@ -1392,6 +1402,7 @@ impl ScanInput {
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
             .enable_predicate_prefilter(enable_predicate_prefilter)
+            .postpone_time_index_filter(postpone_time_index_filter)
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;
@@ -2351,6 +2362,52 @@ mod tests {
             },
             Arc::new(crate::sst::file_purger::NoopFilePurger),
         )
+    }
+
+    #[test]
+    fn test_time_range_covers_file() {
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+
+        assert!(!time_range_covers_file(None, &file));
+        assert!(time_range_covers_file(
+            Some(&TimestampRange::min_to_max()),
+            &file
+        ));
+        assert!(time_range_covers_file(
+            Some(&TimestampRange::new_inclusive(
+                Some(Timestamp::new_millisecond(1000)),
+                Some(Timestamp::new_millisecond(2000)),
+            )),
+            &file
+        ));
+        assert!(time_range_covers_file(
+            TimestampRange::with_unit(500, 3000, TimeUnit::Millisecond).as_ref(),
+            &file
+        ));
+        assert!(!time_range_covers_file(
+            TimestampRange::with_unit(1000, 2000, TimeUnit::Millisecond).as_ref(),
+            &file
+        ));
+        assert!(!time_range_covers_file(
+            TimestampRange::with_unit(1001, 3000, TimeUnit::Millisecond).as_ref(),
+            &file
+        ));
+        assert!(!time_range_covers_file(
+            Some(&TimestampRange::empty()),
+            &file
+        ));
+
+        let seconds_file = file_handle_with_time_range(
+            Timestamp::new(1, TimeUnit::Second),
+            Timestamp::new(2, TimeUnit::Second),
+        );
+        assert!(time_range_covers_file(
+            TimestampRange::with_unit(1000, 2001, TimeUnit::Millisecond).as_ref(),
+            &seconds_file
+        ));
     }
 
     #[tokio::test]
