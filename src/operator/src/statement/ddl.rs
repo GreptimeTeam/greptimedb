@@ -60,6 +60,8 @@ use common_meta::rpc::ddl::{
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
+#[cfg(feature = "enterprise")]
+use common_telemetry::warn;
 use common_telemetry::{debug, info, tracing};
 use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
