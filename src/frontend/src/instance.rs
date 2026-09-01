@@ -722,6 +722,7 @@ impl Instance {
         );
         let mut stmt = stmts.remove(0);
         validate_analyze_stream_statement(&mut stmt)?;
+        query_ctx.set_explain_verbose(true);
         query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
 
         self.check_sql_permission(&stmt, &query_ctx).await?;
@@ -780,6 +781,7 @@ impl Instance {
 
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
+                    query_ctx.set_explain_verbose(is_explain_analyze_verbose(&stmt));
                     if let Err(e) = self.check_sql_permission(&stmt, &query_ctx).await {
                         results.push(Err(e));
                         break;
@@ -848,6 +850,7 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        query_ctx.set_explain_verbose(stmt.as_ref().is_some_and(is_explain_analyze_verbose));
 
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
@@ -1874,6 +1877,77 @@ mod tests {
         }
 
         fn close(&self) {}
+    }
+
+    struct RecordingExplainVerboseInterceptor {
+        flags: Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl SqlQueryInterceptor for RecordingExplainVerboseInterceptor {
+        type Error = Error;
+
+        fn post_execute(&self, output: Output, query_ctx: QueryContextRef) -> Result<Output> {
+            self.flags.lock().unwrap().push(query_ctx.explain_verbose());
+            Ok(output)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_explain_analyze_verbose_is_scoped_to_statement() -> TestResult<()> {
+        let flags = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let interceptor = Arc::new(RecordingExplainVerboseInterceptor {
+            flags: flags.clone(),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<SqlQueryInterceptorRef<Error>>(interceptor);
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+
+        let query_ctx = test_query_ctx(1);
+        let results = instance
+            .do_query_inner(
+                "EXPLAIN ANALYZE VERBOSE SELECT 1; SELECT 2",
+                query_ctx.clone(),
+            )
+            .await;
+        assert_eq!(2, results.len());
+        for result in results {
+            result.expect("multi-statement query should execute successfully");
+        }
+        assert_eq!(vec![true, false], *flags.lock().unwrap());
+        assert!(!query_ctx.explain_verbose());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_explain_analyze_verbose_resets_before_denied_statement() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+
+        let query_ctx = test_query_ctx(1);
+        let mut results = instance
+            .do_query_inner(
+                "EXPLAIN ANALYZE VERBOSE SELECT 1; SELECT * FROM denied",
+                query_ctx.clone(),
+            )
+            .await;
+        assert_eq!(2, results.len());
+        results.remove(0).expect("verbose statement should execute");
+        let err = results.remove(0).unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        assert!(!query_ctx.explain_verbose());
+
+        Ok(())
     }
 
     #[test]
