@@ -127,7 +127,7 @@ impl CompactionSstReaderBuilder<'_> {
             &targets,
         )?;
 
-        let mut scan_input = ScanInput::new(self.sst_layer, mapper)
+        let mut scan_input = ScanInput::builder(self.sst_layer, mapper)
             .with_json2_rewrite_targets(targets)
             .with_files(self.inputs.to_vec())
             .with_compaction(true)
@@ -147,7 +147,7 @@ impl CompactionSstReaderBuilder<'_> {
                 scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
         }
 
-        Ok(scan_input)
+        Ok(scan_input.build())
     }
 
     async fn collect_parquet_metadata(&self) -> Result<Vec<Arc<ParquetMetaData>>> {

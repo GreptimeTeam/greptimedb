@@ -409,7 +409,7 @@ impl ScanRegion {
     /// Scan sequentially.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input().await?.with_compaction(false);
+        let input = self.scan_input().await?;
         Ok(SeqScan::new(input))
     }
 
@@ -558,7 +558,7 @@ impl ScanRegion {
             }
         });
 
-        let input = ScanInput::new(self.access_layer, mapper)
+        let input = ScanInput::builder(self.access_layer, mapper)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
@@ -619,7 +619,7 @@ impl ScanRegion {
         } else {
             input
         };
-        Ok(input.compute_scan_analysis())
+        Ok(input.build())
     }
 
     /// Builds the deduplicated root column ids required by the projection and
@@ -1010,77 +1010,108 @@ struct ScanAnalysis {
     implied_time_range: Option<TimestampRange>,
 }
 
+/// Builder for a finalized [ScanInput].
+pub(crate) struct ScanInputBuilder {
+    input: ScanInput,
+}
+
 impl ScanInput {
-    /// Creates a new [ScanInput].
+    /// Creates a new [ScanInputBuilder].
     #[must_use]
-    pub(crate) fn new(access_layer: AccessLayerRef, mapper: FlatProjectionMapper) -> ScanInput {
-        ScanInput {
-            access_layer,
-            read_cols: mapper.read_columns().clone(),
-            mapper: Arc::new(mapper),
-            time_range: None,
-            scan_analysis: None,
-            predicate: PredicateGroup::default(),
-            region_partition_expr: None,
-            memtables: Vec::new(),
-            files: Vec::new(),
-            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
-            cache_strategy: CacheStrategy::Disabled,
-            ignore_file_not_found: false,
-            max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
-            scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
-            inverted_index_appliers: [None, None],
-            bloom_filter_index_appliers: [None, None],
-            fulltext_index_appliers: [None, None],
-            #[cfg(feature = "vector_index")]
-            vector_index_applier: None,
-            #[cfg(feature = "vector_index")]
-            vector_index_k: None,
-            query_start: None,
-            append_mode: false,
-            filter_deleted: true,
-            merge_mode: MergeMode::default(),
-            series_row_selector: None,
-            distribution: None,
-            explain_flat_format: false,
-            snapshot_sequence: None,
-            sequence_range: None,
-            compaction: false,
-            json2_rewrite_targets: Arc::default(),
-            query_stat_counters: None,
-            #[cfg(feature = "enterprise")]
-            extension_ranges: Vec::new(),
+    pub(crate) fn builder(
+        access_layer: AccessLayerRef,
+        mapper: FlatProjectionMapper,
+    ) -> ScanInputBuilder {
+        ScanInputBuilder {
+            input: ScanInput {
+                access_layer,
+                read_cols: mapper.read_columns().clone(),
+                mapper: Arc::new(mapper),
+                time_range: None,
+                scan_analysis: None,
+                predicate: PredicateGroup::default(),
+                region_partition_expr: None,
+                memtables: Vec::new(),
+                files: Vec::new(),
+                batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
+                cache_strategy: CacheStrategy::Disabled,
+                ignore_file_not_found: false,
+                max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+                scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+                inverted_index_appliers: [None, None],
+                bloom_filter_index_appliers: [None, None],
+                fulltext_index_appliers: [None, None],
+                #[cfg(feature = "vector_index")]
+                vector_index_applier: None,
+                #[cfg(feature = "vector_index")]
+                vector_index_k: None,
+                query_start: None,
+                append_mode: false,
+                filter_deleted: true,
+                merge_mode: MergeMode::default(),
+                series_row_selector: None,
+                distribution: None,
+                explain_flat_format: false,
+                snapshot_sequence: None,
+                sequence_range: None,
+                compaction: false,
+                json2_rewrite_targets: Arc::default(),
+                query_stat_counters: None,
+                #[cfg(feature = "enterprise")]
+                extension_ranges: Vec::new(),
+            },
         }
     }
 
+    /// Returns the scan-wide hint for rows in an execution batch.
+    pub(crate) fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    /// Returns the range implied by the range-cache time filters.
+    pub(crate) fn implied_time_range(&self) -> Option<&TimestampRange> {
+        self.scan_analysis
+            .as_ref()
+            .expect("ScanInput must be built")
+            .implied_time_range
+            .as_ref()
+    }
+
+    /// Returns the fingerprint for partition range caching.
+    pub(crate) fn scan_fingerprint(&self) -> Option<&ScanRequestFingerprint> {
+        self.scan_analysis
+            .as_ref()
+            .expect("ScanInput must be built")
+            .fingerprint
+            .as_ref()
+    }
+}
+
+impl ScanInputBuilder {
     /// Sets time range filter for time index.
     #[must_use]
     pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
-        self.time_range = time_range;
+        self.input.time_range = time_range;
         self
     }
 
     /// Sets predicate to push down.
     #[must_use]
     pub(crate) fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
-        self.region_partition_expr = predicate.region_partition_expr().cloned();
-        self.predicate = predicate;
-        self.scan_analysis = None;
+        self.input.region_partition_expr = predicate.region_partition_expr().cloned();
+        self.input.predicate = predicate;
         self
     }
 
-    /// Computes and caches analysis of the finalized scan request.
+    /// Builds a finalized [ScanInput] and computes its scan analysis.
     #[must_use]
-    pub(crate) fn compute_scan_analysis(mut self) -> Self {
-        if self.scan_analysis.is_some() {
-            return self;
-        }
+    pub(crate) fn build(mut self) -> ScanInput {
+        let input = &self.input;
+        let eligible = !input.compaction
+            && !input.files.is_empty()
+            && matches!(input.cache_strategy, CacheStrategy::EnableAll(_));
 
-        let eligible = !self.compaction
-            && !self.files.is_empty()
-            && matches!(self.cache_strategy, CacheStrategy::EnableAll(_));
-
-        let metadata = self.region_metadata();
+        let metadata = input.region_metadata();
         let tag_names: HashSet<&str> = metadata
             .column_metadatas
             .iter()
@@ -1097,7 +1128,7 @@ impl ScanInput {
             .expect("Time index must have timestamp-compatible type")
             .unit();
 
-        let exprs = self
+        let exprs = input
             .predicate_group()
             .predicate_without_region()
             .map(|predicate| predicate.exprs())
@@ -1147,7 +1178,7 @@ impl ScanInput {
             // Ensure the filters are sorted for consistent fingerprinting.
             filters.sort_unstable();
             time_filters.sort_unstable();
-            let read_columns = self.read_cols.clone();
+            let read_columns = input.read_cols.clone();
             let fingerprint = crate::read::range_cache::ScanRequestFingerprintBuilder {
                 read_column_types: read_columns
                     .column_ids_iter()
@@ -1166,10 +1197,11 @@ impl ScanInput {
                 read_columns,
                 filters,
                 time_filters,
-                series_row_selector: self.series_row_selector,
-                append_mode: self.append_mode,
-                filter_deleted: self.filter_deleted,
-                merge_mode: self.merge_mode,
+                series_row_selector: input.series_row_selector,
+                append_mode: input.append_mode,
+                filter_deleted: input.filter_deleted,
+                merge_mode: input.merge_mode,
+                sequence_range: input.sequence_range,
                 partition_expr_version: metadata.partition_expr_version,
             }
             .build();
@@ -1178,66 +1210,45 @@ impl ScanInput {
             None
         };
 
-        self.scan_analysis = Some(ScanAnalysis {
+        self.input.scan_analysis = Some(ScanAnalysis {
             fingerprint,
             implied_time_range,
         });
-        self
-    }
-
-    /// Returns the range implied by the range-cache time filters.
-    pub(crate) fn implied_time_range(&self) -> Option<&TimestampRange> {
-        self.scan_analysis
-            .as_ref()
-            .and_then(|analysis| analysis.implied_time_range.as_ref())
-    }
-
-    /// Returns the fingerprint for partition range caching.
-    pub(crate) fn scan_fingerprint(&self) -> Option<&ScanRequestFingerprint> {
-        self.scan_analysis
-            .as_ref()
-            .and_then(|analysis| analysis.fingerprint.as_ref())
+        self.input
     }
 
     /// Sets memtable range builders.
     #[must_use]
     pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
-        self.memtables = memtables;
+        self.input.memtables = memtables;
         self
     }
 
     /// Sets files to read.
     #[must_use]
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
-        self.files = files;
-        self.scan_analysis = None;
+        self.input.files = files;
         self
-    }
-
-    /// Returns the scan-wide hint for rows in an execution batch.
-    pub(crate) fn batch_size(&self) -> usize {
-        self.batch_size
     }
 
     /// Sets the scan-wide hint for rows in an execution batch.
     #[must_use]
     pub(crate) fn with_batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = batch_size;
+        self.input.batch_size = batch_size;
         self
     }
 
     /// Sets cache for this query.
     #[must_use]
     pub(crate) fn with_cache(mut self, cache: CacheStrategy) -> Self {
-        self.cache_strategy = cache;
-        self.scan_analysis = None;
+        self.input.cache_strategy = cache;
         self
     }
 
     /// Ignores file not found error.
     #[must_use]
     pub(crate) fn with_ignore_file_not_found(mut self, ignore: bool) -> Self {
-        self.ignore_file_not_found = ignore;
+        self.input.ignore_file_not_found = ignore;
         self
     }
 
@@ -1247,14 +1258,14 @@ impl ScanInput {
         mut self,
         max_concurrent_scan_files: usize,
     ) -> Self {
-        self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self.input.max_concurrent_scan_files = max_concurrent_scan_files;
         self
     }
 
     /// Sets the memory pool shared by internal scan operators.
     #[must_use]
     pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
-        self.scan_memory_pool = scan_memory_pool;
+        self.input.scan_memory_pool = scan_memory_pool;
         self
     }
 
@@ -1264,7 +1275,7 @@ impl ScanInput {
         mut self,
         appliers: [Option<InvertedIndexApplierRef>; 2],
     ) -> Self {
-        self.inverted_index_appliers = appliers;
+        self.input.inverted_index_appliers = appliers;
         self
     }
 
@@ -1274,7 +1285,7 @@ impl ScanInput {
         mut self,
         appliers: [Option<BloomFilterIndexApplierRef>; 2],
     ) -> Self {
-        self.bloom_filter_index_appliers = appliers;
+        self.input.bloom_filter_index_appliers = appliers;
         self
     }
 
@@ -1284,7 +1295,7 @@ impl ScanInput {
         mut self,
         appliers: [Option<FulltextIndexApplierRef>; 2],
     ) -> Self {
-        self.fulltext_index_appliers = appliers;
+        self.input.fulltext_index_appliers = appliers;
         self
     }
 
@@ -1295,7 +1306,7 @@ impl ScanInput {
         mut self,
         applier: Option<VectorIndexApplierRef>,
     ) -> Self {
-        self.vector_index_applier = applier;
+        self.input.vector_index_applier = applier;
         self
     }
 
@@ -1303,21 +1314,20 @@ impl ScanInput {
     #[cfg(feature = "vector_index")]
     #[must_use]
     pub(crate) fn with_vector_index_k(mut self, k: Option<usize>) -> Self {
-        self.vector_index_k = k;
+        self.input.vector_index_k = k;
         self
     }
 
     /// Sets start time of the query.
     #[must_use]
     pub(crate) fn with_start_time(mut self, now: Option<Instant>) -> Self {
-        self.query_start = now;
+        self.input.query_start = now;
         self
     }
 
     #[must_use]
     pub(crate) fn with_append_mode(mut self, is_append_mode: bool) -> Self {
-        self.append_mode = is_append_mode;
-        self.scan_analysis = None;
+        self.input.append_mode = is_append_mode;
         self
     }
 
@@ -1325,23 +1335,21 @@ impl ScanInput {
         mut self,
         counters: Option<RegionQueryStatCounters>,
     ) -> Self {
-        self.query_stat_counters = counters;
+        self.input.query_stat_counters = counters;
         self
     }
 
     /// Sets whether to remove deletion markers during scan.
     #[must_use]
     pub(crate) fn with_filter_deleted(mut self, filter_deleted: bool) -> Self {
-        self.filter_deleted = filter_deleted;
-        self.scan_analysis = None;
+        self.input.filter_deleted = filter_deleted;
         self
     }
 
     /// Sets the merge mode.
     #[must_use]
     pub(crate) fn with_merge_mode(mut self, merge_mode: MergeMode) -> Self {
-        self.merge_mode = merge_mode;
-        self.scan_analysis = None;
+        self.input.merge_mode = merge_mode;
         self
     }
 
@@ -1351,14 +1359,14 @@ impl ScanInput {
         mut self,
         distribution: Option<TimeSeriesDistribution>,
     ) -> Self {
-        self.distribution = distribution;
+        self.input.distribution = distribution;
         self
     }
 
     /// Sets whether the region's configured SST format is flat for explain output.
     #[must_use]
     pub(crate) fn with_explain_flat_format(mut self, explain_flat_format: bool) -> Self {
-        self.explain_flat_format = explain_flat_format;
+        self.input.explain_flat_format = explain_flat_format;
         self
     }
 
@@ -1368,8 +1376,7 @@ impl ScanInput {
         mut self,
         series_row_selector: Option<TimeSeriesRowSelector>,
     ) -> Self {
-        self.series_row_selector = series_row_selector;
-        self.scan_analysis = None;
+        self.input.series_row_selector = series_row_selector;
         self
     }
 
@@ -1378,31 +1385,42 @@ impl ScanInput {
         mut self,
         snapshot_sequence: Option<SequenceNumber>,
     ) -> Self {
-        self.snapshot_sequence = snapshot_sequence;
+        self.input.snapshot_sequence = snapshot_sequence;
         self
     }
 
     #[must_use]
     pub(crate) fn with_sequence_range(mut self, sequence_range: Option<SequenceRange>) -> Self {
-        self.sequence_range = sequence_range;
+        self.input.sequence_range = sequence_range;
         self
     }
 
     /// Sets whether this scan is for compaction.
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
-        self.compaction = compaction;
-        self.scan_analysis = None;
+        self.input.compaction = compaction;
         self
     }
 
     /// Sets compaction-only JSON2 physical rewrite targets.
     #[must_use]
     pub(crate) fn with_json2_rewrite_targets(mut self, targets: Json2RewriteTargets) -> Self {
-        self.json2_rewrite_targets = targets;
+        self.input.json2_rewrite_targets = targets;
         self
     }
 
+    #[cfg(feature = "enterprise")]
+    #[must_use]
+    pub(crate) fn with_extension_ranges(
+        mut self,
+        extension_ranges: Vec<BoxedExtensionRange>,
+    ) -> Self {
+        self.input.extension_ranges = extension_ranges;
+        self
+    }
+}
+
+impl ScanInput {
     /// Builds memtable ranges to scan by `index`.
     pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
         let memtable = &self.memtables[index.index];
@@ -1723,14 +1741,6 @@ impl ScanInput {
 
 #[cfg(feature = "enterprise")]
 impl ScanInput {
-    #[must_use]
-    pub(crate) fn with_extension_ranges(self, extension_ranges: Vec<BoxedExtensionRange>) -> Self {
-        Self {
-            extension_ranges,
-            ..self
-        }
-    }
-
     #[cfg(feature = "enterprise")]
     pub(crate) fn extension_ranges(&self) -> &[BoxedExtensionRange] {
         &self.extension_ranges
@@ -1931,7 +1941,6 @@ pub struct StreamContext {
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
     pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
-        let input = input.compute_scan_analysis();
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
@@ -1944,7 +1953,6 @@ impl StreamContext {
 
     /// Creates a new [StreamContext] for [UnorderedScan].
     pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
-        let input = input.compute_scan_analysis();
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
@@ -2290,7 +2298,7 @@ mod tests {
     use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
 
-    async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInput {
+    async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInputBuilder {
         let env = SchedulerEnv::new().await;
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
@@ -2299,7 +2307,7 @@ mod tests {
             Arc::new(crate::sst::file_purger::NoopFilePurger),
         );
 
-        ScanInput::new(env.access_layer.clone(), mapper)
+        ScanInput::builder(env.access_layer.clone(), mapper)
             .with_predicate(predicate)
             .with_cache(CacheStrategy::EnableAll(Arc::new(
                 CacheManager::builder()
@@ -2307,7 +2315,6 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
-            .compute_scan_analysis()
     }
 
     /// Helper to create a timestamp millisecond literal.
@@ -2416,7 +2423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compute_scan_analysis() {
+    async fn test_scan_input_builder_computes_scan_analysis() {
         let metadata = metadata_with_time_index_unit(TimeUnit::Millisecond);
         let env = SchedulerEnv::new().await;
         let file = file_handle_with_time_range(
@@ -2426,9 +2433,9 @@ mod tests {
 
         let make_input = |filters: &[Expr]| {
             let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
-            ScanInput::new(env.access_layer.clone(), mapper)
+            ScanInput::builder(env.access_layer.clone(), mapper)
                 .with_predicate(PredicateGroup::new(&metadata, filters).unwrap())
-                .compute_scan_analysis()
+                .build()
         };
 
         let covered = make_input(&[col("ts").gt_eq(ts_lit(500)), col("ts").lt(ts_lit(3000))]);
@@ -2443,15 +2450,12 @@ mod tests {
             &file
         ));
 
-        // Computing the analysis again reuses the cached result.
-        let covered = covered.compute_scan_analysis();
-        assert!(time_range_covers_file(covered.implied_time_range(), &file));
-
-        // Replacing the predicate invalidates the cached analysis.
-        let replaced = covered
-            .with_predicate(PredicateGroup::new(&metadata, &[col("ts").gt(ts_lit(3000))]).unwrap());
-        assert!(replaced.scan_analysis.is_none());
-        let replaced = replaced.compute_scan_analysis();
+        let replaced = ScanInput::builder(
+            env.access_layer.clone(),
+            FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap(),
+        )
+        .with_predicate(PredicateGroup::new(&metadata, &[col("ts").gt(ts_lit(3000))]).unwrap())
+        .build();
         assert!(!time_range_covers_file(
             replaced.implied_time_range(),
             &file
@@ -2463,23 +2467,25 @@ mod tests {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let env = SchedulerEnv::new().await;
-        let input = ScanInput::new(env.access_layer.clone(), mapper);
+        let input = ScanInput::builder(env.access_layer.clone(), mapper).build();
         assert_eq!(
             crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             input.batch_size()
         );
 
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_compaction(true)
-            .with_batch_size(256);
+            .with_batch_size(256)
+            .build();
         assert_eq!(256, input.batch_size());
 
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_batch_size(256)
             .with_compaction(true)
-            .with_compaction(false);
+            .with_compaction(false)
+            .build();
         assert_eq!(256, input.batch_size());
     }
 
@@ -2499,7 +2505,7 @@ mod tests {
         .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
         .with_merge_mode(MergeMode::LastNonNull)
         .with_filter_deleted(false)
-        .compute_scan_analysis();
+        .build();
 
         let fingerprint = input.scan_fingerprint().unwrap();
 
@@ -2539,7 +2545,8 @@ mod tests {
             metadata,
             vec![col("ts").gt_eq(lit(1000)), col("v0").gt(lit(1))],
         )
-        .await;
+        .await
+        .build();
 
         assert!(input.scan_fingerprint().is_none());
     }
@@ -2549,25 +2556,25 @@ mod tests {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let filters = vec![col("k0").eq(lit("foo"))];
 
-        let disabled = ScanInput::new(
+        let disabled = ScanInput::builder(
             SchedulerEnv::new().await.access_layer.clone(),
             FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap(),
         )
         .with_predicate(PredicateGroup::new(metadata.as_ref(), &filters).unwrap())
-        .compute_scan_analysis();
+        .build();
         assert!(disabled.scan_fingerprint().is_none());
 
         let compaction = new_scan_input(metadata.clone(), filters.clone())
             .await
             .with_compaction(true)
-            .compute_scan_analysis();
+            .build();
         assert!(compaction.scan_fingerprint().is_none());
 
         // No files to read.
         let no_files = new_scan_input(metadata, filters)
             .await
             .with_files(vec![])
-            .compute_scan_analysis();
+            .build();
         assert!(no_files.scan_fingerprint().is_none());
     }
 
@@ -2582,7 +2589,9 @@ mod tests {
         builder.partition_expr_json(Some(partition_expr));
         let metadata = Arc::new(builder.build_without_validation().unwrap());
 
-        let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))]).await;
+        let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))])
+            .await
+            .build();
         let fingerprint = input.scan_fingerprint().unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
@@ -2659,7 +2668,7 @@ mod tests {
                 FileMeta::default(),
                 Arc::new(crate::sst::file_purger::NoopFilePurger),
             );
-            ScanInput::new(env.access_layer.clone(), mapper)
+            ScanInput::builder(env.access_layer.clone(), mapper)
                 .with_predicate(predicate)
                 .with_cache(CacheStrategy::EnableAll(Arc::new(
                     CacheManager::builder()
@@ -2667,7 +2676,7 @@ mod tests {
                         .build(),
                 )))
                 .with_files(vec![file])
-                .compute_scan_analysis()
+                .build()
         };
 
         let int_target = JsonNativeType::i64();
@@ -2835,7 +2844,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_level_pruning_stats_ceil_max_unit_conversion() {
         let metadata = metadata_with_time_index_unit(TimeUnit::Millisecond);
-        let input = new_scan_input(metadata, vec![]).await;
+        let input = new_scan_input(metadata, vec![]).await.build();
         let file = file_handle_with_time_range(
             Timestamp::new(1_000_001, TimeUnit::Nanosecond),
             Timestamp::new(1_000_001, TimeUnit::Nanosecond),
@@ -2862,7 +2871,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_level_pruning_stats_overflow_keeps_file() {
         let metadata = metadata_with_time_index_unit(TimeUnit::Nanosecond);
-        let input = new_scan_input(metadata, vec![]).await;
+        let input = new_scan_input(metadata, vec![]).await.build();
         let file = file_handle_with_time_range(
             Timestamp::new(0, TimeUnit::Second),
             Timestamp::new(i64::MAX, TimeUnit::Second),
@@ -2901,8 +2910,9 @@ mod tests {
             vec![],
             physical_lit(false),
         ))]);
-        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
-            .with_predicate(predicate_group);
+        let input = ScanInput::builder(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group)
+            .build();
         let file = file_handle_with_time_range(
             Timestamp::new_millisecond(0),
             Timestamp::new_millisecond(1000),
@@ -2932,8 +2942,9 @@ mod tests {
             physical_lit(true),
         ));
         predicate_group.add_dyn_filters(vec![dyn_filter.clone()]);
-        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
-            .with_predicate(predicate_group);
+        let input = ScanInput::builder(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group)
+            .build();
         let file = file_handle_with_time_range(
             Timestamp::new_millisecond(0),
             Timestamp::new_millisecond(1000),
@@ -2967,7 +2978,8 @@ mod tests {
             let input = new_scan_input(metadata.clone(), vec![])
                 .await
                 .with_append_mode(append_mode)
-                .with_merge_mode(merge_mode);
+                .with_merge_mode(merge_mode)
+                .build();
 
             assert_eq!(expected_mode, input.range_pre_filter_mode(source_count));
         }

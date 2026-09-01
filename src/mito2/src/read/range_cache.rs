@@ -982,12 +982,12 @@ mod tests {
             partition_time_range.0.value(),
             partition_time_range.1.value(),
         );
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_predicate(predicate)
             .with_time_range(query_time_range)
             .with_files(vec![file])
             .with_cache(test_cache_strategy())
-            .compute_scan_analysis();
+            .build();
         let range_meta = RangeMeta {
             time_range: partition_time_range,
             indices: smallvec![SourceIndex {

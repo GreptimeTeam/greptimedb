@@ -586,10 +586,9 @@ mod tests {
         ));
         let mapper =
             FlatProjectionMapper::new(&metadata, 0..metadata.column_metadatas.len()).unwrap();
-        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(ScanInput::new(
-            env.access_layer.clone(),
-            mapper,
-        )));
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(
+            ScanInput::builder(env.access_layer.clone(), mapper).build(),
+        ));
         let pruner = Arc::new(Pruner::new(stream_ctx.clone(), 1));
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_metrics = PartitionMetrics::new(
