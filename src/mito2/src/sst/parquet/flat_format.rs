@@ -51,7 +51,6 @@ use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
     NewRecordBatchSnafu, Result,
 };
-use crate::read::flat_projection::flat_projected_columns;
 use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
@@ -359,18 +358,6 @@ impl FlatReadFormat {
     /// Gets JSON2 read targets.
     pub(crate) fn json_target_types(&self) -> &JsonTargetTypes {
         self.read_cols.json_target_types()
-    }
-
-    /// Returns the logical schema produced after Parquet-level JSON2 alignment.
-    pub(crate) fn output_logical_schema(&self) -> Vec<(ColumnId, ConcreteDataType)> {
-        let mut schema = flat_projected_columns(self.metadata(), self.format_projection());
-        for (column_id, target) in self.json_target_types().iter() {
-            let Some((_, data_type)) = schema.iter_mut().find(|(id, _)| id == column_id) else {
-                continue;
-            };
-            *data_type = ConcreteDataType::json2(target.clone());
-        }
-        schema
     }
 
     /// Gets the projection in the flat format.

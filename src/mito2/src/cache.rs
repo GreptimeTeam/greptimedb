@@ -2027,7 +2027,7 @@ pub struct SelectorResultValue {
     pub result: SelectorResult,
     /// The read columns of rows.
     pub read_cols: ParquetReadColumns,
-    /// JSON2 read targets used by flat-format reads.
+    /// JSON2 target types used by flat-format reads.
     ///
     /// JSON2 projection is query-driven; the same parquet columns can produce
     /// different cached batches under different type hints.

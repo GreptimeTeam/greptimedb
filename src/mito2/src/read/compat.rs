@@ -41,7 +41,7 @@ use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
     NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
-use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, PrimaryKeyArray};
 use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
@@ -95,7 +95,11 @@ impl FlatCompatBatch {
         compaction: bool,
     ) -> Result<Option<Self>> {
         let actual = read_format.metadata();
-        let actual_schema = read_format.output_logical_schema();
+        let actual_schema = flat_projected_columns(
+            actual,
+            read_format.format_projection(),
+            read_format.json_target_types(),
+        );
 
         let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema

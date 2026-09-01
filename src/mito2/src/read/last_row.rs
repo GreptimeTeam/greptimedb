@@ -150,8 +150,8 @@ impl FlatRowGroupLastRowCachedReader {
         if let Some(value) = cache_strategy.get_selector_result(&key) {
             let is_flat = matches!(&value.result, SelectorResult::Flat(_));
             let schema_matches = value.read_cols == *read_cols;
-            let json_read_targets_match = value.json_target_types == json_target_types;
-            if is_flat && schema_matches && json_read_targets_match {
+            let json_target_types_matches = value.json_target_types == json_target_types;
+            if is_flat && schema_matches && json_target_types_matches {
                 Self::new_hit(value)
             } else {
                 Self::new_miss(key, read_cols, json_target_types, reader, cache_strategy)
