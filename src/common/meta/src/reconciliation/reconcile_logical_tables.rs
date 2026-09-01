@@ -128,21 +128,17 @@ impl ReconcileLogicalTablesResultSummary {
     }
 
     fn begin_region_reconciliation(&mut self) {
-        self.created_region_table_count = 0;
-        self.created_region_count = 0;
         self.updated_table_info_count = 0;
         self.last_completed_phase = Some(LogicalTablesPhase::ResolveTableMetadatas);
     }
 
-    fn mark_regions_reconciled(&mut self, table_count: usize, region_count: usize) {
-        self.created_region_table_count = table_count;
-        self.created_region_count = region_count;
+    fn mark_regions_reconciled(&mut self) {
         self.last_completed_phase = Some(LogicalTablesPhase::ReconcileRegions);
     }
 
     fn record_created_regions(&mut self, table_count: usize, region_count: usize) {
-        self.created_region_table_count = table_count;
-        self.created_region_count = region_count;
+        self.created_region_table_count += table_count;
+        self.created_region_count += region_count;
     }
 
     fn begin_table_info_update(&mut self) {
@@ -450,6 +446,7 @@ pub(crate) trait State: Sync + Send + Debug {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use api::region::RegionResponse;
     use api::v1::region::region_request::Body;
@@ -707,7 +704,7 @@ mod tests {
     #[test]
     fn logical_table_summary_accumulates_committed_table_info_chunks() {
         let mut summary = ReconcileLogicalTablesResultSummary::default();
-        summary.mark_regions_reconciled(0, 0);
+        summary.mark_regions_reconciled();
         summary.begin_table_info_update();
         summary.record_updated_table_infos(2);
         summary.record_updated_table_infos(1);
@@ -720,21 +717,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logical_table_mixed_region_outcome_preserves_partial_result() {
+    async fn logical_table_region_progress_accumulates_across_retry() {
         let (tx, _rx) = mpsc::channel(8);
-        let handler = DatanodeWatcher::new(tx).with_handler(|_peer, request| {
+        let fail_region_two = Arc::new(AtomicBool::new(true));
+        let handler_fail_region_two = fail_region_two.clone();
+        let handler = DatanodeWatcher::new(tx).with_handler(move |_peer, request| {
             match request.body.as_ref().unwrap() {
                 Body::Creates(request) => {
                     assert_eq!(request.requests.len(), 1);
                     let region_number =
                         RegionId::from_u64(request.requests[0].region_id).region_number();
-                    if region_number == 1 {
-                        Ok(RegionResponse::new(0))
-                    } else {
+                    if region_number == 2 && handler_fail_region_two.swap(false, Ordering::SeqCst) {
                         error::UnexpectedSnafu {
                             err_msg: "mock error",
                         }
                         .fail()
+                    } else {
+                        Ok(RegionResponse::new(0))
                     }
                 }
                 _ => unreachable!(),
@@ -834,6 +833,36 @@ mod tests {
                 "created_region_count": 2,
                 "updated_table_info_count": 0,
                 "last_completed_phase": "resolve_table_metadatas",
+            })
+        );
+
+        procedure.execute(&procedure_ctx).await.unwrap();
+        assert!(
+            procedure
+                .context
+                .volatile_ctx
+                .missing_regions_by_table
+                .is_empty()
+        );
+        assert_eq!(
+            LogicalTablesEventHarness::all()
+                .event(&procedure, EventTrigger::Succeeded)
+                .unwrap()
+                .json_payload()
+                .unwrap(),
+            json!({
+                "version": 1,
+                "complete": true,
+                "processed_table_count": 2,
+                "metadata_consistent_table_count": 0,
+                "metadata_inconsistent_table_count": 0,
+                "missing_region_table_count": 2,
+                "resolved_column_count": 0,
+                "scanned_region_count": 4,
+                "created_region_table_count": 2,
+                "created_region_count": 3,
+                "updated_table_info_count": 0,
+                "last_completed_phase": "reconcile_regions",
             })
         );
     }

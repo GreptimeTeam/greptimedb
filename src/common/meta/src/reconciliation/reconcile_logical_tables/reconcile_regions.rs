@@ -35,6 +35,11 @@ use crate::rpc::router::{find_leaders, region_distribution};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReconcileRegions;
 
+struct PreparedCreateRequest {
+    request_builder: CreateRequestBuilder,
+    partition_exprs: HashMap<RegionNumber, String>,
+}
+
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for ReconcileRegions {
@@ -47,9 +52,7 @@ impl State for ReconcileRegions {
             .result_summary
             .begin_region_reconciliation();
         if ctx.persistent_ctx.create_tables.is_empty() {
-            ctx.volatile_ctx
-                .result_summary
-                .mark_regions_reconciled(0, 0);
+            ctx.volatile_ctx.result_summary.mark_regions_reconciled();
             return Ok((Box::new(UpdateTableInfos), Status::executing(false)));
         }
 
@@ -73,6 +76,10 @@ impl State for ReconcileRegions {
             }
         }
 
+        let prepared_requests = self.prepare_create_requests(ctx)?;
+        let table_name = ctx.table_name();
+        let storage_path = region_storage_path(&table_name.catalog_name, &table_name.schema_name);
+
         let region_distribution = region_distribution(&region_routes);
         let leaders = find_leaders(&region_routes)
             .into_iter()
@@ -91,8 +98,21 @@ impl State for ReconcileRegions {
                     continue;
                 };
                 for table_id in table_ids {
+                    let Some(prepared_request) = prepared_requests.get(table_id) else {
+                        return error::UnexpectedSnafu {
+                            err_msg: format!(
+                                "Missing prepared request for logical table {table_id}"
+                            ),
+                        }
+                        .fail();
+                    };
                     requests.push((
-                        self.make_request(region_number, *table_id, ctx)?,
+                        self.make_request(
+                            region_number,
+                            *table_id,
+                            &storage_path,
+                            prepared_request,
+                        )?,
                         *table_id,
                         region_number,
                     ));
@@ -165,9 +185,7 @@ impl State for ReconcileRegions {
             table_id,
             table_name
         );
-        ctx.volatile_ctx
-            .result_summary
-            .mark_regions_reconciled(created_region_table_count, created_region_count);
+        ctx.volatile_ctx.result_summary.mark_regions_reconciled();
         ctx.volatile_ctx.missing_regions_by_table.clear();
         ctx.persistent_ctx.create_tables.clear();
         return Ok((Box::new(UpdateTableInfos), Status::executing(true)));
@@ -183,31 +201,15 @@ impl ReconcileRegions {
         &self,
         region_number: RegionNumber,
         table_id: TableId,
-        ctx: &ReconcileLogicalTablesContext,
+        storage_path: &str,
+        prepared_request: &PreparedCreateRequest,
     ) -> Result<RegionRequest> {
-        let physical_table_id = ctx.table_id();
-        let table_name = ctx.table_name();
-        let Some((_, table_info)) = ctx
-            .persistent_ctx
-            .create_tables
-            .iter()
-            .find(|(candidate, _)| *candidate == table_id)
-        else {
-            return error::UnexpectedSnafu {
-                err_msg: format!("Missing table info for logical table {table_id}"),
-            }
-            .fail();
-        };
-        let request_builder =
-            create_region_request_from_raw_table_info(table_info, physical_table_id)?;
-        let storage_path = region_storage_path(&table_name.catalog_name, &table_name.schema_name);
-        let partition_exprs = prepare_partition_exprs(ctx, table_id);
         let region_id = RegionId::new(table_id, region_number);
-        let request = request_builder.build_one(
+        let request = prepared_request.request_builder.build_one(
             region_id,
-            storage_path,
+            storage_path.to_string(),
             &HashMap::new(),
-            &partition_exprs,
+            &prepared_request.partition_exprs,
         )?;
 
         Ok(RegionRequest {
@@ -219,6 +221,29 @@ impl ReconcileRegions {
                 requests: vec![request],
             })),
         })
+    }
+
+    fn prepare_create_requests(
+        &self,
+        ctx: &ReconcileLogicalTablesContext,
+    ) -> Result<HashMap<TableId, PreparedCreateRequest>> {
+        let physical_table_id = ctx.table_id();
+        ctx.persistent_ctx
+            .create_tables
+            .iter()
+            .map(|(table_id, table_info)| {
+                Ok((
+                    *table_id,
+                    PreparedCreateRequest {
+                        request_builder: create_region_request_from_raw_table_info(
+                            table_info,
+                            physical_table_id,
+                        )?,
+                        partition_exprs: prepare_partition_exprs(ctx, *table_id),
+                    },
+                ))
+            })
+            .collect()
     }
 
     async fn missing_regions_by_table(
