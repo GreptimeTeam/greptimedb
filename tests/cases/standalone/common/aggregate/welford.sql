@@ -55,6 +55,39 @@ FROM (
     SELECT 3 AS `id`, `state` FROM grouped_welford WHERE id = 1
 ) AS duplicated_states;
 
+CREATE TABLE welford_delta_merge (
+    `id` INT PRIMARY KEY,
+    `delta` BINARY,
+    `persisted` BINARY,
+    `ts` TIMESTAMP TIME INDEX DEFAULT now()
+);
+
+INSERT INTO welford_delta_merge (`id`, `delta`, `persisted`)
+SELECT 1, stddev_pop_state(`value`), NULL
+FROM test_welford WHERE id <= 5;
+
+INSERT INTO welford_delta_merge (`id`, `delta`, `persisted`)
+SELECT 2, NULL, stddev_pop_state(`value`)
+FROM test_welford WHERE id > 5;
+
+INSERT INTO welford_delta_merge (`id`, `delta`, `persisted`)
+VALUES (3, NULL, NULL);
+
+-- Delta-only, persisted-only, and both-null (empty-state) identity behavior.
+SELECT
+    `id`,
+    stddev_pop_calc(__stddev_pop_state_delta_merge(`delta`, `persisted`)) AS merged_stddev
+FROM welford_delta_merge
+GROUP BY `id`
+ORDER BY `id`;
+
+-- Merging delta and persisted states must equal direct stddev_pop state calculation.
+SELECT
+    stddev_pop_calc(__stddev_pop_state_delta_merge(`delta`, `persisted`)) AS merged_stddev,
+    (SELECT stddev_pop_calc(stddev_pop_state(`value`)) FROM test_welford) AS direct_stddev
+FROM welford_delta_merge;
+
+DROP TABLE welford_delta_merge;
 DROP TABLE grouped_welford;
 DROP TABLE test_welford;
 

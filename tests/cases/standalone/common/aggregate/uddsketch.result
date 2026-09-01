@@ -98,6 +98,38 @@ FROM grouped_uddsketch;
 | 0.5         |
 +-------------+
 
+CREATE TABLE delta_uddsketch (
+    `id` INT PRIMARY KEY,
+    `delta` BINARY,
+    `persisted` BINARY,
+    `ts` timestamp time index default now()
+);
+
+Affected Rows: 0
+
+INSERT INTO delta_uddsketch (`id`, `delta`, `persisted`)
+SELECT 1, uddsketch_state(128, 0.01, `value`), NULL
+FROM test_uddsketch WHERE `id` <= 5;
+
+Affected Rows: 1
+
+INSERT INTO delta_uddsketch (`id`, `delta`, `persisted`)
+SELECT 2, NULL, uddsketch_state(128, 0.01, `value`)
+FROM test_uddsketch WHERE `id` > 5;
+
+Affected Rows: 1
+
+SELECT
+    uddsketch_calc(0.5, __uddsketch_state_delta_merge(128, 0.01, `delta`, `persisted`)) AS merged_p50,
+    (SELECT uddsketch_calc(0.5, uddsketch_state(128, 0.01, `value`)) FROM test_uddsketch) AS direct_p50
+FROM delta_uddsketch;
+
++--------------------+--------------------+
+| merged_p50         | direct_p50         |
++--------------------+--------------------+
+| 59.745049810145126 | 59.745049810145126 |
++--------------------+--------------------+
+
 -- should fail
 SELECT uddsketch_calc(0.1, uddsketch_merge(128, 0.1, `state`)) FROM grouped_uddsketch;
 
@@ -123,6 +155,10 @@ drop table test_uddsketch;
 Affected Rows: 0
 
 drop table grouped_uddsketch;
+
+Affected Rows: 0
+
+drop table delta_uddsketch;
 
 Affected Rows: 0
 

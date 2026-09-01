@@ -191,6 +191,11 @@ impl FunctionRegistry {
             .collect()
     }
 
+    /// Returns a registered aggregate function by name.
+    pub fn get_aggr_func(&self, name: &str) -> Option<AggregateUDF> {
+        self.aggregate_functions.read().unwrap().get(name).cloned()
+    }
+
     /// Returns true if an aggregate function with the given name exists in the registry.
     pub fn is_aggr_func_exist(&self, name: &str) -> bool {
         self.aggregate_functions.read().unwrap().contains_key(name)
