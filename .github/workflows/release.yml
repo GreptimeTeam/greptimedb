@@ -510,7 +510,7 @@ jobs:
       base_ref: ${{ needs.prepare-release-validation.outputs.previous-release-tag }}
       candidate_ref: ${{ needs.prepare-release-validation.outputs.candidate-ref }}
       cargo_profile: nightly
-      runner: perf-regression-8-cores
+      runner: aliyun-ecs
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub

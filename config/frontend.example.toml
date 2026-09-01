@@ -44,7 +44,7 @@ default_column_prefix = "greptime"
 ## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
-## Defaults to max(num_cpus / 2, 1).
+## Defaults to max(num_cpus / 2, 2).
 #+ compact_rt_max_blocking_threads = 4
 
 ## The HTTP server options.
@@ -237,8 +237,13 @@ enable = true
 [otlp]
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
+## Experimental: enable cumulative OTLP exponential histogram ingestion.
+experimental_enable_exponential_histogram = false
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
+## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
+## resource attributes, so metrics-only services reach the semantic graph.
+experimental_enable_resource_info = false
 
 ## Prometheus remote storage options
 [prom_store]
@@ -309,6 +314,30 @@ allow_query_fallback = false
 ## When this limit is reached, queries will fail with ResourceExhausted error.
 ## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
 memory_pool_size = "50%"
+
+## Experimental memory pool allocation policy:
+## - "greedy" (default): first-come-first-served allocation; preserves current behavior.
+## - "fair": divides available memory among spillable operators and may spill earlier.
+## Only effective when `memory_pool_size` is bounded (>0).
+#+ experimental_memory_pool_policy = "greedy"
+
+# --- Experimental: DataFusion spill-to-disk controls ---
+## Spill mode:
+## - "default": preserve DataFusion built-in OS temp directory (default).
+## - "custom": explicitly configure spill path, quota, and compression.
+## - "disabled": explicitly disable disk spilling.
+## Set this to "custom" before using the path/quota/compression keys below.
+#+ experimental_spill_mode = "default"
+## Spill directory path. Ignored unless mode is "custom".
+## @toml2docs:none-default
+#+ experimental_spill_path = "/path/to/spill"
+## Maximum total size of spill directory (default: "1GiB").
+## Ignored unless mode is "custom".
+#+ experimental_spill_max_temp_directory_size = "1GiB"
+## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
+## Ignored unless mode is "custom".
+#+ experimental_spill_compression = "uncompressed"
+# --- End spill-to-disk ---
 
 ## Datanode options.
 [datanode]

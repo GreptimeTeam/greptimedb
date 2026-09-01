@@ -113,7 +113,7 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
@@ -153,6 +153,12 @@ fn test_load_frontend_example_config() {
     let options =
         GreptimeOptions::<FrontendOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
+    assert!(
+        !options
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
@@ -301,6 +307,7 @@ fn test_load_flownode_example_config() {
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::Percentage(50),
                 enable_per_region_metrics: false,
+                ..Default::default()
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
@@ -329,6 +336,12 @@ fn test_load_standalone_example_config() {
     let options =
         GreptimeOptions::<StandaloneOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
+    assert!(
+        !options
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
@@ -342,7 +355,7 @@ fn test_load_standalone_example_config() {
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
@@ -378,6 +391,43 @@ fn test_load_standalone_example_config() {
         ..Default::default()
     };
     similar_asserts::assert_eq!(options, expected);
+}
+
+#[test]
+fn test_load_otlp_exponential_histogram_option() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        "[otlp]\nexperimental_enable_exponential_histogram = true\n",
+    )
+    .unwrap();
+
+    let frontend =
+        GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(
+        frontend
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
+
+    let standalone =
+        GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(
+        standalone
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
+    assert!(
+        standalone
+            .component
+            .frontend_options()
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
 }
 
 #[test]

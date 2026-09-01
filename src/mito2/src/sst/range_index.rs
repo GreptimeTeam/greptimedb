@@ -12,8 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Primary-key index writer.
+//! Per-SST series row-range index.
 
 mod writer;
 
-pub use writer::{PkIndexWriter, PkIndexWriterMetrics, PkIndexWriterOptions, pk_columns_schema};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
+    DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
+};
+pub use writer::{
+    SstRangeIndexWriter, SstRangeIndexWriterMetrics, SstRangeIndexWriterOptions, range_index_schema,
+};
+
+const ROW_GROUP_ID_COLUMN: &str = "row_group_id";
+const START_COLUMN: &str = "start";
+const END_COLUMN: &str = "end";

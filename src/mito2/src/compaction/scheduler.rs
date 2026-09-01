@@ -264,9 +264,13 @@ impl CompactionScheduler {
     ///
     /// # Effects
     ///
-    /// Notifies waiters, schedules a pending manual or explicit automatic
-    /// follow-up, or removes the region status. The returned transition reports
-    /// a dispatched automatic follow-up or DDLs that are now safe to execute.
+    /// Notifies waiters, schedules a pending manual or automatic follow-up, or
+    /// removes the region status. A follow-up is scheduled whenever the cycle
+    /// latched an automatic trigger, or when `made_progress` is true (the
+    /// execution removed more files than it added): successful compaction keeps
+    /// draining the region until the picker returns no plan. The returned
+    /// transition reports a dispatched automatic follow-up or DDLs that are now
+    /// safe to execute.
     ///
     /// # Constraints
     ///
@@ -279,12 +283,18 @@ impl CompactionScheduler {
         execution: &CompactionExecution,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        made_progress: bool,
     ) -> CompactionTransition {
         if !self.is_current_execution(region_id, execution) {
             return CompactionTransition::NoAction;
         }
-        self.on_compaction_finished(region_id, manifest_ctx, schema_metadata_manager)
-            .await
+        self.on_compaction_finished(
+            region_id,
+            manifest_ctx,
+            schema_metadata_manager,
+            made_progress,
+        )
+        .await
     }
 
     /// Completes a cooperatively canceled execution.
@@ -571,6 +581,7 @@ impl CompactionScheduler {
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        made_progress: bool,
     ) -> CompactionTransition {
         if !self.region_status.contains_key(&region_id) {
             return CompactionTransition::NoAction;
@@ -605,7 +616,11 @@ impl CompactionScheduler {
             return CompactionTransition::DdlReady(pending_ddl_requests);
         }
 
-        if status.active.reset_automatic_followup()
+        // Keep draining when the cycle latched an automatic trigger, or when the
+        // execution reduced the file count. A no-progress rewrite stops here so a
+        // split-heavy output cannot loop forever; the next flush trigger resumes.
+        let should_continue = status.active.reset_automatic_followup() || made_progress;
+        if should_continue
             && self.schedule_automatic_followup(region_id, manifest_ctx, schema_metadata_manager)
         {
             return CompactionTransition::AutomaticFollowupScheduled;

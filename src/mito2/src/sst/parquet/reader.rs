@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{error, tracing, warn};
+use common_telemetry::{debug, error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::utils::expr_to_columns;
@@ -471,7 +471,24 @@ impl ParquetReaderBuilder {
             &file_path,
             skip_auto_convert,
         )?;
-        if need_override_sequence(&parquet_meta) {
+        // `region_meta` comes from the Parquet/source file and must not be used as the
+        // target identity. When the caller has no current metadata, the handle is the
+        // only local identity available and therefore denotes a local read.
+        let expected_region_id = self
+            .expected_metadata
+            .as_ref()
+            .map(|metadata| metadata.region_id)
+            .unwrap_or(self.file_handle.region_id());
+        let is_foreign = self.file_handle.region_id() != expected_region_id;
+        if is_foreign {
+            debug!(
+                "Reading foreign SST, file_id: {}, source_region_id: {}, expected_region_id: {}",
+                self.file_handle.file_id().file_id(),
+                self.file_handle.region_id(),
+                expected_region_id,
+            );
+        }
+        if is_foreign || need_override_sequence(&parquet_meta) {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
         }

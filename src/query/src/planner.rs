@@ -711,12 +711,18 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             ),
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts_ns",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                true,
+            ),
         ];
         let schema = Arc::new(Schema::new(columns));
         let table_meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![])
-            .value_indices(vec![0, 1])
+            .value_indices(vec![0, 1, 2, 3])
             .next_column_id(1024)
             .build()
             .unwrap();
@@ -860,6 +866,30 @@ mod tests {
         engine.planner().plan(&stmt, query_ctx).await.unwrap()
     }
 
+    /// Plans `sql` and runs the DataFusion analyzer, which is where
+    /// `InsertAssignmentRule` sits. Planning alone stops short of it, so these
+    /// assertions would not see the assignment rewrite at all.
+    async fn analyze_insert(
+        engine: &QueryEngineRef,
+        sql: &str,
+        query_ctx: &QueryContextRef,
+    ) -> String {
+        let stmt = QueryLanguageParser::parse_sql(sql, query_ctx).unwrap();
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .unwrap();
+        let context = engine.engine_context(query_ctx.clone());
+        let state = context.state();
+        state
+            .analyzer()
+            .execute_and_check(plan, state.config_options(), |_, _| {})
+            .unwrap()
+            .display_indent_schema()
+            .to_string()
+    }
+
     #[tokio::test]
     async fn test_insert_timestamp_literals_use_query_timezone() {
         let query_ctx = Arc::new(
@@ -869,32 +899,199 @@ mod tests {
         );
         let engine = create_timestamp_test_engine().await;
 
-        for (sql, expected_timestamp) in [
+        for (sql, expected_timestamps) in [
             (
                 "INSERT INTO timestamps (ts, st) \
                  VALUES ('2026-08-02 12:00:00.001', now())",
-                1_785_643_200_001_i64,
+                &[1_785_643_200_001_i64][..],
             ),
             (
                 "INSERT INTO timestamps (ts, st) \
                  SELECT '2026-08-03 12:00:00.001', now()",
-                1_785_729_600_001_i64,
+                &[1_785_729_600_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT '2026-08-04 12:00:00.001', now() LIMIT 1",
+                &[1_785_816_000_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT * FROM (\
+                     SELECT '2026-08-05 12:00:00.001', now()\
+                 ) AS source",
+                &[1_785_902_400_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT '2026-08-18 12:00:00.001', max(st) \
+                 FROM timestamps GROUP BY note",
+                &[1_787_025_600_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT c, s FROM (\
+                     SELECT '2026-08-13 12:00:00.001' AS c, now() AS s\
+                 ) AS t WHERE c > '2026-01-01'",
+                &[1_786_593_600_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT c, s FROM (\
+                     SELECT '2026-08-14 12:00:00.001' AS c, now() AS s\
+                 ) AS t ORDER BY c",
+                &[1_786_680_000_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT DISTINCT c, s FROM (\
+                     SELECT '2026-08-15 12:00:00.001' AS c, now() AS s\
+                 ) AS t",
+                &[1_786_766_400_001_i64][..],
             ),
         ] {
-            let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
-            let plan = engine
-                .planner()
-                .plan(&stmt, query_ctx.clone())
-                .await
-                .unwrap()
-                .display_indent()
-                .to_string();
+            let plan = analyze_insert(&engine, sql, &query_ctx).await;
+
+            for expected_timestamp in expected_timestamps {
+                assert!(
+                    plan.contains(&format!("TimestampMillisecond({expected_timestamp}, None)")),
+                    "{plan}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_explicit_timestamp_cast_keeps_datafusion_semantics() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+        let sql = "INSERT INTO timestamps (ts, st) \
+                   VALUES (CAST('2026-08-08 12:00:00.001' AS TIMESTAMP), now())";
+        let plan = analyze_insert(&engine, sql, &query_ctx).await;
+
+        // An explicit cast reaches the analyzer as an `arrow_cast` call rather
+        // than an `Expr::Cast`, which is how it stays out of the rewrite.
+        assert!(
+            plan.contains("arrow_cast(Utf8(\"2026-08-08 12:00:00.001\")"),
+            "{plan}"
+        );
+        // 12:00:00.001 read as Shanghai local time; the source query keeps UTC.
+        assert!(
+            !plan.contains("TimestampMillisecond(1786104000001, None)"),
+            "{plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_converts_source_literal_shared_by_several_columns() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+
+        // Rewriting `c` in place would also retype `note` and truncate `ts_ns`.
+        for (sql, expected) in [
+            (
+                "INSERT INTO timestamps (ts, note) SELECT a, b FROM (\
+                     SELECT c AS a, c AS b FROM (\
+                         SELECT '2026-08-12 12:00:00.001' AS c\
+                     ) AS t1\
+                 ) AS t2",
+                &[
+                    "TimestampMillisecond(1786507200001, None)",
+                    "[a:Utf8, b:Utf8]",
+                ][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, ts_ns) SELECT a, b FROM (\
+                     SELECT c AS a, c AS b FROM (\
+                         SELECT '2026-08-12 12:00:00.123456789' AS c\
+                     ) AS t1\
+                 ) AS t2",
+                &[
+                    "TimestampMillisecond(1786507200123, None)",
+                    "TimestampNanosecond(1786507200123456789, None)",
+                ][..],
+            ),
+        ] {
+            let plan = analyze_insert(&engine, sql, &query_ctx).await;
+
+            for expected in expected {
+                assert!(plan.contains(expected), "{plan}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_union_converts_via_assignment_cast() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+        // Branches disagree, so the conversion stays as a cast on the
+        // assignment instead of folding. One cast covers every branch, which is
+        // why a NULL branch no longer cancels the conversion for the column and
+        // why UNION's dedup keys stay on the original strings.
+        for sql in [
+            "INSERT INTO timestamps (ts, st) \
+             SELECT '2026-08-06 12:00:00.001', now() \
+             UNION ALL \
+             SELECT '2026-08-07 12:00:00.001', NULL",
+            "INSERT INTO timestamps (ts, st) \
+             SELECT '2026-08-16 12:00:00.001', now() \
+             UNION \
+             SELECT '2026-08-17 12:00:00.001', now()",
+        ] {
+            let plan = analyze_insert(&engine, sql, &query_ctx).await;
 
             assert!(
-                plan.contains(&format!("TimestampMillisecond({expected_timestamp}, None)")),
+                plan.contains("AS Timestamp(ms, \"Asia/Shanghai\")"),
+                "{plan}"
+            );
+            // The branches themselves are untouched.
+            assert!(
+                plan.contains("Utf8(\"2026-08-07 12:00:00.001\")")
+                    || plan.contains("Utf8(\"2026-08-17 12:00:00.001\")"),
                 "{plan}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_insert_mixed_union_keeps_source_coercion() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+        let sql = "INSERT INTO timestamps (ts, st) \
+                   SELECT '2026-08-10 12:00:00.001', now() \
+                   UNION ALL \
+                   SELECT CAST('2026-08-11 12:00:00.001' AS TIMESTAMP), now()";
+        let plan = analyze_insert(&engine, sql, &query_ctx).await;
+
+        assert!(
+            !plan.contains("TimestampMillisecond(1786334400001, None)"),
+            "{plan}"
+        );
+        assert!(
+            plan.contains("arrow_cast(Utf8(\"2026-08-11 12:00:00.001\")"),
+            "{plan}"
+        );
+        // TypeCoercion has already settled this union to timestamp, so the
+        // assignment has nothing left to reinterpret. Retargeting the cast here
+        // would leave a Timestamp(None) -> Timestamp(Some(tz)) step behind,
+        // which shifts the value instead of relabelling it.
+        assert!(!plan.contains("Asia/Shanghai"), "{plan}");
     }
 
     #[tokio::test]

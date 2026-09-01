@@ -18,8 +18,6 @@ use std::time::Instant;
 
 use clap::Parser;
 use colored::Colorize;
-use datanode::config::RegionEngineConfig;
-use datanode::store;
 use futures::stream;
 use mito2::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -32,19 +30,20 @@ use mito2::sst::file::{FileHandle, FileMeta};
 use mito2::sst::file_purger::{FilePurger, FilePurgerRef};
 use mito2::sst::index::intermediate::IntermediateManager;
 use mito2::sst::index::puffin_manager::PuffinManagerFactory;
+use mito2::sst::parquet::WriteOptions;
 use mito2::sst::parquet::reader::ParquetReaderBuilder;
-use mito2::sst::parquet::{PARQUET_METADATA_KEY, WriteOptions};
 use mito2::worker::write_cache_from_config;
 use object_store::ObjectStore;
-use parquet::file::metadata::{FooterTail, KeyValue};
+use parquet::file::metadata::FooterTail;
 use regex::Regex;
 use snafu::OptionExt;
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
 use store_api::storage::FileId;
 
-use crate::datanode::{StorageConfig, StorageConfigWrapper};
+use crate::datanode::tool_util::{
+    build_object_store, extract_region_metadata, max_row_group_uncompressed_size, parse_config,
+};
 use crate::error;
 
 /// Object storage benchmark command
@@ -65,46 +64,6 @@ pub struct ObjbenchCommand {
     /// Output file path for pprof flamegraph (enables profiling)
     #[clap(long, value_name = "FILE")]
     pub pprof_file: Option<PathBuf>,
-}
-
-pub(crate) fn parse_config(
-    config_path: &PathBuf,
-) -> error::Result<(
-    StorageConfig,
-    MitoConfig,
-    common_wal::config::DatanodeWalConfig,
-)> {
-    let cfg_str = std::fs::read_to_string(config_path).map_err(|e| {
-        error::IllegalConfigSnafu {
-            msg: format!("failed to read config {}: {e}", config_path.display()),
-        }
-        .build()
-    })?;
-
-    let store_cfg: StorageConfigWrapper = toml::from_str(&cfg_str).map_err(|e| {
-        error::IllegalConfigSnafu {
-            msg: format!("failed to parse config {}: {e}", config_path.display()),
-        }
-        .build()
-    })?;
-
-    let wal_config = store_cfg.wal;
-    let storage_config = store_cfg.storage;
-    let mito_engine_config = store_cfg
-        .region_engine
-        .into_iter()
-        .filter_map(|c| {
-            if let RegionEngineConfig::Mito(mito) = c {
-                Some(mito)
-            } else {
-                None
-            }
-        })
-        .next()
-        .with_context(|| error::IllegalConfigSnafu {
-            msg: format!("Engine config not found in {:?}", config_path),
-        })?;
-    Ok((storage_config, mito_engine_config, wal_config))
 }
 
 impl ObjbenchCommand {
@@ -154,17 +113,7 @@ impl ObjbenchCommand {
         let region_meta = extract_region_metadata(&self.source, &parquet_meta)?;
         let num_rows = parquet_meta.file_metadata().num_rows() as u64;
         let num_row_groups = parquet_meta.num_row_groups() as u64;
-        let max_row_group_uncompressed_size: u64 = parquet_meta
-            .row_groups()
-            .iter()
-            .map(|rg| {
-                rg.columns()
-                    .iter()
-                    .map(|c| c.uncompressed_size() as u64)
-                    .sum::<u64>()
-            })
-            .max()
-            .unwrap_or(0);
+        let max_row_group_uncompressed_size = max_row_group_uncompressed_size(&parquet_meta);
 
         println!(
             "{} Metadata loaded - rows: {}, size: {} bytes",
@@ -485,47 +434,6 @@ fn parse_file_dir_components(path: &str) -> error::Result<FileDirComponents> {
     })
 }
 
-pub(crate) fn extract_region_metadata(
-    file_path: &str,
-    meta: &parquet::file::metadata::ParquetMetaData,
-) -> error::Result<RegionMetadataRef> {
-    let kvs: Option<&Vec<KeyValue>> = meta.file_metadata().key_value_metadata();
-    let Some(kvs) = kvs else {
-        return Err(error::IllegalConfigSnafu {
-            msg: format!("{file_path}: missing parquet key_value metadata"),
-        }
-        .build());
-    };
-    let json = kvs
-        .iter()
-        .find(|kv| kv.key == PARQUET_METADATA_KEY)
-        .and_then(|kv| kv.value.as_ref())
-        .ok_or_else(|| {
-            error::IllegalConfigSnafu {
-                msg: format!("{file_path}: key {PARQUET_METADATA_KEY} not found or empty"),
-            }
-            .build()
-        })?;
-    let region: RegionMetadata = RegionMetadata::from_json(json).map_err(|e| {
-        error::IllegalConfigSnafu {
-            msg: format!("invalid region metadata json: {e}"),
-        }
-        .build()
-    })?;
-    Ok(Arc::new(region))
-}
-
-pub(crate) async fn build_object_store(sc: &StorageConfig) -> error::Result<ObjectStore> {
-    store::new_object_store(sc.store.clone(), &sc.data_home)
-        .await
-        .map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("Failed to build object store: {e:?}"),
-            }
-            .build()
-        })
-}
-
 async fn build_access_layer_simple(
     components: &FileDirComponents,
     object_store: ObjectStore,
@@ -574,7 +482,7 @@ async fn build_cache_manager(
     puffin_manager: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
 ) -> error::Result<CacheManagerRef> {
-    let write_cache = write_cache_from_config(config, puffin_manager, intermediate_manager)
+    let write_cache = write_cache_from_config(config, puffin_manager, intermediate_manager, None)
         .await
         .map_err(|e| {
             error::IllegalConfigSnafu {
@@ -666,7 +574,8 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use store_api::region_request::PathType;
 
-    use crate::datanode::objbench::{parse_config, parse_file_dir_components};
+    use crate::datanode::objbench::parse_file_dir_components;
+    use crate::datanode::tool_util::parse_config;
 
     #[test]
     fn test_parse_dir() {

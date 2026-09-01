@@ -54,7 +54,6 @@ use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
-use crate::prom_store::Metrics;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
@@ -68,6 +67,15 @@ pub struct TraceIngestOutcome {
     pub write_cost: usize,
     pub accepted_spans: usize,
     pub rejected_spans: usize,
+    pub error_message: Option<String>,
+}
+
+/// Result of ingesting one OTLP metrics request or Arrow batch.
+#[derive(Debug, Default, Clone)]
+pub struct MetricsIngestOutcome {
+    pub write_cost: usize,
+    pub accepted_data_points: i64,
+    pub rejected_data_points: i64,
     pub error_message: Option<String>,
 }
 
@@ -125,8 +133,6 @@ pub trait PromStoreProtocolHandler {
 
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
-    /// Handling push gateway requests
-    async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
 
 #[async_trait]
@@ -136,7 +142,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<Output>;
+    ) -> Result<MetricsIngestOutcome>;
 
     /// Handling opentelemetry traces request
     async fn traces(

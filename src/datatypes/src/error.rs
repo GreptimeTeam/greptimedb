@@ -77,6 +77,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unimplemented: {feat}"))]
+    Unimplemented {
+        feat: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse version in schema meta, value: {}", value))]
     ParseSchemaVersion {
         value: String,
@@ -196,6 +203,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid JSON2 layout: {reason}"))]
+    InvalidJson2Layout {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid JSON2 settings: {reason}"))]
+    InvalidJson2Settings {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid Vector: {}", msg))]
     InvalidVector {
         msg: String,
@@ -305,6 +326,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             UnsupportedOperation { .. }
+            | Unimplemented { .. }
             | UnsupportedArrowType { .. }
             | UnsupportedJsonType { .. }
             | UnsupportedDefaultExpr { .. } => StatusCode::Unsupported,
@@ -318,6 +340,8 @@ impl ErrorExt for Error {
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
+            | InvalidJson2Layout { .. }
+            | InvalidJson2Settings { .. }
             | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }

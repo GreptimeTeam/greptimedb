@@ -34,8 +34,8 @@ use servers::otlp::trace::span::{SpanEvents, SpanLinks, TraceSpan};
 use servers::otlp::trace::v1::{TraceBinaryType, TraceRetryColumn};
 
 use super::{
-    ChunkFailureReaction, Instance, TraceChunkRetry, TraceChunkSchemaState, TraceRequestSchema,
-    TraceRequestSchemaPlan, TraceSpanMetadata, TraceTablePreAlter, chunk_owned,
+    ChunkFailureReaction, Instance, TraceChunkRetry, TraceChunkSchemaState, TraceFailureMessages,
+    TraceRequestSchema, TraceRequestSchemaPlan, TraceSpanMetadata, TraceTablePreAlter, chunk_owned,
     wrap_trace_alter_failure,
 };
 use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
@@ -102,22 +102,28 @@ fn test_classify_trace_prewrite_failure() {
 
 #[test]
 fn test_finish_trace_failure_message() {
-    let message = Instance::finish_trace_failure_message(
-        3,
-        2,
-        vec!["Rejected span trace:span (InvalidArguments)".to_string()],
-    )
-    .unwrap();
+    let mut messages = TraceFailureMessages::default();
+    Instance::push_trace_failure_message(
+        &mut messages,
+        "span_rejected",
+        "coercion",
+        "Rejected span trace:span (InvalidArguments)".to_string(),
+    );
+
+    let message = Instance::finish_trace_failure_message(3, 2, messages).unwrap();
     assert!(message.contains("Accepted 3 spans, rejected 2 spans"));
     assert!(message.contains("Rejected span trace:span"));
 
-    assert_eq!(Instance::finish_trace_failure_message(2, 0, vec![]), None);
+    assert_eq!(
+        Instance::finish_trace_failure_message(2, 0, TraceFailureMessages::default()),
+        None
+    );
 }
 
 #[test]
 fn test_finish_trace_failure_message_without_detail_messages() {
     assert_eq!(
-        Instance::finish_trace_failure_message(0, 2, vec![]),
+        Instance::finish_trace_failure_message(0, 2, TraceFailureMessages::default()),
         Some("Accepted 0 spans, rejected 2 spans".to_string())
     );
 }
@@ -126,39 +132,138 @@ fn test_finish_trace_failure_message_without_detail_messages() {
 fn test_push_trace_failure_message_increments_labeled_counter() {
     let label = "retry_per_span_counter_test";
     let initial = OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).get();
-    let mut messages = Vec::new();
+    let mut messages = TraceFailureMessages::default();
 
     Instance::push_trace_failure_message(
         &mut messages,
         label,
+        "InvalidArguments",
         "Chunk fallback triggered by InvalidArguments".to_string(),
     );
 
-    assert_eq!(messages.len(), 1);
+    assert_eq!(messages.entries.len(), 1);
     assert_eq!(
         OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).get(),
         initial + 1
     );
 }
 
+/// One bad column rejects every span, so repeats must collapse instead of
+/// filling the bounded entry list with the same cause.
+#[test]
+fn test_push_trace_failure_message_collapses_repeated_cause() {
+    let label = "span_rejected_dedup_test";
+    let initial = OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).get();
+    let mut messages = TraceFailureMessages::default();
+
+    for idx in 0..3 {
+        Instance::push_trace_failure_message(
+            &mut messages,
+            label,
+            "failed to coerce",
+            format!("Rejected span trace:span-{idx} (InvalidArguments): failed to coerce"),
+        );
+    }
+
+    assert_eq!(messages.entries.len(), 1);
+    assert_eq!(messages.entries[0].occurrences, 3);
+    assert_eq!(messages.suppressed_occurrences, 0);
+    // Every occurrence is still metered even though the details collapse.
+    assert_eq!(
+        OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).get(),
+        initial + 3
+    );
+
+    let summary = Instance::finish_trace_failure_message(0, 3, messages).unwrap();
+    assert!(
+        summary.contains("Rejected span trace:span-0 (InvalidArguments): failed to coerce (x3)"),
+        "unexpected summary: {summary}"
+    );
+}
+
+/// Dedup identity comes from the full cause, so two failures that only differ
+/// past the display limit must stay separate instead of one silently vanishing.
+#[test]
+fn test_trace_failure_cause_keeps_identity_beyond_the_display_limit() {
+    let shared_prefix = "x".repeat(400);
+    let (first_cause, first_shown) = Instance::trace_failure_cause(
+        &servers::error::InvalidParameterSnafu {
+            reason: format!("{shared_prefix}-int64"),
+        }
+        .build(),
+    );
+    let (second_cause, second_shown) = Instance::trace_failure_cause(
+        &servers::error::InvalidParameterSnafu {
+            reason: format!("{shared_prefix}-float64"),
+        }
+        .build(),
+    );
+
+    assert_eq!(first_shown, second_shown);
+    assert_ne!(first_cause, second_cause);
+
+    let mut messages = TraceFailureMessages::default();
+    Instance::push_trace_failure_message(&mut messages, "span_rejected", &first_cause, first_shown);
+    Instance::push_trace_failure_message(
+        &mut messages,
+        "span_rejected",
+        &second_cause,
+        second_shown,
+    );
+
+    assert_eq!(messages.entries.len(), 2);
+}
+
+/// The same cause reported by two different sites must stay distinguishable.
+#[test]
+fn test_push_trace_failure_message_separates_labels_sharing_a_key() {
+    let mut messages = TraceFailureMessages::default();
+
+    Instance::push_trace_failure_message(
+        &mut messages,
+        "span_rejected",
+        "failed to coerce",
+        "Rejected span trace:span (InvalidArguments): failed to coerce".to_string(),
+    );
+    Instance::push_trace_failure_message(
+        &mut messages,
+        "discard_chunk",
+        "failed to coerce",
+        "Discarded 7 spans after pre-write chunk failure (InvalidArguments): failed to coerce"
+            .to_string(),
+    );
+
+    assert_eq!(messages.entries.len(), 2);
+}
+
 #[test]
 fn test_push_trace_failure_message_caps_recorded_messages() {
     let label = "retry_per_span_limit_test";
-    let mut messages = Vec::new();
+    let mut messages = TraceFailureMessages::default();
 
-    for idx in 0..=4 {
-        Instance::push_trace_failure_message(&mut messages, label, format!("failure-{idx}"));
+    for idx in 0..=5 {
+        Instance::push_trace_failure_message(
+            &mut messages,
+            label,
+            &format!("cause-{idx}"),
+            format!("failure-{idx}"),
+        );
     }
 
-    assert_eq!(messages.len(), 4);
     assert_eq!(
-        messages,
-        vec![
-            "failure-0".to_string(),
-            "failure-1".to_string(),
-            "failure-2".to_string(),
-            "failure-3".to_string()
-        ]
+        messages
+            .entries
+            .iter()
+            .map(|entry| entry.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["failure-0", "failure-1", "failure-2", "failure-3"]
+    );
+    assert_eq!(messages.suppressed_occurrences, 2);
+
+    let summary = Instance::finish_trace_failure_message(0, 6, messages).unwrap();
+    assert!(
+        summary.ends_with("; 2 additional failures suppressed"),
+        "unexpected summary: {summary}"
     );
 }
 
@@ -551,6 +656,34 @@ fn test_trace_request_schema_isolates_non_candidate_batch() {
     assert_eq!(
         request_schema.incompatible_schema_observations(Some(&existing_string_schema)),
         HashMap::from([(column_name.to_string(), HashSet::from([1]))])
+    );
+}
+
+#[test]
+fn test_trace_request_schema_keeps_signed_request_into_existing_unsigned_column() {
+    // Regression for the unsigned -> signed transition: an existing
+    // `duration_nano` UInt64 column must NOT exclude a new signed (Int64)
+    // batch as "logically incompatible". The batch must reach the
+    // reconciliation path, which coerces Int64 -> UInt64 in place (no ALTER).
+    // Excluding it up front made ingestion error after the flip.
+    let column_name = "duration_nano";
+    let int64_schema = field_schema(column_name, ColumnDataType::Int64);
+    let existing_uint64_schema =
+        DatatypesSchemaBuilder::try_from_columns(vec![DatatypesColumnSchema::new(
+            column_name,
+            ConcreteDataType::uint64_datatype(),
+            true,
+        )])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut request_schema = TraceRequestSchema::default();
+    request_schema.observe_trace_column(0, &int64_schema, Some(ColumnDataType::Int64));
+
+    assert_eq!(
+        request_schema.incompatible_schema_observations(Some(&existing_uint64_schema)),
+        HashMap::new()
     );
 }
 

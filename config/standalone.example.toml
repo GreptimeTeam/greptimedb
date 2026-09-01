@@ -57,7 +57,7 @@ max_concurrent_queries = 0
 ## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
-## Defaults to max(num_cpus / 2, 1).
+## Defaults to max(num_cpus / 2, 2).
 #+ compact_rt_max_blocking_threads = 4
 
 ## The HTTP server options.
@@ -204,8 +204,13 @@ enable = true
 [otlp]
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
+## Experimental: enable cumulative OTLP exponential histogram ingestion.
+experimental_enable_exponential_histogram = false
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
+## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
+## resource attributes, so metrics-only services reach the semantic graph.
+experimental_enable_resource_info = false
 
 ## Prometheus remote storage options
 [prom_store]
@@ -440,6 +445,30 @@ parallelism = 0
 ## NOTE: This does NOT limit memory used by table scans.
 memory_pool_size = "50%"
 
+## Experimental memory pool allocation policy:
+## - "greedy" (default): first-come-first-served allocation; preserves current behavior.
+## - "fair": divides available memory among spillable operators and may spill earlier.
+## Only effective when `memory_pool_size` is bounded (>0).
+#+ experimental_memory_pool_policy = "greedy"
+
+# --- Experimental: DataFusion spill-to-disk controls ---
+## Spill mode:
+## - "default": preserve DataFusion built-in OS temp directory (default).
+## - "custom": explicitly configure spill path, quota, and compression.
+## - "disabled": explicitly disable disk spilling.
+## Set this to "custom" before using the path/quota/compression keys below.
+#+ experimental_spill_mode = "default"
+## Spill directory path. Ignored unless mode is "custom".
+## @toml2docs:none-default
+#+ experimental_spill_path = "/path/to/spill"
+## Maximum total size of spill directory (default: "1GiB").
+## Ignored unless mode is "custom".
+#+ experimental_spill_max_temp_directory_size = "1GiB"
+## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
+## Ignored unless mode is "custom".
+#+ experimental_spill_compression = "uncompressed"
+# --- End spill-to-disk ---
+
 ## The data storage options.
 [storage]
 ## The working home directory.
@@ -620,7 +649,7 @@ compress_manifest = false
 #+ experimental_compaction_on_exhausted = "wait"
 
 ## Interval to auto flush a region if it has not flushed yet.
-auto_flush_interval = "1h"
+auto_flush_interval = "10m"
 
 ## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 ## @toml2docs:none-default="Auto"
@@ -925,7 +954,7 @@ ttl = "90d"
 ## `alter_database`, `drop_database`, `create_flow`, `drop_flow`,
 ## `create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,
 ## `drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,
-## `create_view`, `drop_view`, `admin_function`.
+## `create_view`, `drop_view`, `admin_function`, `reconcile_table`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
 #+ event_types = ["create_database"]

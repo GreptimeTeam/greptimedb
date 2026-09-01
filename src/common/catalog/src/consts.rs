@@ -220,6 +220,11 @@ pub const SEMANTIC_RELATIONSHIPS_TABLE_NAME: &str = "semantic_relationships";
 /// `semantic_relationships`; see [`is_ddl_reserved_table`] for its lifecycle.
 pub const SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME: &str = "semantic_relationships_declared";
 
+/// Width of the window the graph derivation bins observations into. Sources
+/// synthesizing observations must land a row in every window they describe,
+/// so this is shared rather than restated per crate.
+pub const SEMANTIC_GRAPH_WINDOW_NANOS: i64 = 60 * 1_000_000_000;
+
 // Column names of the graph tables: `catalog` exposes these schemas and the
 // read-time plans in `operator` must project exactly them.
 pub const OBSERVED_AT_COLUMN: &str = "observed_at";
@@ -240,9 +245,11 @@ pub const REL_TYPE_COLUMN: &str = "rel_type";
 pub const PROVENANCE_COLUMN: &str = "provenance";
 pub const CONFIDENCE_COLUMN: &str = "confidence";
 pub const REQUEST_COUNT_COLUMN: &str = "request_count";
+pub const UNMATCHED_COUNT_COLUMN: &str = "unmatched_count";
 pub const ERROR_COUNT_COLUMN: &str = "error_count";
 pub const DURATION_SUM_COLUMN: &str = "duration_sum";
 pub const DURATION_COUNT_COLUMN: &str = "duration_count";
+pub const DURATION_MAX_COLUMN: &str = "duration_max";
 pub const EDGE_ATTRIBUTES_COLUMN: &str = "attributes";
 // Declared-edge table only.
 pub const VALID_FROM_COLUMN: &str = "valid_from";

@@ -42,6 +42,14 @@ use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
+/// Wraps the remote object store used by write cache uploads.
+pub trait WriteCacheUploadStoreWrapper: Send + Sync {
+    /// Wraps an object store before uploading a cached file.
+    fn wrap(&self, store: ObjectStore) -> ObjectStore;
+}
+
+pub type WriteCacheUploadStoreWrapperRef = Arc<dyn WriteCacheUploadStoreWrapper>;
+
 /// A cache for uploading files to remote object stores.
 ///
 /// It keeps files in local disk and then sends files to object stores.
@@ -56,6 +64,8 @@ pub struct WriteCache {
     task_sender: UnboundedSender<RegionLoadCacheTask>,
     /// Optional cache for manifest files.
     manifest_cache: Option<ManifestCache>,
+    /// Optional wrapper for remote stores used by uploads.
+    upload_store_wrapper: Option<WriteCacheUploadStoreWrapperRef>,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -91,6 +101,7 @@ impl WriteCache {
             intermediate_manager,
             task_sender,
             manifest_cache,
+            upload_store_wrapper: None,
         })
     }
 
@@ -138,6 +149,15 @@ impl WriteCache {
     /// Returns the manifest cache if available.
     pub(crate) fn manifest_cache(&self) -> Option<ManifestCache> {
         self.manifest_cache.clone()
+    }
+
+    /// Sets the wrapper for remote stores used by uploads.
+    pub(crate) fn with_upload_store_wrapper(
+        mut self,
+        upload_store_wrapper: Option<WriteCacheUploadStoreWrapperRef>,
+    ) -> Self {
+        self.upload_store_wrapper = upload_store_wrapper;
+        self
     }
 
     /// Build the puffin manager
@@ -379,7 +399,11 @@ impl WriteCache {
             .await
             .context(error::OpenDalSnafu)?;
 
-        let mut writer = remote_store
+        let upload_store = self.upload_store_wrapper.as_ref().map_or_else(
+            || remote_store.clone(),
+            |wrapper| wrapper.wrap(remote_store.clone()),
+        );
+        let mut writer = upload_store
             .writer_with(upload_path)
             .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
             .concurrent(DEFAULT_WRITE_CONCURRENCY)
@@ -501,7 +525,8 @@ impl UploadTracker {
 mod tests {
     use bytes::Bytes;
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::ATOMIC_WRITE_DIR;
+    use object_store::services::Memory;
+    use object_store::{ATOMIC_WRITE_DIR, ObjectStore};
     use parquet::file::metadata::PageIndexPolicy;
     use store_api::region_request::PathType;
     use store_api::storage::FileId;
@@ -520,6 +545,59 @@ mod tests {
         new_flat_source_from_record_batches, new_record_batch_by_range,
         sst_file_handle_with_file_id, sst_region_metadata,
     };
+
+    struct RedirectUploadStoreWrapper {
+        target_store: ObjectStore,
+    }
+
+    impl WriteCacheUploadStoreWrapper for RedirectUploadStoreWrapper {
+        fn wrap(&self, _store: ObjectStore) -> ObjectStore {
+            self.target_store.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upload_uses_wrapped_remote_store() {
+        let env = TestEnv::new().await;
+        let local_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let original_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let target_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let wrapper = Arc::new(RedirectUploadStoreWrapper {
+            target_store: target_store.clone(),
+        });
+        let write_cache = WriteCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+            None,
+            false,
+            env.get_puffin_manager(),
+            env.get_intermediate_manager(),
+            None,
+        )
+        .await
+        .unwrap()
+        .with_upload_store_wrapper(Some(wrapper.clone()));
+
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        let cache_path = write_cache.file_cache.cache_file_path(key);
+        let upload_path = "wrapped-upload.parquet";
+        let data = Bytes::from_static(b"wrapped upload data");
+        local_store.write(&cache_path, data.clone()).await.unwrap();
+
+        write_cache
+            .upload(key, upload_path, &original_store)
+            .await
+            .unwrap();
+
+        assert!(original_store.stat(upload_path).await.is_err());
+        assert_eq!(
+            target_store.read(upload_path).await.unwrap().to_vec(),
+            data.to_vec()
+        );
+    }
 
     #[tokio::test]
     async fn test_write_and_upload_sst() {

@@ -66,7 +66,10 @@ use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
 };
 use servers::grpc::FlightCompression;
-use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
+use servers::grpc::flight::{
+    FlightCraft, FlightRecordBatchSource, FlightRecordBatchStream, FlightRecordBatchStreamInput,
+    TonicStream,
+};
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContext, QueryContextBuilder, QueryContextRef,
@@ -976,13 +979,23 @@ impl FlightCraft for RegionServer {
             .map(|h| Arc::new(QueryContext::from(h)))
             .unwrap_or(QueryContext::arc());
 
-        let result = self
-            .handle_remote_read(request, query_ctx.clone())
-            .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
-            .await?;
+        let region_server = self.clone();
+        let initializer_query_ctx = query_ctx.clone();
+        let initializer_tracing_context = tracing_context.clone();
+        let initializer = async move {
+            region_server
+                .handle_remote_read(request, initializer_query_ctx)
+                .trace(initializer_tracing_context.attach(info_span!("RegionServer::handle_read")))
+                .await
+                .map_err(Into::into)
+        };
 
         let stream = Box::pin(FlightRecordBatchStream::new(
-            result,
+            FlightRecordBatchStreamInput::initializer(async move {
+                initializer
+                    .await
+                    .map(FlightRecordBatchSource::RecordBatches)
+            }),
             tracing_context,
             self.flight_compression,
             query_ctx,
@@ -1330,11 +1343,8 @@ impl RegionServerInner {
         }
 
         if !errors.is_empty() {
-            return error::UnexpectedSnafu {
-                // Returns the first error.
-                violated: format!("Failed to open batch regions: {:?}", errors[0]),
-            }
-            .fail();
+            // Preserve the first region error so callers can honor its status code and retry hint.
+            return Err(errors.swap_remove(0)).context(HandleBatchOpenRequestSnafu);
         }
 
         Ok(open_regions)
@@ -1979,7 +1989,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{Rows, SemanticType};
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{ErrorExt, RetryHint};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
@@ -2514,7 +2524,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::Unexpected);
+        assert_matches!(&err, error::Error::HandleBatchOpenRequest { .. });
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 
     struct CurrentEngineTest {

@@ -23,7 +23,7 @@
 //! the query engine. Injected into the catalog manager after the engine is built,
 //! breaking the `catalog -> query` cycle.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Weak;
 
 use async_trait::async_trait;
@@ -32,7 +32,9 @@ use auth::{
     PermissionTableTargets, SEMANTIC_GRAPH_QUERY,
 };
 use catalog::CatalogManager;
-use catalog::system_schema::semantic_graph::EntityGraphProvider;
+use catalog::system_schema::semantic_graph::{
+    DeclarationOrigin, EntityGraphProvider, TableEntityDeclaration,
+};
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, OBSERVED_AT_COLUMN,
     PG_CATALOG_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
@@ -60,8 +62,9 @@ use table::TableRef;
 use table::metadata::TableInfo;
 use table::predicate::{TimeRangeExtraction, extract_time_range_strict};
 use table::requests::{
-    EntityRole, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
-    is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
+    EntityRole, SEMANTIC_METRIC_TYPE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC,
+    SOURCE_OPENTELEMETRY, SOURCE_PROMETHEUS, is_trace_v1_table, parse_entity_columns,
+    parse_entity_option_key,
 };
 
 use crate::error;
@@ -126,15 +129,6 @@ impl EntityGraphProviderImpl {
     /// Parses `greptime.semantic.entity.<type>.{id|descriptive|scope}` options of
     /// one table into per-type declarations. A type with no `id` columns is skipped.
     fn parse_declarations(table_info: &TableInfo) -> Vec<EntityDeclaration> {
-        let Some(time_index) = table_info
-            .meta
-            .schema
-            .timestamp_column()
-            .map(|c| c.name.clone())
-        else {
-            return vec![];
-        };
-
         // entity_type -> (id_columns, descriptive_columns, scope_columns)
         type RoleColumns = (Vec<String>, Vec<String>, Vec<String>);
         let mut by_type: HashMap<String, RoleColumns> = HashMap::new();
@@ -150,6 +144,17 @@ impl EntityGraphProviderImpl {
                 EntityRole::Scope => entry.2 = cols,
             }
         }
+        if by_type.is_empty() {
+            return vec![];
+        }
+        let Some(time_index) = table_info
+            .meta
+            .schema
+            .timestamp_column()
+            .map(|c| c.name.clone())
+        else {
+            return vec![];
+        };
 
         by_type
             .into_iter()
@@ -177,6 +182,8 @@ impl EntityGraphProviderImpl {
                         time_index: time_index.clone(),
                         entity_type,
                         id_columns,
+                        id_qualifier: None,
+                        superseded_by_columns: vec![],
                         descriptive_columns,
                         scope_columns,
                     })
@@ -188,24 +195,61 @@ impl EntityGraphProviderImpl {
     /// All entity declarations of one table: the explicit options plus the
     /// zero-configuration conventions (`otlp_trace_entities` for trace-v1
     /// tables — including the `service` identity of tables created before the
-    /// ingest-side auto-stamp — and the Prometheus descriptor whitelist). An
-    /// explicit declaration of a type always suppresses the implicit one, even
-    /// when the explicit declaration is invalid and skipped: silently falling
-    /// back would change entity identity behind the user's back.
+    /// ingest-side auto-stamp — and the Prometheus/OTel descriptor
+    /// whitelists). An explicit declaration of a type always suppresses the
+    /// implicit one, even when the explicit declaration is invalid and
+    /// skipped: silently falling back would change entity identity behind the
+    /// user's back.
     fn declarations_for(
         table_info: &TableInfo,
         conventions: &Conventions,
     ) -> Vec<EntityDeclaration> {
         let mut declarations = Self::parse_declarations(table_info);
+        let mut supersessions = Vec::new();
         if is_trace_v1_table(table_info) {
             Self::extend_with_implicit_entities(
                 table_info,
                 &conventions.otlp_trace_entities,
                 &mut declarations,
+                &mut supersessions,
             );
         }
-        Self::extend_with_prometheus_conventions(table_info, conventions, &mut declarations);
+        Self::extend_with_info_metric_conventions(
+            table_info,
+            &conventions.prometheus_info_metrics,
+            SOURCE_PROMETHEUS,
+            None,
+            &mut declarations,
+            &mut supersessions,
+        );
+        Self::extend_with_info_metric_conventions(
+            table_info,
+            &conventions.otel_info_metrics,
+            SOURCE_OPENTELEMETRY,
+            Some(servers::semantic::METRIC_TYPE_INFO),
+            &mut declarations,
+            &mut supersessions,
+        );
+        Self::resolve_supersessions(&mut declarations, supersessions);
         declarations
+    }
+
+    /// Binds each `superseded_by` to the identity the superseding type has on
+    /// this table, once every declaration is known. A type nothing declares
+    /// here leaves the guard empty, so the superseded entity stands instead of
+    /// yielding to a node that will never be derived.
+    fn resolve_supersessions(
+        declarations: &mut [EntityDeclaration],
+        supersessions: Vec<(usize, String)>,
+    ) {
+        for (index, entity_type) in supersessions {
+            let identity = declarations
+                .iter()
+                .find(|declaration| declaration.entity_type == entity_type)
+                .map(|declaration| declaration.id_columns.clone())
+                .unwrap_or_default();
+            declarations[index].superseded_by_columns = identity;
+        }
     }
 
     /// Whether the table carries an explicit `entity.<type>.id` option.
@@ -216,34 +260,45 @@ impl EntityGraphProviderImpl {
         })
     }
 
-    /// Implicit declarations of the well-known Prometheus entity-descriptor
-    /// metrics (the `prometheus_info_metrics` whitelist of `conventions.yaml`),
-    /// gated on the ingest-stamped `signal_type=metric` + `source=prometheus`
-    /// options and keyed by table name. The metric engine's physical table
+    /// Implicit declarations of the well-known entity-descriptor metrics
+    /// (the `prometheus_info_metrics` / `otel_info_metrics` whitelists of
+    /// `conventions.yaml`), gated on the ingest-stamped `signal_type=metric`
+    /// option plus the whitelist's expected `source`; OTel descriptors also
+    /// require `metric.type=info`. The metric engine's physical table
     /// aggregates every logical table's columns and must not contribute a
     /// duplicate source.
-    fn extend_with_prometheus_conventions(
+    fn extend_with_info_metric_conventions(
         table_info: &TableInfo,
-        conventions: &Conventions,
+        whitelist: &BTreeMap<String, Vec<ImplicitEntity>>,
+        expected_source: &str,
+        expected_metric_type: Option<&str>,
         declarations: &mut Vec<EntityDeclaration>,
+        supersessions: &mut Vec<(usize, String)>,
     ) {
-        let Some(implicit_entities) = conventions.prometheus_info_metrics.get(&table_info.name)
-        else {
+        let Some(implicit_entities) = whitelist.get(&table_info.name) else {
             return;
         };
         let options = &table_info.meta.options.extra_options;
         if options.get(SEMANTIC_SIGNAL_TYPE).map(String::as_str) != Some(SIGNAL_TYPE_METRIC)
-            || options.get(SEMANTIC_SOURCE).map(String::as_str) != Some(SOURCE_PROMETHEUS)
+            || options.get(SEMANTIC_SOURCE).map(String::as_str) != Some(expected_source)
+            || expected_metric_type.is_some_and(|expected| {
+                options.get(SEMANTIC_METRIC_TYPE).map(String::as_str) != Some(expected)
+            })
             || table_info.is_physical_table()
         {
             debug!(
-                "Table `{}` matches the info-metric whitelist but is not a prometheus logical \
-                 metric table; skipping its implicit declarations",
+                "Table `{}` matches the info-metric whitelist but is not an eligible \
+                 `{expected_source}` info-metric source; skipping its implicit declarations",
                 table_info.name
             );
             return;
         }
-        Self::extend_with_implicit_entities(table_info, implicit_entities, declarations);
+        Self::extend_with_implicit_entities(
+            table_info,
+            implicit_entities,
+            declarations,
+            supersessions,
+        );
     }
 
     /// Synthesizes the applicable subset of `entities` on `table_info`:
@@ -253,6 +308,7 @@ impl EntityGraphProviderImpl {
         table_info: &TableInfo,
         entities: &[ImplicitEntity],
         declarations: &mut Vec<EntityDeclaration>,
+        supersessions: &mut Vec<(usize, String)>,
     ) {
         let schema = &table_info.meta.schema;
         let Some(time_index) = schema.timestamp_column().map(|c| c.name.clone()) else {
@@ -296,12 +352,23 @@ impl EntityGraphProviderImpl {
                     .cloned()
                     .collect()
             };
+            // A table predating the qualifier column keeps the unqualified
+            // identity rather than losing the declaration.
+            let id_qualifier = implicit
+                .qualified_by
+                .clone()
+                .filter(|c| schema.column_schema_by_name(c).is_some());
+            if let Some(entity_type) = &implicit.superseded_by {
+                supersessions.push((declarations.len(), entity_type.clone()));
+            }
             declarations.push(EntityDeclaration {
                 schema: table_info.schema_name.clone(),
                 table: table_info.name.clone(),
                 time_index: time_index.clone(),
                 entity_type: implicit.entity.clone(),
                 id_columns: implicit.id.clone(),
+                id_qualifier,
+                superseded_by_columns: vec![],
                 descriptive_columns,
                 scope_columns: vec![],
             });
@@ -622,6 +689,33 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         };
         self.execute_plan(catalog, plan, query_ctx).await
     }
+
+    fn table_declarations(&self, table_info: &TableInfo) -> Vec<TableEntityDeclaration> {
+        // A broken embedded file still leaves the explicit half reportable;
+        // the scan paths surface the error itself.
+        let derived = match conventions() {
+            Ok(conventions) => Self::declarations_for(table_info, conventions),
+            Err(_) => Self::parse_declarations(table_info),
+        };
+        let mut declarations = derived
+            .into_iter()
+            .map(|declaration| TableEntityDeclaration {
+                origin: if Self::explicitly_declares(table_info, &declaration.entity_type) {
+                    DeclarationOrigin::Declared
+                } else {
+                    DeclarationOrigin::Convention
+                },
+                entity_type: declaration.entity_type,
+                id_columns: declaration.id_columns,
+                id_qualifier: declaration.id_qualifier,
+                superseded_by_columns: declaration.superseded_by_columns,
+                descriptive_columns: declaration.descriptive_columns,
+                scope_columns: declaration.scope_columns,
+            })
+            .collect::<Vec<_>>();
+        declarations.sort_by(|a, b| a.entity_type.cmp(&b.entity_type));
+        declarations
+    }
 }
 
 #[cfg(test)]
@@ -832,6 +926,24 @@ mod tests {
             declarations[2].id_columns,
             vec!["service_name", "resource_attributes.service.instance.id"]
         );
+        assert_eq!(declarations[1].id_qualifier, None);
+
+        let namespaced = table_info(
+            &[
+                "service_name",
+                "resource_attributes.service.namespace",
+                "resource_attributes.service.instance.id",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        for declaration in sorted_declarations(&namespaced) {
+            assert_eq!(
+                declaration.id_qualifier.as_deref(),
+                Some("resource_attributes.service.namespace"),
+                "{} must qualify its identity like the metric side's job",
+                declaration.entity_type
+            );
+        }
 
         // Missing uid column: no pod entity synthesized, no name-based guess.
         let no_uid = table_info(
@@ -854,6 +966,84 @@ mod tests {
             ],
         );
         assert!(sorted_declarations(&invalid_explicit).is_empty());
+    }
+
+    #[test]
+    fn trace_table_host_and_container_require_stable_ids() {
+        let with_ids = table_info(
+            &[
+                "service_name",
+                "resource_attributes.host.id",
+                "resource_attributes.host.name",
+                "resource_attributes.container.id",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let declarations = sorted_declarations(&with_ids);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(types, vec!["container", "host", "service"]);
+        assert_eq!(
+            declarations[1].id_columns,
+            vec!["resource_attributes.host.id"]
+        );
+        assert_eq!(
+            declarations[1].descriptive_columns,
+            vec!["resource_attributes.host.name"]
+        );
+
+        // A wrong `resource_attributes.` prefix would leave the generic
+        // container standing beside the k8s one, which the descriptor-table
+        // case cannot catch.
+        let pod_container = table_info(
+            &[
+                "service_name",
+                "resource_attributes.container.id",
+                "resource_attributes.container.name",
+                "resource_attributes.k8s.pod.uid",
+                "resource_attributes.k8s.container.name",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let declarations = sorted_declarations(&pod_container);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["container", "k8s.container", "k8s.pod", "service"]
+        );
+        assert_eq!(
+            declarations[0].superseded_by_columns,
+            vec![
+                "resource_attributes.k8s.pod.uid",
+                "resource_attributes.k8s.container.name"
+            ]
+        );
+        assert_eq!(
+            declarations[1].descriptive_columns,
+            vec![
+                "resource_attributes.container.id",
+                "resource_attributes.container.name"
+            ]
+        );
+
+        let names_only = table_info(
+            &[
+                "service_name",
+                "resource_attributes.host.name",
+                "resource_attributes.container.name",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let types: Vec<String> = sorted_declarations(&names_only)
+            .into_iter()
+            .map(|d| d.entity_type)
+            .collect();
+        assert_eq!(types, vec!["service"]);
     }
 
     #[test]
@@ -898,6 +1088,152 @@ mod tests {
         assert_eq!(declarations[1].entity_type, "k8s.pod");
         // The explicit identity wins over the conventional [namespace, pod].
         assert_eq!(declarations[1].id_columns, vec!["pod"]);
+    }
+
+    const OTEL_STAMPS: &[(&str, &str)] = &[
+        (SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC),
+        (SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY),
+        (SEMANTIC_METRIC_TYPE, servers::semantic::METRIC_TYPE_INFO),
+    ];
+
+    #[test]
+    fn greptime_otel_resource_info_gets_implicit_declarations() {
+        let info = prom_table_info(
+            "greptime_otel_resource_info",
+            &[
+                "job",
+                "instance",
+                "service.name",
+                "service.namespace",
+                "host.id",
+                "host.name",
+                "container.id",
+                "container.name",
+                "k8s.pod.uid",
+                "k8s.pod.name",
+                "k8s.container.name",
+                "k8s.namespace.name",
+            ],
+            OTEL_STAMPS,
+        );
+        let declarations = sorted_declarations(&info);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                "container",
+                "host",
+                "k8s.container",
+                "k8s.pod",
+                "service",
+                "service.instance"
+            ]
+        );
+        // A pod's container is the k8s.container, under the identity
+        // kube-state-metrics gives it; the generic type yields to it.
+        assert_eq!(
+            declarations[2].id_columns,
+            vec!["k8s.pod.uid", "k8s.container.name"]
+        );
+        assert_eq!(
+            declarations[0].superseded_by_columns,
+            vec!["k8s.pod.uid", "k8s.container.name"],
+            "the generic container must yield to the k8s.container identity itself"
+        );
+        assert_eq!(declarations[1].id_columns, vec!["host.id"]);
+        assert_eq!(declarations[1].descriptive_columns, vec!["host.name"]);
+        assert_eq!(declarations[4].id_columns, vec!["job"]);
+        assert_eq!(
+            declarations[4].descriptive_columns,
+            vec!["service.name", "service.namespace"]
+        );
+        assert_eq!(declarations[5].id_columns, vec!["job", "instance"]);
+        assert!(declarations[5].descriptive_columns.is_empty());
+
+        // Nothing here can produce a k8s.container, so the generic one must
+        // stand or the container disappears instead of changing type.
+        let no_k8s = prom_table_info(
+            "greptime_otel_resource_info",
+            &["job", "container.id", "k8s.pod.uid"],
+            OTEL_STAMPS,
+        );
+        let declarations = sorted_declarations(&no_k8s);
+        assert_eq!(declarations[0].entity_type, "container");
+        assert!(declarations[0].superseded_by_columns.is_empty());
+
+        // Same rule when a skipped explicit declaration blocks the implicit
+        // one: nothing declares the type, so nothing may yield to it.
+        let mut stamps = OTEL_STAMPS.to_vec();
+        stamps.push(("greptime.semantic.entity.k8s.container.id", "gone"));
+        let broken_explicit = prom_table_info(
+            "greptime_otel_resource_info",
+            &["job", "container.id", "k8s.pod.uid", "k8s.container.name"],
+            &stamps,
+        );
+        let declarations = sorted_declarations(&broken_explicit);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(types, vec!["container", "k8s.pod", "service"]);
+        assert!(declarations[0].superseded_by_columns.is_empty());
+
+        let partial = prom_table_info(
+            "greptime_otel_resource_info",
+            &["job", "service.name", "host.id"],
+            OTEL_STAMPS,
+        );
+        let types: Vec<String> = sorted_declarations(&partial)
+            .into_iter()
+            .map(|d| d.entity_type)
+            .collect();
+        assert_eq!(types, vec!["host", "service"]);
+    }
+
+    #[test]
+    fn otel_implicit_declarations_are_gated() {
+        let labels: &[&str] = &["job", "instance", "host.id"];
+        assert!(
+            sorted_declarations(&prom_table_info(
+                "greptime_otel_resource_info",
+                labels,
+                PROM_STAMPS
+            ))
+            .is_empty()
+        );
+        let mut stamps = OTEL_STAMPS.to_vec();
+        stamps.push((PHYSICAL_TABLE_METADATA_KEY, "true"));
+        assert!(
+            sorted_declarations(&prom_table_info(
+                "greptime_otel_resource_info",
+                labels,
+                &stamps
+            ))
+            .is_empty()
+        );
+        assert!(
+            conventions()
+                .unwrap()
+                .otel_info_metrics
+                .contains_key(servers::otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME)
+        );
+
+        let wrong_type = [
+            (SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC),
+            (SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY),
+            (SEMANTIC_METRIC_TYPE, servers::semantic::METRIC_TYPE_GAUGE),
+        ];
+        assert!(
+            sorted_declarations(&prom_table_info(
+                "greptime_otel_resource_info",
+                labels,
+                &wrong_type
+            ))
+            .is_empty()
+        );
     }
 
     #[test]

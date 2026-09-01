@@ -24,6 +24,7 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
+pub use json::parse_json2_type_hint_path;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::{
     ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDisplay, NullsDistinctOption,
@@ -711,8 +712,8 @@ impl<'a> ParserContext<'a> {
         let mut extensions = ColumnExtensions::default();
 
         let data_type =
-            if let Some((data_type, type_hints)) = json::parse_json2_type_and_hints(parser)? {
-                extensions.json_type_hints = type_hints;
+            if let Some((data_type, options)) = json::parse_json2_type_and_options(parser)? {
+                extensions.json2_options = options;
                 data_type
             } else {
                 parser.parse_data_type().context(SyntaxSnafu)?

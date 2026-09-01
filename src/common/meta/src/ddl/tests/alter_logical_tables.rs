@@ -43,6 +43,7 @@ use crate::error::Error::{AlterLogicalTablesInvalidArguments, TableNotFound};
 use crate::error::Result;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
+use crate::lock_key::TableLock;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -162,7 +163,8 @@ async fn test_on_prepare_check_schema() {
         ),
     ];
     let physical_table_id = 1024u32;
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
+    let mut procedure =
+        AlterLogicalTablesProcedure::new(tasks, physical_table_id, vec![], ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, AlterLogicalTablesInvalidArguments { .. });
 }
@@ -177,7 +179,8 @@ async fn test_on_prepare_check_alter_kind() {
         "new_table1",
     )];
     let physical_table_id = 1024u32;
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
+    let mut procedure =
+        AlterLogicalTablesProcedure::new(tasks, physical_table_id, vec![], ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, AlterLogicalTablesInvalidArguments { .. });
 }
@@ -197,7 +200,7 @@ async fn test_on_prepare_different_physical_table() {
         make_alter_logical_table_add_column_task(None, "table2", vec!["column2".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy1_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy1_id, vec![], ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, AlterLogicalTablesInvalidArguments { .. });
 }
@@ -218,7 +221,7 @@ async fn test_on_prepare_logical_table_not_exists() {
         make_alter_logical_table_add_column_task(None, "table2", vec!["column2".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, vec![], ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, TableNotFound { .. });
 }
@@ -241,7 +244,7 @@ async fn test_on_prepare() {
         make_alter_logical_table_add_column_task(None, "table3", vec!["column3".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, vec![], ddl_context);
     let result = procedure.on_prepare().await;
     assert_matches!(
         result,
@@ -277,7 +280,8 @@ async fn test_on_update_metadata() {
         make_alter_logical_table_add_column_task(None, "table3", vec!["new_col".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context.clone());
+    let mut procedure =
+        AlterLogicalTablesProcedure::new(tasks, phy_id, vec![], ddl_context.clone());
     let mut status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,
@@ -362,7 +366,8 @@ async fn test_on_part_duplicate_alter_request() {
         make_alter_logical_table_add_column_task(None, "table2", vec!["col_0".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context.clone());
+    let mut procedure =
+        AlterLogicalTablesProcedure::new(tasks, phy_id, vec![], ddl_context.clone());
     let mut status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,
@@ -448,7 +453,8 @@ async fn test_on_part_duplicate_alter_request() {
         ),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context.clone());
+    let mut procedure =
+        AlterLogicalTablesProcedure::new(tasks, phy_id, vec![], ddl_context.clone());
     let mut status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,
@@ -620,7 +626,7 @@ async fn test_on_submit_alter_region_request() {
         make_alter_logical_table_add_column_task(None, "table2", vec!["mew_col".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, vec![], ddl_context);
     procedure.on_prepare().await.unwrap();
     procedure.on_submit_alter_region_requests().await.unwrap();
     let mut results = Vec::new();
@@ -644,5 +650,84 @@ async fn test_on_submit_alter_region_request() {
             })),
             ..
         })
+    );
+}
+
+#[test]
+fn test_lock_key_covers_submission_resolved_logical_tables() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let tasks = vec![make_alter_logical_table_add_column_task(
+        None,
+        "table1",
+        vec!["column1".to_string()],
+    )];
+    let procedure = AlterLogicalTablesProcedure::new(tasks, 1024, vec![1025, 1026], ddl_context);
+    let keys = procedure.lock_key();
+    let keys = keys.keys_to_lock().collect::<Vec<_>>();
+    for table_id in [1024u32, 1025, 1026] {
+        let expected: common_procedure::StringKey = TableLock::Write(table_id).into();
+        assert!(keys.contains(&&expected), "missing lock for {table_id}");
+    }
+}
+
+#[tokio::test]
+async fn test_from_json_without_logical_table_ids() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
+    let logical_id = create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    let tasks = vec![make_alter_logical_table_add_column_task(
+        None,
+        "table1",
+        vec!["column1".to_string()],
+    )];
+    let mut procedure =
+        AlterLogicalTablesProcedure::new(tasks, phy_id, vec![logical_id], ddl_context.clone());
+    procedure.on_prepare().await.unwrap();
+    let json = procedure.dump().unwrap();
+
+    // Pre-upgrade procedure state carries no `logical_table_ids`, but a
+    // post-Prepare dump still holds the resolved table snapshots.
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("logical_table_ids")
+        .unwrap();
+    let restored = AlterLogicalTablesProcedure::from_json(&value.to_string(), ddl_context).unwrap();
+
+    let keys = restored.lock_key();
+    let keys = keys.keys_to_lock().collect::<Vec<_>>();
+    for table_id in [phy_id, logical_id] {
+        let expected: common_procedure::StringKey = TableLock::Write(table_id).into();
+        assert!(keys.contains(&&expected), "missing lock for {table_id}");
+    }
+}
+
+#[tokio::test]
+async fn test_on_prepare_rejects_table_outside_locked_set() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+
+    let tasks = vec![make_alter_logical_table_add_column_task(
+        None,
+        "table1",
+        vec!["column1".to_string()],
+    )];
+
+    // The table resolved at prepare time is not in the locked set, as if it
+    // had been dropped and recreated after submission.
+    let stale_locked_id = phy_id + 1000;
+    let mut procedure =
+        AlterLogicalTablesProcedure::new(tasks, phy_id, vec![stale_locked_id], ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("not covered by the procedure locks"),
+        "{err}"
     );
 }
