@@ -65,6 +65,7 @@ use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
+use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
@@ -238,6 +239,9 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(7, Arc::new(PromqlTsidNarrowJoin));
+        // Re-enforce sorting after custom rules update scan partitioning and distribution.
+        // Keep it immediately before DataFusion's default EnsureRequirements.
+        physical_optimizer.rules.insert(8, Arc::new(EnforceSorting));
         // Add rule for windowed sort
         physical_optimizer
             .rules

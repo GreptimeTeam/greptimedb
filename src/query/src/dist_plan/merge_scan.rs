@@ -39,7 +39,7 @@ use datafusion::physical_plan::metrics::{
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream,
+    SendableRecordBatchStream, apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
@@ -1160,11 +1160,20 @@ impl ExecutionPlan for MergeScanExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
+        f: &mut dyn FnMut(
             &Arc<dyn datafusion_physical_expr::PhysicalExpr>,
         ) -> Result<TreeNodeRecursion>,
     ) -> Result<TreeNodeRecursion> {
-        Ok(TreeNodeRecursion::Continue)
+        let captured_remote_dyn_filters = self.captured_remote_dyn_filters();
+        apply_expression_roots(
+            captured_remote_dyn_filters
+                .into_iter()
+                .map(|captured_dyn_filter| {
+                    captured_dyn_filter.alive_dyn_filter
+                        as Arc<dyn datafusion_physical_expr::PhysicalExpr>
+                }),
+            f,
+        )
     }
 
     // DataFusion will swap children unconditionally.
@@ -1426,10 +1435,10 @@ mod tests {
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
-    use datafusion_physical_expr::Distribution;
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
+    use datafusion_physical_expr::{Distribution, PhysicalExpr};
     use datatypes::extension::json::JsonExtensionType;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
@@ -3297,6 +3306,24 @@ mod tests {
             Some(remote_dyn_filter_producer_id),
             "try_with_new_distribution must preserve remote dynamic filter producer id"
         );
+    }
+
+    #[test]
+    fn merge_scan_apply_expressions_exposes_remote_dyn_filter_id() {
+        let query_ctx = QueryContext::arc();
+        let exec =
+            remote_dyn_filter_test_exec(Arc::new(TestRegionQueryHandler::default()), query_ctx);
+        let dyn_filter = install_remote_dyn_filter(&exec);
+        let expected_expression_id = dyn_filter.expression_id();
+        let mut expression_ids = Vec::new();
+
+        exec.apply_expressions(&mut |expr| {
+            expression_ids.push(expr.expression_id());
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+
+        assert_eq!(expression_ids, vec![expected_expression_id]);
     }
 
     #[test]
