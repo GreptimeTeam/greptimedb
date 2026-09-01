@@ -39,8 +39,9 @@ use store_api::mito_engine_options::{
     APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD,
     MEMTABLE_BULK_ENCODE_ROW_THRESHOLD, MEMTABLE_BULK_MAX_MERGE_GROUPS,
     MEMTABLE_BULK_MERGE_THRESHOLD, MEMTABLE_TYPE, MERGE_MODE_KEY, SST_FORMAT_KEY,
-    TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
-    is_mito_engine_option_key,
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_FALLBACK_TO_LOCAL,
+    TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
@@ -118,6 +119,8 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     set.insert(TWCS_FALLBACK_TO_LOCAL);
     set.insert(TWCS_TIME_WINDOW);
     set.insert(TWCS_TRIGGER_FILE_NUM);
+    set.insert(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
+    set.insert(TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM);
     set.insert(TWCS_MAX_OUTPUT_FILE_SIZE);
     set.insert(SST_FORMAT_KEY);
     set
@@ -748,6 +751,12 @@ mod tests {
             MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD
         ));
         assert!(validate_database_option(MEMTABLE_BULK_MAX_MERGE_GROUPS));
+        assert!(validate_database_option(
+            "compaction.twcs.active_window.trigger_file_num"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.inactive_window.trigger_file_num"
+        ));
         assert!(!validate_database_option("foo"));
     }
 

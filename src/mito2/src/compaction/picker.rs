@@ -144,6 +144,7 @@ pub fn new_picker(
         match compaction_options {
             CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker {
                 trigger_file_num: twcs_opts.trigger_file_num,
+                inactive_window_trigger_file_num: twcs_opts.inactive_window_trigger_file_num,
                 time_window_seconds: twcs_opts.time_window_seconds(),
                 max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
                 append_mode,

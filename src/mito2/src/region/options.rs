@@ -334,9 +334,14 @@ impl Default for CompactionOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TwcsOptions {
-    /// Minimum file num in every time window to trigger a compaction.
+    /// Minimum file num in the active time window to trigger a compaction.
     #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "active_window.trigger_file_num", alias = "trigger_file_num")]
     pub trigger_file_num: usize,
+    /// Minimum file num in an inactive time window to trigger a compaction.
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "inactive_window.trigger_file_num")]
+    pub inactive_window_trigger_file_num: usize,
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
@@ -370,6 +375,7 @@ impl Default for TwcsOptions {
     fn default() -> Self {
         Self {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 2,
             time_window: None,
             max_output_file_size: Some(ReadableSize::mb(512)),
             remote_compaction: false,
@@ -661,7 +667,8 @@ mod tests {
     #[test]
     fn test_with_compaction_type() {
         let map = make_map(&[
-            ("compaction.twcs.trigger_file_num", "8"),
+            ("compaction.twcs.active_window.trigger_file_num", "8"),
+            ("compaction.twcs.inactive_window.trigger_file_num", "2"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
         ]);
@@ -669,6 +676,7 @@ mod tests {
         let expect = RegionOptions {
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
+                inactive_window_trigger_file_num: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
             }),
@@ -676,6 +684,27 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_twcs_window_trigger_below_two_is_accepted_for_compatibility() {
+        // Tables created before the >= 2 ALTER-time check may have persisted
+        // trigger values of 1; region open must still accept them.
+        let map = make_map(&[
+            ("compaction.twcs.active_window.trigger_file_num", "1"),
+            ("compaction.type", "twcs"),
+        ]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        let CompactionOptions::Twcs(twcs) = &options.compaction;
+        assert_eq!(1, twcs.trigger_file_num);
+
+        let map = make_map(&[
+            ("compaction.twcs.inactive_window.trigger_file_num", "1"),
+            ("compaction.type", "twcs"),
+        ]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        let CompactionOptions::Twcs(twcs) = &options.compaction;
+        assert_eq!(1, twcs.inactive_window_trigger_file_num);
     }
 
     #[test]
@@ -942,6 +971,7 @@ mod tests {
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
+                inactive_window_trigger_file_num: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: Some(ReadableSize::gb(1)),
                 remote_compaction: false,
@@ -980,6 +1010,7 @@ mod tests {
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
+                inactive_window_trigger_file_num: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: None,
                 remote_compaction: false,
@@ -1047,6 +1078,7 @@ mod tests {
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
+                inactive_window_trigger_file_num: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: Some(ReadableSize::mb(7)),
                 remote_compaction: false,

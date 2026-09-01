@@ -66,8 +66,10 @@ fn parse_max_input_files(env_value: Option<&str>) -> usize {
 /// candidates.
 #[derive(Clone, Debug)]
 pub struct TwcsPicker {
-    /// Minimum file num to trigger a compaction.
+    /// Minimum file num to trigger a compaction in the active window.
     pub trigger_file_num: usize,
+    /// Minimum file num to trigger a compaction in an inactive window.
+    pub inactive_window_trigger_file_num: usize,
     /// Compaction time window in seconds.
     pub time_window_seconds: Option<i64>,
     /// Max allowed compaction output file size. The picker also uses it to predict
@@ -158,7 +160,13 @@ impl TwcsPicker {
         files: &Window,
         windows: &BTreeMap<i64, Window>,
     ) -> (Vec<FileHandle>, bool) {
-        if files.files.len() < self.trigger_file_num {
+        let is_active_window = active_window == Some(files.time_window);
+        let trigger_file_num = if is_active_window {
+            self.trigger_file_num
+        } else {
+            self.inactive_window_trigger_file_num
+        };
+        if files.files.len() < trigger_file_num {
             return (vec![], false);
         }
 
@@ -192,17 +200,17 @@ impl TwcsPicker {
         // Keep fresh L0 data and compacted L1 data in separate tasks whenever either
         // level can trigger compaction on its own. This prevents each L0 batch from
         // pulling the previous L1 output into another rewrite.
-        let (inputs, found_runs) = if num_l0_files >= self.trigger_file_num {
+        let (inputs, found_runs) = if num_l0_files >= trigger_file_num {
             let l0_pick =
                 pick_candidate_files(l0_files, self.max_output_file_size, pick_count_first);
-            if l0_pick.0.is_empty() && num_l1_files >= self.trigger_file_num {
+            if l0_pick.0.is_empty() && num_l1_files >= trigger_file_num {
                 pick_candidate_files(l1_files, self.max_output_file_size, pick_count_first)
             } else {
                 l0_pick
             }
-        } else if num_l1_files >= self.trigger_file_num {
+        } else if num_l1_files >= trigger_file_num {
             pick_candidate_files(l1_files, self.max_output_file_size, pick_count_first)
-        } else {
+        } else if is_active_window {
             l0_files.extend(l1_files);
             let picker = if num_l0_files > 0 && num_l1_files > 0 {
                 pick_mixed_count_first
@@ -210,6 +218,8 @@ impl TwcsPicker {
                 pick_count_first
             };
             pick_candidate_files(l0_files, self.max_output_file_size, picker)
+        } else {
+            pick_inactive_window_files(l0_files, l1_files, self.max_output_file_size)
         };
         let filter_deleted = !self.append_mode
             && !window_has_overlap(files, windows)
@@ -230,6 +240,29 @@ impl TwcsPicker {
         }
         (inputs, filter_deleted)
     }
+}
+
+fn pick_inactive_window_files(
+    mut l0_files: Vec<FileHandle>,
+    l1_files: Vec<FileHandle>,
+    max_output_file_size: Option<u64>,
+) -> (Vec<FileHandle>, usize) {
+    let l0_pick = pick_candidate_files(l0_files.clone(), max_output_file_size, pick_count_first);
+    if !l0_pick.0.is_empty() {
+        return l0_pick;
+    }
+
+    let l1_pick = pick_candidate_files(l1_files.clone(), max_output_file_size, pick_count_first);
+    if !l1_pick.0.is_empty() {
+        return l1_pick;
+    }
+
+    l0_files.extend(l1_files);
+    pick_candidate_files(
+        l0_files,
+        max_output_file_size,
+        pick_unbalanced_mixed_count_first,
+    )
 }
 
 fn pick_candidate_files(
@@ -413,10 +446,19 @@ fn pick_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |_| true)
+    pick_count_first_where(sorted_runs, max_output_file_size, is_balanced_candidate)
 }
 
 fn pick_mixed_count_first(
+    sorted_runs: Vec<SortedRun<FileHandle>>,
+    max_output_file_size: Option<u64>,
+) -> Vec<FileHandle> {
+    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
+        candidate.has_mixed_levels() && is_balanced_candidate(candidate)
+    })
+}
+
+fn pick_unbalanced_mixed_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
 ) -> Vec<FileHandle> {
@@ -425,6 +467,10 @@ fn pick_mixed_count_first(
         max_output_file_size,
         Candidate::has_mixed_levels,
     )
+}
+
+fn is_balanced_candidate(candidate: &Candidate) -> bool {
+    candidate.is_balanced() && candidate.has_balanced_level_rows()
 }
 
 fn pick_count_first_where(
@@ -442,9 +488,7 @@ fn pick_count_first_where(
         for right in left..right_bound {
             candidate.absorb(&files[right], &files[left..right], &mut participations);
             if candidate.num_files < 2
-                || !candidate.is_balanced()
                 || !is_eligible(&candidate)
-                || !candidate.has_balanced_level_rows()
                 || !candidate.makes_progress(max_output_file_size)
             {
                 continue;
@@ -866,6 +910,7 @@ mod tests {
     async fn test_pick_expired_ssts_without_marking_compacting() {
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1264,6 +1309,7 @@ mod tests {
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
             let output = TwcsPicker {
                 trigger_file_num: 2,
+                inactive_window_trigger_file_num: 2,
                 time_window_seconds: None,
                 max_output_file_size: None,
                 append_mode: false,
@@ -1420,6 +1466,7 @@ mod tests {
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
         let output = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: None,
             max_output_file_size: None,
             append_mode: false,
@@ -1488,6 +1535,7 @@ mod tests {
         // Create picker with trigger_file_num of 4 so single files won't form runs in first window
         let picker = TwcsPicker {
             trigger_file_num: 4, // High enough to prevent runs in first window
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1533,6 +1581,7 @@ mod tests {
 
         let picker = TwcsPicker {
             trigger_file_num: 2,
+            inactive_window_trigger_file_num: 2,
             time_window_seconds: Some(3),
             max_output_file_size: Some(1000),
             append_mode: true,
@@ -1564,6 +1613,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 1);
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(1),
             max_output_file_size: Some(1_000),
             append_mode: true,
@@ -1606,6 +1656,7 @@ mod tests {
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1630,6 +1681,7 @@ mod tests {
         // Without max_background_tasks, should have more outputs
         let picker_no_limit = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1674,6 +1726,7 @@ mod tests {
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1723,6 +1776,7 @@ mod tests {
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1767,6 +1821,7 @@ mod tests {
 
         let picker = TwcsPicker {
             trigger_file_num: num_files,
+            inactive_window_trigger_file_num: num_files,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1813,6 +1868,7 @@ mod tests {
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(3600),
             max_output_file_size: None,
             append_mode: false,
@@ -1859,6 +1915,7 @@ mod tests {
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(3600),
             max_output_file_size: Some(1024 * 1024 * 1024),
             append_mode: false,
@@ -1890,6 +1947,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 3);
         let picker = TwcsPicker {
             trigger_file_num: 2,
+            inactive_window_trigger_file_num: 2,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1951,6 +2009,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 3);
         let picker = TwcsPicker {
             trigger_file_num: 2,
+            inactive_window_trigger_file_num: 2,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1978,6 +2037,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_inactive_window_uses_its_trigger_file_num() {
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 20, 30, 0, 2, 10),
+        ];
+        let windows = assign_to_windows(files.iter(), 100);
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            inactive_window_trigger_file_num: 2,
+            time_window_seconds: Some(100),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(100), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(2, output[0].inputs.len());
+    }
+
+    #[tokio::test]
     async fn test_count_first_prefers_more_files_over_smaller_overlap() {
         let files = [
             new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
@@ -1988,6 +2073,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 100);
         let picker = TwcsPicker {
             trigger_file_num: 2,
+            inactive_window_trigger_file_num: 2,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
@@ -2014,6 +2100,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 100);
         let picker = TwcsPicker {
             trigger_file_num: 3,
+            inactive_window_trigger_file_num: 3,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
@@ -2039,6 +2126,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 100);
         let picker = TwcsPicker {
             trigger_file_num: 3,
+            inactive_window_trigger_file_num: 3,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
@@ -2079,6 +2167,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 1000);
         let picker = TwcsPicker {
             trigger_file_num: 2,
+            inactive_window_trigger_file_num: 2,
             time_window_seconds: Some(1000),
             max_output_file_size: None,
             append_mode: false,
@@ -2258,6 +2347,7 @@ mod tests {
         }));
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(1),
             max_output_file_size: None,
             append_mode: false,
@@ -2316,6 +2406,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 1);
         let picker = TwcsPicker {
             trigger_file_num: 4,
+            inactive_window_trigger_file_num: 4,
             time_window_seconds: Some(1),
             max_output_file_size: Some(512),
             append_mode: false,
@@ -2331,6 +2422,32 @@ mod tests {
         assert_eq!(1, output.len());
         assert_eq!(4, output[0].inputs.len());
         assert!(output[0].inputs.iter().all(|file| file.level() == 1));
+    }
+
+    #[tokio::test]
+    async fn test_inactive_window_mixed_fallback_bypasses_balance_checks() {
+        let files = [
+            new_file_with_level_and_rows(0, 99, 1, 1, 1_000, 1_000_000),
+            new_file_with_level_and_rows(0, 9, 0, 2, 10, 1),
+        ];
+        let windows = assign_to_windows(files.iter(), 100);
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            inactive_window_trigger_file_num: 2,
+            time_window_seconds: Some(100),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(100), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(2, output[0].inputs.len());
     }
 
     #[test]
@@ -2514,6 +2631,7 @@ mod tests {
         let windows = assign_to_windows(files.iter(), 100);
         let picker = TwcsPicker {
             trigger_file_num: 3,
+            inactive_window_trigger_file_num: 3,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,

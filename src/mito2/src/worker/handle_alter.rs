@@ -398,10 +398,33 @@ fn set_twcs_options(
     region_id: RegionId,
 ) -> std::result::Result<(), MetadataError> {
     match key {
-        mito_engine_options::TWCS_TRIGGER_FILE_NUM => {
+        mito_engine_options::TWCS_TRIGGER_FILE_NUM
+        | mito_engine_options::TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM => {
             let files = parse_usize_with_default(key, value, default_option.trigger_file_num)?;
+            ensure!(
+                files >= 2,
+                InvalidSetRegionOptionRequestSnafu { key, value }
+            );
             log_option_update(region_id, key, options.trigger_file_num, files);
             options.trigger_file_num = files;
+        }
+        mito_engine_options::TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM => {
+            let files = parse_usize_with_default(
+                key,
+                value,
+                default_option.inactive_window_trigger_file_num,
+            )?;
+            ensure!(
+                files >= 2,
+                InvalidSetRegionOptionRequestSnafu { key, value }
+            );
+            log_option_update(
+                region_id,
+                key,
+                options.inactive_window_trigger_file_num,
+                files,
+            );
+            options.inactive_window_trigger_file_num = files;
         }
         mito_engine_options::TWCS_MAX_OUTPUT_FILE_SIZE => {
             let size = if value.is_empty() {
@@ -474,6 +497,66 @@ fn need_change_index(kind: &AlterKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_set_twcs_window_trigger_options() {
+        let mut options = TwcsOptions::default();
+        let defaults = options.clone();
+        let region_id = RegionId::new(1, 1);
+
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.active_window.trigger_file_num",
+            "8",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.inactive_window.trigger_file_num",
+            "3",
+            region_id,
+        )
+        .unwrap();
+        assert_eq!(8, options.trigger_file_num);
+        assert_eq!(3, options.inactive_window_trigger_file_num);
+
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.active_window.trigger_file_num",
+            "",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.inactive_window.trigger_file_num",
+            "",
+            region_id,
+        )
+        .unwrap();
+        assert_eq!(defaults, options);
+    }
+
+    #[test]
+    fn test_set_twcs_window_trigger_rejects_values_below_two() {
+        let defaults = TwcsOptions::default();
+        for key in [
+            "compaction.twcs.trigger_file_num",
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.inactive_window.trigger_file_num",
+        ] {
+            let mut options = defaults.clone();
+            assert!(
+                set_twcs_options(&mut options, &defaults, key, "1", RegionId::new(1, 1)).is_err(),
+                "{key}"
+            );
+        }
+    }
 
     #[test]
     fn test_new_region_options_with_idempotent_append_mode() {
