@@ -45,8 +45,8 @@ ORDER BY station, "channel", ts;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortExec: expr=[station@1 ASC NULLS LAST, channel@2 ASC NULLS LAST, ts@0 ASC NULLS LAST], preserve_REDACTED
-|_|_|_ProjectionExec: expr=[ts@1 as ts, station@2 as station, channel@3 as channel, avg(range_select_projection.value_a + range_select_projection.value_b) RANGE 10s@0 as avg_value] REDACTED
+| 0_| 0_|_ProjectionExec: expr=[ts@1 as ts, station@2 as station, channel@3 as channel, avg(range_select_projection.value_a + range_select_projection.value_b) RANGE 10s@0 as avg_value] REDACTED
+|_|_|_SortExec: expr=[station@2 ASC NULLS LAST, channel@3 ASC NULLS LAST, ts@1 ASC NULLS LAST], preserve_REDACTED
 |_|_|_RangeSelectExec: range_expr=[avg(range_select_projection.value_a + range_select_projection.value_b) RANGE 10s], align=5000ms, align_to=0ms, align_by=[station@1, channel@2], time_index=ts REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED

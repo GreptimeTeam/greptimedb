@@ -177,44 +177,58 @@ TQL EVAL (60, 180, '60s') sum by(host) (rate(metrics[1m])) * 60;
 -- Test querying non-existent table
 TQL EVAL (60, 180, '60s') sum(rate(non_existent_table[1m]));
 
-++
-++
++------+----------------------------------------------------+
+| time | sum(prom_rate(time_range,value,time,Int64(60000))) |
++------+----------------------------------------------------+
++------+----------------------------------------------------+
 
 -- Test querying non-existent label
 TQL EVAL (60, 180, '60s') sum(rate(metrics{non_existent_label="value"}[1m]));
 
-++
-++
++----+----------------------------------------------+
+| ts | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++----+----------------------------------------------+
++----+----------------------------------------------+
 
 -- Test querying non-existent label value
 TQL EVAL (60, 180, '60s') sum(rate(metrics{host="non_existent_host"}[1m]));
 
-++
-++
++----+----------------------------------------------+
+| ts | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++----+----------------------------------------------+
++----+----------------------------------------------+
 
 -- Test querying multiple non-existent labels
 TQL EVAL (60, 180, '60s') sum(rate(metrics{non_existent_label1="value1", non_existent_label2="value2"}[1m]));
 
-++
-++
++----+----------------------------------------------+
+| ts | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++----+----------------------------------------------+
++----+----------------------------------------------+
 
 -- Test querying mix of existing and non-existent labels
 TQL EVAL (60, 180, '60s') sum(rate(metrics{host="host1", non_existent_label="value"}[1m]));
 
-++
-++
++----+----------------------------------------------+
+| ts | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++----+----------------------------------------------+
++----+----------------------------------------------+
 
 -- Test querying non-existent table with non-existent labels
 TQL EVAL (60, 180, '60s') sum(rate(non_existent_table{non_existent_label="value"}[1m]));
 
-++
-++
++------+----------------------------------------------------+
+| time | sum(prom_rate(time_range,value,time,Int64(60000))) |
++------+----------------------------------------------------+
++------+----------------------------------------------------+
 
 -- Test querying non-existent table with multiple non-existent labels
 TQL EVAL (60, 180, '60s') sum(rate(non_existent_table{label1="value1", label2="value2"}[1m]));
 
-++
-++
++------+----------------------------------------------------+
+| time | sum(prom_rate(time_range,value,time,Int64(60000))) |
++------+----------------------------------------------------+
++------+----------------------------------------------------+
 
 DROP TABLE metrics;
 

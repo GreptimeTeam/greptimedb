@@ -38,7 +38,7 @@ SELECT REPLACE('hello world', '', 'xyz');
 +---------------------------------------------------+
 | replace(Utf8("hello world"),Utf8(""),Utf8("xyz")) |
 +---------------------------------------------------+
-| xyzhxyzexyzlxyzlxyzoxyz xyzwxyzoxyzrxyzlxyzdxyz   |
+| hello world                                       |
 +---------------------------------------------------+
 
 SELECT REPLACE('', 'xyz', 'abc');

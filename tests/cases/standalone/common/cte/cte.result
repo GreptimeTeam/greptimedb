@@ -125,7 +125,8 @@ select
 from cte
 where alias2 > 0;
 
-Error: 3000(PlanQuery), Failed to plan SQL: No field named alias2. Valid fields are cte.a.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named alias2.
+Valid fields are cte.a.
 
 drop table a;
 
