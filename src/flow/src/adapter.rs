@@ -453,11 +453,11 @@ impl StreamingEngine {
             .stateless_flows
             .read()
             .await
-            .values()
-            .filter(|flow| flow.source_table_id == table_id)
-            .cloned()
+            .iter()
+            .filter(|(_, flow)| flow.source_table_id == table_id)
+            .map(|(flow_id, flow)| (*flow_id, flow.clone()))
             .collect::<Vec<_>>();
-        for flow in flows {
+        for (flow_id, flow) in flows {
             stateless::execute(
                 &flow,
                 &rows,
@@ -470,7 +470,7 @@ impl StreamingEngine {
             .map_err(|err| {
                 InsertIntoFlowSnafu {
                     region_id: u64::from(region_id),
-                    flow_ids: vec![],
+                    flow_ids: vec![flow_id],
                 }
                 .into_error(BoxedError::new(err))
             })?;
@@ -783,14 +783,7 @@ impl StreamingEngine {
                 })
                 .collect_vec();
             self.handle_write_request(region_id.into(), rows, &table_types, source_schema_version)
-                .await
-                .map_err(|err| {
-                    InsertIntoFlowSnafu {
-                        region_id,
-                        flow_ids: vec![],
-                    }
-                    .into_error(BoxedError::new(err))
-                })?;
+                .await?;
         }
         Ok(())
     }

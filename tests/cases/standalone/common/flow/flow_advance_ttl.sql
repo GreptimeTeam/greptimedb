@@ -14,6 +14,14 @@ SELECT
 FROM
     distinct_basic;
 
+-- instant-TTL sources reject non-stateless LIMIT plans
+CREATE FLOW test_limit_instant_rejected SINK TO out_limit_instant_rejected EVAL INTERVAL '1m' AS
+SELECT
+    number
+FROM
+    distinct_basic
+LIMIT 1;
+
 -- flow_options should have a flow_type:streaming
 -- since source table's ttl=instant and the query is stateless
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
