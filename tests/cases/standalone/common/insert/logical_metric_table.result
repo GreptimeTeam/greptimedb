@@ -25,8 +25,10 @@ Affected Rows: 0
 
 SELECT * from t2;
 
-++
-++
++-----+----+-----+
+| job | ts | val |
++-----+----+-----+
++-----+----+-----+
 
 INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);
 
@@ -145,8 +147,10 @@ Affected Rows: 0
 
 SELECT * from t2;
 
-++
-++
++-----+----+-----+
+| job | ts | val |
++-----+----+-----+
++-----+----+-----+
 
 INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);
 

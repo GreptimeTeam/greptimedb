@@ -58,8 +58,10 @@ SELECT d, d < -1000000 FROM float_special ORDER BY ts;
 -- NaN != NaN
 SELECT f, f = f FROM float_special WHERE f != f ORDER BY ts;
 
-++
-++
++---+-----------------------------------+
+| f | float_special.f = float_special.f |
++---+-----------------------------------+
++---+-----------------------------------+
 
 SELECT d, d IS NULL FROM float_special ORDER BY ts;
 

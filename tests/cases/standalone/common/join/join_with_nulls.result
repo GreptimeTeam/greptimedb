@@ -41,8 +41,10 @@ SELECT * FROM null_left l LEFT JOIN null_right r ON l."id" = r."id" ORDER BY l.t
 -- JOIN on string columns with NULLs
 SELECT * FROM null_left l INNER JOIN null_right r ON l.val = r.val ORDER BY l.ts;
 
-++
-++
++----+-----+----+----+-----+----+
+| id | val | ts | id | val | ts |
++----+-----+----+----+-----+----+
++----+-----+----+----+-----+----+
 
 -- JOIN with IS NOT DISTINCT FROM (treats NULL=NULL as true)
 SELECT * FROM null_left l INNER JOIN null_right r ON l."id" IS NOT DISTINCT FROM r."id" ORDER BY l.ts;

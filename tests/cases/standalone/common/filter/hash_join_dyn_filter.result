@@ -49,7 +49,7 @@ WHERE c.tier = 'gold';
 |               |       MergeScan [is_placeholder=false, remote_input=[                                                                             |
 |               | SubqueryAlias: c                                                                                                                  |
 |               |   Filter: customers.customer_id IS NOT NULL AND customers.tier = Utf8("gold")                                                     |
-|               |     TableScan: customers, partial_filters=[customers.tier = Utf8("gold"), customers.customer_id IS NOT NULL]                      |
+|               |     TableScan: customers, partial_filters=[customers.customer_id IS NOT NULL, customers.tier = Utf8("gold")]                      |
 |               | ]]                                                                                                                                |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] |
 |               |   RepartitionExec: REDACTED
@@ -100,7 +100,7 @@ WHERE c.tier = 'gold';
 |_|_|_|
 | 1_| 0_|_FilterExec: customer_id@0 IS NOT NULL AND tier@2 = gold metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "filters": ["tier = Utf8(\"gold\")", "customer_id IS NOT NULL"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "filters": ["customer_id IS NOT NULL", "tier = Utf8(\"gold\")"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -177,7 +177,7 @@ WHERE c.tier IN ('gold', 'silver');
 |               |       MergeScan [is_placeholder=false, remote_input=[                                                                                           |
 |               | SubqueryAlias: c                                                                                                                                |
 |               |   Filter: customers.customer_id IS NOT NULL AND (customers.tier = Utf8("gold") OR customers.tier = Utf8("silver"))                              |
-|               |     TableScan: customers, partial_filters=[customers.tier = Utf8("gold") OR customers.tier = Utf8("silver"), customers.customer_id IS NOT NULL] |
+|               |     TableScan: customers, partial_filters=[customers.customer_id IS NOT NULL, customers.tier = Utf8("gold") OR customers.tier = Utf8("silver")] |
 |               | ]]                                                                                                                                              |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(cid@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5]                       |
 |               |   RepartitionExec: REDACTED
@@ -229,7 +229,7 @@ WHERE c.tier IN ('gold', 'silver');
 |_|_|_|
 | 1_| 0_|_FilterExec: customer_id@0 IS NOT NULL AND (tier@2 = gold OR tier@2 = silver) metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "filters": ["tier = Utf8(\"gold\") OR tier = Utf8(\"silver\")", "customer_id IS NOT NULL"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "filters": ["customer_id IS NOT NULL", "tier = Utf8(\"gold\") OR tier = Utf8(\"silver\")"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+

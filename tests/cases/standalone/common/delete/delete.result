@@ -88,8 +88,10 @@ ADMIN flush_table('monitor');
 
 SELECT ts, host, cpu, memory FROM monitor WHERE cpu = 66.6 ORDER BY ts;
 
-++
-++
++----+------+-----+--------+
+| ts | host | cpu | memory |
++----+------+-----+--------+
++----+------+-----+--------+
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
@@ -108,8 +110,10 @@ Affected Rows: 2
 
 SELECT ts, host, cpu, memory FROM monitor WHERE memory > 2048 ORDER BY ts;
 
-++
-++
++----+------+-----+--------+
+| ts | host | cpu | memory |
++----+------+-----+--------+
++----+------+-----+--------+
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 

@@ -488,13 +488,17 @@ SELECT * FROM zh_logs where `log_message` @@ 'ship_';
 
 SELECT * FROM zh_logs where `log_message` @@ '登录_id';
 
-++
-++
++----+-------------+
+| id | log_message |
++----+-------------+
++----+-------------+
 
 SELECT * FROM zh_logs where `log_message` @@ '手机号_trace';
 
-++
-++
++----+-------------+
+| id | log_message |
++----+-------------+
++----+-------------+
 
 SELECT * FROM zh_logs where `log_message` @@ '手机';
 

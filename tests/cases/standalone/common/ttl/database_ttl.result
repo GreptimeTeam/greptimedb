@@ -44,8 +44,10 @@ ADMIN compact_table('test_ttl');
 -- Must be expired --
 SELECT val from test_ttl;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 ALTER DATABASE test_ttl_db SET ttl = '1 day';
 

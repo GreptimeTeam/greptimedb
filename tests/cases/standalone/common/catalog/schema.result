@@ -99,8 +99,10 @@ Error: 4001(TableNotFound), Table not found: greptime.test_public_schema.hello
 
 SHOW TABLES FROM test_public_schema;
 
-++
-++
++------------------------------+
+| Tables_in_test_public_schema |
++------------------------------+
++------------------------------+
 
 SHOW TABLES FROM public;
 

@@ -127,8 +127,10 @@ SELECT f FROM floats WHERE f>'-inf'::FLOAT ORDER BY 1;
 
 SELECT f FROM floats WHERE f>'inf'::FLOAT;
 
-++
-++
++---+
+| f |
++---+
++---+
 
 -- >=
 SELECT f FROM floats WHERE f>=1 ORDER BY f;
@@ -178,8 +180,10 @@ SELECT f FROM floats WHERE f<'inf'::FLOAT ORDER BY f;
 
 SELECT f FROM floats WHERE f<'-inf'::FLOAT;
 
-++
-++
++---+
+| f |
++---+
++---+
 
 -- <=
 SELECT f FROM floats WHERE f<=1 ORDER BY f;
@@ -341,8 +345,10 @@ SELECT d FROM doubles WHERE d>'-inf'::DOUBLE ORDER BY 1;
 
 SELECT d FROM doubles WHERE d>'inf'::DOUBLE;
 
-++
-++
++---+
+| d |
++---+
++---+
 
 -- >=
 SELECT d FROM doubles WHERE d>=1 ORDER BY d;
@@ -392,8 +398,10 @@ SELECT d FROM doubles WHERE d<'inf'::DOUBLE ORDER BY d;
 
 SELECT d FROM doubles WHERE d<'-inf'::DOUBLE;
 
-++
-++
++---+
+| d |
++---+
++---+
 
 -- <=
 SELECT d FROM doubles WHERE d<=1 ORDER BY d;
