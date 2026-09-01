@@ -76,16 +76,10 @@ impl ScanHintRule {
         match &plan {
             LogicalPlan::TableScan(table_scan) => {
                 let mut transformed = false;
-                if let Some(source) = table_scan
-                    .source
-                    .as_any()
-                    .downcast_ref::<DefaultTableSource>()
-                {
+                if let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>() {
                     // The provider in the region server is [DummyTableProvider].
-                    if let Some(adapter) = source
-                        .table_provider
-                        .as_any()
-                        .downcast_ref::<DummyTableProvider>()
+                    if let Some(adapter) =
+                        source.table_provider.downcast_ref::<DummyTableProvider>()
                     {
                         // set order_hint
                         if let Some(order_expr) = &visitor.order_expr {

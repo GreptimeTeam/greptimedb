@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::cmp::Ordering;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,6 +22,7 @@ use datafusion::arrow::array::{Array, TimestampMillisecondArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
@@ -33,8 +33,9 @@ use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream, Statistics,
+    ChildStats, DisplayAs, DisplayFormatType, ExecutionPlan, InputDistributionRequirements,
+    PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream, Statistics,
+    StatisticsArgs,
 };
 use datafusion_expr::col;
 use datatypes::arrow::compute;
@@ -345,8 +346,11 @@ pub struct InstantManipulateExec {
 }
 
 impl ExecutionPlan for InstantManipulateExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn schema(&self) -> SchemaRef {
@@ -357,8 +361,8 @@ impl ExecutionPlan for InstantManipulateExec {
         self.input.properties()
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
-        self.input.required_input_distribution()
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        self.input.input_distribution_requirements()
     }
 
     // Prevent reordering of input
@@ -435,8 +439,16 @@ impl ExecutionPlan for InstantManipulateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
-        let input_stats = self.input.partition_statistics(partition)?;
+    fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(partition)]
+    }
+
+    fn statistics_from_inputs(
+        &self,
+        input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> DataFusionResult<Arc<Statistics>> {
+        let input_stats = &input_stats[0];
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
@@ -448,12 +460,12 @@ impl ExecutionPlan for InstantManipulateExec {
             })
             .unwrap_or(Precision::Absent);
 
-        Ok(Statistics {
+        Ok(Arc::new(Statistics {
             num_rows: Precision::Inexact(estimated_row_num.floor() as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
             column_statistics: Statistics::unknown_column(&self.schema()),
-        })
+        }))
     }
 
     fn name(&self) -> &str {

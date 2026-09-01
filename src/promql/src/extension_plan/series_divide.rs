@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -20,6 +19,7 @@ use std::task::{Context, Poll};
 use datafusion::arrow::array::{Array, ArrayRef, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
@@ -30,8 +30,8 @@ use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
+    PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion_expr::col;
 use datatypes::arrow::compute;
@@ -334,8 +334,11 @@ pub struct SeriesDivideExec {
 }
 
 impl ExecutionPlan for SeriesDivideExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn schema(&self) -> SchemaRef {
@@ -346,18 +349,18 @@ impl ExecutionPlan for SeriesDivideExec {
         self.input.properties()
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
         if self.tag_columns.is_empty() {
-            return vec![Distribution::SinglePartition];
+            return InputDistributionRequirements::new(vec![Distribution::SinglePartition]);
         }
         let schema = self.input.schema();
-        vec![Distribution::HashPartitioned(
+        InputDistributionRequirements::new(vec![Distribution::KeyPartitioned(
             self.tag_columns
                 .iter()
                 // Safety: the tag column names is verified in the planning phase
                 .map(|tag| Arc::new(ColumnExpr::new_with_schema(tag, &schema).unwrap()) as _)
                 .collect(),
-        )]
+        )])
     }
 
     fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {

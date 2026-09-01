@@ -22,13 +22,23 @@ use datafusion::arrow::array::{Array, AsArray, ListBuilder, StringViewBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Float64Type, UInt8Type};
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::DataFusionError;
-use datafusion_expr::type_coercion::aggregates::INTEGERS;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use geohash::Coord;
 use snafu::ResultExt;
 
 use crate::function::{Function, extract_args};
 use crate::scalars::geo::helpers;
+
+const INTEGER_TYPES: &[DataType] = &[
+    DataType::Int8,
+    DataType::Int16,
+    DataType::Int32,
+    DataType::Int64,
+    DataType::UInt8,
+    DataType::UInt16,
+    DataType::UInt32,
+    DataType::UInt64,
+];
 
 fn ensure_resolution_usize(v: u8) -> datafusion_common::Result<usize> {
     if v == 0 || v > 12 {
@@ -49,7 +59,7 @@ impl Default for GeohashFunction {
     fn default() -> Self {
         let mut signatures = Vec::new();
         for coord_type in &[DataType::Float32, DataType::Float64] {
-            for resolution_type in INTEGERS {
+            for resolution_type in INTEGER_TYPES {
                 signatures.push(TypeSignature::Exact(vec![
                     // latitude
                     coord_type.clone(),
@@ -146,7 +156,7 @@ impl Default for GeohashNeighboursFunction {
     fn default() -> Self {
         let mut signatures = Vec::new();
         for coord_type in &[DataType::Float32, DataType::Float64] {
-            for resolution_type in INTEGERS {
+            for resolution_type in INTEGER_TYPES {
                 signatures.push(TypeSignature::Exact(vec![
                     // latitude
                     coord_type.clone(),

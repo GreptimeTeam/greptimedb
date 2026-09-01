@@ -18,7 +18,6 @@ use std::fmt::Display;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::compute::kernels::numeric;
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
 use crate::function::{Function, extract_args};
@@ -34,7 +33,7 @@ pub(crate) struct ModuloFunction {
 impl Default for ModuloFunction {
     fn default() -> Self {
         Self {
-            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(2, Volatility::Immutable),
         }
     }
 }

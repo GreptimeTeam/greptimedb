@@ -17,12 +17,11 @@ use catalog::table_source::DfTableSourceProvider;
 use common_function::utils::escape_like_pattern;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::SessionState;
-use datafusion_common::{DFSchema, ScalarValue};
+use datafusion_common::{DFSchema, ScalarValue, TableReference};
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
     BinaryExpr, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Operator, col, lit, not,
 };
-use datafusion_sql::TableReference;
 use datatypes::schema::Schema;
 use log_query::{AggFunc, BinaryOperator, EqualValue, LogExpr, LogQuery, TimeFilter};
 use snafu::{OptionExt, ResultExt};
@@ -56,11 +55,9 @@ impl LogQueryPlanner {
             .await
             .context(CatalogSnafu)?;
         let schema = table_source
-            .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
             .table_provider
-            .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table()
