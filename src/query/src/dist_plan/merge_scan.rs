@@ -441,6 +441,10 @@ pub struct MergeScanExec {
     /// Metrics for each partition
     partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
+    /// Snapshot of the statement's explain verbosity. The query context is shared by
+    /// all statements in a multi-statement request, while this execution plan may
+    /// start its stream later.
+    explain_verbose: bool,
     /// Optional because RDF must fail open: missing ids skip RDF but keep normal query execution.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
@@ -542,6 +546,7 @@ impl MergeScanExec {
             sub_stage_metrics: Arc::default(),
             partition_metrics: Arc::default(),
             properties,
+            explain_verbose: query_ctx.explain_verbose(),
             query_ctx,
             remote_dyn_filter_producer_id,
             captured_remote_dyn_filters: Arc::default(),
@@ -599,7 +604,7 @@ impl MergeScanExec {
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
         let read_preference = self.query_ctx.read_preference();
-        let explain_verbose = self.query_ctx.explain_verbose();
+        let explain_verbose = self.explain_verbose;
         let live_analyze_metrics = explain_verbose && self.query_ctx.live_analyze_metrics_enabled();
         let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
             context.as_ref(),
@@ -676,11 +681,17 @@ impl MergeScanExec {
                         );
                     }
                 }
+                // The execution plan owns the statement-scoped snapshot. Do not
+                // serialize the shared context's current value here: a later
+                // statement may have already reused and updated it.
+                let mut serialized_query_ctx: greptime_proto::v1::QueryContext =
+                    (&region_query_ctx).into();
+                serialized_query_ctx.explain.get_or_insert_default().verbose = explain_verbose;
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
                         dbname: dbname.clone(),
-                        query_context: Some((&region_query_ctx).into()),
+                        query_context: Some(serialized_query_ctx),
                     }),
                     region_id,
                     plan: plan.clone(),
@@ -932,6 +943,7 @@ impl MergeScanExec {
             sub_stage_metrics: self.sub_stage_metrics.clone(),
             partition_metrics: self.partition_metrics.clone(),
             query_ctx: self.query_ctx.clone(),
+            explain_verbose: self.explain_verbose,
             remote_dyn_filter_producer_id: self.remote_dyn_filter_producer_id,
             captured_remote_dyn_filters: self.captured_remote_dyn_filters.clone(),
             target_partition: self.target_partition,
@@ -2112,6 +2124,7 @@ mod tests {
     #[derive(Default)]
     struct TestRegionQueryHandler {
         responses: HashMap<RegionId, TestRegionResponse>,
+        explain_verbose: Mutex<Vec<bool>>,
     }
 
     impl TestRegionQueryHandler {
@@ -2128,7 +2141,10 @@ mod tests {
                     )
                 })
                 .collect();
-            Self { responses }
+            Self {
+                responses,
+                explain_verbose: Mutex::default(),
+            }
         }
 
         fn with_responses(
@@ -2146,7 +2162,10 @@ mod tests {
                     )
                 })
                 .collect();
-            Self { responses }
+            Self {
+                responses,
+                explain_verbose: Mutex::default(),
+            }
         }
     }
 
@@ -2540,6 +2559,14 @@ mod tests {
             _target: &crate::region_query::RegionQueryTarget,
             request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            self.explain_verbose.lock().unwrap().push(
+                request
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.query_context.as_ref())
+                    .and_then(|query_context| query_context.explain.as_ref())
+                    .is_some_and(|explain| explain.verbose),
+            );
             let response = self
                 .responses
                 .get(&request.region_id)
@@ -2630,6 +2657,55 @@ mod tests {
         exec.execute(0, Arc::new(TaskContext::default()))?
             .try_collect()
             .await
+    }
+
+    #[tokio::test]
+    async fn merge_scan_serializes_construction_time_explain_verbose_snapshot() {
+        let query_ctx = QueryContext::arc();
+        query_ctx.set_explain_verbose(true);
+        let region_one = RegionId::new(1024, 1);
+        let region_two = RegionId::new(1024, 2);
+        let handler = Arc::new(TestRegionQueryHandler::with_responses([
+            (region_one, Arc::new(Schema::new(vec![])), vec![]),
+            (region_two, Arc::new(Schema::new(vec![])), vec![]),
+        ]));
+        let session_state = SessionStateBuilder::new().build();
+        let plan = LogicalPlanBuilder::empty(true).build().unwrap();
+        let schema = plan.schema().as_arrow().clone();
+        let verbose_exec = MergeScanExec::new(
+            &session_state,
+            TableName::new("catalog", "schema", "table"),
+            vec![region_one],
+            plan.clone(),
+            &schema,
+            handler.clone(),
+            query_ctx.clone(),
+            1,
+            AliasMapping::new(),
+            None,
+            false,
+        )
+        .unwrap();
+
+        query_ctx.set_explain_verbose(false);
+        let ordinary_exec = MergeScanExec::new(
+            &session_state,
+            TableName::new("catalog", "schema", "table"),
+            vec![region_two],
+            plan,
+            &schema,
+            handler.clone(),
+            query_ctx,
+            1,
+            AliasMapping::new(),
+            None,
+            false,
+        )
+        .unwrap();
+
+        collect_merge_scan(verbose_exec).await.unwrap();
+        collect_merge_scan(ordinary_exec).await.unwrap();
+        assert_eq!(vec![true, false], *handler.explain_verbose.lock().unwrap());
     }
 
     fn assert_int64_batch(batch: &DfRecordBatch, values: (i64, i64)) {
