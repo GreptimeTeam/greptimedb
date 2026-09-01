@@ -21,7 +21,6 @@ Affected Rows: 0
 -- SQLNESS REPLACE (cpu_usage\.ts_range) ts_range
 -- SQLNESS REPLACE (cpu_usage\.ts) ts
 -- SQLNESS REPLACE (?m)^\|_\|_\|_SortExec:.*\n
--- SQLNESS REPLACE (?m)(^\|_\|_\|_PromSeriesDivideExec:.*\n)(?:\|_\|_\|_(?:RepartitionExec|SortPreservingMergeExec):.*\n)* $1
 -- SQLNESS REPLACE (SeriesScan:.*|SeqScan:.*) ScanExec: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
@@ -42,8 +41,6 @@ TQL analyze (0, 10, '1s')  sum by(job) (irate(cpu_usage{job="fire"}[5s])) / 1e9;
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["job"] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SortPreservingMergeExec: [job@1 ASC, ts@2 ASC] REDACTED
 |_|_|_ProjectionExec: expr=[value@1 as value, job@0 as job, CAST(ts@2 AS Timestamp(ms)) as ts] REDACTED
 |_|_|_ScanExec: REDACTED
 |_|_|_|

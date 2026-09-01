@@ -419,8 +419,16 @@ impl Accumulator for CountHashAccumulator {
             &self.random_state,
             &mut self.batch_hashes,
         )?;
-        for hash in hashes {
-            self.values.insert(*hash);
+        if let Some(nulls) = arr.logical_nulls() {
+            for (hash, is_valid) in hashes.iter().zip(nulls.iter()) {
+                if is_valid {
+                    self.values.insert(*hash);
+                }
+            }
+        } else {
+            for hash in hashes {
+                self.values.insert(*hash);
+            }
         }
         Ok(())
     }
@@ -494,7 +502,7 @@ mod tests {
         ])) as ArrayRef;
         acc.update_batch(&[array])?;
         let result = acc.evaluate()?;
-        assert_eq!(result, ScalarValue::Int64(Some(4)));
+        assert_eq!(result, ScalarValue::Int64(Some(3)));
 
         // Test with empty data
         let mut acc = create_test_accumulator();
@@ -508,7 +516,7 @@ mod tests {
         let array = Arc::new(Int32Array::from(vec![None, None, None])) as ArrayRef;
         acc.update_batch(&[array])?;
         let result = acc.evaluate()?;
-        assert_eq!(result, ScalarValue::Int64(Some(1)));
+        assert_eq!(result, ScalarValue::Int64(Some(0)));
 
         Ok(())
     }
