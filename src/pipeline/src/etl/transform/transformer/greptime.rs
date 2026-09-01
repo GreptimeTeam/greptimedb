@@ -312,6 +312,7 @@ impl GreptimeTransformer {
 pub struct ColumnMetadata {
     column_schema: datatypes::schema::ColumnSchema,
     semantic_type: SemanticType,
+    json_settings: OnceCell<JsonSettings>,
 }
 
 impl From<ColumnSchema> for ColumnMetadata {
@@ -338,7 +339,20 @@ impl From<ColumnSchema> for ColumnMetadata {
         Self {
             column_schema,
             semantic_type,
+            json_settings: OnceCell::new(),
         }
+    }
+}
+
+impl ColumnMetadata {
+    fn json_settings(&self) -> Result<&JsonSettings> {
+        self.json_settings.get_or_try_init(|| {
+            if let Some(extension) = self.column_schema.extension_type::<Json2ExtensionType>()? {
+                Ok(extension.metadata().json_settings().clone())
+            } else {
+                Ok(parse_legacy_json2_settings(self.column_schema.metadata())?.unwrap_or_default())
+            }
+        })
     }
 }
 
@@ -349,6 +363,7 @@ impl TryFrom<ColumnMetadata> for ColumnSchema {
         let ColumnMetadata {
             column_schema,
             semantic_type,
+            ..
         } = value;
 
         let options = options_from_column_schema(&column_schema);
@@ -438,6 +453,7 @@ impl SchemaInfo {
             Some(ColumnMetadata {
                 column_schema,
                 semantic_type,
+                json_settings: OnceCell::new(),
             })
         } else {
             None
@@ -512,6 +528,7 @@ fn resolve_schema(
                 ColumnMetadata {
                     column_schema,
                     semantic_type,
+                    json_settings: OnceCell::new(),
                 }
             });
         let key = column.to_string();
@@ -759,16 +776,29 @@ fn resolve_value(
         }
 
         VrlValue::Array(_) | VrlValue::Object(_) => {
-            let json_settings = schema_info.json_settings_for_column(&column_name, None)?;
+            let index = index.or_else(|| {
+                let column = schema_info.find_column_schema_in_table(&column_name)?;
+                let index = schema_info.schema.len();
+                schema_info.schema.push(column);
+                schema_info.index.insert(column_name.clone(), index);
+                Some(index)
+            });
+            // TODO(LFC): Default to JSON2 for auto-created tables.
+            let json2_index = index.filter(|&index| {
+                matches!(
+                    &schema_info.schema[index].column_schema.data_type,
+                    ConcreteDataType::Json(column_type) if column_type.is_json2()
+                )
+            });
 
-            let value = if let Some(json_settings) = json_settings {
+            let value = if let Some(index) = json2_index {
                 let value: serde_json::Value = value.try_into().map_err(|e: StdError| {
                     CoerceIncompatibleTypesSnafu { msg: e.to_string() }.build()
                 })?;
-                let value = json_settings.encode(value)?;
+                let value = schema_info.schema[index].json_settings()?.encode(value)?;
 
                 resolve_schema(
-                    index,
+                    Some(index),
                     p_ctx,
                     &column_name,
                     &ConcreteDataType::json2(Default::default()),
@@ -856,6 +886,7 @@ fn identity_pipeline_inner(
     schema_info.schema.push(ColumnMetadata {
         column_schema,
         semantic_type: SemanticType::Timestamp,
+        json_settings: OnceCell::new(),
     });
 
     let mut opt_map = HashMap::new();
@@ -1034,6 +1065,24 @@ mod tests {
 
     use super::*;
     use crate::{PipelineDefinition, identity_pipeline};
+
+    #[test]
+    fn test_column_metadata_caches_json_settings() -> Result<()> {
+        let column = ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "data",
+                ConcreteDataType::json2(Default::default()),
+                true,
+            ),
+            semantic_type: SemanticType::Field,
+            json_settings: OnceCell::new(),
+        };
+
+        let first = column.json_settings()?;
+        let second = column.json_settings()?;
+        assert!(std::ptr::eq(first, second));
+        Ok(())
+    }
 
     #[test]
     fn test_transform_json2_uses_destination_table_settings() {

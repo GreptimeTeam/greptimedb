@@ -30,6 +30,8 @@ use crate::types::json_type::{JsonNativeType, JsonNumberType, is_include};
 use crate::types::{StructField, StructType};
 use crate::value::{ListValue, StructValue, Value};
 
+pub type JsonObjectVariant = BTreeMap<String, JsonVariant>;
+
 /// Number in json, can be a positive integer, a negative integer, or a floating number.
 /// Each of which is represented as `u64`, `i64` and `f64`.
 ///
@@ -124,7 +126,7 @@ pub enum JsonVariant {
     Number(JsonNumber),
     String(String),
     Array(Vec<JsonVariant>),
-    Object(BTreeMap<String, JsonVariant>),
+    Object(JsonObjectVariant),
     /// A special "variant" value of JSON, to represent a union result of conflict JSON type values.
     Variant(Vec<u8>),
 }

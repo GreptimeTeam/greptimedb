@@ -3360,19 +3360,21 @@ CREATE TABLE b (
 
     let output = execute_sql(&instance, "SHOW CREATE TABLE b").await.data;
     let expected = r#"
-+-------+----------------------------------+
-| Table | Create Table                     |
-+-------+----------------------------------+
-| b     | CREATE TABLE IF NOT EXISTS "b" ( |
-|       |   "j" JSON2 NULL,                |
-|       |   "ts" TIMESTAMP(3) NOT NULL,    |
-|       |   TIME INDEX ("ts")              |
-|       | )                                |
-|       |                                  |
-|       | ENGINE=mito                      |
-|       | WITH(                            |
-|       |   append_mode = 'true'           |
-|       | )                                |
-+-------+----------------------------------+"#;
++-------+-----------------------------------+
+| Table | Create Table                      |
++-------+-----------------------------------+
+| b     | CREATE TABLE IF NOT EXISTS "b" (  |
+|       |   "j" JSON2(                      |
+|       |     max_auto_expanded_paths = 100 |
+|       |   ) NULL,                         |
+|       |   "ts" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("ts")               |
+|       | )                                 |
+|       |                                   |
+|       | ENGINE=mito                       |
+|       | WITH(                             |
+|       |   append_mode = 'true'            |
+|       | )                                 |
++-------+-----------------------------------+"#;
     check_output_stream(output, expected).await;
 }

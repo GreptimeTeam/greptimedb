@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::hash::Hash;
 use std::mem;
 use std::sync::Arc;
 
@@ -46,6 +47,7 @@ impl ReadColumns {
         }
     }
 
+    /// Attaches query-time JSON2 projection types.
     pub fn with_json_target_types(
         mut self,
         json_target_types: BTreeMap<ColumnId, JsonNativeType>,
@@ -66,10 +68,11 @@ impl ReadColumns {
         self.column_ids_iter().collect()
     }
 
-    pub fn json_target_types(&self) -> &JsonTargetTypes {
+    pub(crate) fn json_target_types(&self) -> &JsonTargetTypes {
         &self.json_target_types
     }
 
+    /// Returns the query-time JSON2 projection type for a column.
     pub fn json_target_type(&self, column_id: ColumnId) -> Option<&JsonNativeType> {
         self.json_target_types.get(&column_id)
     }
@@ -77,7 +80,6 @@ impl ReadColumns {
     pub fn estimated_size(&self) -> usize {
         self.col_ids.capacity() * mem::size_of::<ColumnId>()
             + self.col_ids.len() * mem::size_of::<ColumnId>()
-            + self.json_target_types.len()
-                * (mem::size_of::<ColumnId>() + mem::size_of::<JsonNativeType>())
+            + self.json_target_types.len() * (size_of::<ColumnId>() + size_of::<JsonNativeType>())
     }
 }
