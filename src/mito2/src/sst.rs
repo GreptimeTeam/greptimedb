@@ -47,6 +47,7 @@ pub mod file_ref;
 pub mod index;
 pub mod location;
 pub mod parquet;
+pub mod range_index;
 pub(crate) mod version;
 
 /// Default write buffer size, it should be greater than the default minimum upload part of S3 (5mb).
