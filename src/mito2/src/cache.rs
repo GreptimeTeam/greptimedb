@@ -34,6 +34,7 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef};
@@ -2066,8 +2067,7 @@ impl SelectorResultValue {
             SelectorResult::Flat(batches) => batches.iter().map(record_batch_estimated_size).sum(),
         };
         result_size
-            + self.json_target_types.len()
-                * (mem::size_of::<ColumnId>() + mem::size_of::<ConcreteDataType>())
+            + self.json_target_types.len() * (size_of::<ColumnId>() + size_of::<JsonNativeType>())
     }
 }
 

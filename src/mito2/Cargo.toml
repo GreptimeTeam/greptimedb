@@ -65,7 +65,7 @@ log-store = { workspace = true }
 mito-codec.workspace = true
 moka = { workspace = true, features = ["sync", "future"] }
 object-store = { workspace = true, features = ["testing"] }
-parquet = { workspace = true, features = ["async"] }
+parquet = { workspace = true, features = ["async", "variant_experimental"] }
 paste.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true

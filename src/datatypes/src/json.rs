@@ -39,6 +39,8 @@ use crate::value::{ListValue, StructValue, Value};
 pub const JSON2_MAX_STRUCTURED_DEPTH: usize = 50;
 /// Reserved physical field containing unexpanded JSON2 paths.
 pub const JSON2_REMAINDER_FIELD_NAME: &str = "!__remainder__!";
+/// Default maximum number of unhinted JSON leaf paths expanded into Arrow fields.
+pub const JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS: u32 = 100;
 
 /// JSON2 settings stored in column schema metadata and represented through
 /// Arrow extension metadata.
@@ -105,6 +107,14 @@ pub struct JsonContext<'a> {
 }
 
 impl JsonSettings {
+    /// Creates default v2 settings for newly created JSON2 columns.
+    pub fn new_v2() -> Self {
+        Self {
+            type_hints: vec![],
+            max_auto_expanded_paths: Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS),
+        }
+    }
+
     /// Creates and validates JSON2 settings.
     pub fn try_new(
         type_hints: Vec<JsonTypeHint>,
@@ -159,6 +169,10 @@ impl JsonSettings {
 }
 
 fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
+    if type_hints.is_empty() {
+        return Ok(());
+    }
+
     let mut object = JsonObjectType::new();
     for hint in type_hints {
         if hint.path.len() > JSON2_MAX_STRUCTURED_DEPTH {
@@ -193,7 +207,9 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
             | ConcreteDataType::Int64(_)
             | ConcreteDataType::Float32(_)
             | ConcreteDataType::Float64(_)
-            | ConcreteDataType::String(_) => (&hint.data_type).into(),
+            | ConcreteDataType::String(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_) => (&hint.data_type).into(),
             data_type => {
                 return InvalidJson2SettingsSnafu {
                     reason: format!("unsupported JSON2 type hint data type: {data_type}"),

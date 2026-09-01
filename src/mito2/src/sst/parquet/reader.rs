@@ -16,11 +16,14 @@
 
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
@@ -31,8 +34,9 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::{Json2ExtensionType, is_json2_extension_type};
 use datatypes::prelude::DataType;
+use datatypes::vectors::json::json2_physical_data_type;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
@@ -76,7 +80,6 @@ use crate::sst::index::inverted_index::applier::{
 };
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -94,6 +97,7 @@ use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_pla
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, Json2RewriteTargets, Json2TargetLayout};
 use crate::sst::{override_pk_field_to_binary, tag_maybe_to_dictionary_field};
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
@@ -106,6 +110,43 @@ const MAX_ROW_GROUPS_TO_CHECK_PK: usize = 4;
 /// limit, signalling the writer likely fell back to plain encoding.
 fn should_read_pk_as_binary(parquet_meta: &ParquetMetaData) -> bool {
     should_read_pk_as_binary_with_limit(parquet_meta, DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT)
+}
+
+fn apply_json2_rewrite_targets(
+    read_format: &FlatReadFormat,
+    targets: &Json2RewriteTargets,
+) -> Result<SchemaRef> {
+    let schema = read_format.output_arrow_schema()?;
+    if targets.is_empty() {
+        return Ok(schema);
+    }
+
+    let mut schema = schema.as_ref().clone();
+    let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
+    for (column_id, layout) in targets.iter() {
+        let Some(index) = read_format.parquet_projected_index_by_id(*column_id) else {
+            continue;
+        };
+        let Some(field) = fields.get(index) else {
+            continue;
+        };
+        let mut field = field.as_ref().clone();
+        field.set_data_type(json2_physical_data_type(&layout.target_layout));
+
+        let mut metadata = field.metadata().clone();
+        metadata.insert(
+            EXTENSION_TYPE_NAME_KEY.to_string(),
+            Json2ExtensionType::NAME.to_string(),
+        );
+        metadata.insert(
+            EXTENSION_TYPE_METADATA_KEY.to_string(),
+            layout.extension_metadata.clone(),
+        );
+        field.set_metadata(metadata);
+        fields[index] = Arc::new(field);
+    }
+    schema.fields = fields.into();
+    Ok(Arc::new(schema))
 }
 
 fn should_read_pk_as_binary_with_limit(
@@ -163,6 +204,8 @@ pub struct ParquetReaderBuilder {
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
     read_cols: Option<ReadColumns>,
+    /// Compaction-only JSON2 physical rewrite targets.
+    json2_rewrite_targets: Json2RewriteTargets,
     /// Strategy to cache SST data.
     cache_strategy: CacheStrategy,
     /// Index appliers.
@@ -208,6 +251,7 @@ impl ParquetReaderBuilder {
             object_store,
             predicate: None,
             read_cols: None,
+            json2_rewrite_targets: Arc::default(),
             cache_strategy: CacheStrategy::Disabled,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
@@ -247,6 +291,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn projection(mut self, read_cols: Option<ReadColumns>) -> ParquetReaderBuilder {
         self.read_cols = read_cols;
+        self
+    }
+
+    /// Attaches fixed JSON2 physical layouts used by compaction readers.
+    #[must_use]
+    pub(crate) fn json2_rewrite_targets(mut self, targets: Json2RewriteTargets) -> Self {
+        self.json2_rewrite_targets = targets;
         self
     }
 
@@ -563,6 +614,8 @@ impl ParquetReaderBuilder {
             );
         }
 
+        let output_schema = apply_json2_rewrite_targets(&read_format, &self.json2_rewrite_targets)?;
+
         // Create ArrowReaderMetadata for async stream building.
         let mut arrow_reader_options = ArrowReaderOptions::new();
         if !read_format
@@ -574,7 +627,7 @@ impl ParquetReaderBuilder {
             // Read `__primary_key` as Binary when it's too large for dictionary
             // encoding; convert_batch wraps it back to a DictionaryArray.
             let schema_for_reader = if should_read_pk_as_binary(&parquet_meta) {
-                read_format.set_pk_as_binary()?;
+                read_format.set_pk_as_binary(output_schema.clone());
                 override_pk_field_to_binary(read_format.arrow_schema())
             } else {
                 read_format.arrow_schema().clone()
@@ -585,7 +638,18 @@ impl ParquetReaderBuilder {
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;
 
-        let output_schema = read_format.output_arrow_schema()?;
+        let json2_rewrite_targets = self
+            .json2_rewrite_targets
+            .iter()
+            .map(|(column_id, layout)| {
+                let column = region_meta
+                    .column_by_id(*column_id)
+                    .context(UnexpectedSnafu {
+                        reason: format!("JSON2 target column by id {column_id} does not exist"),
+                    })?;
+                Ok((column.column_schema.name.clone(), layout.clone()))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
@@ -594,6 +658,7 @@ impl ParquetReaderBuilder {
             parquet_metadata_size,
             arrow_metadata,
             output_schema,
+            json2_rewrite_targets,
             object_store: self.object_store.clone(),
             projection: projection_plan,
             has_nested_projection,
@@ -1814,6 +1879,8 @@ pub(crate) struct RowGroupReaderBuilder {
     arrow_metadata: ArrowReaderMetadata,
     /// Projected output schema aligned with `projection.projected_root_presence`.
     output_schema: SchemaRef,
+    /// JSON2 columns that must be semantically rewritten into the projected target layout.
+    json2_rewrite_targets: HashMap<String, Json2TargetLayout>,
     /// Object store as an Operator.
     object_store: ObjectStore,
     /// Projection mask.
@@ -1975,7 +2042,7 @@ impl RowGroupReaderBuilder {
         &self,
         stream: ProjectedRecordBatchStream,
     ) -> Result<ProjectedRecordBatchStream> {
-        if !self.has_nested_projection {
+        if !self.has_nested_projection && self.json2_rewrite_targets.is_empty() {
             return Ok(stream);
         }
 
@@ -1984,6 +2051,7 @@ impl RowGroupReaderBuilder {
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
         )?
+        .with_json2_rewrite_targets(&self.json2_rewrite_targets)?
         .boxed())
     }
 

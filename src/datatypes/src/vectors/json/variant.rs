@@ -39,6 +39,10 @@ pub fn variant_field(name: impl Into<String>, nullable: bool) -> Field {
     .with_extension_type(VariantType)
 }
 
+/// Encodes JSON values as an unshredded Parquet Variant array.
+///
+/// `None` represents an Arrow null while `Some(Value::Null)` represents a JSON
+/// null, preserving the distinction required by JSON2.
 #[cfg(test)]
 pub(crate) fn json_values_to_variant(values: &[Option<serde_json::Value>]) -> Result<ArrayRef> {
     let mut builder = VariantArrayBuilder::new(values.len());
@@ -53,7 +57,7 @@ pub(crate) fn json_values_to_variant(values: &[Option<serde_json::Value>]) -> Re
 
 /// Encodes JSON variants as an unshredded Parquet Variant array.
 #[cfg(test)]
-fn json_variants_to_variant(values: &[Option<JsonVariant>]) -> Result<ArrayRef> {
+pub(crate) fn json_variants_to_variant(values: &[Option<JsonVariant>]) -> Result<ArrayRef> {
     let mut builder = VariantArrayBuilder::new(values.len());
     for value in values {
         match value {
@@ -201,6 +205,7 @@ fn append_large_u64(
     builder: &mut impl VariantBuilderExt,
     value: u64,
 ) -> std::result::Result<(), ArrowError> {
+    // Parquet Variant has no unsigned integer primitive. Decimal16 preserves the full u64 range.
     let value = VariantDecimal16::try_new(value as i128, 0).map_err(|e| {
         ArrowError::InvalidArgumentError(format!(
             "Failed to encode JSON large integer as Variant Decimal16: {e}"

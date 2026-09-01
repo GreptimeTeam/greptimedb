@@ -129,25 +129,30 @@ pub struct JsonMetadata {
 }
 
 impl JsonMetadata {
-    /// Creates metadata for the legacy JSON2 layout.
+    /// Creates metadata for the JSON2 layout version 2.
     pub fn new(json_settings: JsonSettings) -> Self {
-        Self {
-            json_settings,
-            layout_version: None,
-        }
-    }
-
-    /// Creates metadata for the new JSON2 physical v2 layout.
-    pub fn new_v2(json_settings: JsonSettings) -> Self {
         Self {
             json_settings,
             layout_version: Some(JSON2_LAYOUT_V2),
         }
     }
 
+    /// Creates metadata for the legacy JSON2 layout.
+    pub fn new_v1(json_settings: JsonSettings) -> Self {
+        Self {
+            json_settings,
+            layout_version: None,
+        }
+    }
+
     /// Returns the JSON2 settings.
     pub fn json_settings(&self) -> &JsonSettings {
         &self.json_settings
+    }
+
+    /// Consumes the metadata and returns its JSON2 settings.
+    pub fn into_json_settings(self) -> JsonSettings {
+        self.json_settings
     }
 
     /// Returns whether this metadata describes JSON2 layout version 2.
@@ -226,7 +231,7 @@ impl ExtensionType for Json2ExtensionType {
             })?;
             Ok(Arc::new(metadata))
         } else {
-            Ok(Arc::new(JsonMetadata::default()))
+            Ok(Arc::new(JsonMetadata::new_v1(JsonSettings::default())))
         }
     }
 
@@ -406,7 +411,7 @@ mod tests {
         let legacy: JsonMetadata = serde_json::from_str(r#"{"json_settings":{}}"#)?;
         assert!(!legacy.is_version_2());
 
-        let metadata = JsonMetadata::new_v2(JsonSettings::default());
+        let metadata = JsonMetadata::new(JsonSettings::default());
         assert!(metadata.is_version_2());
         let serialized = serde_json::to_string(&metadata)?;
         let deserialized: JsonMetadata = serde_json::from_str(&serialized)?;
@@ -418,7 +423,9 @@ mod tests {
     #[test]
     fn test_parse_json2_physical_layout() -> crate::error::Result<()> {
         let legacy = Field::new("data", DataType::Struct(Fields::empty()), true)
-            .with_extension_type(Json2ExtensionType::default());
+            .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new_v1(
+                JsonSettings::default(),
+            ))));
         assert!(!Json2PhysicalLayout::try_from_root(&legacy)?.is_version_2());
 
         let v2 = Field::new(
@@ -432,7 +439,7 @@ mod tests {
             ),
             true,
         )
-        .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(
+        .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new(
             JsonSettings::default(),
         ))));
         assert!(Json2PhysicalLayout::try_from_root(&v2)?.is_version_2());
@@ -447,7 +454,7 @@ mod tests {
         assert!(Json2PhysicalLayout::try_from_root(&field).is_err());
 
         let metadata =
-            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default())));
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::default())));
         let missing = Field::new("data", DataType::Struct(Fields::empty()), true)
             .with_extension_type(metadata.clone());
         assert!(json2_remainder_field(&missing).is_ok_and(|x| x.is_none()));
