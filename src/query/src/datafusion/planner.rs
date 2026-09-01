@@ -20,7 +20,7 @@ use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
 use common_function::function::FunctionContext;
 use datafusion::catalog::TableFunctionArgs;
-use datafusion::common::TableReference;
+use datafusion::common::{DFSchema, TableReference};
 use datafusion::datasource::cte_worktable::CteWorkTable;
 use datafusion::datasource::file_format::{FileFormatFactory, format_as_file_type};
 use datafusion::datasource::provider_as_source;
@@ -252,17 +252,24 @@ impl ContextProvider for DfContextProviderAdapter {
         // `array_upper(ARRAY[...], 1)` reach them as concrete literals.
         // Non-constant args are returned unchanged by the simplifier.
         let simplify_info = datafusion_expr::simplify::SimplifyContext::builder()
-            .with_config_options(self.session_state.config_options().clone())
+            .with_config_options(Arc::clone(self.session_state.config_options()))
+            .with_query_execution_start_time(
+                self.session_state
+                    .execution_props()
+                    .query_execution_start_time,
+            )
             .build();
         let simplifier =
             datafusion_optimizer::simplify_expressions::ExprSimplifier::new(simplify_info);
-        let args: Vec<datafusion_expr::Expr> = args
+        let schema = DFSchema::empty();
+        let args = args
             .into_iter()
-            .map(|a| match simplifier.simplify(a.clone()) {
-                Ok(simplified) => simplified,
-                Err(_) => a,
+            .map(|arg| {
+                simplifier
+                    .coerce(arg, &schema)
+                    .and_then(|arg| simplifier.simplify(arg))
             })
-            .collect();
+            .collect::<DfResult<Vec<_>>>()?;
         let table_args = TableFunctionArgs::new(&args, &self.session_state);
         let tbl_func = if let Some(tbl_func) = self.engine_state.table_function(name) {
             tbl_func
@@ -294,7 +301,7 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
-        // Teach the SQL planner to accept Postgres oid-alias type names
+        // Provide the SQL planner with Postgres oid-alias type names
         // (`regclass`, `regproc`, `regtype`, `regnamespace`, `oid`, ...) and
         // `pg_catalog.`-qualified builtins. DataFusion rejects these as
         // "Unsupported SQL type" otherwise. The planner maps each to its Arrow
