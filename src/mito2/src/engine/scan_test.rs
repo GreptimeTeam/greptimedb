@@ -2933,7 +2933,7 @@ async fn test_exact_sequence_read_pk_format_compaction_multiple_inputs() {
         .insert_option("preserve_row_sequence", "true")
         .insert_option("sst_format", "primary_key")
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
         .build();
     let column_schemas = test_util::rows_schema(&request);
 
@@ -2955,7 +2955,13 @@ async fn test_exact_sequence_read_pk_format_compaction_multiple_inputs() {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Compact(RegionCompactRequest::default()),
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
         )
         .await
         .unwrap();
