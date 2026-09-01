@@ -106,15 +106,31 @@ same-request conflict can create `mixed`; a later write does not update an
 existing table option, so the catalog value can also be stale while the row tag
 remains authoritative.
 
+The concrete mixed-temporality workload is a rolling production change from
+cumulative to delta for the same metric name. Old and new exporters can overlap
+during rollout, retries and late points can extend that overlap, and retained
+cumulative history must remain queryable after the fleet converges. Rejecting a
+different temporality at table level therefore prevents an in-place transition.
+Routing delta rows to another table either exposes a different metric/table to
+users or requires a logical union that still needs a per-series temporality
+discriminator. v1 keeps one table and stores that discriminator on the series.
+
 The marker remains in PromQL results and follows ordinary label matching and
-grouping. Nullable String tags match like absent Prometheus labels, and
-cross-table binary operations normalize a missing tag to the empty label value;
-use the configured label in `ignoring(...)` when that distinction should not
+grouping. The supported states of this reserved label are absent/NULL
+(cumulative) and `delta`. Exact Metric Engine arithmetic and comparison matching
+reuses the existing `__tsid` key, so mixed-temporality support adds no projected
+matching columns on that path. When `__tsid` is unavailable and the marker
+participates in matching, the planner aligns only the configured temporality
+marker, projecting a nullable String on an input whose schema lacks it;
+unrelated nullable labels retain their existing matching behavior. Ignoring the
+marker adds no marker-related matching work.
+
+Use the configured label in `ignoring(...)` when temporality should not
 participate in matching (for example, `ignoring(__greptime_temporality__)` with
 the default prefix or `ignoring(__custom_temporality__)` with `custom`). Apply
-`rate()` or `increase()` before an aggregation or subquery that drops the marker.
-`irate()` and `resets()` are not temporality-aware in v1; `delta()`, `idelta()`,
-and `changes()` retain their existing raw-sample semantics.
+`rate()` or `increase()` before an aggregation or subquery that drops the
+marker. `irate()` and `resets()` are not temporality-aware in v1; `delta()`,
+`idelta()`, and `changes()` retain their existing raw-sample semantics.
 
 The configured temporality label is a reserved stored key for OTLP metric
 attributes. Existing float tables that already contain that exact String tag

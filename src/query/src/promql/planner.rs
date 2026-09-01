@@ -105,13 +105,14 @@ use crate::parser::{
     EXPLAIN_VERBOSE_NODE_NAME,
 };
 use crate::promql::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
-    FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
-    InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, SameLabelSetSnafu,
-    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
-    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
-    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu,
+    InvalidRegularExpressionSnafu, InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu,
+    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
+    Result, SameLabelSetSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -1064,12 +1065,20 @@ impl PromPlanner {
         first_leaf: &PlannedIslandLeaf,
         right_leaf: &PlannedIslandLeaf,
     ) -> Result<LogicalPlan> {
+        let only_join_time_index = (first_leaf.ctx.tag_columns.is_empty()
+            || right_leaf.ctx.tag_columns.is_empty())
+            && !first_leaf
+                .ctx
+                .tag_columns
+                .iter()
+                .chain(&right_leaf.ctx.tag_columns)
+                .any(|tag| tag == greptime_temporality_label());
         let (mut left_keys, mut right_keys, force_empty_join) = self.binary_join_key_columns(
             left.schema(),
             right_leaf.plan.schema(),
             &first_leaf.ctx,
             &right_leaf.ctx,
-            false,
+            only_join_time_index,
             &None,
         )?;
 
@@ -1585,7 +1594,15 @@ impl PromPlanner {
                     right_table_ref.clone(),
                     left_time_index_column,
                     right_time_index_column,
-                    lhs.value_type() == ValueType::Scalar || rhs.value_type() == ValueType::Scalar,
+                    lhs.value_type() == ValueType::Scalar
+                        || rhs.value_type() == ValueType::Scalar
+                        || ((left_context.tag_columns.is_empty()
+                            || right_context.tag_columns.is_empty())
+                            && !left_context
+                                .tag_columns
+                                .iter()
+                                .chain(&right_context.tag_columns)
+                                .any(|tag| tag == greptime_temporality_label())),
                     modifier,
                     &left_context,
                     &right_context,
@@ -2578,6 +2595,7 @@ impl PromPlanner {
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
+                    && column_name == greptime_temporality_label()
                     && let Some(data_type) = field
                         .filter(|field| {
                             field.is_nullable()
@@ -5803,7 +5821,7 @@ impl PromPlanner {
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
     ) -> Result<LogicalPlan> {
-        let (mut left_tag_columns, mut right_tag_columns, force_empty_join) = self
+        let (mut left_tag_columns, mut right_tag_columns, mut force_empty_join) = self
             .binary_join_key_columns(
                 left.schema(),
                 right.schema(),
@@ -5816,28 +5834,30 @@ impl PromPlanner {
             && !force_empty_join
             && left_tag_columns == BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()])
             && right_tag_columns == BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]);
-        let normalize_match_keys = !only_join_time_index
+        let (left, right) = if !only_join_time_index
             && !use_tsid_join
-            && Self::binary_match_keys_need_normalization(
-                &left,
-                &right,
-                left_context,
-                right_context,
-                modifier,
-            );
-        let (left, right, force_empty_join) = if normalize_match_keys {
-            let (left, right, match_keys) = Self::add_normalized_match_keys(
+            && Self::only_temporality_match_label_mismatches(left_context, right_context, modifier)
+        {
+            let mut aligned_left_context = left_context.clone();
+            let mut aligned_right_context = right_context.clone();
+            let (left, right, _) = Self::align_temporality_match_column(
                 left,
                 right,
-                left_context,
-                right_context,
-                modifier,
+                &mut aligned_left_context,
+                &mut aligned_right_context,
             )?;
-            left_tag_columns = match_keys.iter().cloned().collect();
-            right_tag_columns = match_keys.into_iter().collect();
-            (left, right, false)
+            (left_tag_columns, right_tag_columns, force_empty_join) = self
+                .binary_join_key_columns(
+                    left.schema(),
+                    right.schema(),
+                    &aligned_left_context,
+                    &aligned_right_context,
+                    false,
+                    modifier,
+                )?;
+            (left, right)
         } else {
-            (left, right, force_empty_join)
+            (left, right)
         };
 
         // push time index column if it exists
@@ -5916,31 +5936,78 @@ impl PromPlanner {
         labels
     }
 
-    fn binary_match_keys_need_normalization(
-        left: &LogicalPlan,
-        right: &LogicalPlan,
+    fn only_temporality_match_label_mismatches(
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         modifier: &Option<BinModifier>,
     ) -> bool {
-        Self::selected_binary_match_labels(left_context, right_context, modifier)
-            .into_iter()
-            .any(|label| {
-                let nullable = |plan: &LogicalPlan, context: &PromPlannerContext| {
-                    context.tag_columns.contains(&label).then(|| {
-                        plan.schema()
-                            .fields()
-                            .iter()
-                            .find(|field| field.name() == &label)
-                            .is_none_or(|field| field.is_nullable())
-                    })
-                };
-                match (nullable(left, left_context), nullable(right, right_context)) {
-                    (Some(left), Some(right)) => left || right,
-                    (Some(_), None) | (None, Some(_)) => true,
-                    (None, None) => false,
-                }
-            })
+        let mut mismatches =
+            Self::selected_binary_match_labels(left_context, right_context, modifier)
+                .into_iter()
+                .filter(|label| {
+                    left_context.tag_columns.contains(label)
+                        != right_context.tag_columns.contains(label)
+                });
+        matches!(
+            (mismatches.next(), mismatches.next()),
+            (Some(label), None) if label == greptime_temporality_label()
+        )
+    }
+
+    fn align_temporality_match_column(
+        mut left: LogicalPlan,
+        mut right: LogicalPlan,
+        left_context: &mut PromPlannerContext,
+        right_context: &mut PromPlannerContext,
+    ) -> Result<(LogicalPlan, LogicalPlan, bool)> {
+        let marker = greptime_temporality_label();
+        let left_has_marker = left_context.tag_columns.iter().any(|tag| tag == marker);
+        let (present, add_to_left) = if left_has_marker {
+            (&left, false)
+        } else {
+            (&right, true)
+        };
+        let data_type = present
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.name() == marker)
+            .map(|field| field.data_type().clone())
+            .with_context(|| ColumnNotFoundSnafu {
+                col: marker.to_string(),
+            })?;
+        let null = Self::string_scalar_value(&data_type, None).with_context(|| {
+            UnexpectedPlanExprSnafu {
+                desc: format!("temporality match label {marker} must be a string"),
+            }
+        })?;
+        let add_marker = |plan: LogicalPlan| {
+            let visible = plan
+                .schema()
+                .iter()
+                .map(|(qualifier, field)| {
+                    DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+                })
+                .collect::<Vec<_>>();
+            LogicalPlanBuilder::from(plan)
+                .project(
+                    visible
+                        .into_iter()
+                        .chain([DfExpr::Literal(null, None).alias(marker)]),
+                )
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)
+        };
+
+        if add_to_left {
+            left = add_marker(left)?;
+            left_context.tag_columns.push(marker.to_string());
+        } else {
+            right = add_marker(right)?;
+            right_context.tag_columns.push(marker.to_string());
+        }
+        Ok((left, right, add_to_left))
     }
 
     fn normalized_match_key_expr(
@@ -5971,93 +6038,6 @@ impl PromPlanner {
         expr.alias(internal_name)
     }
 
-    fn add_normalized_match_keys(
-        left: LogicalPlan,
-        right: LogicalPlan,
-        left_context: &PromPlannerContext,
-        right_context: &PromPlannerContext,
-        modifier: &Option<BinModifier>,
-    ) -> Result<(LogicalPlan, LogicalPlan, Vec<String>)> {
-        let match_labels =
-            Self::selected_binary_match_labels(left_context, right_context, modifier);
-        let left_tags = left_context.tag_columns.iter().collect::<HashSet<_>>();
-        let right_tags = right_context.tag_columns.iter().collect::<HashSet<_>>();
-        let mut occupied = left
-            .schema()
-            .fields()
-            .iter()
-            .chain(right.schema().fields().iter())
-            .map(|field| field.name().clone())
-            .collect::<HashSet<_>>();
-        let mut left_keys = Vec::with_capacity(match_labels.len());
-        let mut right_keys = Vec::with_capacity(match_labels.len());
-        let mut key_names = Vec::with_capacity(match_labels.len());
-
-        for label in match_labels {
-            let find_field = |plan: &LogicalPlan, tags: &HashSet<&String>| {
-                tags.contains(&label).then(|| {
-                    plan.schema()
-                        .iter()
-                        .find(|(_, field)| field.name() == &label)
-                        .map(|(qualifier, field)| (qualifier.cloned(), field.data_type().clone()))
-                        .with_context(|| ColumnNotFoundSnafu { col: label.clone() })
-                })
-            };
-            let left_field = find_field(&left, &left_tags).transpose()?;
-            let right_field = find_field(&right, &right_tags).transpose()?;
-            let data_type = Self::common_label_data_type(
-                left_field.as_ref().map(|(_, data_type)| data_type),
-                right_field.as_ref().map(|(_, data_type)| data_type),
-            )
-            .with_context(|| UnexpectedPlanExprSnafu {
-                desc: format!("binary match label {label} must be a string"),
-            })?;
-            let mut index = key_names.len();
-            let internal_name = loop {
-                let name = format!("__promql_match_{index}");
-                index += 1;
-                if occupied.insert(name.clone()) {
-                    break name;
-                }
-            };
-            left_keys.push(Self::normalized_match_key_expr(
-                &label,
-                left_field,
-                &data_type,
-                &internal_name,
-            ));
-            right_keys.push(Self::normalized_match_key_expr(
-                &label,
-                right_field,
-                &data_type,
-                &internal_name,
-            ));
-            key_names.push(internal_name);
-        }
-
-        let visible_exprs = |plan: &LogicalPlan| {
-            plan.schema()
-                .iter()
-                .map(|(qualifier, field)| {
-                    DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
-                })
-                .collect::<Vec<_>>()
-        };
-        let left_visible = visible_exprs(&left);
-        let right_visible = visible_exprs(&right);
-        let left = LogicalPlanBuilder::from(left)
-            .project(left_visible.into_iter().chain(left_keys))
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
-        let right = LogicalPlanBuilder::from(right)
-            .project(right_visible.into_iter().chain(right_keys))
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
-        Ok((left, right, key_names))
-    }
-
     fn is_zero_row_empty_relation(plan: &LogicalPlan) -> bool {
         // `produce_one_row` is used for input-free plans that still emit one row;
         // only the false case is a statically proven empty vector.
@@ -6067,7 +6047,7 @@ impl PromPlanner {
     /// Build a set operator (AND/OR/UNLESS)
     fn set_op_on_non_field_columns(
         &mut self,
-        left: LogicalPlan,
+        mut left: LogicalPlan,
         mut right: LogicalPlan,
         left_context: PromPlannerContext,
         right_context: PromPlannerContext,
@@ -6108,6 +6088,65 @@ impl PromPlanner {
                 },
             );
         }
+
+        let output_context = left_context.clone();
+        let visible_left_schema = left.schema().clone();
+        let mut left_context = left_context;
+        let mut right_context = right_context;
+        let added_marker_to_left = if Self::only_temporality_match_label_mismatches(
+            &left_context,
+            &right_context,
+            modifier,
+        ) {
+            let aligned = Self::align_temporality_match_column(
+                left,
+                right,
+                &mut left_context,
+                &mut right_context,
+            )?;
+            left = aligned.0;
+            right = aligned.1;
+            aligned.2
+        } else {
+            false
+        };
+
+        let mut left_tag_col_set = left_context
+            .tag_columns
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut right_tag_col_set = right_context
+            .tag_columns
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(matching) = modifier
+            .as_ref()
+            .and_then(|modifier| modifier.matching.as_ref())
+        {
+            match matching {
+                LabelModifier::Include(on) => {
+                    let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
+                    left_tag_col_set = left_tag_col_set.intersection(&mask).cloned().collect();
+                    right_tag_col_set = right_tag_col_set.intersection(&mask).cloned().collect();
+                }
+                LabelModifier::Exclude(ignoring) => {
+                    for label in &ignoring.labels {
+                        let _ = left_tag_col_set.remove(label);
+                        let _ = right_tag_col_set.remove(label);
+                    }
+                }
+            }
+        }
+        ensure!(
+            left_tag_col_set == right_tag_col_set,
+            CombineTableColumnMismatchSnafu {
+                left: left_tag_col_set.iter().cloned().collect::<Vec<_>>(),
+                right: right_tag_col_set.iter().cloned().collect::<Vec<_>>(),
+            }
+        );
+
         let left_time_index = left_context.time_index_column.clone().unwrap();
         let right_time_index = right_context.time_index_column.clone().unwrap();
 
@@ -6133,23 +6172,10 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        let visible_left_schema = left.schema().clone();
-        let normalize_match_keys = Self::binary_match_keys_need_normalization(
-            &left,
-            &right,
-            &left_context,
-            &right_context,
-            modifier,
-        );
-        let (left, right, mut join_keys) = if normalize_match_keys {
-            Self::add_normalized_match_keys(left, right, &left_context, &right_context, modifier)?
-        } else {
-            let keys = Self::selected_binary_match_labels(&left_context, &right_context, modifier)
-                .into_iter()
-                .collect();
-            (left, right, keys)
-        };
-        join_keys.push(left_time_index);
+        let join_keys = left_tag_col_set
+            .into_iter()
+            .chain([left_time_index])
+            .collect::<Vec<_>>();
 
         ensure!(
             left_context.field_columns.len() == 1
@@ -6197,16 +6223,20 @@ impl PromPlanner {
             }
             _ => UnexpectedTokenSnafu { token: op }.fail(),
         }?;
-        let result = LogicalPlanBuilder::from(result)
-            .project(visible_left_schema.iter().map(|(qualifier, field)| {
-                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
-            }))
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
+        let result = if added_marker_to_left {
+            LogicalPlanBuilder::from(result)
+                .project(visible_left_schema.iter().map(|(qualifier, field)| {
+                    DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+                }))
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?
+        } else {
+            result
+        };
 
         // AND/UNLESS preserve the complete left operand schema and metadata.
-        self.ctx = left_context;
+        self.ctx = output_context;
         Ok(result)
     }
 
@@ -9098,6 +9128,35 @@ mod test {
                 "{query}: {plan_str}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn timestamp_binary_join_rejects_default_matching_on_mismatched_labels() {
+        let eval_stmt = build_eval_stmt("timestamp(left_host_job) / right_by_job");
+
+        let table_provider = build_test_table_provider_with_tsid_tag_fields(&[
+            (
+                (DEFAULT_SCHEMA_NAME.to_string(), "left_host_job".to_string()),
+                2,
+                1,
+            ),
+            (
+                (DEFAULT_SCHEMA_NAME.to_string(), "right_by_job".to_string()),
+                1,
+                1,
+            ),
+        ])
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+
+        assert!(
+            plan_str.contains("Boolean(false)") || plan_str.contains("false"),
+            "{plan_str}"
+        );
     }
 
     #[tokio::test]

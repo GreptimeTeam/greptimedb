@@ -256,33 +256,6 @@ async fn rate_and_increase_select_raw_delta_math_per_series() {
 }
 
 #[tokio::test]
-async fn timestamp_binary_join_normalizes_default_matching_on_mismatched_labels() {
-    let eval_stmt = build_eval_stmt("timestamp(left_host_job) / right_by_job");
-
-    let table_provider = build_test_table_provider_with_tsid_tag_fields(&[
-        (
-            (DEFAULT_SCHEMA_NAME.to_string(), "left_host_job".to_string()),
-            2,
-            1,
-        ),
-        (
-            (DEFAULT_SCHEMA_NAME.to_string(), "right_by_job".to_string()),
-            1,
-            1,
-        ),
-    ])
-    .await;
-    let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-        .await
-        .unwrap();
-    let plan_str = plan.display_indent_schema().to_string();
-
-    assert!(plan_str.contains("__promql_match_0"), "{plan_str}");
-    assert!(plan_str.contains("__promql_match_1"), "{plan_str}");
-    assert!(!plan_str.contains("Boolean(false)"), "{plan_str}");
-}
-
-#[tokio::test]
 async fn native_histogram_rate_ignores_delta_marker() {
     let provider =
         build_test_native_histogram_table_provider_with_marker("native_delta_metric", true).await;
@@ -321,9 +294,10 @@ async fn mixed_range_rate_selects_delta_math_only_for_float_samples() {
 }
 
 #[tokio::test]
-async fn nullable_string_matchers_treat_null_as_absent() {
+async fn temporality_matchers_treat_null_as_absent() {
+    let marker = greptime_temporality_label();
     let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-        "label",
+        marker,
         ArrowDataType::Utf8,
         true,
     )]));
@@ -331,40 +305,30 @@ async fn nullable_string_matchers_treat_null_as_absent() {
         schema.clone(),
         vec![Arc::new(StringArray::from(vec![
             None,
-            Some(""),
-            Some("delta"),
-            Some("other"),
+            Some(GREPTIME_TEMPORALITY_DELTA),
         ]))],
     )
     .unwrap();
     let table = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
 
-    for (query, expected) in [
-        (r#"metric{label=""}"#, vec![None, Some("")]),
-        (
-            r#"metric{label!="delta"}"#,
-            vec![None, Some(""), Some("other")],
-        ),
-        (
-            r#"metric{label=~".*"}"#,
-            vec![None, Some(""), Some("delta"), Some("other")],
-        ),
-        (
-            r#"metric{label!~"delta"}"#,
-            vec![None, Some(""), Some("other")],
-        ),
-        (r#"metric{label="delta"}"#, vec![Some("delta")]),
+    for (matcher, expected) in [
+        (r#"="""#, vec![None]),
+        (r#"!="delta""#, vec![None]),
+        (r#"=~".*""#, vec![None, Some(GREPTIME_TEMPORALITY_DELTA)]),
+        (r#"!~"delta""#, vec![None]),
+        (r#"="delta""#, vec![Some(GREPTIME_TEMPORALITY_DELTA)]),
     ] {
+        let query = format!(r#"metric{{{marker}{matcher}}}"#);
         let scan = LogicalPlanBuilder::scan("labels", provider_as_source(table.clone()), None)
             .unwrap()
             .build()
             .unwrap();
-        let PromExpr::VectorSelector(selector) = parser::parse(query).unwrap() else {
+        let PromExpr::VectorSelector(selector) = parser::parse(&query).unwrap() else {
             unreachable!()
         };
         let expressions = PromPlanner::matchers_to_expr(selector.matchers, scan.schema()).unwrap();
         let display = expressions.iter().map(ToString::to_string).join(" AND ");
-        if query == r#"metric{label="delta"}"# {
+        if matcher == r#"="delta""# {
             assert!(!display.contains("coalesce"), "{display}");
         } else if !expressions.is_empty() {
             assert!(display.contains("coalesce"), "{display}");
@@ -383,7 +347,7 @@ async fn nullable_string_matchers_treat_null_as_absent() {
             .iter()
             .flat_map(|batch| {
                 let labels = batch
-                    .column_by_name("label")
+                    .column_by_name(marker)
                     .unwrap()
                     .as_any()
                     .downcast_ref::<StringArray>()
@@ -401,15 +365,54 @@ async fn nullable_string_matchers_treat_null_as_absent() {
             "{query}"
         );
     }
+
+    let ordinary_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "label",
+        ArrowDataType::Utf8,
+        true,
+    )]));
+    let ordinary_scan = LogicalPlanBuilder::scan(
+        "ordinary_labels",
+        provider_as_source(Arc::new(
+            MemTable::try_new(ordinary_schema, vec![vec![]]).unwrap(),
+        )),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let PromExpr::VectorSelector(selector) = parser::parse(r#"metric{label!="delta"}"#).unwrap()
+    else {
+        unreachable!()
+    };
+    let expressions = PromPlanner::matchers_to_expr(selector.matchers, ordinary_scan.schema())
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .join(" AND ");
+    assert!(!expressions.contains("coalesce"), "{expressions}");
 }
 
 #[tokio::test]
-async fn binary_joins_normalize_missing_and_null_labels() {
-    for (left_k, expected_rows) in [(Some(Some("delta")), 0), (Some(None), 1)] {
-        let left = matrix_source("lhs", left_k, 1, 1.0);
-        let right = matrix_source("rhs", None, 1, 2.0);
-        let left_context = matrix_context("lhs", left_k);
-        let right_context = matrix_context("rhs", None);
+async fn binary_joins_align_only_the_temporality_marker() {
+    let marker = greptime_temporality_label();
+    for (left_marker, expected_rows) in [(Some(GREPTIME_TEMPORALITY_DELTA), 0), (None, 1)] {
+        let left = source(
+            "lhs",
+            false,
+            1,
+            vec![("job", Some("job")), (marker, left_marker)],
+            DirectOrValue::Float64(1.0),
+        );
+        let right = source(
+            "rhs",
+            false,
+            1,
+            vec![("job", Some("job"))],
+            DirectOrValue::Float64(2.0),
+        );
+        let left_context = direct_or_context("lhs", &["job", marker], "v");
+        let right_context = direct_or_context("rhs", &["job"], "v");
         let planner = PromPlanner {
             table_provider: build_test_table_provider_with_fields(
                 &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
@@ -433,6 +436,13 @@ async fn binary_joins_normalize_missing_and_null_labels() {
                 &right_context,
             )
             .unwrap();
+        assert!(
+            !joined
+                .display_indent_schema()
+                .to_string()
+                .contains("__promql_match_"),
+            "{joined:?}"
+        );
         let (_, batches) = execute(joined, &build_query_engine_state()).await;
         assert_eq!(
             expected_rows,
@@ -467,10 +477,56 @@ async fn binary_joins_normalize_missing_and_null_labels() {
                 .iter()
                 .all(|field| !field.name().starts_with("__promql_match_"))
         );
+        assert!(
+            !set.display_indent_schema()
+                .to_string()
+                .contains("__promql_match_"),
+            "{set:?}"
+        );
         let (_, batches) = execute(set, &build_query_engine_state()).await;
         assert_eq!(
             expected_rows,
             batches.iter().map(RecordBatch::num_rows).sum::<usize>()
         );
     }
+
+    let left = source(
+        "lhs",
+        false,
+        1,
+        vec![("job", Some("job"))],
+        DirectOrValue::Float64(1.0),
+    );
+    let right = source(
+        "rhs",
+        false,
+        1,
+        vec![("job", Some("job")), (marker, None)],
+        DirectOrValue::Float64(2.0),
+    );
+    let PromExpr::Binary(and_expr) = parser::parse("lhs and rhs").unwrap() else {
+        unreachable!()
+    };
+    let mut planner = PromPlanner {
+        table_provider: build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await,
+        ctx: PromPlannerContext::default(),
+        promql_annotations: None,
+    };
+    let set = planner
+        .set_op_on_non_field_columns(
+            scan(&left),
+            scan(&right),
+            direct_or_context("lhs", &["job"], "v"),
+            direct_or_context("rhs", &["job", marker], "v"),
+            and_expr.op,
+            &and_expr.modifier,
+        )
+        .unwrap();
+    assert!(set.schema().field_with_unqualified_name(marker).is_err());
+    let (_, batches) = execute(set, &build_query_engine_state()).await;
+    assert_eq!(1, batches.iter().map(RecordBatch::num_rows).sum::<usize>());
 }

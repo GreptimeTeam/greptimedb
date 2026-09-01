@@ -72,7 +72,7 @@ TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 |_|_| Total rows: 3_|
 +-+-+-+
 
--- Nullable tags follow Prometheus absent-label matcher semantics.
+-- The reserved temporality marker treats NULL as the absent cumulative state.
 TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__=""};
 
 +---------------------+----------------+------------+--------------------------+
@@ -145,7 +145,7 @@ INSERT INTO delta_tagless VALUES (180000, 10);
 
 Affected Rows: 1
 
--- Missing and null labels match as empty; the concrete "delta" label does not.
+-- A missing temporality marker matches the NULL cumulative state; "delta" does not.
 TQL EVAL (180, 180, '1m') delta_marker_only + delta_tagless;
 
 +---------------------+-----------------------------------------------------------------+
