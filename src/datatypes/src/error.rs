@@ -225,6 +225,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid JSON2 settings: {reason}"))]
+    InvalidJson2Settings {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid Vector: {}", msg))]
     InvalidVector {
         msg: String,
@@ -349,6 +356,7 @@ impl ErrorExt for Error {
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
             | InvalidJson2Layout { .. }
+            | InvalidJson2Settings { .. }
             | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }

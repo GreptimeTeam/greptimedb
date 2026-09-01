@@ -30,11 +30,11 @@ pub use mito_codec::key_values::KeyValues;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
-use crate::error::{Result, UnsupportedOperationSnafu};
+use crate::error::{InvalidRegionOptionsSnafu, Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::{BulkMemtableBuilder, CompactDispatcher};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
@@ -399,6 +399,26 @@ pub(crate) struct MemtableBuilderProvider {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     config: Arc<MitoConfig>,
     compact_dispatcher: Arc<CompactDispatcher>,
+}
+
+/// Ensures JSON2 columns are not used with [`TimeSeriesMemtable`].
+pub(crate) fn ensure_json2_not_use_time_series_memtable(
+    metadata: &RegionMetadata,
+    options: &RegionOptions,
+) -> Result<()> {
+    if metadata
+        .column_metadatas
+        .iter()
+        .any(|x| x.column_schema.data_type.is_json2())
+    {
+        ensure!(
+            !matches!(&options.memtable, Some(MemtableOptions::TimeSeries)),
+            InvalidRegionOptionsSnafu {
+                reason: "JSON2 columns only support BulkMemtable",
+            }
+        );
+    }
+    Ok(())
 }
 
 impl MemtableBuilderProvider {
@@ -772,9 +792,15 @@ impl MemtableRange {
 mod tests {
     use std::sync::Arc;
 
+    use common_error::ext::WhateverResult;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+    use store_api::metadata::RegionMetadataBuilder;
+
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
     use crate::memtable::bulk::BulkMemtableConfig;
+    use crate::test_util::sst_util::sst_region_metadata;
 
     #[test]
     fn test_alloc_tracker_without_manager() {
@@ -847,5 +873,28 @@ mod tests {
             provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
 
         assert_eq!(&config, builder.config());
+    }
+
+    #[test]
+    fn test_json2_requires_bulk_memtable() -> WhateverResult<()> {
+        let mut metadata = sst_region_metadata();
+        metadata.column_metadatas[2].column_schema.data_type =
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        let metadata = RegionMetadataBuilder::from_existing(metadata).build()?;
+        let mut options = RegionOptions {
+            sst_format: Some(FormatType::PrimaryKey),
+            memtable: Some(MemtableOptions::TimeSeries),
+            ..Default::default()
+        };
+
+        let err = ensure_json2_not_use_time_series_memtable(&metadata, &options).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("JSON2 columns only support BulkMemtable")
+        );
+
+        options.memtable = Some(MemtableOptions::Bulk(BulkMemtableConfig::default()));
+        ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        Ok(())
     }
 }

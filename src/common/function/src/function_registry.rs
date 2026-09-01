@@ -43,6 +43,7 @@ use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::uddsketch_rank::UddSketchRankFunction;
 use crate::scalars::vector::VectorFunction as VectorScalarFunction;
+use crate::scalars::welford_stddev::WelfordStddevFunction;
 use crate::system::SystemFunction;
 
 #[derive(Default)]
@@ -190,6 +191,11 @@ impl FunctionRegistry {
             .collect()
     }
 
+    /// Returns a registered aggregate function by name.
+    pub fn get_aggr_func(&self, name: &str) -> Option<AggregateUDF> {
+        self.aggregate_functions.read().unwrap().get(name).cloned()
+    }
+
     /// Returns true if an aggregate function with the given name exists in the registry.
     pub fn is_aggr_func_exist(&self, name: &str) -> bool {
         self.aggregate_functions.read().unwrap().contains_key(name)
@@ -212,6 +218,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     UddSketchCalcFunction::register(&function_registry);
     UddSketchRankFunction::register(&function_registry);
     HllCalcFunction::register(&function_registry);
+    WelfordStddevFunction::register(&function_registry);
     DecodePrimaryKeyFunction::register(&function_registry);
 
     // Full text search function

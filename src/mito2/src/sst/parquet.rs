@@ -14,11 +14,13 @@
 
 //! SST in parquet format.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+use datatypes::json::JsonSettings;
 use parquet::file::metadata::ParquetMetaData;
-use store_api::storage::FileId;
+use store_api::storage::{ColumnId, FileId};
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
@@ -28,6 +30,7 @@ pub mod file_range;
 pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
+pub(crate) mod index_writer;
 pub(crate) mod json_align;
 pub mod metadata;
 pub mod prefilter;
@@ -48,6 +51,19 @@ pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
 /// default execution batch size to reduce rebatching and concatenation in the
 /// query pipeline.
 pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;
+
+/// JSON2 physical layouts requested by a compaction read.
+pub(crate) type Json2RewriteTargets = Arc<BTreeMap<ColumnId, Json2TargetLayout>>;
+
+/// Fixed JSON2 physical layout used while rewriting compaction input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Json2TargetLayout {
+    /// Logical JSON2 extension metadata attached to the rewritten field.
+    pub(crate) extension_metadata: String,
+    /// Settings used to build the fixed physical layout.
+    pub(crate) target_layout: JsonSettings,
+}
+
 /// Default row group size for parquet files.
 ///
 /// Keep the existing persisted/on-disk default stable. It intentionally stays

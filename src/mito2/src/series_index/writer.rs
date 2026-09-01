@@ -16,7 +16,6 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray, UInt32Array,
     UInt64Array,
@@ -26,83 +25,25 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use datatypes::value::Value;
-use futures::future::BoxFuture;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
-use object_store::{ObjectStore, Writer};
-use parquet::arrow::AsyncArrowWriter;
-use parquet::arrow::async_writer::AsyncFileWriter;
-use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::errors::ParquetError;
-use parquet::file::properties::WriterProperties;
+use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use store_api::storage::consts::ReservedColumnId;
 
-use crate::access_layer::TempFileCleaner;
 use crate::error::{
-    DecodeSnafu, InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, OpenDalSnafu,
-    Result, UnexpectedSnafu, WriteParquetSnafu,
+    DecodeSnafu, InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::series_index::{
     MAX_TS_COLUMN, MIN_TS_COLUMN, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN,
 };
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::sst::parquet::index_writer::ParquetIndexWriter;
 
 const WRITE_BATCH_SIZE: usize = 1024;
-
-type ParquetWriter = AsyncArrowWriter<AsyncWriter>;
-
-/// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`] and tracks
-/// the number of bytes successfully submitted to the object store.
-struct AsyncWriter {
-    inner: Writer,
-    output_bytes: u64,
-}
-
-impl AsyncWriter {
-    fn new(inner: Writer) -> Self {
-        Self {
-            inner,
-            output_bytes: 0,
-        }
-    }
-
-    fn output_bytes(&self) -> u64 {
-        self.output_bytes
-    }
-
-    fn into_inner(self) -> Writer {
-        self.inner
-    }
-}
-
-impl AsyncFileWriter for AsyncWriter {
-    fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
-        Box::pin(async move {
-            let len = bytes.len() as u64;
-            self.inner
-                .write(bytes)
-                .await
-                .map_err(|error| ParquetError::External(Box::new(error)))?;
-            self.output_bytes += len;
-            Ok(())
-        })
-    }
-
-    fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
-        Box::pin(async move {
-            self.inner
-                .close()
-                .await
-                .map(|_| ())
-                .map_err(|error| ParquetError::External(Box::new(error)))
-        })
-    }
-}
 
 /// Options for writing a series index.
 #[derive(Debug, Clone)]
@@ -170,9 +111,7 @@ pub struct SeriesIndexWriter {
     codec: Arc<dyn PrimaryKeyCodec>,
     tag_columns: Vec<(ColumnId, String)>,
     schema: SchemaRef,
-    object_store: ObjectStore,
-    file_name: String,
-    writer: Option<ParquetWriter>,
+    writer: ParquetIndexWriter,
     current_primary_key: Option<Vec<u8>>,
     current_row: Option<SeriesIndexRow>,
     buffered_rows: Vec<SeriesIndexRow>,
@@ -200,32 +139,21 @@ impl SeriesIndexWriter {
         );
         let schema = series_index_schema(&metadata)?;
         let tag_columns = tag_columns(&metadata);
-        let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
-        let output = object_store
-            .writer_with(path)
-            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-            .concurrent(DEFAULT_WRITE_CONCURRENCY)
-            .await
-            .context(OpenDalSnafu)?;
-        let properties = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_encoding(Encoding::PLAIN)
-            .set_max_row_group_row_count(Some(options.row_group_size))
-            .set_column_index_truncate_length(None)
-            .set_statistics_truncate_length(None)
-            .build();
-        let writer =
-            AsyncArrowWriter::try_new(AsyncWriter::new(output), schema.clone(), Some(properties))
-                .context(WriteParquetSnafu)?;
+        let writer = ParquetIndexWriter::try_new(
+            "series index",
+            object_store,
+            path,
+            &schema,
+            options.row_group_size,
+        )
+        .await?;
         let codec = build_primary_key_codec(&metadata);
 
         Ok(Self {
             codec,
             tag_columns,
             schema,
-            object_store,
-            file_name,
-            writer: Some(writer),
+            writer,
             current_primary_key: None,
             current_row: None,
             buffered_rows: Vec::with_capacity(WRITE_BATCH_SIZE),
@@ -465,15 +393,7 @@ impl SeriesIndexWriter {
         }
         let batch = rows_to_batch(&self.schema, &self.buffered_rows)?;
         let start = Instant::now();
-        let result = self
-            .writer
-            .as_mut()
-            .context(UnexpectedSnafu {
-                reason: "series index Parquet writer is closed",
-            })?
-            .write(&batch)
-            .await
-            .context(WriteParquetSnafu);
+        let result = self.writer.write(&batch).await;
         self.metrics.write_elapsed += start.elapsed();
         result?;
         self.buffered_rows.clear();
@@ -489,35 +409,18 @@ impl SeriesIndexWriter {
         self.metrics.aggregate_elapsed += aggregate_start.elapsed().saturating_sub(write_cost);
 
         let finish_start = Instant::now();
-        self.writer
-            .as_mut()
-            .context(UnexpectedSnafu {
-                reason: "series index Parquet writer is closed",
-            })?
-            .finish()
-            .await
-            .context(WriteParquetSnafu)?;
-        let writer = self.writer.take().context(UnexpectedSnafu {
-            reason: "series index Parquet writer is closed",
-        })?;
-        self.metrics.output_bytes = writer.into_inner().output_bytes();
+        self.metrics.output_bytes = self.writer.finish().await?;
         self.metrics.finish_elapsed += finish_start.elapsed();
         Ok(())
     }
 
     async fn cleanup(&mut self) {
         let start = Instant::now();
-        if let Some(writer) = self.writer.take() {
-            let mut writer = writer.into_inner().into_inner();
-            if let Err(error) = writer.abort().await {
-                common_telemetry::warn!(error; "Failed to abort series index writer");
-            }
-        }
+        self.writer.abort().await;
         self.current_primary_key = None;
         self.current_row = None;
         self.buffered_rows.clear();
 
-        TempFileCleaner::clean_atomic_dir_files(&self.object_store, &[&self.file_name]).await;
         self.metrics.output_bytes = 0;
         self.metrics.cleanup_elapsed += start.elapsed();
     }
@@ -729,6 +632,7 @@ fn rows_to_batch(schema: &SchemaRef, rows: &[SeriesIndexRow]) -> Result<RecordBa
 #[cfg(test)]
 mod tests {
     use api::v1::SemanticType;
+    use bytes::Bytes;
     use datatypes::arrow::array::{
         BinaryDictionaryBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
         TimestampNanosecondArray, TimestampSecondArray, UInt8Array,

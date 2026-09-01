@@ -245,9 +245,11 @@ pub const REL_TYPE_COLUMN: &str = "rel_type";
 pub const PROVENANCE_COLUMN: &str = "provenance";
 pub const CONFIDENCE_COLUMN: &str = "confidence";
 pub const REQUEST_COUNT_COLUMN: &str = "request_count";
+pub const UNMATCHED_COUNT_COLUMN: &str = "unmatched_count";
 pub const ERROR_COUNT_COLUMN: &str = "error_count";
 pub const DURATION_SUM_COLUMN: &str = "duration_sum";
 pub const DURATION_COUNT_COLUMN: &str = "duration_count";
+pub const DURATION_MAX_COLUMN: &str = "duration_max";
 pub const EDGE_ATTRIBUTES_COLUMN: &str = "attributes";
 // Declared-edge table only.
 pub const VALID_FROM_COLUMN: &str = "valid_from";

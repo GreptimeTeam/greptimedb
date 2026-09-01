@@ -24,10 +24,10 @@ use bytes::Bytes;
 use common_base::cancellation::CancellableFuture;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
-use datatypes::extension::json::is_json2_extension_type;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionFlushReason;
 use store_api::storage::{RegionId, SequenceNumber};
 use strum::IntoStaticStr;
@@ -37,15 +37,15 @@ use crate::access_layer::{
     AccessLayerRef, Metrics, OperationType, SstInfoArray, SstWriteRequest, WriteType,
 };
 use crate::cache::CacheManagerRef;
+use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
     Error, FlushCancelledSnafu, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    RegionDroppedSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
-use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, MemtableRanges, RangesOptions};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
@@ -708,6 +708,7 @@ impl RegionFlushTask {
         let flat_sources = memtable_flat_sources(
             batch_schema,
             mem_ranges,
+            &version.metadata,
             &version.options,
             field_column_start,
         )?;
@@ -901,6 +902,7 @@ struct FlatSources {
 fn memtable_flat_sources(
     schema: SchemaRef,
     mem_ranges: MemtableRanges,
+    metadata: &RegionMetadataRef,
     options: &RegionOptions,
     field_column_start: usize,
 ) -> Result<FlatSources> {
@@ -918,6 +920,7 @@ fn memtable_flat_sources(
         if let Some(encoded) = only_range.encoded() {
             flat_sources.encoded.push((encoded, max_sequence));
         } else {
+            let schema = only_range.record_batch_schema_hint().unwrap_or(schema);
             let iter = only_range.build_record_batch_iter(None, None)?;
             // Dedup according to append mode and merge mode.
             // Even single range may have duplicate rows.
@@ -951,12 +954,23 @@ fn memtable_flat_sources(
         let mut input_iters = Vec::with_capacity(num_ranges);
         let mut current_ranges = Vec::new();
 
-        let has_json2 = schema.fields().iter().any(is_json2_extension_type);
-        let mut json_align_schemas = if has_json2 {
-            Some(Vec::with_capacity(num_ranges))
-        } else {
-            None
-        };
+        let schemas = ranges
+            .values()
+            .filter(|range| range.encoded().is_none())
+            .map(|range| {
+                (
+                    range
+                        .record_batch_schema_hint()
+                        .unwrap_or_else(|| schema.clone()),
+                    range.num_rows() as u64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let plans = Arc::new(collect_json2_rewrite_plans(metadata, &schemas)?);
+        let schema = rewrite_json2_schema(
+            schemas.first().map(|(schema, _)| schema).unwrap_or(&schema),
+            &plans,
+        );
 
         for (_range_id, range) in ranges {
             if let Some(encoded) = range.encoded() {
@@ -965,15 +979,26 @@ fn memtable_flat_sources(
                 continue;
             }
 
-            // Collect schemas if has json2 field.
-            if let Some(schemas) = json_align_schemas.as_mut() {
-                let schema = range
-                    .record_batch_schema_hint()
-                    .unwrap_or_else(|| schema.clone());
-                schemas.push(schema);
+            if let Some(actual) = range.record_batch_schema_hint() {
+                let actual = rewrite_json2_schema(&actual, &plans);
+                ensure!(
+                    actual == schema,
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Different schemas found in a MemtableRanges, expected: {}, actual: {}",
+                            schema, actual,
+                        ),
+                    }
+                )
             }
 
             let iter = range.build_record_batch_iter(None, None)?;
+            let iter: BoxedRecordBatchIterator = if plans.is_empty() {
+                iter
+            } else {
+                let plans = plans.clone();
+                Box::new(iter.map(move |batch| rewrite_json2_batch(batch?, &plans)))
+            };
             input_iters.push(iter);
             let range_rows = range.num_rows();
             last_iter_rows += range_rows;
@@ -1007,11 +1032,6 @@ fn memtable_flat_sources(
 
                 let input_iters =
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges));
-                let (schema, input_iters) = maybe_align_json2_iters(
-                    schema.clone(),
-                    json_align_schemas.take(),
-                    input_iters,
-                )?;
 
                 let maybe_dedup = merge_and_dedup_with_batch_size(
                     &schema,
@@ -1022,17 +1042,12 @@ fn memtable_flat_sources(
                     batch_size,
                 )?;
 
-                flat_sources
-                    .sources
-                    .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
+                flat_sources.sources.push((
+                    FlatSource::new_iter(schema.clone(), maybe_dedup),
+                    max_sequence,
+                ));
                 last_iter_rows = 0;
                 current_ranges.clear();
-
-                json_align_schemas = if has_json2 {
-                    Some(Vec::with_capacity(num_ranges))
-                } else {
-                    None
-                };
             }
         }
 
@@ -1045,9 +1060,6 @@ fn memtable_flat_sources(
                 input_iters.len(),
                 rows_remaining
             );
-
-            let (schema, input_iters) =
-                maybe_align_json2_iters(schema, json_align_schemas, input_iters)?;
 
             let max_sequence = current_ranges
                 .iter()
@@ -1076,24 +1088,6 @@ fn memtable_flat_sources(
     }
 
     Ok(flat_sources)
-}
-
-fn maybe_align_json2_iters(
-    schema: SchemaRef,
-    schemas: Option<Vec<SchemaRef>>,
-    input_iters: Vec<BoxedRecordBatchIterator>,
-) -> Result<(SchemaRef, Vec<BoxedRecordBatchIterator>)> {
-    let Some(schemas) = schemas else {
-        return Ok((schema, input_iters));
-    };
-
-    let aligner = Json2Aligner::try_new(schemas)?;
-    let input_iters = input_iters
-        .into_iter()
-        .map(|input_iter| aligner.wrap_iter(input_iter))
-        .collect();
-
-    Ok((aligner.schema().clone(), input_iters))
 }
 
 /// Merges multiple record batch iterators and applies deduplication based on the specified mode.
@@ -1646,6 +1640,8 @@ mod tests {
     use api::v1::{OpType, Rows};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use datatypes::arrow::datatypes::Schema;
+    use datatypes::arrow::record_batch::RecordBatch;
     use mito_codec::row_converter::build_primary_key_codec;
     use tokio::sync::oneshot;
 
@@ -1654,7 +1650,9 @@ mod tests {
     use crate::error::InvalidSchedulerStateSnafu;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-    use crate::memtable::{Memtable, RangesOptions};
+    use crate::memtable::{
+        IterBuilder, Memtable, MemtableRange, MemtableRangeContext, MemtableStats, RangesOptions,
+    };
     use crate::request::WriteRequest;
     use crate::schedule::scheduler::Scheduler;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
@@ -2243,6 +2241,7 @@ mod tests {
             let flat_sources = memtable_flat_sources(
                 schema.clone(),
                 mem_ranges,
+                &metadata,
                 &options,
                 metadata.primary_key.len(),
             )
@@ -2271,9 +2270,14 @@ mod tests {
                 ..Default::default()
             };
 
-            let flat_sources =
-                memtable_flat_sources(schema, mem_ranges, &options, metadata.primary_key.len())
-                    .unwrap();
+            let flat_sources = memtable_flat_sources(
+                schema,
+                mem_ranges,
+                &metadata,
+                &options,
+                metadata.primary_key.len(),
+            )
+            .unwrap();
             assert!(flat_sources.encoded.is_empty());
             assert_eq!(1, flat_sources.sources.len());
 
@@ -2286,6 +2290,118 @@ mod tests {
             }
             assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }
+    }
+
+    #[test]
+    fn test_memtable_flat_sources_uses_non_encoded_schema() -> Result<()> {
+        struct TestIterBuilder {
+            schema: SchemaRef,
+            batch: Option<RecordBatch>,
+        }
+
+        impl IterBuilder for TestIterBuilder {
+            fn build(
+                &self,
+                _metrics: Option<crate::memtable::MemScanMetrics>,
+            ) -> Result<crate::memtable::BoxedBatchIterator> {
+                unimplemented!()
+            }
+
+            fn is_record_batch(&self) -> bool {
+                true
+            }
+
+            fn build_record_batch(
+                &self,
+                _time_range: Option<(common_time::Timestamp, common_time::Timestamp)>,
+                _metrics: Option<crate::memtable::MemScanMetrics>,
+            ) -> Result<BoxedRecordBatchIterator> {
+                let Some(batch) = self.batch.clone() else {
+                    unimplemented!()
+                };
+                Ok(Box::new(std::iter::once(Ok(batch))))
+            }
+
+            fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
+                Some(self.schema.clone())
+            }
+
+            fn encoded_range(&self) -> Option<EncodedRange> {
+                self.batch.is_none().then(|| EncodedRange {
+                    data: Bytes::new(),
+                    sst_info: SstInfo::default(),
+                })
+            }
+        }
+
+        let metadata = metadata_for_test();
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let pk_codec = build_primary_key_codec(&metadata);
+        let mut converter = BulkPartConverter::new(&metadata, schema.clone(), 1, pk_codec, true);
+        let kvs = build_key_values_with_ts_seq_values(
+            &metadata,
+            "key".to_string(),
+            1,
+            std::iter::once(1000),
+            std::iter::once(Some(1.0)),
+            1,
+        );
+        converter.append_key_values(&kvs)?;
+        let batch = converter.convert()?.batch;
+        let encoded_schema = Arc::new(Schema::empty());
+
+        let new_range = |id, builder| {
+            MemtableRange::new(
+                Arc::new(MemtableRangeContext::new(
+                    id,
+                    Box::new(builder),
+                    Default::default(),
+                )),
+                MemtableStats {
+                    num_rows: 1,
+                    ..Default::default()
+                },
+            )
+        };
+        let mut ranges = std::collections::BTreeMap::new();
+        ranges.insert(
+            0,
+            new_range(
+                0,
+                TestIterBuilder {
+                    schema: encoded_schema.clone(),
+                    batch: None,
+                },
+            ),
+        );
+        ranges.insert(
+            1,
+            new_range(
+                0,
+                TestIterBuilder {
+                    schema: schema.clone(),
+                    batch: Some(batch),
+                },
+            ),
+        );
+
+        let sources = memtable_flat_sources(
+            encoded_schema,
+            MemtableRanges { ranges },
+            &metadata,
+            &RegionOptions {
+                append_mode: true,
+                ..Default::default()
+            },
+            metadata.primary_key.len(),
+        )?;
+        assert_eq!(1, sources.encoded.len());
+        assert_eq!(1, sources.sources.len());
+        assert_eq!(&schema, sources.sources[0].0.schema());
+        Ok(())
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ use api::helper::encode_json_value;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
+use arrow_schema::extension::ExtensionType;
 use common_base::readable_size::ReadableSize;
 use common_error::ext::{ErrorExt, WhateverResult};
 use common_error::status_code::StatusCode;
@@ -28,16 +29,19 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType, UInt64Type};
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+use datatypes::json::JsonSettings;
 use datatypes::json::value::JsonValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+use datatypes::vectors::json::array::JsonArray;
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
-use store_api::region_request::{RegionPutRequest, RegionRequest};
+use store_api::region_request::{RegionCompactRequest, RegionPutRequest, RegionRequest};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
 
@@ -47,7 +51,7 @@ use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
 use crate::test_util;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
-use crate::test_util::{CreateRequestBuilder, TestEnv};
+use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
 
 #[tokio::test]
 async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResult<()> {
@@ -79,28 +83,34 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
 
     // Write full JSON objects, then flush them so the scanner has an Parquet file where nested
     // projection can be pushed down.
-    let rows = Rows {
-        schema,
-        rows: vec![
-            row(vec![
-                ValueData::StringValue("tag-1".to_string()),
-                ValueData::JsonValue(encode_json_value(JsonValue::from(json!({
-                    "a": { "x": 10, "y": "ignored-a" },
-                    "b": "ignored-b"
-                })))),
-                ValueData::TimestampMillisecondValue(1000),
-            ]),
-            row(vec![
-                ValueData::StringValue("tag-2".to_string()),
-                ValueData::JsonValue(encode_json_value(JsonValue::from(json!({
-                    "a": { "x": 20, "y": "ignored-c" },
-                    "b": "ignored-d"
-                })))),
-                ValueData::TimestampMillisecondValue(2000),
-            ]),
+    for values in [
+        vec![
+            ValueData::StringValue("tag-1".to_string()),
+            ValueData::JsonValue(encode_json_value(JsonValue::from(json!({
+                "a": { "x": 10, "y": "ignored-a" },
+                "b": "ignored-b"
+            })))),
+            ValueData::TimestampMillisecondValue(1000),
         ],
-    };
-    test_util::put_rows(&engine, region_id, rows).await;
+        vec![
+            ValueData::StringValue("tag-2".to_string()),
+            ValueData::JsonValue(encode_json_value(JsonValue::from(json!({
+                "a": { "x": 20, "y": "ignored-c" },
+                "b": "ignored-d"
+            })))),
+            ValueData::TimestampMillisecondValue(2000),
+        ],
+    ] {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: vec![row(values)],
+            },
+        )
+        .await;
+    }
     test_util::flush_region(&engine, region_id, None).await;
 
     // Without a type hint, the scanner reads the whole JSON2 root column.
@@ -211,6 +221,231 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     let stream = scanner.scan().await?;
     let batches = RecordBatches::try_collect(stream).await?;
     assert_eq!(batches.pretty_print()?, expected.trim());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_json2_v1_region_reopen_and_compaction() -> WhateverResult<()> {
+    let mut request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("memtable.type", "bulk")
+        .build();
+    let settings = JsonSettings::default();
+    request.column_metadatas[1]
+        .column_schema
+        .with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new_v1(
+            settings,
+        ))));
+    let table_dir = request.table_dir.clone();
+    let schema = test_util::rows_schema(&request);
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+
+    let values = [
+        json!({"route": 1}),
+        json!({"b": {"c": "x"}}),
+        json!({"route": 3, "written_after_reopen": true}),
+    ];
+    for (i, value) in values[..2].iter().enumerate() {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: vec![row(vec![
+                    ValueData::StringValue("tag".to_string()),
+                    ValueData::JsonValue(encode_json_value(JsonValue::from(value.clone()))),
+                    ValueData::TimestampMillisecondValue((i as i64 + 1) * 1000),
+                ])],
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+
+    reopen_region(
+        &engine,
+        region_id,
+        table_dir,
+        true,
+        HashMap::from([("memtable.type".to_string(), "bulk".to_string())]),
+    )
+    .await;
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let column = &version
+        .metadata
+        .column_by_name("field_0")
+        .unwrap()
+        .column_schema;
+    let extension = column.extension_type::<Json2ExtensionType>()?.unwrap();
+    assert!(extension.metadata().is_version_2());
+
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: vec![row(vec![
+                ValueData::StringValue("tag".to_string()),
+                ValueData::JsonValue(encode_json_value(JsonValue::from(values[2].clone()))),
+                ValueData::TimestampMillisecondValue(3000),
+            ])],
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let input_files = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .map(|level| level.files.len())
+        .sum::<usize>();
+    assert_eq!(3, input_files);
+
+    // The same requested path is stored as a v1 explicit leaf in the first SST, is absent from
+    // the second SST, and lives in the v2 remainder in the third SST. A per-file route preserves
+    // those differences while exposing one logical query type to the merge reader.
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                projection: Some(vec![1]),
+                json_type_hint: HashMap::from([(
+                    "field_0".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "route".to_string(),
+                        JsonNativeType::i64(),
+                    )])),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+    let mut routed = Vec::new();
+    for batch in batches.iter() {
+        let array = batch.column_by_name("field_0").unwrap().clone();
+        let json = JsonArray::from(&array);
+        for i in 0..array.len() {
+            routed.push(json.try_get_value(i)?);
+        }
+    }
+    assert_eq!(
+        [json!({"route": 1}), json!(null), json!({"route": 3})],
+        routed.as_slice()
+    );
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await?;
+
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                projection: Some(vec![1]),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+    let mut actual = Vec::new();
+    for batch in batches.iter() {
+        let array = batch.column_by_name("field_0").unwrap().clone();
+        let json = JsonArray::from(&array);
+        for i in 0..array.len() {
+            actual.push(json.try_get_value(i)?);
+        }
+    }
+    assert_eq!(values, actual.as_slice());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_flush_aligns_different_json2_layouts() -> WhateverResult<()> {
+    let mut request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("append_mode", "true")
+        .insert_option("memtable.type", "bulk")
+        .build();
+    let settings = JsonSettings::try_new(vec![], Some(1))?;
+    request.column_metadatas[1]
+        .column_schema
+        .with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            settings,
+        ))));
+    let schema = test_util::rows_schema(&request);
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1025, 0);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+
+    for (offset, name) in [(0, "a"), (1024, "b")] {
+        let rows = (0..1024)
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue("tag".to_string()),
+                    ValueData::JsonValue(encode_json_value(JsonValue::from(json!({(name): i})))),
+                    ValueData::TimestampMillisecondValue(offset + i),
+                ])
+            })
+            .collect();
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+    }
+
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                projection: Some(vec![1]),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+    let mut counts = HashMap::new();
+    for batch in batches.iter() {
+        let array = batch.column_by_name("field_0").unwrap().clone();
+        let json = JsonArray::from(&array);
+        for i in 0..array.len() {
+            let value = json.try_get_value(i)?;
+            let name = match (value.get("a"), value.get("b")) {
+                (Some(_), None) => "a",
+                (None, Some(_)) => "b",
+                _ => panic!("expected exactly one dynamic JSON2 field, got {value}"),
+            };
+            *counts.entry(name).or_insert(0) += 1;
+        }
+    }
+    assert_eq!(Some(&1024), counts.get("a"));
+    assert_eq!(Some(&1024), counts.get("b"));
     Ok(())
 }
 

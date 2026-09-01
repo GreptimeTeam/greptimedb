@@ -1,0 +1,9 @@
+name = "stddev_pop_state"
+reason = "Verify WLF1 states persisted by an old binary retain their binary layout and are readable directly and through stddev_pop_merge on the new binary."
+introduced_by = "PR #8972"
+topologies = ["distributed", "standalone"]
+from_range = [">=v1.3.0"]
+to_range = [">=v1.3.0"]
+features = ["table", "query", "aggregate"]
+owner = "query"
+namespace = "stddev_pop_state"

@@ -36,8 +36,9 @@ use crate::otlp::metrics::{
     exponential_histogram_value, scalar_value_string, service_identity,
 };
 use crate::otlp::trace::{
-    KEY_CONTAINER_ID, KEY_CONTAINER_NAME, KEY_HOST_ID, KEY_HOST_NAME, KEY_K8S_NAMESPACE_NAME,
-    KEY_K8S_POD_NAME, KEY_K8S_POD_UID, KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE,
+    KEY_CONTAINER_ID, KEY_CONTAINER_NAME, KEY_HOST_ID, KEY_HOST_NAME, KEY_K8S_CONTAINER_NAME,
+    KEY_K8S_NAMESPACE_NAME, KEY_K8S_POD_NAME, KEY_K8S_POD_UID, KEY_SERVICE_NAME,
+    KEY_SERVICE_NAMESPACE,
 };
 use crate::row_writer::{self, MultiTableData};
 
@@ -61,13 +62,14 @@ fn is_projected_attr(key: &str) -> bool {
             | KEY_CONTAINER_NAME
             | KEY_K8S_POD_UID
             | KEY_K8S_POD_NAME
+            | KEY_K8S_CONTAINER_NAME
             | KEY_K8S_NAMESPACE_NAME
     )
 }
 
 /// Upper bound of [`is_projected_attr`] plus the derived `job`/`instance`,
 /// used to size the per-row buffers.
-const MAX_PROJECTED_TAGS: usize = 11;
+const MAX_PROJECTED_TAGS: usize = 12;
 
 /// Projected attributes (sorted `(name, value)` pairs) -> graph window ->
 /// the newest data-point time seen in that window, which is what the row for
