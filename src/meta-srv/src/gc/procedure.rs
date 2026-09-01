@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_error::ext::BoxedError;
 use common_meta::instruction::{self, GcRegions, GetFileRefs, GetFileRefsReply, InstructionReply};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
@@ -352,19 +353,19 @@ impl BatchGcProcedure {
             .table_route_manager()
             .batch_get_physical_table_routes(&table_ids)
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get table routes for tables {:?}", table_ids),
+            })?;
 
         if table_routes.len() != table_ids.len() {
             // batch_get_physical_table_routes returns a subset on misses; treat that as error
             for table_id in &table_ids {
                 if !table_routes.contains_key(table_id) {
                     // indicate is a logical table id
-                    return error::InvalidArgumentsSnafu {
-                    err_msg: format!(
-                        "Unexpected logical table route: table {} resolved to physical table regions",
-                        table_id
-                    ),
-                }
+                    return error::RetryLaterSnafu {
+                        reason: format!("Missing table route for involved table {}", table_id),
+                    }
                     .fail();
                 }
             }
@@ -536,13 +537,9 @@ impl BatchGcProcedure {
                     );
                 }
                 Err(e) => {
-                    // Continue with other tables instead of failing completely
-                    // TODO(discord9): consider failing here instead
-                    warn!(
-                        "Failed to get table route for table {}: {}, skipping its regions",
-                        table_id, e
-                    );
-                    continue;
+                    return Err(BoxedError::new(e)).context(error::RetryLaterWithSourceSnafu {
+                        reason: format!("Failed to get table route for table {}", table_id),
+                    });
                 }
             }
         }
@@ -640,6 +637,14 @@ impl BatchGcProcedure {
                         .entry(*src_region)
                         .or_default()
                         .insert(*dst_region);
+                } else {
+                    return error::RetryLaterSnafu {
+                        reason: format!(
+                            "Missing leader route for related destination region {}",
+                            dst_region
+                        ),
+                    }
+                    .fail();
                 } // since read from manifest, no need to send to followers
             }
         }
@@ -1124,8 +1129,11 @@ mod tests {
     use api::v1::meta::mailbox_message::Payload;
     use common_meta::instruction::{GcRegionsReply, InstructionReply};
     use common_meta::key::TableMetadataManager;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::kv_backend::TxnService;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::sequence::SequenceBuilder;
     use common_time::util::current_time_millis;
     use store_api::storage::FileId;
@@ -1199,6 +1207,107 @@ mod tests {
         assert_eq!(report.deleted_files[&region_id], Vec::<FileId>::new());
         assert!(!report.processed_regions.contains(&region_id));
         assert!(report.need_retry_regions.contains(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_file_references_fails_when_related_destination_route_is_missing() {
+        let source_region = RegionId::new(1024, 1);
+        let destination_region = RegionId::new(1024, 2);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let route = PhysicalTableRouteValue::new(vec![
+            RegionRoute {
+                region: Region::new_test(source_region),
+                leader_peer: Some(Peer::new(1, "leader")),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            },
+            RegionRoute {
+                region: Region::new_test(destination_region),
+                leader_peer: None,
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            },
+        ]);
+        let (txn, _) = table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .build_create_txn(1024, &TableRouteValue::Physical(route))
+            .unwrap();
+        kv_backend.txn(txn).await.unwrap();
+        let mut procedure = BatchGcProcedure::new(
+            MailboxContext::new(
+                SequenceBuilder::new("test_missing_related_route", kv_backend.clone()).build(),
+            )
+            .mailbox()
+            .clone(),
+            table_metadata_manager,
+            "localhost".to_string(),
+            vec![source_region],
+            true,
+            Duration::from_secs(10),
+            HashMap::new(),
+        );
+        procedure.data.related_regions =
+            HashMap::from([(source_region, HashSet::from([destination_region]))]);
+
+        let err = procedure.get_file_references().await.unwrap_err();
+        assert!(err.is_retryable());
+        assert!(err.to_string().contains(&destination_region.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_discover_route_for_regions_fails_retryably_when_table_route_is_missing() {
+        let procedure = batch_gc_procedure();
+        let regions = [RegionId::new(1024, 1)];
+
+        let result = procedure.discover_route_for_regions(&regions).await;
+        let Err(err) = result else {
+            panic!("missing table route unexpectedly returned partial routes");
+        };
+        assert!(err.is_retryable());
+        assert!(err.to_string().contains("table route"));
+    }
+
+    #[tokio::test]
+    async fn test_find_related_regions_fails_retryably_when_logical_physical_route_is_missing() {
+        let logical_table_id = 1024;
+        let physical_table_id = 2048;
+        let region = RegionId::new(logical_table_id, 1);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let (txn, _) = table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .build_create_txn(
+                logical_table_id,
+                &TableRouteValue::logical(physical_table_id),
+            )
+            .unwrap();
+        kv_backend.txn(txn).await.unwrap();
+        let procedure = BatchGcProcedure::new(
+            MailboxContext::new(
+                SequenceBuilder::new("test_missing_physical_route", kv_backend).build(),
+            )
+            .mailbox()
+            .clone(),
+            table_metadata_manager,
+            "localhost".to_string(),
+            vec![region],
+            true,
+            Duration::from_secs(10),
+            HashMap::new(),
+        );
+
+        let err = procedure.find_related_regions(&[region]).await.unwrap_err();
+        assert!(err.is_retryable());
+        assert!(err.to_string().contains("table route"));
+        let source = std::error::Error::source(&err).expect("batch lookup source is preserved");
+        assert!(source.to_string().contains(&physical_table_id.to_string()));
     }
 
     #[tokio::test]
