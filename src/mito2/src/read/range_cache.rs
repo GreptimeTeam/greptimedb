@@ -532,7 +532,7 @@ fn build_range_cache_key_inner(
         return None;
     }
 
-    let fingerprint = stream_ctx.scan_fingerprint.as_ref()?;
+    let fingerprint = stream_ctx.input.scan_fingerprint()?;
 
     // Dyn filters can change at runtime, so we can't cache when they're present.
     let has_dyn_filters = stream_ctx
@@ -556,7 +556,7 @@ fn build_range_cache_key_inner(
     // them in the key.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let (file_min, file_max) = range_meta.time_range;
-    let covers = match &stream_ctx.scan_implied_time_range {
+    let covers = match stream_ctx.input.implied_time_range() {
         // An empty implied range can never cover a non-empty file range, so
         // short-circuit.
         Some(implied) if !implied.is_empty() => {
@@ -986,7 +986,8 @@ mod tests {
             .with_predicate(predicate)
             .with_time_range(query_time_range)
             .with_files(vec![file])
-            .with_cache(test_cache_strategy());
+            .with_cache(test_cache_strategy())
+            .compute_scan_analysis();
         let range_meta = RangeMeta {
             time_range: partition_time_range,
             indices: smallvec![SourceIndex {
@@ -1000,16 +1001,9 @@ mod tests {
             num_rows: 10,
         };
         let partition_range = range_meta.new_partition_range(0);
-        let (scan_fingerprint, scan_implied_time_range) =
-            match crate::read::scan_region::build_scan_fingerprint(&input) {
-                Some(b) => (Some(b.fingerprint), b.implied_time_range),
-                None => (None, None),
-            };
         let stream_ctx = StreamContext {
             input,
             ranges: vec![range_meta],
-            scan_fingerprint,
-            scan_implied_time_range,
             query_start: Instant::now(),
         };
 
@@ -1219,7 +1213,7 @@ mod tests {
         )
         .await;
 
-        assert!(ctx_a.scan_implied_time_range.is_none());
+        assert!(ctx_a.input.implied_time_range().is_none());
         let key_a = build_range_cache_key(&ctx_a, &part_a).unwrap();
         let key_b = build_range_cache_key(&ctx_b, &part_b).unwrap();
         assert_ne!(key_a.scan, key_b.scan);
@@ -1241,13 +1235,17 @@ mod tests {
         );
 
         let (mut ctx, part_range) = new_stream_context(
-            vec![col("ts").gt_eq(ts_lit(1500)), col("k0").eq(lit("foo"))],
+            vec![
+                col("ts").gt_eq(ts_lit(1500)),
+                col("ts").lt(ts_lit(1500)),
+                col("k0").eq(lit("foo")),
+            ],
             TimestampRange::with_unit(1500, 3000, TimeUnit::Millisecond),
             partition,
         )
         .await;
 
-        ctx.scan_implied_time_range = Some(TimestampRange::empty());
+        assert!(ctx.input.implied_time_range().unwrap().is_empty());
         ctx.ranges[0].time_range = (
             Timestamp::new(1_000_000_000, TimeUnit::Nanosecond),
             Timestamp::new(2_000_000_000, TimeUnit::Nanosecond),

@@ -619,7 +619,7 @@ impl ScanRegion {
         } else {
             input
         };
-        Ok(input)
+        Ok(input.compute_scan_analysis())
     }
 
     /// Builds the deduplicated root column ids required by the projection and
@@ -937,6 +937,8 @@ pub struct ScanInput {
     pub(crate) read_cols: ReadColumns,
     /// Time range filter for time index.
     pub(crate) time_range: Option<TimestampRange>,
+    /// Cached analysis of the finalized scan request.
+    scan_analysis: Option<ScanAnalysis>,
     /// Predicate to push down.
     pub(crate) predicate: PredicateGroup,
     /// Region partition expr applied at read time.
@@ -996,6 +998,18 @@ pub struct ScanInput {
     extension_ranges: Vec<BoxedExtensionRange>,
 }
 
+/// Cached output of scan request analysis: the optional range-cache fingerprint
+/// plus the derived implied time range used by range cache and prefilter.
+struct ScanAnalysis {
+    /// `None` when the scan is not eligible for range caching.
+    fingerprint: Option<ScanRequestFingerprint>,
+    /// `Some(r)` = all time-only predicates are guaranteed true on `r` (in the
+    /// column's `TimeUnit`).
+    /// `None`    = at least one time-only predicate could not be proven (e.g.
+    /// `OR`), so the time-filter optimization is disabled for this scan.
+    implied_time_range: Option<TimestampRange>,
+}
+
 impl ScanInput {
     /// Creates a new [ScanInput].
     #[must_use]
@@ -1005,6 +1019,7 @@ impl ScanInput {
             read_cols: mapper.read_columns().clone(),
             mapper: Arc::new(mapper),
             time_range: None,
+            scan_analysis: None,
             predicate: PredicateGroup::default(),
             region_partition_expr: None,
             memtables: Vec::new(),
@@ -1050,7 +1065,138 @@ impl ScanInput {
     pub(crate) fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
         self.region_partition_expr = predicate.region_partition_expr().cloned();
         self.predicate = predicate;
+        self.scan_analysis = None;
         self
+    }
+
+    /// Computes and caches analysis of the finalized scan request.
+    #[must_use]
+    pub(crate) fn compute_scan_analysis(mut self) -> Self {
+        if self.scan_analysis.is_some() {
+            return self;
+        }
+
+        let eligible = !self.compaction
+            && !self.files.is_empty()
+            && matches!(self.cache_strategy, CacheStrategy::EnableAll(_));
+
+        let metadata = self.region_metadata();
+        let tag_names: HashSet<&str> = metadata
+            .column_metadatas
+            .iter()
+            .filter(|col| col.semantic_type == SemanticType::Tag)
+            .map(|col| col.column_schema.name.as_str())
+            .collect();
+
+        let time_index = metadata.time_index_column();
+        let time_index_name = time_index.column_schema.name.clone();
+        let ts_col_unit = time_index
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .expect("Time index must have timestamp-compatible type")
+            .unit();
+
+        let exprs = self
+            .predicate_group()
+            .predicate_without_region()
+            .map(|predicate| predicate.exprs())
+            .unwrap_or_default();
+
+        let mut filters = Vec::new();
+        let mut time_only_exprs: Vec<&Expr> = Vec::new();
+        let mut has_tag_filter = false;
+        let mut columns = HashSet::new();
+
+        for expr in exprs {
+            columns.clear();
+            let is_time_only = match expr_to_columns(expr, &mut columns) {
+                Ok(()) if !columns.is_empty() => {
+                    has_tag_filter |= columns
+                        .iter()
+                        .any(|col| tag_names.contains(col.name.as_str()));
+                    columns.iter().all(|col| col.name == time_index_name)
+                }
+                _ => false,
+            };
+
+            // Route time-only exprs that the legacy extractor recognizes into
+            // `time_only_exprs` so the implication walker
+            // (`implied_time_range_from_exprs`, called below) can attempt to drop
+            // them from the cache key when the partition's `FileTimeRange` is fully
+            // covered, then stringify them into the fingerprint's `time_filters`
+            // bucket. Time-only exprs that the extractor doesn't recognize stay in
+            // `filters` and never get stripped — conservatively correct.
+            if is_time_only
+                && extract_time_range_from_expr(&time_index_name, ts_col_unit, expr).is_some()
+            {
+                time_only_exprs.push(expr);
+            } else {
+                filters.push(expr.to_string());
+            }
+        }
+
+        let implied_time_range =
+            implied_time_range_from_exprs(&time_index_name, ts_col_unit, &time_only_exprs);
+
+        // We only cache requests that have tag filters to avoid caching all series.
+        let fingerprint = if eligible && has_tag_filter {
+            let mut time_filters: Vec<String> =
+                time_only_exprs.iter().map(|e| e.to_string()).collect();
+
+            // Ensure the filters are sorted for consistent fingerprinting.
+            filters.sort_unstable();
+            time_filters.sort_unstable();
+            let read_columns = self.read_cols.clone();
+            let fingerprint = crate::read::range_cache::ScanRequestFingerprintBuilder {
+                read_column_types: read_columns
+                    .column_ids_iter()
+                    .map(|id| {
+                        read_columns
+                            .json_target_type(id)
+                            .cloned()
+                            .map(ConcreteDataType::json2)
+                            .or_else(|| {
+                                metadata
+                                    .column_by_id(id)
+                                    .map(|col| col.column_schema.data_type.clone())
+                            })
+                    })
+                    .collect(),
+                read_columns,
+                filters,
+                time_filters,
+                series_row_selector: self.series_row_selector,
+                append_mode: self.append_mode,
+                filter_deleted: self.filter_deleted,
+                merge_mode: self.merge_mode,
+                partition_expr_version: metadata.partition_expr_version,
+            }
+            .build();
+            Some(fingerprint)
+        } else {
+            None
+        };
+
+        self.scan_analysis = Some(ScanAnalysis {
+            fingerprint,
+            implied_time_range,
+        });
+        self
+    }
+
+    /// Returns the range implied by the range-cache time filters.
+    pub(crate) fn implied_time_range(&self) -> Option<&TimestampRange> {
+        self.scan_analysis
+            .as_ref()
+            .and_then(|analysis| analysis.implied_time_range.as_ref())
+    }
+
+    /// Returns the fingerprint for partition range caching.
+    pub(crate) fn scan_fingerprint(&self) -> Option<&ScanRequestFingerprint> {
+        self.scan_analysis
+            .as_ref()
+            .and_then(|analysis| analysis.fingerprint.as_ref())
     }
 
     /// Sets memtable range builders.
@@ -1064,6 +1210,7 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
+        self.scan_analysis = None;
         self
     }
 
@@ -1083,6 +1230,7 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_cache(mut self, cache: CacheStrategy) -> Self {
         self.cache_strategy = cache;
+        self.scan_analysis = None;
         self
     }
 
@@ -1169,6 +1317,7 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_append_mode(mut self, is_append_mode: bool) -> Self {
         self.append_mode = is_append_mode;
+        self.scan_analysis = None;
         self
     }
 
@@ -1184,6 +1333,7 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_filter_deleted(mut self, filter_deleted: bool) -> Self {
         self.filter_deleted = filter_deleted;
+        self.scan_analysis = None;
         self
     }
 
@@ -1191,6 +1341,7 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_merge_mode(mut self, merge_mode: MergeMode) -> Self {
         self.merge_mode = merge_mode;
+        self.scan_analysis = None;
         self
     }
 
@@ -1218,6 +1369,7 @@ impl ScanInput {
         series_row_selector: Option<TimeSeriesRowSelector>,
     ) -> Self {
         self.series_row_selector = series_row_selector;
+        self.scan_analysis = None;
         self
     }
 
@@ -1240,6 +1392,7 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        self.scan_analysis = None;
         self
     }
 
@@ -1367,7 +1520,7 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let may_build_selective_row_selection = predicate.is_some();
-        let postpone_time_index_filter = time_range_covers_file(self.time_range.as_ref(), file);
+        let postpone_time_index_filter = time_range_covers_file(self.implied_time_range(), file);
         let decode_pk_values = !self.compaction
             && self
                 .mapper
@@ -1763,131 +1916,6 @@ pub(crate) fn exact_sequence_range(
     Ok((files, sequence_range))
 }
 
-/// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
-/// implied time range used to decide whether the cache key can drop the time
-/// predicates for a given partition (see `build_range_cache_key`).
-pub(crate) struct ScanFingerprintBundle {
-    pub(crate) fingerprint: ScanRequestFingerprint,
-    /// `Some(r)` = all time-only predicates are guaranteed true on `r` (in the
-    /// column's `TimeUnit`).
-    /// `None`    = at least one time-only predicate could not be proven (e.g.
-    /// `OR`), so the cache-key optimization is disabled for this scan.
-    pub(crate) implied_time_range: Option<TimestampRange>,
-}
-
-/// Builds a [ScanFingerprintBundle] from a [ScanInput] if the scan is eligible
-/// for partition range caching.
-pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanFingerprintBundle> {
-    let eligible = !input.compaction
-        && !input.files.is_empty()
-        && matches!(input.cache_strategy, CacheStrategy::EnableAll(_));
-
-    if !eligible {
-        return None;
-    }
-
-    let metadata = input.region_metadata();
-    let tag_names: HashSet<&str> = metadata
-        .column_metadatas
-        .iter()
-        .filter(|col| col.semantic_type == SemanticType::Tag)
-        .map(|col| col.column_schema.name.as_str())
-        .collect();
-
-    let time_index = metadata.time_index_column();
-    let time_index_name = time_index.column_schema.name.clone();
-    let ts_col_unit = time_index
-        .column_schema
-        .data_type
-        .as_timestamp()
-        .expect("Time index must have timestamp-compatible type")
-        .unit();
-
-    let exprs = input
-        .predicate_group()
-        .predicate_without_region()
-        .map(|predicate| predicate.exprs())
-        .unwrap_or_default();
-
-    let mut filters = Vec::new();
-    let mut time_only_exprs: Vec<&Expr> = Vec::new();
-    let mut has_tag_filter = false;
-    let mut columns = HashSet::new();
-
-    for expr in exprs {
-        columns.clear();
-        let is_time_only = match expr_to_columns(expr, &mut columns) {
-            Ok(()) if !columns.is_empty() => {
-                has_tag_filter |= columns
-                    .iter()
-                    .any(|col| tag_names.contains(col.name.as_str()));
-                columns.iter().all(|col| col.name == time_index_name)
-            }
-            _ => false,
-        };
-
-        // Route time-only exprs that the legacy extractor recognizes into
-        // `time_only_exprs` so the implication walker
-        // (`implied_time_range_from_exprs`, called below) can attempt to drop
-        // them from the cache key when the partition's `FileTimeRange` is fully
-        // covered, then stringify them into the fingerprint's `time_filters`
-        // bucket. Time-only exprs that the extractor doesn't recognize stay in
-        // `filters` and never get stripped — conservatively correct.
-        if is_time_only
-            && extract_time_range_from_expr(&time_index_name, ts_col_unit, expr).is_some()
-        {
-            time_only_exprs.push(expr);
-        } else {
-            filters.push(expr.to_string());
-        }
-    }
-
-    if !has_tag_filter {
-        // We only cache requests that have tag filters to avoid caching all series.
-        return None;
-    }
-
-    let implied_time_range =
-        implied_time_range_from_exprs(&time_index_name, ts_col_unit, &time_only_exprs);
-    let mut time_filters: Vec<String> = time_only_exprs.iter().map(|e| e.to_string()).collect();
-
-    // Ensure the filters are sorted for consistent fingerprinting.
-    filters.sort_unstable();
-    time_filters.sort_unstable();
-    let read_columns = input.read_cols.clone();
-    let fingerprint = crate::read::range_cache::ScanRequestFingerprintBuilder {
-        read_column_types: read_columns
-            .column_ids_iter()
-            .map(|id| {
-                read_columns
-                    .json_target_type(id)
-                    .cloned()
-                    .map(ConcreteDataType::json2)
-                    .or_else(|| {
-                        metadata
-                            .column_by_id(id)
-                            .map(|col| col.column_schema.data_type.clone())
-                    })
-            })
-            .collect(),
-        read_columns,
-        filters,
-        time_filters,
-        series_row_selector: input.series_row_selector,
-        append_mode: input.append_mode,
-        filter_deleted: input.filter_deleted,
-        merge_mode: input.merge_mode,
-        sequence_range: input.sequence_range,
-        partition_expr_version: metadata.partition_expr_version,
-    }
-    .build();
-
-    Some(ScanFingerprintBundle {
-        fingerprint,
-        implied_time_range,
-    })
-}
-
 /// Context shared by different streams from a scanner.
 /// It contains the input and ranges to scan.
 pub struct StreamContext {
@@ -1895,18 +1923,6 @@ pub struct StreamContext {
     pub input: ScanInput,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
-    /// Precomputed scan fingerprint for partition range caching.
-    /// `None` when the scan is not eligible for caching.
-    #[allow(dead_code)]
-    pub(crate) scan_fingerprint: Option<ScanRequestFingerprint>,
-    /// Implied range of every time-only predicate, in the time index column's
-    /// `TimeUnit`. Used by `build_range_cache_key` to decide whether the
-    /// partition's `FileTimeRange` is fully covered (allowing `time_filters`
-    /// to be stripped from the cache key). `None` when caching is ineligible
-    /// or when the implication walker bailed on an unsupported shape (e.g.
-    /// `OR`).
-    pub(crate) scan_implied_time_range: Option<TimestampRange>,
-
     // Metrics:
     /// The start time of the query.
     pub(crate) query_start: Instant,
@@ -1915,38 +1931,26 @@ pub struct StreamContext {
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
     pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
+        let input = input.compute_scan_analysis();
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
-        let (scan_fingerprint, scan_implied_time_range) = match build_scan_fingerprint(&input) {
-            Some(b) => (Some(b.fingerprint), b.implied_time_range),
-            None => (None, None),
-        };
-
         Self {
             input,
             ranges,
-            scan_fingerprint,
-            scan_implied_time_range,
             query_start,
         }
     }
 
     /// Creates a new [StreamContext] for [UnorderedScan].
     pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
+        let input = input.compute_scan_analysis();
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
-        let (scan_fingerprint, scan_implied_time_range) = match build_scan_fingerprint(&input) {
-            Some(b) => (Some(b.fingerprint), b.implied_time_range),
-            None => (None, None),
-        };
-
         Self {
             input,
             ranges,
-            scan_fingerprint,
-            scan_implied_time_range,
             query_start,
         }
     }
@@ -2303,6 +2307,7 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
+            .compute_scan_analysis()
     }
 
     /// Helper to create a timestamp millisecond literal.
@@ -2411,6 +2416,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_compute_scan_analysis() {
+        let metadata = metadata_with_time_index_unit(TimeUnit::Millisecond);
+        let env = SchedulerEnv::new().await;
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+
+        let make_input = |filters: &[Expr]| {
+            let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+            ScanInput::new(env.access_layer.clone(), mapper)
+                .with_predicate(PredicateGroup::new(&metadata, filters).unwrap())
+                .compute_scan_analysis()
+        };
+
+        let covered = make_input(&[col("ts").gt_eq(ts_lit(500)), col("ts").lt(ts_lit(3000))]);
+        assert!(time_range_covers_file(covered.implied_time_range(), &file));
+
+        // The convex hull of this disjunction covers the file, but most rows do
+        // not satisfy it. The strict implied-range analysis must reject it.
+        let disjoint = make_input(&[col("ts").eq(ts_lit(1000)).or(col("ts").eq(ts_lit(2000)))]);
+        assert!(disjoint.implied_time_range().is_none());
+        assert!(!time_range_covers_file(
+            disjoint.implied_time_range(),
+            &file
+        ));
+
+        // Computing the analysis again reuses the cached result.
+        let covered = covered.compute_scan_analysis();
+        assert!(time_range_covers_file(covered.implied_time_range(), &file));
+
+        // Replacing the predicate invalidates the cached analysis.
+        let replaced = covered
+            .with_predicate(PredicateGroup::new(&metadata, &[col("ts").gt(ts_lit(3000))]).unwrap());
+        assert!(replaced.scan_analysis.is_none());
+        let replaced = replaced.compute_scan_analysis();
+        assert!(!time_range_covers_file(
+            replaced.implied_time_range(),
+            &file
+        ));
+    }
+
+    #[tokio::test]
     async fn test_scan_input_uses_explicit_batch_size() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
@@ -2450,12 +2498,13 @@ mod tests {
         .with_distribution(Some(TimeSeriesDistribution::PerSeries))
         .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
         .with_merge_mode(MergeMode::LastNonNull)
-        .with_filter_deleted(false);
+        .with_filter_deleted(false)
+        .compute_scan_analysis();
 
-        let fingerprint = build_scan_fingerprint(&input).unwrap();
+        let fingerprint = input.scan_fingerprint().unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
-            read_columns: input.read_cols,
+            read_columns: input.read_cols.clone(),
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
@@ -2480,7 +2529,7 @@ mod tests {
             partition_expr_version: 0,
         }
         .build();
-        assert_eq!(expected, fingerprint.fingerprint);
+        assert_eq!(&expected, fingerprint);
     }
 
     #[tokio::test]
@@ -2492,7 +2541,7 @@ mod tests {
         )
         .await;
 
-        assert!(build_scan_fingerprint(&input).is_none());
+        assert!(input.scan_fingerprint().is_none());
     }
 
     #[tokio::test]
@@ -2504,17 +2553,22 @@ mod tests {
             SchedulerEnv::new().await.access_layer.clone(),
             FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap(),
         )
-        .with_predicate(PredicateGroup::new(metadata.as_ref(), &filters).unwrap());
-        assert!(build_scan_fingerprint(&disabled).is_none());
+        .with_predicate(PredicateGroup::new(metadata.as_ref(), &filters).unwrap())
+        .compute_scan_analysis();
+        assert!(disabled.scan_fingerprint().is_none());
 
         let compaction = new_scan_input(metadata.clone(), filters.clone())
             .await
-            .with_compaction(true);
-        assert!(build_scan_fingerprint(&compaction).is_none());
+            .with_compaction(true)
+            .compute_scan_analysis();
+        assert!(compaction.scan_fingerprint().is_none());
 
         // No files to read.
-        let no_files = new_scan_input(metadata, filters).await.with_files(vec![]);
-        assert!(build_scan_fingerprint(&no_files).is_none());
+        let no_files = new_scan_input(metadata, filters)
+            .await
+            .with_files(vec![])
+            .compute_scan_analysis();
+        assert!(no_files.scan_fingerprint().is_none());
     }
 
     #[tokio::test]
@@ -2529,10 +2583,10 @@ mod tests {
         let metadata = Arc::new(builder.build_without_validation().unwrap());
 
         let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))]).await;
-        let fingerprint = build_scan_fingerprint(&input).unwrap();
+        let fingerprint = input.scan_fingerprint().unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
-            read_columns: input.read_cols,
+            read_columns: input.read_cols.clone(),
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
@@ -2554,7 +2608,7 @@ mod tests {
             partition_expr_version: metadata.partition_expr_version,
         }
         .build();
-        assert_eq!(expected, fingerprint.fingerprint);
+        assert_eq!(&expected, fingerprint);
         assert_ne!(0, metadata.partition_expr_version);
     }
 
@@ -2613,16 +2667,15 @@ mod tests {
                         .build(),
                 )))
                 .with_files(vec![file])
+                .compute_scan_analysis()
         };
 
         let int_target = JsonNativeType::i64();
         let string_target = JsonNativeType::String;
-        let int_fingerprint = build_scan_fingerprint(&make_input(int_target.clone()).await)
-            .unwrap()
-            .fingerprint;
-        let string_fingerprint = build_scan_fingerprint(&make_input(string_target).await)
-            .unwrap()
-            .fingerprint;
+        let int_input = make_input(int_target.clone()).await;
+        let string_input = make_input(string_target).await;
+        let int_fingerprint = int_input.scan_fingerprint().unwrap();
+        let string_fingerprint = string_input.scan_fingerprint().unwrap();
 
         assert_ne!(int_fingerprint, string_fingerprint);
         assert_eq!(
