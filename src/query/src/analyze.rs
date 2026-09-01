@@ -16,7 +16,6 @@
 //!
 //! The code skeleton is taken from `datafusion/physical-plan/src/analyze.rs`
 
-use std::any::Any;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -30,11 +29,12 @@ use datafusion::execution::TaskContext;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, accept,
+    ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan,
+    InputDistributionRequirements, PlanProperties, ReplaceChildrenOptions, accept,
 };
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, assert_eq_or_internal_err, internal_err};
-use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -110,7 +110,6 @@ pub fn analyze_plan_metrics_to_json_value(
     verbose: bool,
 ) -> serde_json::Result<Value> {
     let input = plan
-        .as_any()
         .downcast_ref::<DistAnalyzeExec>()
         .map(|exec| exec.input().clone())
         .unwrap_or_else(|| plan.clone());
@@ -125,7 +124,7 @@ pub fn analyze_plan_metrics_to_json_value(
     }));
 
     let _ = input.apply(|plan| {
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
             for (node, metric) in merge_scan.sub_stage_metrics().into_iter().enumerate() {
                 stages.push(json!({
                     "stage": 1,
@@ -157,11 +156,6 @@ impl ExecutionPlan for DistAnalyzeExec {
         "DistAnalyzeExec"
     }
 
-    /// Return a reference to Any that can be used for downcasting
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
@@ -170,14 +164,25 @@ impl ExecutionPlan for DistAnalyzeExec {
         vec![&self.input]
     }
 
-    /// AnalyzeExec is handled specially so this value is ignored
-    fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![]
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
+    ) -> DfResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
-    fn with_new_children(
+    /// AnalyzeExec is handled specially so this value is ignored
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        // AnalyzeExec is handled specially so this value is ignored.
+        InputDistributionRequirements::new(vec![
+            datafusion_physical_expr::Distribution::UnspecifiedDistribution,
+        ])
+    }
+
+    fn replace_children(
         self: Arc<Self>,
         mut children: Vec<Arc<dyn ExecutionPlan>>,
+        _options: ReplaceChildrenOptions,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         assert_eq_or_internal_err!(
             children.len(),
@@ -189,6 +194,17 @@ impl ExecutionPlan for DistAnalyzeExec {
             self.verbose,
             self.format,
         )))
+    }
+
+    #[allow(deprecated)]
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
     }
 
     fn execute(
@@ -293,7 +309,7 @@ fn create_output_batch(
 
     // Find merge scan and append its sub_stage_metrics
     input.apply(|plan| {
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
             let sub_stage_metrics = merge_scan.sub_stage_metrics();
             for (node, metric) in sub_stage_metrics.into_iter().enumerate() {
                 builder.append_metric(1, node as _, metrics_to_string(metric, format)?);
@@ -421,7 +437,14 @@ mod tests {
             AnalyzeFormat::TEXT,
         ));
 
-        assert!(ExecutionPlan::with_new_children(analyze, vec![]).is_err());
+        assert!(
+            ExecutionPlan::replace_children(
+                analyze,
+                vec![],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -432,14 +455,14 @@ mod tests {
             AnalyzeFormat::TEXT,
         ));
 
-        let result = ExecutionPlan::with_new_children(
+        let result = ExecutionPlan::replace_children(
             analyze,
             vec![empty_plan("first"), empty_plan("second")],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
         );
 
         if let Ok(plan) = result {
             let retained = plan
-                .as_any()
                 .downcast_ref::<DistAnalyzeExec>()
                 .unwrap()
                 .input()
@@ -460,8 +483,13 @@ mod tests {
         ));
         let replacement = empty_plan("replacement");
 
-        let rebuilt = ExecutionPlan::with_new_children(analyze, vec![replacement]).unwrap();
-        let rebuilt = rebuilt.as_any().downcast_ref::<DistAnalyzeExec>().unwrap();
+        let rebuilt = ExecutionPlan::replace_children(
+            analyze,
+            vec![replacement],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .unwrap();
+        let rebuilt = rebuilt.downcast_ref::<DistAnalyzeExec>().unwrap();
 
         assert_eq!(rebuilt.input().schema().field(0).name(), "replacement");
     }

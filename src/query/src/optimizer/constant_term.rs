@@ -76,10 +76,6 @@ impl PartialEq for PreCompiledMatchesTermExpr {
 impl Eq for PreCompiledMatchesTermExpr {}
 
 impl PhysicalExpr for PreCompiledMatchesTermExpr {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn data_type(
         &self,
         _input_schema: &arrow_schema::Schema,
@@ -166,10 +162,10 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let res = plan
             .transform_down(&|plan: Arc<dyn ExecutionPlan>| {
-                if let Some(filter) = plan.as_any().downcast_ref::<FilterExec>() {
+                if let Some(filter) = plan.downcast_ref::<FilterExec>() {
                     let pred = filter.predicate().clone();
                     let new_pred = pred.transform_down(&|expr: Arc<dyn PhysicalExpr>| {
-                        if let Some(func) = expr.as_any().downcast_ref::<ScalarFunctionExpr>() {
+                        if let Some(func) = expr.downcast_ref::<ScalarFunctionExpr>() {
                             if !func.name().eq_ignore_ascii_case("matches_term") {
                                 return Ok(Transformed::no(expr));
                             }
@@ -178,7 +174,7 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                                 return Ok(Transformed::no(expr));
                             }
 
-                            if let Some(lit) = args[1].as_any().downcast_ref::<Literal>()
+                            if let Some(lit) = args[1].downcast_ref::<Literal>()
                                 && let ScalarValue::Utf8(Some(term)) = lit.value()
                             {
                                 let finder = MatchesTermFinder::new(term);
@@ -248,6 +244,7 @@ mod tests {
     use datafusion::physical_plan::get_plan_string;
     use datafusion_common::{Column, DFSchema};
     use datafusion_expr::expr::ScalarFunction;
+    use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
     use datafusion_expr::{Expr, Literal, ScalarUDF};
     use datafusion_physical_expr::{ScalarFunctionExpr, create_physical_expr};
     use datatypes::prelude::ConcreteDataType;
@@ -343,6 +340,7 @@ mod tests {
             )),
             &DFSchema::try_from(batch.schema().clone()).unwrap(),
             &Default::default(),
+            &PhysicalPlanningContext::default(),
         )
         .unwrap();
 
@@ -357,16 +355,11 @@ mod tests {
             .optimize(Arc::new(filter), &Default::default())
             .unwrap();
 
-        let optimized_filter = optimized_plan
-            .as_any()
-            .downcast_ref::<FilterExec>()
-            .unwrap();
+        let optimized_filter = optimized_plan.downcast_ref::<FilterExec>().unwrap();
         let predicate = optimized_filter.predicate();
 
         // The predicate should be a PreCompiledMatchesTermExpr
-        assert!(
-            std::any::TypeId::of::<PreCompiledMatchesTermExpr>() == predicate.as_any().type_id()
-        );
+        assert!(predicate.is::<PreCompiledMatchesTermExpr>());
     }
 
     #[test]
@@ -413,6 +406,7 @@ mod tests {
             )),
             &DFSchema::try_from(batch.schema().clone()).unwrap(),
             &Default::default(),
+            &PhysicalPlanningContext::default(),
         )
         .unwrap();
 
@@ -426,14 +420,11 @@ mod tests {
             .optimize(Arc::new(filter), &Default::default())
             .unwrap();
 
-        let optimized_filter = optimized_plan
-            .as_any()
-            .downcast_ref::<FilterExec>()
-            .unwrap();
+        let optimized_filter = optimized_plan.downcast_ref::<FilterExec>().unwrap();
         let predicate = optimized_filter.predicate();
 
         // The predicate should still be a ScalarFunctionExpr
-        assert!(std::any::TypeId::of::<ScalarFunctionExpr>() == predicate.as_any().type_id());
+        assert!(predicate.is::<ScalarFunctionExpr>());
     }
 
     #[tokio::test]

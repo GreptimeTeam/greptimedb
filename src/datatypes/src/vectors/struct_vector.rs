@@ -157,7 +157,9 @@ impl VectorOp for StructVector {
 
         for (index, &offset) in offsets.iter().enumerate() {
             for _ in previous_offset..offset {
-                output.extend(0, index, index + 1);
+                output
+                    .try_extend(0, index, index + 1)
+                    .expect("extend failed due to offset overflow");
             }
             previous_offset = offset;
         }

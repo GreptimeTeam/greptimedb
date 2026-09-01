@@ -29,9 +29,9 @@ use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::info;
 use common_time::FOREVER;
+use datafusion::common::TableReference;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::col;
-use datafusion::sql::TableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan, lit};
 use datatypes::arrow::array::{Array, AsArray};
 use servers::error::{

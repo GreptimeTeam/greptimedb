@@ -21,7 +21,9 @@ use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use datafusion::physical_plan::{
+    ChildrenPropertiesMode, ExecutionPlan, ExecutionPlanProperties, ReplaceChildrenOptions,
+};
 use datafusion_common::Result as DfResult;
 use datafusion_physical_expr::{Distribution, OrderingRequirements, Partitioning};
 
@@ -57,7 +59,7 @@ impl EnsureGlobalLimitForFetch {
         let plan = if children.is_empty() {
             plan
         } else {
-            let required_input_distribution = plan.required_input_distribution();
+            let required_input_distribution = plan.input_distribution_requirements();
             let required_input_ordering = plan.required_input_ordering();
             let maintains_input_order = plan.maintains_input_order();
             let child_parent = ParentContext {
@@ -72,7 +74,7 @@ impl EnsureGlobalLimitForFetch {
                 .enumerate()
                 .map(|(idx, child)| {
                     let required_distribution = required_input_distribution
-                        .get(idx)
+                        .child_distribution(idx)
                         .cloned()
                         .unwrap_or(Distribution::UnspecifiedDistribution);
                     let partitioning_to_restore =
@@ -101,7 +103,10 @@ impl EnsureGlobalLimitForFetch {
                     Self::optimize_plan(Arc::clone(child), parent)
                 })
                 .collect::<DfResult<Vec<_>>>()?;
-            plan.with_new_children(children)?
+            plan.replace_children(
+                children,
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?
         };
 
         let Some(fetch) = plan.fetch() else {
@@ -111,7 +116,7 @@ impl EnsureGlobalLimitForFetch {
         if parent
             .global_fetch
             .is_some_and(|parent_fetch| parent_fetch <= fetch)
-            || !plan.as_any().is::<FilterExec>()
+            || !plan.is::<FilterExec>()
             || plan.output_partitioning().partition_count() <= 1
         {
             return Ok(plan);
@@ -149,10 +154,10 @@ impl Default for ParentContext {
 
 fn provided_global_fetch(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
     let fetch = plan.fetch()?;
-    (plan.as_any().is::<GlobalLimitExec>()
-        || plan.as_any().is::<CoalescePartitionsExec>()
-        || plan.as_any().is::<SortPreservingMergeExec>()
-        || plan.as_any().is::<MergeSortExec>())
+    (plan.is::<GlobalLimitExec>()
+        || plan.is::<CoalescePartitionsExec>()
+        || plan.is::<SortPreservingMergeExec>()
+        || plan.is::<MergeSortExec>())
     .then_some(fetch)
 }
 
@@ -196,7 +201,7 @@ fn partitioning_to_restore_for(
     child: &Arc<dyn ExecutionPlan>,
     required_distribution: &Distribution,
 ) -> Option<Partitioning> {
-    if !matches!(required_distribution, Distribution::HashPartitioned(_))
+    if !matches!(required_distribution, Distribution::KeyPartitioned(_))
         || child.output_partitioning().partition_count() <= 1
     {
         return None;
@@ -233,7 +238,7 @@ fn inherited_partitioning_to_restore(
 
     let satisfies_parent_distribution = matches!(
         parent.required_distribution,
-        Distribution::HashPartitioned(_)
+        Distribution::KeyPartitioned(_)
     ) && plan
         .output_partitioning()
         .satisfaction(
@@ -272,7 +277,7 @@ mod tests {
         let optimized =
             EnsureGlobalLimitForFetch::optimize_plan(filter, ParentContext::default()).unwrap();
 
-        assert!(optimized.as_any().is::<CoalescePartitionsExec>());
+        assert!(optimized.is::<CoalescePartitionsExec>());
         assert_eq!(optimized.fetch(), Some(1));
         assert_eq!(optimized.output_partitioning().partition_count(), 1);
     }
@@ -295,7 +300,7 @@ mod tests {
         let projection = optimized.children()[0];
         let coalesce = projection.children()[0];
 
-        assert!(coalesce.as_any().is::<CoalescePartitionsExec>());
+        assert!(coalesce.is::<CoalescePartitionsExec>());
         assert_eq!(coalesce.fetch(), Some(5));
     }
 
@@ -310,8 +315,8 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
         let child = optimized.children()[0];
 
-        assert!(optimized.as_any().is::<SortPreservingMergeExec>());
-        assert!(child.as_any().is::<FilterExec>());
+        assert!(optimized.is::<SortPreservingMergeExec>());
+        assert!(child.is::<FilterExec>());
     }
 
     #[test]
@@ -325,8 +330,8 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
         let child = optimized.children()[0];
 
-        assert!(optimized.as_any().is::<SortPreservingMergeExec>());
-        assert!(child.as_any().is::<SortPreservingMergeExec>());
+        assert!(optimized.is::<SortPreservingMergeExec>());
+        assert!(child.is::<SortPreservingMergeExec>());
         assert_eq!(child.fetch(), Some(5));
     }
 
@@ -340,8 +345,8 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
         let child = optimized.children()[0];
 
-        assert!(optimized.as_any().is::<MergeSortExec>());
-        assert!(child.as_any().is::<FilterExec>());
+        assert!(optimized.is::<MergeSortExec>());
+        assert!(child.is::<FilterExec>());
     }
 
     #[test]
@@ -354,10 +359,10 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
         let child = optimized.children()[0];
 
-        assert!(optimized.as_any().is::<MergeSortExec>());
-        assert!(child.as_any().is::<SortPreservingMergeExec>());
+        assert!(optimized.is::<MergeSortExec>());
+        assert!(child.is::<SortPreservingMergeExec>());
         assert_eq!(child.fetch(), Some(5));
-        assert!(child.children()[0].as_any().is::<FilterExec>());
+        assert!(child.children()[0].is::<FilterExec>());
     }
 
     #[test]
@@ -371,8 +376,8 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
         let child = optimized.children()[0];
 
-        assert!(optimized.as_any().is::<SortPreservingMergeExec>());
-        assert!(child.as_any().is::<SortPreservingMergeExec>());
+        assert!(optimized.is::<SortPreservingMergeExec>());
+        assert!(child.is::<SortPreservingMergeExec>());
         assert_eq!(child.fetch(), Some(1));
     }
 
@@ -396,10 +401,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let merge = optimized
-            .as_any()
-            .downcast_ref::<SortPreservingMergeExec>()
-            .unwrap();
+        let merge = optimized.downcast_ref::<SortPreservingMergeExec>().unwrap();
 
         assert_eq!(merge.expr(), &actual_ordering);
     }
@@ -423,9 +425,9 @@ mod tests {
         let projection = optimized.children()[0];
         let child = projection.children()[0];
 
-        assert!(optimized.as_any().is::<SortPreservingMergeExec>());
-        assert!(projection.as_any().is::<ProjectionExec>());
-        assert!(child.as_any().is::<SortPreservingMergeExec>());
+        assert!(optimized.is::<SortPreservingMergeExec>());
+        assert!(projection.is::<ProjectionExec>());
+        assert!(child.is::<SortPreservingMergeExec>());
         assert_eq!(child.fetch(), Some(1));
     }
 
@@ -455,13 +457,13 @@ mod tests {
         let optimized =
             EnsureGlobalLimitForFetch::optimize_plan(join, ParentContext::default()).unwrap();
         let left = optimized.children()[0];
-        let repartition = left.as_any().downcast_ref::<RepartitionExec>().unwrap();
+        let repartition = left.downcast_ref::<RepartitionExec>().unwrap();
 
         assert!(matches!(
             repartition.partitioning(),
             Partitioning::Hash(_, 3)
         ));
-        assert!(repartition.input().as_any().is::<CoalescePartitionsExec>());
+        assert!(repartition.input().is::<CoalescePartitionsExec>());
         assert_eq!(repartition.input().fetch(), Some(1));
     }
 
@@ -499,16 +501,15 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(join, ParentContext::default()).unwrap();
         let projection = optimized.children()[0];
         let repartition = projection.children()[0]
-            .as_any()
             .downcast_ref::<RepartitionExec>()
             .unwrap();
 
-        assert!(projection.as_any().is::<ProjectionExec>());
+        assert!(projection.is::<ProjectionExec>());
         assert!(matches!(
             repartition.partitioning(),
             Partitioning::Hash(_, 3)
         ));
-        assert!(repartition.input().as_any().is::<CoalescePartitionsExec>());
+        assert!(repartition.input().is::<CoalescePartitionsExec>());
         assert_eq!(repartition.input().fetch(), Some(1));
     }
 
@@ -542,17 +543,16 @@ mod tests {
         let outer_projection = optimized.children()[0];
         let inner_projection = outer_projection.children()[0];
         let repartition = inner_projection.children()[0]
-            .as_any()
             .downcast_ref::<RepartitionExec>()
             .unwrap();
 
-        assert!(outer_projection.as_any().is::<ProjectionExec>());
-        assert!(inner_projection.as_any().is::<ProjectionExec>());
+        assert!(outer_projection.is::<ProjectionExec>());
+        assert!(inner_projection.is::<ProjectionExec>());
         assert!(matches!(
             repartition.partitioning(),
             Partitioning::Hash(_, 3)
         ));
-        assert!(repartition.input().as_any().is::<CoalescePartitionsExec>());
+        assert!(repartition.input().is::<CoalescePartitionsExec>());
         assert_eq!(repartition.input().fetch(), Some(1));
     }
 

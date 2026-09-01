@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 #[cfg(test)]
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
@@ -43,6 +42,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{Column as ColumnExpr, DataFusionError, Result, Statistics};
 use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
@@ -868,7 +868,7 @@ impl MergeScanExec {
     }
 
     pub fn try_with_new_distribution(&self, distribution: Distribution) -> Option<Self> {
-        let Distribution::HashPartitioned(hash_exprs) = distribution else {
+        let Distribution::KeyPartitioned(hash_exprs) = distribution else {
             // not applicable
             return None;
         };
@@ -883,8 +883,7 @@ impl MergeScanExec {
         let hash_expr_col_names: HashSet<_> = hash_exprs
             .iter()
             .filter_map(|expr| {
-                expr.as_any()
-                    .downcast_ref::<Column>()
+                expr.downcast_ref::<Column>()
                     .map(|col_expr| col_expr.name())
             })
             .collect();
@@ -906,8 +905,7 @@ impl MergeScanExec {
         let overlaps: Vec<_> = hash_exprs
             .iter()
             .filter(|expr| {
-                expr.as_any()
-                    .downcast_ref::<Column>()
+                expr.downcast_ref::<Column>()
                     .is_some_and(|col_expr| all_partition_col_aliases.contains(col_expr.name()))
             })
             .cloned()
@@ -1148,10 +1146,6 @@ impl Drop for PartitionMetrics {
 }
 
 impl ExecutionPlan for MergeScanExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }
@@ -1162,6 +1156,15 @@ impl ExecutionPlan for MergeScanExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion_physical_expr::PhysicalExpr>,
+        ) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     // DataFusion will swap children unconditionally.
@@ -1245,14 +1248,14 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
         if partition.is_some() {
-            return Ok(Statistics::new_unknown(&self.arrow_schema));
+            return Ok(Arc::new(Statistics::new_unknown(&self.arrow_schema)));
         }
 
         let mut statistics = Statistics::new_unknown(&self.arrow_schema);
         statistics.num_rows = self.estimated_num_rows();
-        Ok(statistics)
+        Ok(Arc::new(statistics))
     }
 
     fn name(&self) -> &str {
@@ -1420,6 +1423,7 @@ mod tests {
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
+    use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::Distribution;
@@ -1523,6 +1527,12 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    fn merge_scan_statistics(exec: &MergeScanExec) -> Arc<Statistics> {
+        StatisticsContext::new()
+            .compute(exec, &StatisticsArgs::new())
+            .unwrap()
     }
 
     fn task_context_with_engine_state(
@@ -1673,9 +1683,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(regions.clone(), limited, 10)
-                .partition_statistics(None)
-                .unwrap()
+            merge_scan_statistics(&merge_scan_exec_with_plan(regions.clone(), limited, 10))
                 .num_rows,
             Precision::Inexact(100)
         );
@@ -1689,10 +1697,12 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(vec![RegionId::new(1024, 1)], large_limit, 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                vec![RegionId::new(1024, 1)],
+                large_limit,
+                10,
+            ))
+            .num_rows,
             Precision::Inexact(large_bound)
         );
 
@@ -1702,17 +1712,16 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(regions.clone(), uncapped.clone(), 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                regions.clone(),
+                uncapped.clone(),
+                10,
+            ))
+            .num_rows,
             Precision::Absent
         );
         assert_eq!(
-            merge_scan_exec_with_plan(Vec::new(), uncapped, 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(Vec::new(), uncapped, 10)).num_rows,
             Precision::Inexact(0)
         );
 
@@ -1726,10 +1735,12 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(regions.clone(), global_aggregate, 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                regions.clone(),
+                global_aggregate,
+                10,
+            ))
+            .num_rows,
             Precision::Inexact(2)
         );
 
@@ -1749,10 +1760,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(regions, grouping_sets, 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(regions, grouping_sets, 10)).num_rows,
             Precision::Absent
         );
     }
@@ -3275,7 +3283,7 @@ mod tests {
         // A distribution that differs from the current partitioning but shares a
         // column name present in partition_cols, so try_with_new_distribution
         // produces a clone instead of returning None.
-        let new_dist = Distribution::HashPartitioned(vec![
+        let new_dist = Distribution::KeyPartitioned(vec![
             Arc::new(Column::new("col1", 0)),
             Arc::new(Column::new("col2", 1)),
         ]);

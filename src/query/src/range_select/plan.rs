@@ -21,22 +21,23 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use ahash::RandomState;
 use arrow::compute::{self, CastOptions, cast_with_options, take_arrays};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
 use common_function::aggrs::aggr_wrapper::get_aggr_func;
 use common_recordbatch::DfSendableRecordBatchStream;
+use datafusion::catalog::Session;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::TaskContext;
-use datafusion::execution::context::SessionState;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use datafusion_common::hash_utils::create_hashes;
+use datafusion_common::hash_utils::{RandomState, create_hashes};
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
 use datafusion_expr::utils::{COUNT_STAR_EXPANSION, exprlist_to_fields};
 use datafusion_expr::{
@@ -535,7 +536,8 @@ impl RangeSelect {
         is_count_aggr: bool,
         exprs: &[Expr],
         df_schema: &Arc<DFSchema>,
-        session_state: &SessionState,
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
     ) -> DfResult<Vec<Arc<dyn PhysicalExpr>>> {
         exprs
             .iter()
@@ -549,9 +551,15 @@ impl RangeSelect {
                 Expr::Wildcard { .. } if is_count_aggr => create_physical_expr(
                     &lit(COUNT_STAR_EXPANSION),
                     df_schema.as_ref(),
-                    session_state.execution_props(),
+                    session.execution_props(),
+                    planning_ctx,
                 ),
-                _ => create_physical_expr(e, df_schema.as_ref(), session_state.execution_props()),
+                _ => create_physical_expr(
+                    e,
+                    df_schema.as_ref(),
+                    session.execution_props(),
+                    planning_ctx,
+                ),
             })
             .collect::<DfResult<Vec<_>>>()
     }
@@ -560,7 +568,8 @@ impl RangeSelect {
         &self,
         logical_input: &LogicalPlan,
         exec_input: Arc<dyn ExecutionPlan>,
-        session_state: &SessionState,
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let fields: Vec<_> = self
             .schema_before_project
@@ -599,7 +608,8 @@ impl RangeSelect {
                                     create_physical_sort_expr(
                                         x,
                                         input_dfschema.as_ref(),
-                                        session_state.execution_props(),
+                                        session.execution_props(),
+                                        planning_ctx,
                                     )
                                 })
                                 .collect::<DfResult<Vec<_>>>()?
@@ -608,7 +618,8 @@ impl RangeSelect {
                             let time_index = create_physical_expr(
                                 &self.time_expr,
                                 input_dfschema.as_ref(),
-                                session_state.execution_props(),
+                                session.execution_props(),
+                                planning_ctx,
                             )?;
                             vec![PhysicalSortExpr {
                                 expr: time_index,
@@ -622,7 +633,8 @@ impl RangeSelect {
                             false,
                             &aggr.params.args,
                             input_dfschema,
-                            session_state,
+                            session,
+                            planning_ctx,
                         )?;
                         // first_value/last_value has only one param.
                         // The param have been checked by datafusion in logical plan stage.
@@ -642,7 +654,8 @@ impl RangeSelect {
                                     create_physical_sort_expr(
                                         x,
                                         input_dfschema.as_ref(),
-                                        session_state.execution_props(),
+                                        session.execution_props(),
+                                        planning_ctx,
                                     )
                                 })
                                 .collect::<DfResult<Vec<_>>>()?
@@ -656,7 +669,8 @@ impl RangeSelect {
                             aggr.func.name() == "count",
                             &aggr.params.args,
                             input_dfschema,
-                            session_state,
+                            session,
+                            planning_ctx,
                         )?;
                         AggregateExprBuilder::new(aggr.func.clone(), input_phy_exprs)
                             .schema(input_schema.clone())
@@ -688,7 +702,8 @@ impl RangeSelect {
         } else {
             schema_before_project.clone()
         };
-        let by = self.create_physical_expr_list(false, &self.by, input_dfschema, session_state)?;
+        let by =
+            self.create_physical_expr_list(false, &self.by, input_dfschema, session, planning_ctx)?;
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -790,10 +805,6 @@ impl DisplayAs for RangeSelectExec {
 }
 
 impl ExecutionPlan for RangeSelectExec {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -808,6 +819,13 @@ impl ExecutionPlan for RangeSelectExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
+    ) -> DfResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -858,7 +876,7 @@ impl ExecutionPlan for RangeSelectExec {
             schema: self.schema.clone(),
             range_exec: self.range_exec.clone(),
             input,
-            random_state: RandomState::new(),
+            random_state: RandomState::default(),
             time_index,
             align: self.align,
             align_to: self.align_to,

@@ -140,13 +140,15 @@ impl DfLogicalPlanner {
             // notice format is already set in query context, so can be ignore here
             Ok(LogicalPlan::Analyze(Analyze {
                 verbose,
+                format: ExplainFormat::Indent,
                 input: plan,
                 schema,
+                analyze_level: None,
+                analyze_categories: None,
             }))
         } else {
             let stringified_plans = vec![plan.to_stringified(PlanType::InitialLogicalPlan)];
 
-            // default to configuration value
             let options = self.session_state.config().options();
             let format = format
                 .map(|x| ExplainFormat::from_str(&x))
@@ -160,6 +162,7 @@ impl DfLogicalPlanner {
                 stringified_plans,
                 schema,
                 logical_optimization_succeeded: false,
+                show_statistics: None,
             }))
         }
     }
@@ -490,7 +493,8 @@ impl DfLogicalPlanner {
                     if let DfExpr::Cast(cast) = e
                         && let DfExpr::Placeholder(ph) = &*cast.expr
                     {
-                        placeholder_types.insert(ph.id.clone(), Some(cast.data_type.clone()));
+                        placeholder_types
+                            .insert(ph.id.clone(), Some(cast.field.data_type().clone()));
                         casted_placeholders.insert(ph.id.clone());
                     }
 
