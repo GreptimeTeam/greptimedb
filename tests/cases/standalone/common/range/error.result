@@ -86,7 +86,7 @@ SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';
 -- 2.4 nest query
 SELECT min(max(val) RANGE '20s') RANGE '20s' FROM host ALIGN '10s';
 
-Error: 2000(InvalidSyntax), Range Query: Nest Range Query is not allowed
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Aggregate function calls cannot be nested: 'max(host.val)' is nested inside 'min(range_fn(max(host.val), Utf8("20s"), Utf8("")))'
 
 -- 2.5 wrong Aggregate
 SELECT rank() OVER (PARTITION BY host ORDER BY ts DESC) RANGE '10s' FROM host ALIGN '5s';
