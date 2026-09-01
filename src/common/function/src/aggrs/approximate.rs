@@ -20,6 +20,7 @@ use crate::function_registry::FunctionRegistry;
 
 pub mod hll;
 pub mod uddsketch;
+pub mod welford;
 
 pub(crate) struct ApproximateFunction;
 
@@ -37,6 +38,7 @@ impl ApproximateFunction {
         registry.register_aggr(uddsketch_merge);
         registry.register_aggr(uddsketch_delta);
 
+        // hll
         let hll_state = hll::HllState::state_udf_impl();
         let hll_merge = hll::HllState::merge_udf_impl();
         let hll_delta = AggregateUDF::new_from_impl(DeltaMergeWrapper::new(
@@ -48,5 +50,9 @@ impl ApproximateFunction {
         registry.register_aggr(hll_state);
         registry.register_aggr(hll_merge);
         registry.register_aggr(hll_delta);
+
+        // welford
+        registry.register_aggr(welford::WelfordAccumulator::state_udf_impl());
+        registry.register_aggr(welford::WelfordAccumulator::merge_udf_impl());
     }
 }
