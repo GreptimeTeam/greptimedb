@@ -66,20 +66,21 @@ fn make_key(
 }
 
 fn build_input(shape: &Shape) -> (SchemaRef, Vec<RecordBatch>) {
-    let mut fields = Vec::new();
-    fields.push(Field::new("value", DataType::Float64, true));
-    fields.push(Field::new(
-        "ts",
-        DataType::Timestamp(TimeUnit::Millisecond, None),
-        false,
-    ));
-    fields.push(Field::new(
-        "__primary_key",
-        DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
-        false,
-    ));
-    fields.push(Field::new("__sequence", DataType::UInt64, false));
-    fields.push(Field::new("__op_type", DataType::UInt8, false));
+    let fields = vec![
+        Field::new("value", DataType::Float64, true),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(
+            "__primary_key",
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+            false,
+        ),
+        Field::new("__sequence", DataType::UInt64, false),
+        Field::new("__op_type", DataType::UInt8, false),
+    ];
     let schema = Arc::new(Schema::new(fields));
     assert_eq!(
         schema.fields().len(),
