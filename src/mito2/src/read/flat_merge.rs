@@ -35,6 +35,7 @@ use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
@@ -355,7 +356,8 @@ impl BatchBuilder {
         check_interleave_overflow(&self.batches, &self.schema, &self.indices)?;
 
         let primary_key_column_idx = (self.schema.fields.len() >= 3)
-            .then(|| primary_key_column_index(self.schema.fields.len()));
+            .then(|| primary_key_column_index(self.schema.fields.len()))
+            .filter(|&column_idx| self.schema.field(column_idx).name() == PRIMARY_KEY_COLUMN_NAME);
         let columns = (0..self.schema.fields.len())
             .map(|column_idx| {
                 let arrays: Vec<_> = self
@@ -2210,6 +2212,32 @@ mod tests {
 
         let result_batch = builder.build_record_batch().unwrap().unwrap();
         assert_eq!(result_batch.num_rows(), 2);
+    }
+
+    #[test]
+    fn test_batch_builder_generic_three_column_schema() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field1", DataType::Int64, false),
+            Field::new("field2", DataType::Int64, false),
+            Field::new("field3", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(Int64Array::from(vec![3, 4])),
+                Arc::new(Int64Array::from(vec![5, 6])),
+            ],
+        )
+        .unwrap();
+        let mut builder = BatchBuilder::new(schema, 1, 2);
+        builder.push_batch(0, batch.clone());
+        builder.push_row(0);
+        builder.push_row(0);
+
+        let output_batch = builder.build_record_batch().unwrap().unwrap();
+
+        assert_eq!(batch, output_batch);
     }
 
     fn assert_primary_key_dictionary(
