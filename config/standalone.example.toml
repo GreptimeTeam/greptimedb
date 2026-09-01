@@ -68,6 +68,8 @@ max_concurrent_queries = 0
 #+ query_weight = 2
 ## Relative write share while both query and write workloads are backlogged.
 #+ write_weight = 8
+## Number of polls between scheduler fairness samples. Must be greater than zero.
+#+ sample_every_polls = 16
 
 ## The HTTP server options.
 [http]

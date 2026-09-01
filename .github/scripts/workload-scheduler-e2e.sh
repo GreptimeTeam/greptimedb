@@ -100,12 +100,59 @@ assert_metrics() {
     grep -Eq "^greptime_workload_scheduler_polls_total\\{workload=\\\"${class}\\\"\\} [0-9.e+-]+$" <<<"${metrics}"
   done
 }
-assert_polls() {
+metric_polls() {
+  local metrics
+  metrics="$(curl -fsS --max-time 10 "${DATA_HTTP}/metrics")"
+  awk '
+    $1 == "greptime_workload_scheduler_polls_total{workload=\"query\"}" {
+      workload = "query"
+      count[workload]++
+      value[workload] = $2
+      if (NF != 2 || $2 !~ /^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/) {
+        invalid[workload] = $2
+      }
+    }
+    $1 == "greptime_workload_scheduler_polls_total{workload=\"write\"}" {
+      workload = "write"
+      count[workload]++
+      value[workload] = $2
+      if (NF != 2 || $2 !~ /^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/) {
+        invalid[workload] = $2
+      }
+    }
+    END {
+      failed = 0
+      for (i = 1; i <= 2; i++) {
+        workload = (i == 1 ? "query" : "write")
+        if (count[workload] == 0) {
+          printf "metric_polls: missing %s Prometheus sample\n", workload > "/dev/stderr"
+          failed = 1
+        } else if (count[workload] != 1) {
+          printf "metric_polls: expected exactly one %s Prometheus sample, found %d\n", workload, count[workload] > "/dev/stderr"
+          failed = 1
+        }
+        if (workload in invalid) {
+          printf "metric_polls: invalid %s Prometheus numeric token: %s\n", workload, invalid[workload] > "/dev/stderr"
+          failed = 1
+        }
+      }
+      if (failed) exit 1
+      print value["query"]
+      print value["write"]
+    }
+  ' <<<"${metrics}"
+}
+assert_metric_polls() {
   local before="$1" after="$2" phase="$3" comparison="$4"
-  for class in query write; do
-    jq -e --argjson b "${before}" --arg c "${class}" \
-      ".[\$c].polls ${comparison} \$b[\$c].polls" <<<"${after}" >/dev/null || {
-        echo "${phase}: ${class} polls did not satisfy ${comparison}" >&2; return 1;
+  local -a before_values after_values
+  mapfile -t before_values <<<"${before}"
+  mapfile -t after_values <<<"${after}"
+  for i in 0 1; do
+    local class=query
+    [[ "${i}" == 1 ]] && class=write
+    awk -v before="${before_values[${i}]}" -v after="${after_values[${i}]}" \
+      "BEGIN { exit !(after ${comparison} before) }" || {
+        echo "${phase}: ${class} Prometheus polls did not satisfy ${comparison}" >&2; return 1;
       }
   done
 }
@@ -145,14 +192,14 @@ curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
 assert_status "$(state)" true 3 7
 assert_metrics
 sql 'CREATE TABLE scheduler_e2e (ts TIMESTAMP TIME INDEX, v INT)' >/dev/null
-before="$(state)"; sql 'INSERT INTO scheduler_e2e VALUES (1000, 10), (2000, 20)' >/dev/null
-assert_values "$(sql 'SELECT v FROM scheduler_e2e ORDER BY v')" '[10,20]'; after="$(state)"
-assert_status "${after}" true 3 7; assert_polls "${before}" "${after}" 'enabled phase' '>'
+before="$(metric_polls)"; sql 'INSERT INTO scheduler_e2e VALUES (1000, 10), (2000, 20)' >/dev/null
+assert_values "$(sql 'SELECT v FROM scheduler_e2e ORDER BY v')" '[10,20]'; after="$(metric_polls)"
+assert_status "$(state)" true 3 7; assert_metric_polls "${before}" "${after}" 'enabled phase' '>'
 
 curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' --data false "${DATA_HTTP}/debug/workload_scheduler/enabled" >/dev/null
-before="$(state)"; assert_status "${before}" false 3 7
+before="$(metric_polls)"; assert_status "$(state)" false 3 7
 sql 'INSERT INTO scheduler_e2e VALUES (3000, 30)' >/dev/null
-assert_values "$(sql 'SELECT v FROM scheduler_e2e ORDER BY v')" '[10,20,30]'; after="$(state)"
-assert_status "${after}" false 3 7; assert_polls "${before}" "${after}" 'disabled phase' '=='
+assert_values "$(sql 'SELECT v FROM scheduler_e2e ORDER BY v')" '[10,20,30]'; after="$(metric_polls)"
+assert_status "$(state)" false 3 7; assert_metric_polls "${before}" "${after}" 'disabled phase' '=='
 
 echo "distributed workload scheduler E2E passed; logs retained in ${RUN_DIR}"

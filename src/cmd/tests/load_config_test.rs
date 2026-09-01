@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::io::Write;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
@@ -56,6 +56,7 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         enable = true
         query_weight = 1
         write_weight = 4
+        sample_every_polls = 32
     "#;
 
     let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
@@ -74,6 +75,24 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         NonZeroU32::new(4).unwrap(),
         options.runtime.experimental_workload_scheduler.write_weight
     );
+    assert_eq!(
+        NonZeroUsize::new(32).unwrap(),
+        options
+            .runtime
+            .experimental_workload_scheduler
+            .sample_every_polls
+    );
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_sampling() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        sample_every_polls = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
 }
 
 #[test]

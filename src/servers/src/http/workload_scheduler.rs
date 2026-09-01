@@ -62,7 +62,6 @@ pub(super) async fn set_weights_handler(body: Bytes) -> Result<impl IntoResponse
 #[derive(Debug, Serialize)]
 struct ClassStatusDto {
     weight: u32,
-    polls: u64,
 }
 
 /// Point-in-time workload scheduler status. Scheduler class fields are omitted
@@ -77,9 +76,9 @@ struct SchedulerStatusDto {
     write: Option<ClassStatusDto>,
 }
 
-/// Returns the current workload scheduler state and query/write weights and
-/// poll counters. Always returns 200, with `enabled=false` when the scheduler
-/// is dynamically disabled.
+/// Returns the current workload scheduler state and query/write weights.
+/// Always returns 200, with `enabled=false` when the scheduler is dynamically
+/// disabled.
 #[axum_macros::debug_handler]
 pub(super) async fn get_status_handler() -> Result<impl IntoResponse> {
     let enabled = common_runtime::workload_scheduler_enabled();
@@ -96,7 +95,6 @@ pub(super) async fn get_status_handler() -> Result<impl IntoResponse> {
     for (class, class_stats) in &stats.classes {
         let status = ClassStatusDto {
             weight: class_stats.weight,
-            polls: class_stats.polls,
         };
         match class.id() {
             1 => query = Some(status),
