@@ -975,7 +975,9 @@ mod tests {
         assert!(!env.disk_manager.tmp_files_enabled());
         let result = env.disk_manager.create_tmp_file("test spill");
         assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("DiskManager is disabled"));
+        if let Err(error) = result {
+            assert!(format!("{error}").contains("DiskManager is disabled"));
+        }
     }
 
     #[test]
