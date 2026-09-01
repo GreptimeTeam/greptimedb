@@ -52,7 +52,16 @@ impl ApproximateFunction {
         registry.register_aggr(hll_delta);
 
         // welford
-        registry.register_aggr(welford::WelfordAccumulator::state_udf_impl());
-        registry.register_aggr(welford::WelfordAccumulator::merge_udf_impl());
+        let welford_state = welford::WelfordAccumulator::state_udf_impl();
+        let welford_merge = welford::WelfordAccumulator::merge_udf_impl();
+        let welford_delta = AggregateUDF::new_from_impl(DeltaMergeWrapper::new(
+            welford_merge.clone(),
+            welford::STDDEV_POP_STATE_NAME,
+            vec![DataType::Binary],
+            DataType::Binary,
+        ));
+        registry.register_aggr(welford_state);
+        registry.register_aggr(welford_merge);
+        registry.register_aggr(welford_delta);
     }
 }

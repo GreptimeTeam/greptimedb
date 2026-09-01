@@ -57,6 +57,7 @@ use uddsketch::UddSketchRef;
 use super::*;
 use crate::aggrs::approximate::hll::{HllState, HllStateType};
 use crate::aggrs::approximate::uddsketch::UddSketchState;
+use crate::aggrs::approximate::welford::{WelfordAccumulator, WelfordState};
 use crate::aggrs::count_hash::CountHash;
 use crate::function::Function as _;
 use crate::function_registry::FUNCTION_REGISTRY;
@@ -977,6 +978,73 @@ fn test_registered_hll_delta_merge_semantics() {
     };
     let mut merged: HllStateType = bincode::deserialize(&merged).unwrap();
     assert_eq!(merged.count().trunc() as u32, 2);
+}
+
+#[test]
+fn test_registered_welford_delta_merge_semantics() {
+    let welford = FUNCTION_REGISTRY
+        .get_aggr_func(&aggr_delta_merge_func_name("stddev_pop_state"))
+        .expect("global approximate functions register Welford delta merge");
+    assert_eq!(welford.name(), "__stddev_pop_state_delta_merge");
+    assert_eq!(
+        welford.signature().type_signature,
+        TypeSignature::Exact(vec![DataType::Binary, DataType::Binary])
+    );
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        Field::new("delta", DataType::Binary, true),
+        Field::new("persisted", DataType::Binary, true),
+    ]));
+    let expr = AggregateExprBuilder::new(
+        Arc::new(welford),
+        vec![
+            Arc::new(PhysicalColumn::new("delta", 0)),
+            Arc::new(PhysicalColumn::new("persisted", 1)),
+        ],
+    )
+    .schema(schema)
+    .alias("stddev_pop_state_delta_merge")
+    .build()
+    .unwrap();
+
+    fn state(values: &[f64]) -> Vec<u8> {
+        let mut accumulator = WelfordAccumulator::default();
+        accumulator
+            .update_batch(&[Arc::new(Float64Array::from(
+                values.iter().copied().map(Some).collect::<Vec<_>>(),
+            )) as ArrayRef])
+            .unwrap();
+        let ScalarValue::Binary(Some(state)) = accumulator.evaluate().unwrap() else {
+            panic!("Welford state must be binary");
+        };
+        state
+    }
+
+    let delta = state(&[1.0, 2.0]);
+    let persisted = state(&[3.0, 4.0]);
+    let expected = state(&[1.0, 2.0, 3.0, 4.0]);
+
+    for (delta, persisted, expected) in [
+        (Some(delta.as_slice()), None, state(&[1.0, 2.0])),
+        (None, Some(persisted.as_slice()), state(&[3.0, 4.0])),
+        (None, None, state(&[])),
+        (Some(delta.as_slice()), Some(persisted.as_slice()), expected),
+    ] {
+        let mut accum = expr.create_accumulator().unwrap();
+        accum
+            .update_batch(&[
+                Arc::new(BinaryArray::from(vec![delta])),
+                Arc::new(BinaryArray::from(vec![persisted])),
+            ])
+            .unwrap();
+        let ScalarValue::Binary(Some(merged)) = accum.evaluate().unwrap() else {
+            panic!("Welford delta merge state must be binary");
+        };
+        assert_eq!(
+            WelfordState::decode(&merged).unwrap(),
+            WelfordState::decode(&expected).unwrap()
+        );
+    }
 }
 
 #[test]

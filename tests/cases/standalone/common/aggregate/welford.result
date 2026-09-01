@@ -87,6 +87,64 @@ FROM (
 
 Error: 1001(Unsupported), This feature is not implemented: Welford DISTINCT aggregations are not available
 
+CREATE TABLE welford_delta_merge (
+    `id` INT PRIMARY KEY,
+    `delta` BINARY,
+    `persisted` BINARY,
+    `ts` TIMESTAMP TIME INDEX DEFAULT now()
+);
+
+Affected Rows: 0
+
+INSERT INTO welford_delta_merge (`id`, `delta`, `persisted`)
+SELECT 1, stddev_pop_state(`value`), NULL
+FROM test_welford WHERE id <= 5;
+
+Affected Rows: 1
+
+INSERT INTO welford_delta_merge (`id`, `delta`, `persisted`)
+SELECT 2, NULL, stddev_pop_state(`value`)
+FROM test_welford WHERE id > 5;
+
+Affected Rows: 1
+
+INSERT INTO welford_delta_merge (`id`, `delta`, `persisted`)
+VALUES (3, NULL, NULL);
+
+Affected Rows: 1
+
+-- Delta-only, persisted-only, and both-null (empty-state) identity behavior.
+SELECT
+    `id`,
+    stddev_pop_calc(__stddev_pop_state_delta_merge(`delta`, `persisted`)) AS merged_stddev
+FROM welford_delta_merge
+GROUP BY `id`
+ORDER BY `id`;
+
++----+--------------------+
+| id | merged_stddev      |
++----+--------------------+
+| 1  | 14.142135623730951 |
+| 2  | 14.142135623730951 |
+| 3  |                    |
++----+--------------------+
+
+-- Merging delta and persisted states must equal direct stddev_pop state calculation.
+SELECT
+    stddev_pop_calc(__stddev_pop_state_delta_merge(`delta`, `persisted`)) AS merged_stddev,
+    (SELECT stddev_pop_calc(stddev_pop_state(`value`)) FROM test_welford) AS direct_stddev
+FROM welford_delta_merge;
+
++--------------------+--------------------+
+| merged_stddev      | direct_stddev      |
++--------------------+--------------------+
+| 28.722813232690143 | 28.722813232690143 |
++--------------------+--------------------+
+
+DROP TABLE welford_delta_merge;
+
+Affected Rows: 0
+
 DROP TABLE grouped_welford;
 
 Affected Rows: 0
