@@ -30,6 +30,7 @@ use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use datatypes::vectors::json::array::JsonArray;
+use datatypes::vectors::json::json2_physical_data_type;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
@@ -37,7 +38,8 @@ use store_api::storage::ColumnId;
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
-use crate::read::read_columns::{JsonReadTarget, ReadColumns};
+use crate::read::read_columns::ReadColumns;
+use crate::sst::parquet::Json2RewriteTargets;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -93,6 +95,21 @@ impl FlatProjectionMapper {
         projection: Vec<usize>,
         read_cols: ReadColumns,
     ) -> Result<Self> {
+        Self::new_with_json2_rewrite_targets(
+            metadata,
+            projection,
+            read_cols,
+            &Json2RewriteTargets::default(),
+        )
+    }
+
+    /// Returns a mapper for a compaction read with fixed JSON2 output layouts.
+    pub(crate) fn new_with_json2_rewrite_targets(
+        metadata: &RegionMetadataRef,
+        projection: Vec<usize>,
+        read_cols: ReadColumns,
+        json2_rewrite_targets: &Json2RewriteTargets,
+    ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
@@ -139,7 +156,8 @@ impl FlatProjectionMapper {
             }
         }
 
-        let input_arrow_schema = compute_input_arrow_schema(metadata, &batch_schema, &read_cols);
+        let input_arrow_schema =
+            compute_input_arrow_schema(metadata, &batch_schema, &read_cols, json2_rewrite_targets);
 
         // If projection is empty, we don't output any column.
         let output_schema = if is_empty_projection {
@@ -397,10 +415,9 @@ fn json2_read_datatype(
     if !json_type.is_json2() {
         return None;
     }
-    match read_cols.json_read_target(&column_id) {
-        Some(JsonReadTarget::Projection(target)) => Some(ConcreteDataType::json2(target.clone())),
-        _ => None,
-    }
+    read_cols
+        .json_target_type(column_id)
+        .map(|x| ConcreteDataType::json2(x.clone()))
 }
 
 fn single_value_string_dictionary<'a>(
@@ -473,14 +490,19 @@ pub(crate) fn compute_input_arrow_schema(
     metadata: &RegionMetadata,
     batch_schema: &[(ColumnId, ConcreteDataType)],
     read_cols: &ReadColumns,
+    json2_rewrite_targets: &Json2RewriteTargets,
 ) -> datatypes::arrow::datatypes::SchemaRef {
     let mut new_fields = Vec::with_capacity(batch_schema.len() + 3);
     for (column_id, data_type) in batch_schema {
-        let data_type = match read_cols.json_read_target(column_id) {
-            Some(JsonReadTarget::Projection(json_type)) => json_type.as_arrow_type(),
-            Some(JsonReadTarget::Rewrite(layout)) => layout.data_type.clone(),
-            None => data_type.as_arrow_type(),
-        };
+        let data_type = json2_rewrite_targets
+            .get(column_id)
+            .map(|x| json2_physical_data_type(&x.target_layout))
+            .or_else(|| {
+                read_cols
+                    .json_target_type(*column_id)
+                    .map(|x| x.as_arrow_type())
+            })
+            .unwrap_or_else(|| data_type.as_arrow_type());
 
         let column_metadata = metadata.column_by_id(*column_id).unwrap();
         let field = Field::new(

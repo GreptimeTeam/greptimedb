@@ -95,7 +95,7 @@ impl FlatCompatBatch {
         compaction: bool,
     ) -> Result<Option<Self>> {
         let actual = read_format.metadata();
-        let actual_schema = read_format.output_logical_schema(mapper.metadata())?;
+        let actual_schema = read_format.output_logical_schema();
 
         let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema

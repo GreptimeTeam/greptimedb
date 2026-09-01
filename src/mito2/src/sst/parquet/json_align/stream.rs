@@ -30,7 +30,7 @@ use snafu::{ResultExt, ensure};
 use crate::error::{
     CastColumnSnafu, DataTypeMismatchSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
-use crate::read::read_columns::Json2TargetLayout;
+use crate::sst::parquet::Json2TargetLayout;
 
 #[derive(Debug)]
 struct Json2RewriteSettings {
@@ -273,7 +273,6 @@ mod tests {
         let rewrite_targets = HashMap::from([(
             "j".to_string(),
             Json2TargetLayout {
-                data_type: DataType::Null,
                 extension_metadata: serde_json::to_string(&JsonMetadata::new(
                     logical_settings.clone(),
                 ))?,

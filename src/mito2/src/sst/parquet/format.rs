@@ -706,7 +706,7 @@ fn json_target_nested_paths(
     read_columns: &ReadColumns,
     column_id: ColumnId,
 ) -> Vec<NestedPath> {
-    let Some(target_type) = read_columns.json_projection_type(column_id) else {
+    let Some(target_type) = read_columns.json_target_type(column_id) else {
         return Vec::new();
     };
     let Some(column) = metadata.column_by_id(column_id) else {

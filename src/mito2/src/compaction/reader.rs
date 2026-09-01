@@ -42,12 +42,13 @@ use crate::error::{
 };
 use crate::read::FlatSource;
 use crate::read::flat_projection::FlatProjectionMapper;
-use crate::read::read_columns::{Json2TargetLayout, ReadColumns};
+use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
+use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
 
 /// Builders to create [BoxedRecordBatchStream] for compaction.
 pub(crate) struct CompactionSstReaderBuilder<'a> {
@@ -121,18 +122,22 @@ impl CompactionSstReaderBuilder<'_> {
             json2_target_layouts.insert(
                 column.column_id,
                 Json2TargetLayout {
-                    data_type: json2_physical_data_type(&plan.target_layout),
                     extension_metadata,
                     target_layout: plan.target_layout.clone(),
                 },
             );
         }
-        let read_columns =
-            ReadColumns::new(read_column_ids).with_json2_target_layouts(json2_target_layouts);
-        let mapper =
-            FlatProjectionMapper::new_with_read_columns(&self.metadata, projection, read_columns)?;
+        let read_columns = ReadColumns::new(read_column_ids);
+        let targets: Json2RewriteTargets = Arc::new(json2_target_layouts);
+        let mapper = FlatProjectionMapper::new_with_json2_rewrite_targets(
+            &self.metadata,
+            projection,
+            read_columns,
+            &targets,
+        )?;
 
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
+            .with_json2_rewrite_targets(targets)
             .with_files(self.inputs.to_vec())
             .with_compaction(true)
             .with_batch_size(batch_size)

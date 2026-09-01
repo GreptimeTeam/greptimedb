@@ -33,16 +33,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use arrow_schema::extension::{
-    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
-};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::kernels::take::take;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::Json2ExtensionType;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::RowGroupMetaData;
@@ -53,10 +49,10 @@ use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
-    NewRecordBatchSnafu, Result, UnexpectedSnafu,
+    NewRecordBatchSnafu, Result,
 };
 use crate::read::flat_projection::flat_projected_columns;
-use crate::read::read_columns::{JsonReadTarget, JsonReadTargets, ReadColumns};
+use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
     PrimaryKeyReadFormat, StatValues, column_null_counts, column_values,
@@ -246,9 +242,8 @@ impl FlatReadFormat {
     }
 
     /// Enables wrapping binary `__primary_key` batches back to a dictionary in [`Self::convert_batch`].
-    pub(crate) fn set_pk_as_binary(&mut self) -> Result<()> {
-        self.pk_dict_wrap_schema = Some(self.output_arrow_schema()?);
-        Ok(())
+    pub(crate) fn set_pk_as_binary(&mut self, output_schema: SchemaRef) {
+        self.pk_dict_wrap_schema = Some(output_schema);
     }
 
     /// Index of a column in the projected batch by its column id.
@@ -311,7 +306,7 @@ impl FlatReadFormat {
             .project(projection)
             .context(ComputeArrowSnafu)?;
         let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
-        for (column_id, target) in self.json_read_targets().iter() {
+        for (column_id, target) in self.json_target_types().iter() {
             let Some(index) = self.parquet_projected_index_by_id(*column_id) else {
                 continue;
             };
@@ -319,25 +314,7 @@ impl FlatReadFormat {
                 continue;
             };
             let mut field = field.as_ref().clone();
-            match target {
-                JsonReadTarget::Projection(target) => {
-                    field.set_data_type(ConcreteDataType::json2(target.clone()).as_arrow_type())
-                }
-                JsonReadTarget::Rewrite(layout) => {
-                    field.set_data_type(layout.data_type.clone());
-
-                    let mut metadata = field.metadata().clone();
-                    metadata.insert(
-                        EXTENSION_TYPE_NAME_KEY.to_string(),
-                        Json2ExtensionType::NAME.to_string(),
-                    );
-                    metadata.insert(
-                        EXTENSION_TYPE_METADATA_KEY.to_string(),
-                        layout.extension_metadata.clone(),
-                    );
-                    field.set_metadata(metadata);
-                }
-            };
+            field.set_data_type(ConcreteDataType::json2(target.clone()).as_arrow_type());
             fields[index] = Arc::new(field);
         }
         schema.fields = fields.into();
@@ -346,7 +323,7 @@ impl FlatReadFormat {
 
     /// Index of a column in the projected schema produced directly by parquet
     /// reading, before any primary-key-to-flat conversion.
-    fn parquet_projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
+    pub(crate) fn parquet_projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => p
                 .format_projection
@@ -380,33 +357,20 @@ impl FlatReadFormat {
     }
 
     /// Gets JSON2 read targets.
-    pub(crate) fn json_read_targets(&self) -> &JsonReadTargets {
-        self.read_cols.json_read_targets()
+    pub(crate) fn json_target_types(&self) -> &JsonTargetTypes {
+        self.read_cols.json_target_types()
     }
 
     /// Returns the logical schema produced after Parquet-level JSON2 alignment.
-    pub(crate) fn output_logical_schema(
-        &self,
-        expected_metadata: &RegionMetadata,
-    ) -> Result<Vec<(ColumnId, ConcreteDataType)>> {
+    pub(crate) fn output_logical_schema(&self) -> Vec<(ColumnId, ConcreteDataType)> {
         let mut schema = flat_projected_columns(self.metadata(), self.format_projection());
-        for (column_id, target) in self.json_read_targets().iter() {
+        for (column_id, target) in self.json_target_types().iter() {
             let Some((_, data_type)) = schema.iter_mut().find(|(id, _)| id == column_id) else {
                 continue;
             };
-            *data_type = match target {
-                JsonReadTarget::Projection(target) => ConcreteDataType::json2(target.clone()),
-                JsonReadTarget::Rewrite(_) => expected_metadata
-                    .column_by_id(*column_id)
-                    .with_context(|| UnexpectedSnafu {
-                        reason: format!("JSON2 rewrite column id {column_id} does not exist"),
-                    })?
-                    .column_schema
-                    .data_type
-                    .clone(),
-            };
+            *data_type = ConcreteDataType::json2(target.clone());
         }
-        Ok(schema)
+        schema
     }
 
     /// Gets the projection in the flat format.
@@ -1057,9 +1021,8 @@ mod tests {
             false,
         )
         .unwrap();
-        read_format.set_pk_as_binary().unwrap();
-
         let output_schema = read_format.output_arrow_schema().unwrap();
+        read_format.set_pk_as_binary(output_schema.clone());
         let binary_schema = override_pk_field_to_binary(&output_schema);
 
         // The __primary_key field must preserve its field_id metadata after

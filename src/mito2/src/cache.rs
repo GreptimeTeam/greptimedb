@@ -34,6 +34,7 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef};
@@ -65,7 +66,7 @@ use crate::memtable::record_batch_estimated_size;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::read::range_cache::{RangeScanCacheKey, RangeScanCacheValue};
-use crate::read::read_columns::{JsonReadTarget, JsonReadTargets};
+use crate::read::read_columns::JsonTargetTypes;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 use crate::sst::parquet::read_columns::ParquetReadColumns;
@@ -2030,7 +2031,7 @@ pub struct SelectorResultValue {
     ///
     /// JSON2 projection is query-driven; the same parquet columns can produce
     /// different cached batches under different type hints.
-    pub json_read_targets: JsonReadTargets,
+    pub json_target_types: JsonTargetTypes,
 }
 
 impl SelectorResultValue {
@@ -2039,7 +2040,7 @@ impl SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::PrimaryKey(result),
             read_cols,
-            json_read_targets: Arc::default(),
+            json_target_types: Arc::default(),
         }
     }
 
@@ -2047,12 +2048,12 @@ impl SelectorResultValue {
     pub fn new_flat(
         result: Vec<RecordBatch>,
         read_cols: ParquetReadColumns,
-        json_read_targets: JsonReadTargets,
+        json_target_types: JsonTargetTypes,
     ) -> SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::Flat(result),
             read_cols,
-            json_read_targets,
+            json_target_types,
         }
     }
 
@@ -2065,7 +2066,7 @@ impl SelectorResultValue {
             SelectorResult::Flat(batches) => batches.iter().map(record_batch_estimated_size).sum(),
         };
         result_size
-            + self.json_read_targets.len() * (size_of::<ColumnId>() + size_of::<JsonReadTarget>())
+            + self.json_target_types.len() * (size_of::<ColumnId>() + size_of::<JsonNativeType>())
     }
 }
 
