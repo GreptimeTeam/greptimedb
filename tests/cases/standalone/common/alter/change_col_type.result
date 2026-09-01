@@ -352,10 +352,10 @@ INSERT INTO ts_overflow VALUES ("a", "3000-01-01 00:00:00");
 
 Affected Rows: 1
 
--- widening to nanoseconds is rejected before any region is altered
+-- widening to nanoseconds is rejected by region validation: data overflows the target unit
 ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
 
-Error: 1004(InvalidArguments), Cannot widen the time index unit of column 'ts' in table 'greptime.public.ts_overflow': existing timestamps overflow the target unit's i64 range
+Error: 1004(InvalidArguments), Invalid region request, region_id: 4428111282176(1031, 0), err: cannot widen time index column 'ts' to Nanosecond: data spans [3000-01-01 00:00:00+0000, 3000-01-01 00:00:00+0000] which overflows the target unit's i64 range
 
 DESCRIBE ts_overflow;
 

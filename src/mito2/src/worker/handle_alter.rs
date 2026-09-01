@@ -18,8 +18,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_telemetry::{error, info};
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -489,19 +489,22 @@ fn check_time_index_widening_overflow(
                 let (start, end) = file.time_range();
                 if start.convert_to(target_unit).is_none() || end.convert_to(target_unit).is_none()
                 {
-                    return store_api::metadata::InvalidRegionRequestSnafu {
+                    let err = format!(
+                        "cannot widen time index column '{}' to {:?}: data spans \
+                         [{}, {}] which overflows the target unit's i64 range",
+                        column.column_name,
+                        target_unit,
+                        start.to_iso8601_string(),
+                        end.to_iso8601_string(),
+                    );
+                    error!(
+                        "Rejecting time index widening for region {}, file {}: {}",
                         region_id,
-                        err: format!(
-                            "cannot widen time index column '{}' to {:?}: data in file {} \
-                             spans [{}, {}] which overflows the target unit's i64 range",
-                            column.column_name,
-                            target_unit,
-                            file.file_id(),
-                            start.to_iso8601_string(),
-                            end.to_iso8601_string(),
-                        ),
-                    }
-                    .fail();
+                        file.file_id(),
+                        err
+                    );
+                    return store_api::metadata::InvalidRegionRequestSnafu { region_id, err }
+                        .fail();
                 }
             }
         }

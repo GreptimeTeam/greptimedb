@@ -418,19 +418,6 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display(
-        "Cannot widen the time index unit of column '{}' in table '{}': \
-         existing timestamps overflow the target unit's i64 range",
-        column,
-        table
-    ))]
-    TimeIndexWideningOverflow {
-        table: String,
-        column: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to build table meta for table: {}", table_name))]
     BuildTableMeta {
         table_name: String,
@@ -996,8 +983,7 @@ impl ErrorExt for Error {
             | Error::PartitionExprToPb { .. }
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
-            | Error::CreatePartitionRules { .. }
-            | Error::TimeIndexWideningOverflow { .. } => StatusCode::InvalidArguments,
+            | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
             }
