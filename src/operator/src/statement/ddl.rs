@@ -72,6 +72,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVector, VectorRef};
+use futures::StreamExt;
 use humantime::parse_duration;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
@@ -2017,7 +2018,7 @@ impl StatementExecutor {
             ))),
         ];
         for filter in bounds {
-            let provider = std::sync::Arc::new(DfTableProviderAdapter::new(table.clone()));
+            let provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
             let plan = LogicalPlanBuilder::scan(
                 expr.table_name.as_str(),
                 provider_as_source(provider),
@@ -2035,7 +2036,8 @@ impl StatementExecutor {
             let output = self.exec_plan(plan, query_context.clone()).await?;
 
             let has_overflow = match output.data {
-                OutputData::Stream(mut stream) => futures::StreamExt::next(&mut stream)
+                OutputData::Stream(mut stream) => stream
+                    .next()
                     .await
                     .is_some_and(|batch| batch.map(|batch| batch.num_rows() > 0).unwrap_or(true)),
                 _ => false,

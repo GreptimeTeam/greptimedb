@@ -424,15 +424,11 @@ pub enum Error {
         column,
         table
     ))]
-    TimeIndexWideningOverflow { table: String, column: String },
-
-    #[snafu(display("Failed to scan table {} for preflight check", table))]
-    PreflightScan {
+    TimeIndexWideningOverflow {
+        table: String,
+        column: String,
         #[snafu(implicit)]
         location: Location,
-        table: String,
-        #[snafu(source)]
-        error: table::error::Error,
     },
 
     #[snafu(display("Failed to build table meta for table: {}", table_name))]
@@ -1001,7 +997,6 @@ impl ErrorExt for Error {
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
             | Error::CreatePartitionRules { .. }
-            | Error::PreflightScan { .. }
             | Error::TimeIndexWideningOverflow { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists

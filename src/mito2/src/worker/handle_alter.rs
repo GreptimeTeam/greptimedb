@@ -163,7 +163,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id, version.metadata, version.options, request,
         );
         if let Err(e) = check_time_index_widening_overflow(region.region_id, &version, &request) {
-            sender.send(Err(e));
+            sender.send(Err(e).context(InvalidRegionRequestSnafu));
             return;
         }
         self.handle_alter_region_with_empty_memtable(region, version, request, new_options, sender);
@@ -470,7 +470,7 @@ fn check_time_index_widening_overflow(
     region_id: RegionId,
     version: &VersionRef,
     request: &RegionAlterRequest,
-) -> Result<()> {
+) -> store_api::metadata::Result<()> {
     let AlterKind::ModifyColumnTypes { columns } = &request.kind else {
         return Ok(());
     };
@@ -501,8 +501,7 @@ fn check_time_index_widening_overflow(
                             end.to_iso8601_string(),
                         ),
                     }
-                    .fail()
-                    .context(InvalidRegionRequestSnafu);
+                    .fail();
                 }
             }
         }
