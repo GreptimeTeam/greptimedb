@@ -457,23 +457,18 @@ impl Memtable for BulkMemtable {
 
             let fragment_size = fragment.estimated_size();
             // Routes small parts to unordered_part based on row and byte thresholds.
-            if bulk_parts.unordered_part.should_accept(fragment.num_rows())
+            // The compaction of `unordered_part` is fallible; keep its result so
+            // the stats below are updated before any error is propagated.
+            let compact_result = if bulk_parts.unordered_part.should_accept(fragment.num_rows())
                 && fragment_size <= self.config.encode_bytes_threshold
             {
                 bulk_parts.unordered_part.push(fragment);
 
                 // Compacts unordered_part if the row or byte threshold is exceeded.
-                if bulk_parts.should_compact_unordered_part(self.config.encode_bytes_threshold)
-                    && let Some(bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
-                {
-                    bulk_parts.parts.push(BulkPartWrapper {
-                        part: PartToMerge::Bulk {
-                            part: bulk_part,
-                            file_id: FileId::random(),
-                        },
-                        merging: false,
-                    });
-                    bulk_parts.unordered_part.clear();
+                if bulk_parts.should_compact_unordered_part(self.config.encode_bytes_threshold) {
+                    bulk_parts.unordered_part.to_bulk_part()
+                } else {
+                    Ok(None)
                 }
             } else {
                 bulk_parts.parts.push(BulkPartWrapper {
@@ -483,13 +478,29 @@ impl Memtable for BulkMemtable {
                     },
                     merging: false,
                 });
-            }
+                Ok(None)
+            };
 
             // Since this operation should be fast, we do it in parts lock scope.
             // This ensure the statistics in `ranges()` are correct. What's more,
             // it guarantees no rows are out of the time range so we don't need to
             // prune rows by time range again in the iterator of the MemtableRange.
+            //
+            // The fragment is buffered in `unordered_part` regardless of the
+            // compaction outcome, so the stats must be updated even when the
+            // compaction fails — otherwise rows would be present but unaccounted
+            // and `ranges()` could prune them away by time range.
             self.update_stats(local_metrics);
+            if let Some(bulk_part) = compact_result? {
+                bulk_parts.parts.push(BulkPartWrapper {
+                    part: PartToMerge::Bulk {
+                        part: bulk_part,
+                        file_id: FileId::random(),
+                    },
+                    merging: false,
+                });
+                bulk_parts.unordered_part.clear();
+            }
         }
 
         if self.should_compact() {

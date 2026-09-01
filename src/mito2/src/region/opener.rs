@@ -41,7 +41,7 @@ use store_api::metadata::{
 use store_api::region_engine::RegionRole;
 use store_api::region_request::{PathType, RegionRequirements};
 use store_api::storage::{ColumnId, RegionId};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, oneshot};
 
 use crate::access_layer::AccessLayer;
 use crate::cache::file_cache::{FileCache, FileType, IndexKey};
@@ -66,7 +66,7 @@ use crate::region::{
     RegionStats,
 };
 use crate::region_write_ctx::RegionWriteCtx;
-use crate::request::OptionOutputTx;
+use crate::request::{OptionOutputTx, OutputTx};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
@@ -861,17 +861,26 @@ where
             // For WAL replay, we don't need to track the write bytes rate.
             None,
         );
+        // Replay must be fail-closed: an entry that cannot be applied has to
+        // fail the region open instead of silently dropping the rows. The
+        // write context only surfaces apply failures through its output
+        // senders (the notifiers deliver on drop), so hand each replayed
+        // mutation a real oneshot channel and collect the results afterwards.
+        let mut entry_rows = 0usize;
+        let mut replay_results = Vec::new();
         for mutation in entry.mutations {
-            rows_replayed += mutation
+            entry_rows += mutation
                 .rows
                 .as_ref()
                 .map(|rows| rows.rows.len())
                 .unwrap_or(0);
+            let (tx, rx) = oneshot::channel();
+            replay_results.push(rx);
             region_write_ctx.push_mutation(
                 mutation.op_type,
                 mutation.rows,
                 mutation.write_hint,
-                OptionOutputTx::none(),
+                OptionOutputTx::new(Some(OutputTx::new(tx))),
                 // We should respect the sequence in WAL during replay.
                 Some(mutation.sequence),
             );
@@ -888,12 +897,14 @@ where
             if region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse {
                 part.fill_missing_columns(&region_metadata)?;
             }
-            rows_replayed += part.num_rows();
+            entry_rows += part.num_rows();
             // During replay, we should adopt the sequence from WAL.
             let bulk_sequence_from_wal = part.sequence;
+            let (tx, rx) = oneshot::channel();
+            replay_results.push(rx);
             ensure!(
                 region_write_ctx.push_bulk(
-                    OptionOutputTx::none(),
+                    OptionOutputTx::new(Some(OutputTx::new(tx))),
                     part,
                     Some(bulk_sequence_from_wal)
                 ),
@@ -911,6 +922,42 @@ where
         // Publish the replayed sequences only after all rows (including bulk
         // parts) are installed, matching the write path ordering.
         region_write_ctx.publish_sequence_and_entry_id();
+
+        // Flush the notifiers by dropping the write context, then collect the
+        // apply results. Any failure fails the region open (fail-closed): the
+        // WAL entry stays durable, so opening "successfully" with the rows
+        // missing would silently lose acknowledged data. The operator must fix
+        // the underlying cause, or open the region with `skip_wal_replay`.
+        drop(region_write_ctx);
+        for rx in replay_results {
+            match rx.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    error!(
+                        "Failed to apply a replayed WAL entry (entry id: {}, region id: {}) to the memtable: {}. Failing the region open to avoid silently losing acknowledged rows; recover by fixing the cause or opening the region with `skip_wal_replay`.",
+                        entry_id, region_id, err
+                    );
+                    return Err(err);
+                }
+                // The notifier always sends before drop; a closed channel means
+                // the result is unknown, which must also fail the open.
+                Err(_) => {
+                    error!(
+                        "Lost the apply result for a replayed WAL entry (entry id: {}, region id: {}). Failing the region open; recover by opening the region with `skip_wal_replay`.",
+                        entry_id, region_id
+                    );
+                    return RegionCorruptedSnafu {
+                        region_id,
+                        reason: format!(
+                            "apply result channel closed for replayed entry {entry_id}"
+                        ),
+                    }
+                    .fail();
+                }
+            }
+        }
+        // Only rows from entries that applied successfully are counted.
+        rows_replayed += entry_rows;
     }
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest
@@ -1319,34 +1366,45 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use api::v1::helper::{tag_column_schema, time_index_column_schema};
+    use api::v1::value::ValueData;
+    use api::v1::{self, ColumnDataType, Mutation, OpType, Row, Rows, WalEntry};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use datatypes::arrow::array::{ArrayRef, BinaryArray, Int64Array};
     use datatypes::arrow::record_batch::RecordBatch;
+    use futures::future::FutureExt;
     use object_store::ObjectStore;
     use object_store::services::{Fs, Memory, S3};
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
+    use prost::Message;
+    use store_api::logstore::entry::{Entry, NaiveEntry};
+    use store_api::logstore::provider::Provider;
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        initial_pruned_entry_id, preload_parquet_meta_cache_for_files, sanitize_region_options,
-        supports_open_region_object_storage_requirement,
+        initial_pruned_entry_id, preload_parquet_meta_cache_for_files, replay_memtable,
+        sanitize_region_options, supports_open_region_object_storage_requirement,
     };
     use crate::cache::CacheManager;
     use crate::cache::file_cache::{FileType, IndexKey};
     use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
-    use crate::region::options::RegionOptions;
+    use crate::memtable::time_series::TimeSeriesMemtableBuilder;
+    use crate::region::options::{MergeMode, RegionOptions};
     use crate::sst::FormatType;
     use crate::sst::file::{FileHandle, FileMeta};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::parquet::PARQUET_METADATA_KEY;
-    use crate::test_util::TestEnv;
     use crate::test_util::sst_util::sst_region_metadata;
+    use crate::test_util::version_util::VersionControlBuilder;
+    use crate::test_util::wal_util::MockRawEntryStream;
+    use crate::test_util::{TestEnv, ts_ms_value};
+    use crate::wal::entry_reader::LogStoreEntryReader;
 
     fn build_test_manifest(sst_format: FormatType) -> RegionManifest {
         RegionManifest {
@@ -1713,6 +1771,147 @@ mod tests {
                 .get_compact_sst_meta_data(region_file_id, PageIndexPolicy::Optional)
                 .await
                 .is_some()
+        );
+    }
+
+    fn build_mock_wal_reader(
+        provider: &Provider,
+        region_id: RegionId,
+        entries: Vec<(u64, WalEntry)>,
+    ) -> Box<LogStoreEntryReader<MockRawEntryStream>> {
+        Box::new(LogStoreEntryReader::new(MockRawEntryStream {
+            entries: entries
+                .into_iter()
+                .map(|(entry_id, wal_entry)| {
+                    Entry::Naive(NaiveEntry {
+                        provider: provider.clone(),
+                        region_id,
+                        entry_id,
+                        data: wal_entry.encode_to_vec(),
+                    })
+                })
+                .collect(),
+        }))
+    }
+
+    /// Builds a mutation whose primary key value cannot be encoded: the schema
+    /// declares `tag_0` as a string but the row carries an i64. `WriteRequest::new`
+    /// rejects such rows today, but nothing re-validates WAL contents on replay.
+    fn poison_mutation(sequence: u64) -> Mutation {
+        Mutation {
+            op_type: OpType::Put as i32,
+            sequence,
+            rows: Some(Rows {
+                schema: vec![
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    tag_column_schema("tag_0", ColumnDataType::String),
+                ],
+                rows: vec![Row {
+                    values: vec![
+                        ts_ms_value(1),
+                        v1::Value {
+                            value_data: Some(ValueData::I64Value(42)),
+                        },
+                    ],
+                }],
+            }),
+            write_hint: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_replay_fails_closed_on_mutation_failing_memtable_write() {
+        let mut builder = VersionControlBuilder::new();
+        builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::new(
+            None,
+            true,
+            MergeMode::LastRow,
+        )));
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let provider = Provider::raft_engine_provider(region_id.as_u64());
+
+        let wal_entry = WalEntry {
+            mutations: vec![poison_mutation(1)],
+            bulk_entries: vec![],
+        };
+        let reader = build_mock_wal_reader(&provider, region_id, vec![(1, wal_entry)]);
+
+        let result = replay_memtable(
+            &provider,
+            reader,
+            region_id,
+            0,
+            &version_control,
+            false,
+            |_, _, _| async { Ok(()) }.boxed(),
+        )
+        .await;
+
+        // Fail-closed: the region open must fail instead of opening "successfully"
+        // with the acknowledged row silently missing.
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_replay_applies_valid_mutation() {
+        let mut builder = VersionControlBuilder::new();
+        builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::new(
+            None,
+            true,
+            MergeMode::LastRow,
+        )));
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let provider = Provider::raft_engine_provider(region_id.as_u64());
+
+        let wal_entry = WalEntry {
+            mutations: vec![Mutation {
+                op_type: OpType::Put as i32,
+                sequence: 1,
+                rows: Some(Rows {
+                    schema: vec![
+                        time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                        tag_column_schema("tag_0", ColumnDataType::String),
+                    ],
+                    rows: vec![Row {
+                        values: vec![
+                            ts_ms_value(1),
+                            v1::Value {
+                                value_data: Some(ValueData::StringValue("tag_1".to_string())),
+                            },
+                        ],
+                    }],
+                }),
+                write_hint: None,
+            }],
+            bulk_entries: vec![],
+        };
+        let reader = build_mock_wal_reader(&provider, region_id, vec![(1, wal_entry)]);
+
+        let last_entry_id = replay_memtable(
+            &provider,
+            reader,
+            region_id,
+            0,
+            &version_control,
+            false,
+            |_, _, _| async { Ok(()) }.boxed(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(1, last_entry_id);
+        // The committed sequence covers the replayed entry...
+        assert_eq!(1, version_control.committed_sequence());
+        // ...and the row is actually present in the mutable memtable.
+        assert!(
+            !version_control
+                .current()
+                .version
+                .memtables
+                .mutable
+                .is_empty()
         );
     }
 }

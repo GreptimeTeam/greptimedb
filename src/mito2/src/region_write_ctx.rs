@@ -17,13 +17,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use api::v1::{BulkWalEntry, Mutation, OpType, Rows, WalEntry, WriteHint};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use futures::stream::{FuturesUnordered, StreamExt};
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::{Error, Result, WriteGroupSnafu};
+use crate::error::{Error, MemtableApplySnafu, Result, WriteGroupSnafu};
 use crate::memtable::KeyValues;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics;
@@ -209,6 +211,19 @@ impl RegionWriteCtx {
         self.provider == Provider::Noop || self.version.options.skip_wal
     }
 
+    /// Maps an error raised while applying a mutation to the memtable after the
+    /// WAL write. Such an error cannot guarantee the mutation is not durable, so
+    /// it must never be surfaced as a definitive rejection (e.g.
+    /// `InvalidArguments`): the row may still exist after a restart, or be gone
+    /// after a flush. The caller sees an internal error, i.e. the outcome of the
+    /// write is unknown.
+    fn map_apply_error(err: Error) -> Error {
+        match err.status_code() {
+            StatusCode::InvalidArguments => MemtableApplySnafu {}.into_error(Box::new(err)),
+            _ => err,
+        }
+    }
+
     /// Sets error and marks all write operations are failed.
     pub(crate) fn set_error(&mut self, err: Arc<Error>) {
         // Set error for all notifiers.
@@ -265,7 +280,7 @@ impl RegionWriteCtx {
 
         if mutations.len() == 1 {
             if let Err(err) = mutable_memtable.write(&mutations[0].1) {
-                self.notifiers[mutations[0].0].err = Some(Arc::new(err));
+                self.notifiers[mutations[0].0].err = Some(Arc::new(Self::map_apply_error(err)));
             }
         } else {
             let mut tasks = FuturesUnordered::new();
@@ -281,7 +296,7 @@ impl RegionWriteCtx {
                 // first unwrap the result from `spawn` above
                 let (i, result) = result.unwrap();
                 if let Err(err) = result {
-                    self.notifiers[i].err = Some(Arc::new(err));
+                    self.notifiers[i].err = Some(Arc::new(Self::map_apply_error(err)));
                 }
             }
         }
@@ -342,7 +357,7 @@ impl RegionWriteCtx {
             let part = self.bulk_parts.swap_remove(0);
             let num_rows = part.num_rows();
             if let Err(e) = self.version.memtables.mutable.write_bulk(part) {
-                self.bulk_notifiers[0].err = Some(Arc::new(e));
+                self.bulk_notifiers[0].err = Some(Arc::new(Self::map_apply_error(e)));
             } else {
                 self.put_num += num_rows;
             }
@@ -361,7 +376,7 @@ impl RegionWriteCtx {
             // first unwrap the result from `spawn` above
             let (i, result, num_rows) = result.unwrap();
             if let Err(err) = result {
-                self.bulk_notifiers[i].err = Some(Arc::new(err));
+                self.bulk_notifiers[i].err = Some(Arc::new(Self::map_apply_error(err)));
             } else {
                 self.put_num += num_rows;
             }
