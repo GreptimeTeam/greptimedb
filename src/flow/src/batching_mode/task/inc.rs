@@ -23,6 +23,7 @@ use query::options::{
     FLOW_SINK_TABLE_ID,
 };
 use snafu::ResultExt;
+use store_api::mito_engine_options::PRESERVE_ROW_SEQUENCE;
 use table::metadata::TableId;
 
 use crate::Error;
@@ -59,6 +60,57 @@ impl BatchingTask {
                 .build()
             })?;
         Ok(table.table_info().table_id())
+    }
+
+    /// Whether every source table provably supports exact sequence-range
+    /// scans: it must be the canonical mito engine and declare the
+    /// `preserve_row_sequence` capability (a mito region option enforced to
+    /// require append-only mode). When the capability is unknown — a source
+    /// table that cannot be resolved, is not the mito engine, or lacks the
+    /// option — this returns `false` so the caller keeps the historical
+    /// `memtable_only` mode instead of upgrading.
+    pub(crate) async fn sequence_range_capable(&self) -> bool {
+        for name in &self.config.source_table_names {
+            let table = match self
+                .config
+                .catalog_manager
+                .table(&name[0], &name[1], &name[2], None)
+                .await
+            {
+                Ok(Some(table)) => table,
+                Ok(None) => {
+                    debug!(
+                        "Flow {} source table {} not found; retaining memtable_only incremental mode",
+                        self.config.flow_id,
+                        name.join(".")
+                    );
+                    return false;
+                }
+                Err(err) => {
+                    warn!(
+                        "Flow {} failed to resolve source table {} for sequence_range capability check; \
+                         retaining memtable_only incremental mode: {:?}",
+                        self.config.flow_id,
+                        name.join("."),
+                        err
+                    );
+                    return false;
+                }
+            };
+
+            let info = table.table_info();
+            let preserves = info.meta.engine == "mito"
+                && info
+                    .meta
+                    .options
+                    .extra_options
+                    .get(PRESERVE_ROW_SEQUENCE)
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+            if !preserves {
+                return false;
+            }
+        }
+        !self.config.source_table_names.is_empty()
     }
 
     /// For incremental-mode SQL queries, attempt to prepare an executable plan

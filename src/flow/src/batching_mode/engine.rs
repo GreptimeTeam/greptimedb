@@ -46,6 +46,7 @@ use tokio::sync::{RwLock, oneshot};
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::eval_schedule::EvalSchedule;
 use crate::batching_mode::frontend_client::FrontendClient;
+use crate::batching_mode::persistence::{FrontendBatchingQueryExecutor, PersistenceContext};
 use crate::batching_mode::state::DirtyTimeWindows;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
@@ -72,6 +73,7 @@ pub struct BatchingEngine {
     /// Batching mode options for control how batching mode query works
     ///
     pub(crate) batch_opts: Arc<BatchingModeOptions>,
+    persistence_factory: Option<crate::FactoryPlugin>,
 }
 
 #[derive(Default)]
@@ -128,6 +130,26 @@ impl BatchingEngine {
         catalog_manager: CatalogManagerRef,
         batch_opts: BatchingModeOptions,
     ) -> Self {
+        Self::new_with_persistence(
+            frontend_client,
+            query_engine,
+            flow_metadata_manager,
+            table_meta,
+            catalog_manager,
+            batch_opts,
+            None,
+        )
+    }
+
+    pub fn new_with_persistence(
+        frontend_client: Arc<FrontendClient>,
+        query_engine: QueryEngineRef,
+        flow_metadata_manager: FlowMetadataManagerRef,
+        table_meta: TableMetadataManagerRef,
+        catalog_manager: CatalogManagerRef,
+        batch_opts: BatchingModeOptions,
+        persistence_factory: Option<crate::FactoryPlugin>,
+    ) -> Self {
         Self {
             runtime: Default::default(),
             frontend_client,
@@ -136,6 +158,7 @@ impl BatchingEngine {
             catalog_manager,
             query_engine,
             batch_opts: Arc::new(batch_opts),
+            persistence_factory,
         }
     }
 
@@ -491,6 +514,14 @@ impl BatchingEngine {
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
     }
 
+    fn table_options_enable_merge_mode_last_non_null(
+        extra_options: &HashMap<String, String>,
+    ) -> bool {
+        extra_options
+            .get(store_api::mito_engine_options::MERGE_MODE_KEY)
+            .is_some_and(|value| value.eq_ignore_ascii_case("last_non_null"))
+    }
+
     /// SQL flows without a usable time-window expression can only run as an
     /// explicit full-query flow, so require `EVAL INTERVAL` at creation time.
     fn ensure_sql_flow_has_twe_or_eval_interval(
@@ -703,11 +734,58 @@ impl BatchingEngine {
         let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
 
-        // Create sink table if needed, then validate an existing/created sink schema before
-        // spawning the background task. This catches user-created sink schema mismatches at
-        // CREATE FLOW time instead of surfacing them later in the execution loop.
-        task.check_or_create_sink_table(&engine, &frontend).await?;
-        task.validate_sink_table_schema(&engine).await?;
+        // Create the sink before configuring persistence. A persistence-backed sink may
+        // contain ordinary metadata columns supplied by `begin_attempt`, so strict plan/schema
+        // validation is deferred to execution for that path. OSS flows without a factory keep
+        // the existing creation-time validation.
+        let table = task.check_or_create_sink_table(&engine, &frontend).await?;
+
+        let persistence = if let Some(factory) = &self.persistence_factory {
+            let table_info = table.table_info();
+            let meta = &table_info.meta;
+            let effective_mode = if task.config.batch_opts.experimental_enable_incremental_read
+                && task.sequence_range_capable().await
+            {
+                crate::IncrementalMode::SequenceRange
+            } else {
+                crate::IncrementalMode::MemtableOnly
+            };
+            let context = PersistenceContext {
+                flow_id,
+                sink: crate::batching_mode::persistence::SinkLayout {
+                    table_id: table_info.table_id(),
+                    table_name: task.config.sink_table_name.clone(),
+                    engine: meta.engine.clone(),
+                    append: Self::table_options_enable_append_mode(&meta.options.extra_options),
+                    merge_mode: if Self::table_options_enable_merge_mode_last_non_null(
+                        &meta.options.extra_options,
+                    ) {
+                        Some("last_non_null".to_string())
+                    } else {
+                        None
+                    },
+                    columns: meta
+                        .schema
+                        .column_schemas()
+                        .iter()
+                        .map(|column| crate::BatchingMetadataColumn {
+                            name: column.name.clone(),
+                            data_type: column.data_type.clone(),
+                            nullable: column.is_nullable(),
+                        })
+                        .collect(),
+                    ordered_primary_key_indices: meta.primary_key_indices.clone(),
+                    time_index: meta.schema.timestamp_index(),
+                },
+                executor: Arc::new(FrontendBatchingQueryExecutor::new(frontend.clone())),
+                incremental_mode: effective_mode,
+            };
+            factory.create(context).await?
+        } else {
+            task.validate_sink_table_schema(&engine).await?;
+            None
+        };
+        task.set_persistence(persistence).await?;
 
         let (start_tx, start_rx) = oneshot::channel();
 

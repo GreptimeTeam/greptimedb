@@ -57,6 +57,7 @@ use tonic::{Request, Response, Status};
 use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
 use crate::adapter::{FlowStreamingEngineRef, create_worker};
 use crate::batching_mode::engine::BatchingEngine;
+use crate::batching_mode::persistence::FactoryPlugin;
 use crate::error::{
     CacheRequiredSnafu, DatafusionSnafu, ExternalSnafu, ListFlowsSnafu, ParseAddrSnafu,
     ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu, to_status_with_last_err,
@@ -326,6 +327,7 @@ pub struct FlownodeBuilder {
     /// receive a oneshot sender to send state size report
     state_report_handler: Option<StateReportHandler>,
     frontend_client: Arc<FrontendClient>,
+    batching_persistence_factory: Option<FactoryPlugin>,
 }
 
 impl FlownodeBuilder {
@@ -347,7 +349,14 @@ impl FlownodeBuilder {
             heartbeat_task: None,
             state_report_handler: None,
             frontend_client,
+            batching_persistence_factory: None,
         }
+    }
+
+    /// Inject the optional batching persistence collaborator.
+    pub fn with_batching_persistence_factory(mut self, factory: FactoryPlugin) -> Self {
+        self.batching_persistence_factory = Some(factory);
+        self
     }
 
     pub fn with_heartbeat_task(self, heartbeat_task: HeartbeatTask) -> Self {
@@ -404,13 +413,14 @@ impl FlownodeBuilder {
             self.build_manager(query_engine_factory.query_engine())
                 .await?,
         );
-        let batching = Arc::new(BatchingEngine::new(
+        let batching = Arc::new(BatchingEngine::new_with_persistence(
             self.frontend_client.clone(),
             query_engine_factory.query_engine(),
             self.flow_metadata_manager.clone(),
             self.table_meta.clone(),
             self.catalog_manager.clone(),
             self.opts.flow.batching_mode.clone(),
+            self.batching_persistence_factory.clone(),
         ));
         let dual = Arc::new(FlowDualEngine::new(
             manager.clone(),

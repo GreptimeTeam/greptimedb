@@ -139,6 +139,20 @@ impl BatchingTask {
         elapsed: Duration,
         coverage: &QueryCoverage,
     ) -> FlowCheckpointDecision {
+        Self::apply_query_result_to_state_with_repair(state, res, elapsed, coverage, false)
+    }
+
+    /// Apply checkpoint transitions while retaining whether this attempt
+    /// started with a persisted full-repair request. That fact is deliberately
+    /// captured by the caller before execution; a repair request raised later
+    /// must not turn an ordinary full snapshot into a completed repair.
+    pub(super) fn apply_query_result_to_state_with_repair(
+        state: &mut TaskState,
+        res: &OutputWithMetrics,
+        elapsed: Duration,
+        coverage: &QueryCoverage,
+        started_full_repair: bool,
+    ) -> FlowCheckpointDecision {
         state.after_query_exec(elapsed, true);
         let checkpoint_mode = state.checkpoint_mode();
         if let (Some(participating_regions), Some(watermark_map)) =
@@ -238,6 +252,11 @@ impl BatchingTask {
                                 previous_mode: CheckpointMode::FullSnapshot,
                                 reason: FlowQueryFallbackReason::IncrementalDisabled,
                             }
+                        } else if started_full_repair {
+                            FlowCheckpointDecision::CompletedFullRepair {
+                                participating_regions: participating_region_count,
+                                watermarks: watermark_count,
+                            }
                         } else {
                             FlowCheckpointDecision::AdvancedFromFullSnapshot {
                                 participating_regions: participating_region_count,
@@ -306,6 +325,14 @@ impl BatchingTask {
             } => {
                 info!(
                     "Flow {flow_id} switched to incremental mode after full snapshot, participating_regions={participating_regions}, watermarks={watermarks}"
+                );
+            }
+            FlowCheckpointDecision::CompletedFullRepair {
+                participating_regions,
+                watermarks,
+            } => {
+                info!(
+                    "Flow {flow_id} completed full repair, participating_regions={participating_regions}, watermarks={watermarks}"
                 );
             }
             FlowCheckpointDecision::AdvancedIncremental {

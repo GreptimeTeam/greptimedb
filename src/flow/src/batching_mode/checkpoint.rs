@@ -87,6 +87,13 @@ pub(super) enum FlowCheckpointDecision {
         participating_regions: usize,
         watermarks: usize,
     },
+    /// The full repair requested by persistence completed and proved a new
+    /// checkpoint. This is distinct from an ordinary full snapshot because it
+    /// is the only decision that clears the repair request.
+    CompletedFullRepair {
+        participating_regions: usize,
+        watermarks: usize,
+    },
     /// FullSnapshot stayed in full snapshot mode because a scoped base repair
     /// found additional dirty windows that may be concurrent with the returned
     /// high watermark. These windows must be repaired under the fixed high
@@ -114,11 +121,9 @@ impl FlowCheckpointDecision {
                 checkpoint_mode_label(CheckpointMode::FullSnapshot)
             }
             Self::AdvancedIncremental { .. } => checkpoint_mode_label(CheckpointMode::Incremental),
-            // Fenced repair is intentionally a FullSnapshot sub-state, not a
-            // third top-level checkpoint mode, so metrics keep the
-            // `full_snapshot` mode label while the decision label carries
-            // `continue_repair`.
-            Self::ContinuedFencedRepair { .. } => {
+            Self::CompletedFullRepair { .. } | Self::ContinuedFencedRepair { .. } => {
+                // Fenced repair and completion of a requested full repair are
+                // FullSnapshot sub-states, not third top-level modes.
                 checkpoint_mode_label(CheckpointMode::FullSnapshot)
             }
             Self::FallbackToFullSnapshot { previous_mode, .. } => {
@@ -129,9 +134,9 @@ impl FlowCheckpointDecision {
 
     pub(super) fn decision_label(self) -> &'static str {
         match self {
-            Self::AdvancedFromFullSnapshot { .. } | Self::AdvancedIncremental { .. } => {
-                CHECKPOINT_DECISION_ADVANCE
-            }
+            Self::AdvancedFromFullSnapshot { .. }
+            | Self::AdvancedIncremental { .. }
+            | Self::CompletedFullRepair { .. } => CHECKPOINT_DECISION_ADVANCE,
             Self::ContinuedFencedRepair { .. } => CHECKPOINT_DECISION_CONTINUE_REPAIR,
             Self::FallbackToFullSnapshot { .. } => CHECKPOINT_DECISION_FALLBACK,
         }

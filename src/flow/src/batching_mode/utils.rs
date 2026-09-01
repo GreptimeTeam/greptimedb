@@ -14,7 +14,7 @@
 
 //! some utils for helping with batching mode
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -36,6 +36,7 @@ use datafusion_expr::{
     Distinct, ExprSchemable, JoinType, LogicalPlan, LogicalPlanBuilder, Operator, Projection, and,
     binary_expr, bitwise_and, bitwise_or, bitwise_xor, is_null, or, when,
 };
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use query::QueryEngineRef;
@@ -951,12 +952,34 @@ pub(crate) async fn gen_plan_with_matching_schema(
     primary_key_indices: &[usize],
     allow_partial: bool,
 ) -> Result<LogicalPlan, Error> {
+    gen_plan_with_matching_schema_and_values(
+        sql,
+        query_ctx,
+        engine,
+        sink_table_schema,
+        primary_key_indices,
+        allow_partial,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn gen_plan_with_matching_schema_and_values(
+    sql: &str,
+    query_ctx: QueryContextRef,
+    engine: QueryEngineRef,
+    sink_table_schema: SchemaRef,
+    primary_key_indices: &[usize],
+    allow_partial: bool,
+    ordinary_values: Option<&BTreeMap<String, ScalarValue>>,
+) -> Result<LogicalPlan, Error> {
     let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), sql, false).await?;
 
-    let mut add_auto_column = ColumnMatcherRewriter::new(
+    let mut add_auto_column = ColumnMatcherRewriter::new_with_values(
         sink_table_schema,
         primary_key_indices.to_vec(),
         allow_partial,
+        ordinary_values.cloned().unwrap_or_default(),
     );
     let plan = plan
         .clone()
@@ -1096,15 +1119,26 @@ pub struct ColumnMatcherRewriter {
     pub is_rewritten: bool,
     pub primary_key_indices: Vec<usize>,
     pub allow_partial: bool,
+    pub ordinary_values: BTreeMap<String, ScalarValue>,
 }
 
 impl ColumnMatcherRewriter {
     pub fn new(schema: SchemaRef, primary_key_indices: Vec<usize>, allow_partial: bool) -> Self {
+        Self::new_with_values(schema, primary_key_indices, allow_partial, BTreeMap::new())
+    }
+
+    pub fn new_with_values(
+        schema: SchemaRef,
+        primary_key_indices: Vec<usize>,
+        allow_partial: bool,
+        ordinary_values: BTreeMap<String, ScalarValue>,
+    ) -> Self {
         Self {
             schema,
             is_rewritten: false,
             primary_key_indices,
             allow_partial,
+            ordinary_values,
         }
     }
 
@@ -1114,11 +1148,26 @@ impl ColumnMatcherRewriter {
         mut exprs: Vec<Expr>,
         input_schema: &DFSchema,
     ) -> DfResult<Vec<Expr>> {
+        let original_exprs = exprs.clone();
+        for column in self.schema.column_schemas() {
+            if let Some(value) = self.ordinary_values.get(&column.name) {
+                if value.data_type() != column.data_type.as_arrow_type() {
+                    return Err(DataFusionError::Plan(format!(
+                        "Configured batching metadata column {} has incompatible type",
+                        column.name
+                    )));
+                }
+                if !exprs
+                    .iter()
+                    .any(|expr| expr.qualified_name().1 == column.name)
+                {
+                    exprs.push(datafusion_expr::lit(value.clone()).alias(column.name.clone()));
+                }
+            }
+        }
         if self.allow_partial {
             return self.modify_project_exprs_with_partial(exprs);
         }
-
-        let original_exprs = exprs.clone();
 
         let all_names = self
             .schema
