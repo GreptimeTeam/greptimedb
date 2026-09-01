@@ -58,7 +58,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
-use crate::cache::{CacheManager, CacheManagerRef};
+use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRef};
 use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::config::MitoConfig;
@@ -195,10 +195,12 @@ impl WorkerGroup {
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         // We use another scheduler to avoid purge jobs blocking other jobs.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
+        let upload_store_wrapper = plugins.get::<WriteCacheUploadStoreWrapperRef>();
         let write_cache = write_cache_from_config(
             &config,
             puffin_manager_factory.clone(),
             intermediate_manager.clone(),
+            upload_store_wrapper,
         )
         .await?;
         let cache_manager = Arc::new(
@@ -415,6 +417,7 @@ impl WorkerGroup {
             &config,
             puffin_manager_factory.clone(),
             intermediate_manager.clone(),
+            None,
         )
         .await?;
         let cache_manager = Arc::new(
@@ -501,6 +504,7 @@ pub async fn write_cache_from_config(
     config: &MitoConfig,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
+    upload_store_wrapper: Option<WriteCacheUploadStoreWrapperRef>,
 ) -> Result<Option<WriteCacheRef>> {
     if !config.enable_write_cache {
         return Ok(None);
@@ -522,7 +526,8 @@ pub async fn write_cache_from_config(
         intermediate_manager,
         config.manifest_cache_size,
     )
-    .await?;
+    .await?
+    .with_upload_store_wrapper(upload_store_wrapper);
     Ok(Some(Arc::new(cache)))
 }
 
