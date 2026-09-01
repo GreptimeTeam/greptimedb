@@ -611,6 +611,17 @@ impl From<&ArrowTimeUnit> for TimeUnit {
     }
 }
 
+impl From<TimeUnit> for ArrowTimeUnit {
+    fn from(unit: TimeUnit) -> Self {
+        match unit {
+            TimeUnit::Second => Self::Second,
+            TimeUnit::Millisecond => Self::Millisecond,
+            TimeUnit::Microsecond => Self::Microsecond,
+            TimeUnit::Nanosecond => Self::Nanosecond,
+        }
+    }
+}
+
 /// The exact division of a timestamp value into a different unit:
 /// `quotient * from_scale + remainder == value * to_scale` with
 /// `0 <= remainder < from_scale`. `quotient` is the value floored in

@@ -399,7 +399,6 @@ impl SimpleFilterEvaluator {
             // semantics: null results are filtered out).
             return Some(TimestampUnitCast::Pruned);
         };
-        // Fast path: the literal is already in the target unit.
         if unit == target_unit {
             return Some(TimestampUnitCast::Filter(self.clone()));
         }
@@ -464,15 +463,19 @@ fn timestamp_scalar_parts(scalar: &ScalarValue) -> Option<(Option<i64>, TimeUnit
     (timezone.is_none()).then_some((value, unit))
 }
 
-/// Builds a one-element scalar array holding `value` in `unit`.
-fn timestamp_scalar(value: i64, unit: TimeUnit) -> Option<Scalar<ArrayRef>> {
-    let scalar = match unit {
+/// Builds a tz-naive timestamp literal for `value` in `unit`.
+pub fn timestamp_scalar_value(value: i64, unit: TimeUnit) -> ScalarValue {
+    match unit {
         TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), None),
         TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), None),
         TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), None),
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), None),
-    };
-    scalar.to_scalar().ok()
+    }
+}
+
+/// Builds a one-element scalar array holding `value` in `unit`.
+fn timestamp_scalar(value: i64, unit: TimeUnit) -> Option<Scalar<ArrayRef>> {
+    timestamp_scalar_value(value, unit).to_scalar().ok()
 }
 
 /// Evaluate the predicate on the input [RecordBatch], and return a new [RecordBatch].

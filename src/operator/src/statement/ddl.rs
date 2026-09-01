@@ -58,10 +58,11 @@ use common_meta::rpc::ddl::{
     SubmitDdlTaskResponse, TriggerReason,
 };
 use common_query::{Output, OutputData};
+use common_recordbatch::filter::timestamp_scalar_value;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
-use common_time::timestamp::{TimeUnit, div_mod_units};
+use common_time::timestamp::div_mod_units;
 use common_time::{Timestamp, Timezone};
 use datafusion::datasource::provider_as_source;
 use datafusion_common::tree_node::TreeNodeVisitor;
@@ -1943,17 +1944,6 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
-    /// Builds a tz-naive timestamp literal in the given unit.
-    fn ts_scalar(value: i64, unit: TimeUnit) -> datafusion_common::ScalarValue {
-        use datafusion_common::ScalarValue;
-        match unit {
-            TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), None),
-            TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), None),
-            TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), None),
-            TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), None),
-        }
-    }
-
     /// Preflights a time index unit widening: rejects the alter if any existing
     /// timestamp would overflow the target unit's `i64` range (arrow casts such
     /// values to NULL, which a NOT NULL time index cannot hold).
@@ -2008,47 +1998,60 @@ impl StatementExecutor {
             .map(|q| q.quotient + (q.remainder != 0) as i64)
             .unwrap_or(i64::MIN);
 
-        let filter = datafusion_expr::col(&ts_column.name)
-            .gt(datafusion_expr::lit(Self::ts_scalar(max_cur, current_unit)))
-            .or(datafusion_expr::col(&ts_column.name)
-                .lt(datafusion_expr::lit(Self::ts_scalar(min_cur, current_unit))));
+        // One single-sided existence scan per bound, run separately: a single
+        // `ts > max OR ts < min` scan would widen to the full time range and
+        // read every SST's metadata, while each single-sided predicate prunes
+        // files (in-memory time ranges) and skips memtables (stats) without
+        // any IO when nothing overflows.
+        let ts_col = datafusion_expr::col(&ts_column.name);
+        let bounds = [
+            ts_col
+                .clone()
+                .gt(datafusion_expr::lit(timestamp_scalar_value(
+                    max_cur,
+                    current_unit.into(),
+                ))),
+            ts_col.lt(datafusion_expr::lit(timestamp_scalar_value(
+                min_cur,
+                current_unit.into(),
+            ))),
+        ];
+        for filter in bounds {
+            let provider = std::sync::Arc::new(DfTableProviderAdapter::new(table.clone()));
+            let plan = LogicalPlanBuilder::scan(
+                expr.table_name.as_str(),
+                provider_as_source(provider),
+                Some(vec![ts_index]),
+            )
+            .and_then(|builder| builder.filter(filter))
+            .and_then(|builder| builder.limit(0, Some(1)))
+            .and_then(LogicalPlanBuilder::build)
+            .map_err(|e| {
+                error::UnexpectedSnafu {
+                    violated: format!("Failed to build time index overflow preflight plan: {e}"),
+                }
+                .build()
+            })?;
+            let output = self.exec_plan(plan, query_context.clone()).await?;
 
-        // An existence scan across all regions (file and row-group pruning makes
-        // it cheap when nothing overflows).
-        let provider = std::sync::Arc::new(DfTableProviderAdapter::new(table.clone()));
-        let plan = LogicalPlanBuilder::scan(
-            expr.table_name.as_str(),
-            provider_as_source(provider),
-            Some(vec![ts_index]),
-        )
-        .and_then(|builder| builder.filter(filter))
-        .and_then(|builder| builder.limit(0, Some(1)))
-        .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| {
-            error::UnexpectedSnafu {
-                violated: format!("Failed to build time index overflow preflight plan: {e}"),
-            }
-            .build()
-        })?;
-        let output = self.exec_plan(plan, query_context.clone()).await?;
-
-        let has_overflow = match output.data {
-            OutputData::Stream(mut stream) => futures::StreamExt::next(&mut stream)
-                .await
-                .is_some_and(|batch| batch.map(|batch| batch.num_rows() > 0).unwrap_or(true)),
-            _ => false,
-        };
-        ensure!(
-            !has_overflow,
-            error::TimeIndexWideningOverflowSnafu {
-                table: format_full_table_name(
-                    &expr.catalog_name,
-                    &expr.schema_name,
-                    &expr.table_name
-                ),
-                column: ts_column.name.clone(),
-            }
-        );
+            let has_overflow = match output.data {
+                OutputData::Stream(mut stream) => futures::StreamExt::next(&mut stream)
+                    .await
+                    .is_some_and(|batch| batch.map(|batch| batch.num_rows() > 0).unwrap_or(true)),
+                _ => false,
+            };
+            ensure!(
+                !has_overflow,
+                error::TimeIndexWideningOverflowSnafu {
+                    table: format_full_table_name(
+                        &expr.catalog_name,
+                        &expr.schema_name,
+                        &expr.table_name
+                    ),
+                    column: ts_column.name.clone(),
+                }
+            );
+        }
         Ok(())
     }
 
