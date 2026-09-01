@@ -97,7 +97,7 @@ assert_metrics() {
     expected_weight=3
     [[ "${class}" == write ]] && expected_weight=7
     grep -Eq "^greptime_workload_scheduler_weight\\{workload=\\\"${class}\\\"\\} ${expected_weight}$" <<<"${metrics}"
-    grep -Eq "^greptime_workload_scheduler_exec_duration_seconds_total\\{workload=\\\"${class}\\\"\\} [0-9.e+-]+$" <<<"${metrics}"
+    grep -Eq "^greptime_workload_scheduler_polls_total\\{workload=\\\"${class}\\\"\\} [0-9.e+-]+$" <<<"${metrics}"
   done
 }
 assert_polls() {

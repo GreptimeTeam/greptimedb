@@ -108,7 +108,7 @@ pub mod result;
 pub mod splunk;
 mod timeout;
 pub mod utils;
-pub mod workload_scheduler;
+mod workload_scheduler;
 
 use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
@@ -1759,26 +1759,6 @@ mod test {
                 "API server should NOT serve {path}"
             );
         }
-
-        // Debug routes are also hidden from the dedicated API listener.
-        assert_eq!(
-            api_client
-                .post("/debug/workload_scheduler/enabled")
-                .body("true")
-                .send()
-                .await
-                .status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            api_client
-                .post("/debug/workload_scheduler/weights")
-                .body(r#"{"query":3,"write":7}"#)
-                .send()
-                .await
-                .status(),
-            StatusCode::NOT_FOUND
-        );
     }
 
     #[test]

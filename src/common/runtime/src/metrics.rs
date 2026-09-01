@@ -44,13 +44,8 @@ lazy_static! {
 
 #[derive(Clone, Default)]
 struct ClassSnapshot {
-    tasks: u64,
-    wakes: u64,
     polls: u64,
-    completed: u64,
-    cancelled: u64,
     total_admission_wait: Duration,
-    total_exec_time: Duration,
 }
 
 struct WorkloadSchedulerCollector {
@@ -59,13 +54,8 @@ struct WorkloadSchedulerCollector {
     active: IntGauge,
     weight: IntGaugeVec,
     queued: IntGaugeVec,
-    tasks: IntCounterVec,
-    wakes: IntCounterVec,
     polls: IntCounterVec,
-    completed: IntCounterVec,
-    cancelled: IntCounterVec,
     total_admission_wait: CounterVec,
-    total_exec_time: CounterVec,
     snapshots: Mutex<BTreeMap<&'static str, ClassSnapshot>>,
 }
 
@@ -100,22 +90,6 @@ impl WorkloadSchedulerCollector {
                 workload_label,
             )
             .unwrap(),
-            tasks: IntCounterVec::new(
-                Opts::new(
-                    "greptime_workload_scheduler_tasks_total",
-                    "Futures wrapped by the workload scheduler",
-                ),
-                workload_label,
-            )
-            .unwrap(),
-            wakes: IntCounterVec::new(
-                Opts::new(
-                    "greptime_workload_scheduler_wakes_total",
-                    "Proxy-waker calls received by the workload scheduler",
-                ),
-                workload_label,
-            )
-            .unwrap(),
             polls: IntCounterVec::new(
                 Opts::new(
                     "greptime_workload_scheduler_polls_total",
@@ -124,34 +98,10 @@ impl WorkloadSchedulerCollector {
                 workload_label,
             )
             .unwrap(),
-            completed: IntCounterVec::new(
-                Opts::new(
-                    "greptime_workload_scheduler_completed_total",
-                    "Futures completed by the workload scheduler",
-                ),
-                workload_label,
-            )
-            .unwrap(),
-            cancelled: IntCounterVec::new(
-                Opts::new(
-                    "greptime_workload_scheduler_cancelled_total",
-                    "Futures cancelled by the workload scheduler",
-                ),
-                workload_label,
-            )
-            .unwrap(),
             total_admission_wait: CounterVec::new(
                 Opts::new(
                     "greptime_workload_scheduler_admission_wait_seconds_total",
                     "Cumulative workload scheduler admission wait time in seconds",
-                ),
-                workload_label,
-            )
-            .unwrap(),
-            total_exec_time: CounterVec::new(
-                Opts::new(
-                    "greptime_workload_scheduler_exec_duration_seconds_total",
-                    "Cumulative workload scheduler execution time in seconds",
                 ),
                 workload_label,
             )
@@ -185,41 +135,18 @@ impl WorkloadSchedulerCollector {
                     .unwrap_or(i64::MAX),
             );
             let previous = snapshots.entry(workload).or_default();
-            self.tasks
-                .with_label_values(labels)
-                .inc_by(class_stats.tasks.saturating_sub(previous.tasks));
-            self.wakes
-                .with_label_values(labels)
-                .inc_by(class_stats.wakes.saturating_sub(previous.wakes));
             self.polls
                 .with_label_values(labels)
                 .inc_by(class_stats.polls.saturating_sub(previous.polls));
-            self.completed
-                .with_label_values(labels)
-                .inc_by(class_stats.completed.saturating_sub(previous.completed));
-            self.cancelled
-                .with_label_values(labels)
-                .inc_by(class_stats.cancelled.saturating_sub(previous.cancelled));
             self.total_admission_wait.with_label_values(labels).inc_by(
                 class_stats
                     .total_admission_wait
                     .saturating_sub(previous.total_admission_wait)
                     .as_secs_f64(),
             );
-            self.total_exec_time.with_label_values(labels).inc_by(
-                class_stats
-                    .total_exec_time
-                    .saturating_sub(previous.total_exec_time)
-                    .as_secs_f64(),
-            );
             *previous = ClassSnapshot {
-                tasks: class_stats.tasks,
-                wakes: class_stats.wakes,
                 polls: class_stats.polls,
-                completed: class_stats.completed,
-                cancelled: class_stats.cancelled,
                 total_admission_wait: class_stats.total_admission_wait,
-                total_exec_time: class_stats.total_exec_time,
             };
         }
     }
@@ -231,13 +158,8 @@ impl Collector for WorkloadSchedulerCollector {
         desc.extend(self.active.desc());
         desc.extend(self.weight.desc());
         desc.extend(self.queued.desc());
-        desc.extend(self.tasks.desc());
-        desc.extend(self.wakes.desc());
         desc.extend(self.polls.desc());
-        desc.extend(self.completed.desc());
-        desc.extend(self.cancelled.desc());
         desc.extend(self.total_admission_wait.desc());
-        desc.extend(self.total_exec_time.desc());
         desc
     }
 
@@ -248,13 +170,8 @@ impl Collector for WorkloadSchedulerCollector {
         families.extend(self.active.collect());
         families.extend(self.weight.collect());
         families.extend(self.queued.collect());
-        families.extend(self.tasks.collect());
-        families.extend(self.wakes.collect());
         families.extend(self.polls.collect());
-        families.extend(self.completed.collect());
-        families.extend(self.cancelled.collect());
         families.extend(self.total_admission_wait.collect());
-        families.extend(self.total_exec_time.collect());
         families
     }
 }
@@ -282,13 +199,8 @@ mod tests {
 
     fn counter_values(families: &[MetricFamily]) -> BTreeMap<String, BTreeMap<String, f64>> {
         [
-            "greptime_workload_scheduler_tasks_total",
-            "greptime_workload_scheduler_wakes_total",
             "greptime_workload_scheduler_polls_total",
-            "greptime_workload_scheduler_completed_total",
-            "greptime_workload_scheduler_cancelled_total",
             "greptime_workload_scheduler_admission_wait_seconds_total",
-            "greptime_workload_scheduler_exec_duration_seconds_total",
         ]
         .into_iter()
         .map(|name| {
@@ -340,37 +252,12 @@ mod tests {
                 true,
             ),
             (
-                "greptime_workload_scheduler_tasks_total",
-                MetricType::COUNTER,
-                true,
-            ),
-            (
-                "greptime_workload_scheduler_wakes_total",
-                MetricType::COUNTER,
-                true,
-            ),
-            (
                 "greptime_workload_scheduler_polls_total",
                 MetricType::COUNTER,
                 true,
             ),
             (
-                "greptime_workload_scheduler_completed_total",
-                MetricType::COUNTER,
-                true,
-            ),
-            (
-                "greptime_workload_scheduler_cancelled_total",
-                MetricType::COUNTER,
-                true,
-            ),
-            (
                 "greptime_workload_scheduler_admission_wait_seconds_total",
-                MetricType::COUNTER,
-                true,
-            ),
-            (
-                "greptime_workload_scheduler_exec_duration_seconds_total",
                 MetricType::COUNTER,
                 true,
             ),
@@ -430,16 +317,11 @@ mod tests {
         let before = counter_values(&second);
         let after = counter_values(&third);
         for workload in ["query", "write"] {
-            for metric in [
-                "greptime_workload_scheduler_tasks_total",
-                "greptime_workload_scheduler_polls_total",
-                "greptime_workload_scheduler_exec_duration_seconds_total",
-            ] {
-                assert!(
-                    after[metric][workload] > before[metric][workload],
-                    "{metric} did not increase for {workload}"
-                );
-            }
+            let metric = "greptime_workload_scheduler_polls_total";
+            assert!(
+                after[metric][workload] > before[metric][workload],
+                "{metric} did not increase for {workload}"
+            );
         }
     }
 }

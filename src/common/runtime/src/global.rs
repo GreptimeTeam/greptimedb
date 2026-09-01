@@ -476,12 +476,52 @@ pub fn workload_scheduler_stats() -> Option<SchedulerStats> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::task::{Context, Poll};
+    use std::time::{Duration, Instant};
 
     use tokio_test::assert_ok;
 
     use super::*;
+
+    struct CooperativePolls {
+        stop: Arc<AtomicBool>,
+    }
+
+    impl Future for CooperativePolls {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let deadline = Instant::now() + Duration::from_micros(100);
+            while Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+
+            if self.stop.load(Ordering::Relaxed) {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    fn wait_until<F>(description: &str, condition: F)
+    where
+        F: Fn() -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     #[test]
     fn test_datanode_runtime_options_default() {
@@ -668,6 +708,91 @@ mod tests {
         let stats = scheduler.stats();
         assert_eq!(1, stats.classes[&QUERY_TASK_CLASS].polls);
         assert_eq!(1, stats.classes[&WRITE_TASK_CLASS].polls);
+    }
+
+    #[test]
+    fn test_datanode_query_backlog_does_not_starve_ingest() {
+        let query_runtime = create_runtime("test-datanode-query", "test-query-worker", 1);
+        let ingest_runtime = create_runtime("test-datanode-ingest", "test-ingest-worker", 1);
+        let scheduler = Scheduler::builder()
+            .max_concurrent_polls(2)
+            .sample_every_polls(16)
+            .weight(QUERY_TASK_CLASS, 2)
+            .weight(WRITE_TASK_CLASS, 8)
+            .build();
+        let runtimes = GlobalRuntimes::new(
+            Some(query_runtime.clone()),
+            Some(query_runtime.clone()),
+            Some(query_runtime.clone()),
+            Some(query_runtime),
+            Some(ingest_runtime),
+            Some(scheduler.clone()),
+        );
+
+        let stop_queries = Arc::new(AtomicBool::new(false));
+        let query_tasks = (0..3)
+            .map(|_| {
+                runtimes.spawn_query(CooperativePolls {
+                    stop: stop_queries.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Establish the actual datanode topology: two query polls occupy the
+        // scheduler's capacity while the third self-waking query is queued.
+        wait_until("two active query polls and a queued query", || {
+            let stats = scheduler.stats();
+            stats.active_polls == 2
+                && stats
+                    .classes
+                    .get(&QUERY_TASK_CLASS)
+                    .is_some_and(|class| class.tasks == 3 && class.queued >= 1)
+        });
+
+        let write_admitted_before = scheduler
+            .stats()
+            .classes
+            .get(&WRITE_TASK_CLASS)
+            .map_or(0, |class| class.admitted);
+        let write_ran = Arc::new(AtomicBool::new(false));
+        let write_ran_by_body = write_ran.clone();
+        let write = runtimes.spawn_ingest(async move {
+            write_ran_by_body.store(true, Ordering::Relaxed);
+        });
+
+        // The write should first be visible as queued. If dispatch races this
+        // observation, its admission already proves the same handoff.
+        wait_until("write queued or admitted", || {
+            let stats = scheduler.stats();
+            stats.classes.get(&WRITE_TASK_CLASS).is_some_and(|class| {
+                class.admitted > write_admitted_before
+                    || (class.queued == 1 && class.admitted == write_admitted_before)
+            })
+        });
+        wait_until("write admission", || {
+            scheduler
+                .stats()
+                .classes
+                .get(&WRITE_TASK_CLASS)
+                .is_some_and(|class| class.admitted > write_admitted_before)
+        });
+        wait_until("write body", || write_ran.load(Ordering::Relaxed));
+
+        stop_queries.store(true, Ordering::Relaxed);
+        for query in &query_tasks {
+            query.abort();
+        }
+        runtimes.block_on_query(async {
+            for query in query_tasks {
+                let _ = query.await;
+            }
+        });
+        runtimes.block_on_ingest(async {
+            write.await.unwrap();
+        });
+        wait_until("scheduler polls to drain", || {
+            scheduler.stats().active_polls == 0
+        });
     }
 
     #[test]
