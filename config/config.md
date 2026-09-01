@@ -125,6 +125,11 @@
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
+| `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
+| `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
+| `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
+| `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.copy_root` | String | `./greptimedb_data/copy` | Root directory for standalone SQL access to local files.<br/>Relative SQL paths are resolved below this directory. Absolute paths are accepted only when<br/>they are inside this directory. Defaults to `<data_home>/copy`.<br/>Distributed deployments always reject SQL access to local files.<br/>Upgrade note: COPY commands and existing external tables that reference paths outside this<br/>directory will fail. Move those files below the copy root, set this option to a dedicated<br/>directory containing them, or migrate the files to object storage before upgrading. |
@@ -161,7 +166,7 @@
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
 | `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks.<br/>Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
-| `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
+| `region_engine.mito.auto_flush_interval` | String | `10m` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
 | `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`. |
 | `region_engine.mito.default_region_write_buffer_size` | String | `0` | Default write buffer size for each region. Regions stall at this size and reject writes at twice this size. Setting it to 0 disables both limits unless the table specifies `write_buffer_size`. |
@@ -237,7 +242,7 @@
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`, `reconcile_table`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 
@@ -345,6 +350,11 @@
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.allow_query_fallback` | Bool | `false` | Whether to allow query fallback when push down optimize fails.<br/>Default to false, meaning when push down optimize failed, return error msg |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans (only applies to datanodes). |
+| `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
+| `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
+| `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
+| `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
+| `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
 | `datanode.client.connect_timeout` | String | `10s` | -- |
@@ -456,7 +466,7 @@
 | `wal.create_topic_timeout` | String | `30s` | The timeout for creating a Kafka topic.<br/>**It's only used when the provider is `kafka`**. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`, `create_table`, `create_logical_tables`, `alter_table`,<br/>`alter_logical_tables`, `drop_table`, `undrop_table`, `purge_dropped_table`,<br/>`truncate_table`, `create_view`, `drop_view`, `repartition`,<br/>`repartition_group`, `wal_prune`, `batch_gc`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`, `create_table`, `create_logical_tables`, `alter_table`,<br/>`alter_logical_tables`, `drop_table`, `undrop_table`, `purge_dropped_table`,<br/>`truncate_table`, `create_view`, `drop_view`, `repartition`,<br/>`repartition_group`, `wal_prune`, `batch_gc`, `reconcile_table`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `stats_persistence` | -- | -- | Configuration options for the stats persistence. |
 | `stats_persistence.ttl` | String | `0s` | TTL for the stats table that will be used to store the stats.<br/>Set to `0s` to disable stats persistence.<br/>Default is `0s`.<br/>If you want to enable stats persistence, set the TTL to a value greater than 0.<br/>It is recommended to set a small value, e.g., `3h`. |
 | `stats_persistence.interval` | String | `10m` | The interval to persist the stats. Default is `10m`.<br/>The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`. |
@@ -548,6 +558,11 @@
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
+| `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
+| `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
+| `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
+| `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
@@ -585,7 +600,7 @@
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
 | `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks.<br/>Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
-| `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
+| `region_engine.mito.auto_flush_interval` | String | `10m` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
 | `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size` |
 | `region_engine.mito.default_region_write_buffer_size` | String | `0` | Default write buffer size for each region. Regions stall at this size and reject writes at twice this size. Setting it to 0 disables both limits unless the table specifies `write_buffer_size`. |
@@ -721,5 +736,10 @@
 | `query` | -- | -- | -- |
 | `query.parallelism` | Integer | `1` | Parallelism of the query engine for query sent by flownode.<br/>Default to 1, so it won't use too much cpu or memory |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
+| `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
+| `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
+| `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
+| `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |

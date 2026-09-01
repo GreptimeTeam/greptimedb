@@ -169,6 +169,7 @@ pub struct GreptimeDbClusterBuilder {
     metasrv_wal_config: MetasrvWalConfig,
     datanode_gc_config: GcConfig,
     metasrv_gc_config: GcSchedulerOptions,
+    frontend_auto_create_table: bool,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
 }
@@ -202,6 +203,7 @@ impl GreptimeDbClusterBuilder {
             metasrv_wal_config: MetasrvWalConfig::default(),
             datanode_gc_config: GcConfig::default(),
             metasrv_gc_config: GcSchedulerOptions::default(),
+            frontend_auto_create_table: true,
             shared_home_dir: None,
             meta_selector: None,
         }
@@ -245,6 +247,13 @@ impl GreptimeDbClusterBuilder {
 
     pub fn with_metasrv_gc_config(mut self, metasrv_gc_config: GcSchedulerOptions) -> Self {
         self.metasrv_gc_config = metasrv_gc_config;
+        self
+    }
+
+    /// Sets whether the test frontend automatically creates tables on write.
+    #[must_use]
+    pub fn with_frontend_auto_create_table(mut self, auto_create_table: bool) -> Self {
+        self.frontend_auto_create_table = auto_create_table;
         self
     }
 
@@ -529,7 +538,10 @@ impl GreptimeDbClusterBuilder {
     }
 
     fn build_frontend_options(&self) -> FrontendOptions {
-        let mut fe_opts = FrontendOptions::default();
+        let mut fe_opts = FrontendOptions {
+            auto_create_table: self.frontend_auto_create_table,
+            ..Default::default()
+        };
 
         // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
         let port_range = 14000..=24000;

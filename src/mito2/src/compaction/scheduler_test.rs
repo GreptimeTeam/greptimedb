@@ -826,6 +826,7 @@ async fn test_stale_plan_execution_does_not_affect_replacement_status() {
             &stale_execution,
             &manifest_ctx,
             schema_metadata_manager,
+            true,
         )
         .await;
     assert!(pending_ddls.is_empty());
@@ -907,7 +908,7 @@ async fn test_schedule_compaction_skips_task_exceeding_memory_limit() {
 }
 
 #[tokio::test]
-async fn test_execution_finished_without_followup_removes_status() {
+async fn test_execution_finished_drains_until_no_plan() {
     common_telemetry::init_default_ut_logging();
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
@@ -975,23 +976,59 @@ async fn test_execution_finished_without_followup_removes_status() {
         &file_metas,
         purger.clone(),
     );
-    // A completed execution without an explicit follow-up removes its status.
-    scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+    // A completed execution that reduced the file count chains another pick even
+    // without an explicit trigger, because the layout is still compactable.
+    let transition = scheduler
+        .on_compaction_finished(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            true,
+        )
         .await;
+    assert_matches!(transition, CompactionTransition::AutomaticFollowupScheduled);
+    assert!(scheduler.region_status.contains_key(&region_id));
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager.clone())
+        .await;
+    assert_eq!(2, job_scheduler.num_jobs());
+
+    // Replace the layout with a single file: the drain must stop once the picker
+    // finds nothing to do.
+    let data = version_control.current();
+    let file_metas: Vec<_> = data.version.ssts.levels()[0]
+        .files
+        .values()
+        .map(|file| file.meta_ref().clone())
+        .collect();
+    apply_edit(&version_control, &[(0, end)], &file_metas, purger.clone());
+    let transition = scheduler
+        .on_compaction_finished(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            true,
+        )
+        .await;
+    assert_matches!(transition, CompactionTransition::AutomaticFollowupScheduled);
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    let transition = scheduler
+        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager.clone())
+        .await;
+    assert_matches!(transition, CompactionTransition::NoAction);
     assert!(scheduler.region_status.is_empty());
-    assert_eq!(1, job_scheduler.num_jobs());
+    assert_eq!(2, job_scheduler.num_jobs());
 }
 
 #[tokio::test]
-async fn test_time_range_compaction_when_compaction_in_progress() {
+async fn test_execution_finished_without_progress_removes_status() {
     common_telemetry::init_default_ut_logging();
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let mut builder = VersionControlBuilder::new();
-    let purger = builder.file_purger();
     let region_id = builder.region_id();
 
     let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
@@ -1020,6 +1057,70 @@ async fn test_time_range_compaction_when_compaction_in_progress() {
     let manifest_ctx = env
         .mock_manifest_context(version_control.current().version.metadata.clone())
         .await;
+    let scheduled = scheduler
+        .schedule_automatic_compaction(
+            compact_request::Options::Regular(Default::default()),
+            &version_control,
+            &env.access_layer,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+        )
+        .unwrap();
+    assert!(scheduled);
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager.clone())
+        .await;
+    assert_eq!(1, job_scheduler.num_jobs());
+
+    // The execution rewrote files without reducing the file count (e.g. its output
+    // was split into more files than its input). Chaining would loop without making
+    // progress, so the lifecycle ends here; the next flush trigger resumes compaction.
+    let transition = scheduler
+        .on_compaction_finished(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            false,
+        )
+        .await;
+    assert_matches!(transition, CompactionTransition::NoAction);
+    assert!(scheduler.region_status.is_empty());
+    assert_eq!(1, job_scheduler.num_jobs());
+}
+
+#[tokio::test]
+async fn test_time_range_compaction_when_compaction_in_progress() {
+    common_telemetry::init_default_ut_logging();
+    let job_scheduler = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let mut builder = VersionControlBuilder::new();
+    let purger = builder.file_purger();
+    let region_id = builder.region_id();
+
+    let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+    schema_metadata_manager
+        .register_region_table_info(
+            builder.region_id().table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            kv_backend,
+        )
+        .await;
+
+    // 40 files to compact. The first task picks 32, leaving 8 for the pending request.
+    let end = 1000 * 1000;
+    for offset in 0..40 {
+        builder.push_l0_file(offset * 10, end);
+    }
+    let version_control = Arc::new(builder.build());
+    let manifest_ctx = env
+        .mock_manifest_context(version_control.current().version.metadata.clone())
+        .await;
 
     let file_metas: Vec<_> = version_control.current().version.ssts.levels()[0]
         .files
@@ -1027,13 +1128,9 @@ async fn test_time_range_compaction_when_compaction_in_progress() {
         .map(|file| file.meta_ref().clone())
         .collect();
 
-    // 5 files for next compaction and removes old files.
-    apply_edit(
-        &version_control,
-        &[(0, end), (20, end), (40, end), (60, end), (80, end)],
-        &file_metas,
-        purger.clone(),
-    );
+    // Replaces the files before scheduling the first compaction.
+    let next_files = (0..40).map(|offset| (offset * 20, end)).collect::<Vec<_>>();
+    apply_edit(&version_control, &next_files, &file_metas, purger.clone());
 
     scheduler
         .schedule_automatic_compaction(
@@ -1094,7 +1191,12 @@ async fn test_time_range_compaction_when_compaction_in_progress() {
 
     // On compaction finished and schedule next compaction.
     scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+        .on_compaction_finished(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            true,
+        )
         .await;
     assert_eq!(1, scheduler.region_status.len());
     assert!(
@@ -1285,10 +1387,21 @@ async fn test_ranged_compaction_stops_without_followup() {
     assert_eq!(1, job_scheduler.num_jobs());
 
     scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+        .on_compaction_finished(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            true,
+        )
         .await;
-    assert!(!scheduler.region_status.contains_key(&region_id));
-    assert_eq!(1, job_scheduler.num_jobs());
+    // The execution reduced the file count and the remaining window is still
+    // compactable, so the scheduler drains it with an unrestricted follow-up.
+    assert!(scheduler.region_status.contains_key(&region_id));
+    let followup = recv_compaction_pick_finished(&mut rx).await;
+    scheduler
+        .handle_compaction_pick_finished(followup, &manifest_ctx, schema_metadata_manager.clone())
+        .await;
+    assert_eq!(2, job_scheduler.num_jobs());
 }
 
 #[tokio::test]
@@ -1369,7 +1482,12 @@ async fn test_automatic_trigger_during_execution_clears_continuation_scope() {
     // Finishing the manual execution must chain an unrestricted follow-up instead of
     // continuing with the manual request's time range.
     scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+        .on_compaction_finished(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            true,
+        )
         .await;
 
     let continuation = recv_compaction_pick_finished(&mut rx).await;
@@ -1936,7 +2054,7 @@ async fn test_on_compaction_finished_returns_pending_ddl_requests() {
     });
 
     let pending_ddls = scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager, true)
         .await;
 
     assert_eq!(pending_ddls.len(), 1);
@@ -1985,7 +2103,12 @@ async fn test_planning_terminal_prioritizes_pending_ddl_over_automatic_followup(
     assert!(result.is_ok());
 
     let pending_ddls = scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+        .on_compaction_finished(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            true,
+        )
         .await;
 
     assert!(pending_ddls.is_empty());
@@ -2034,7 +2157,7 @@ async fn test_on_compaction_finished_dispatches_pending_ddl_before_chained_regul
     });
 
     let pending_ddls = scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager, true)
         .await;
 
     assert_eq!(pending_ddls.len(), 1);
@@ -2056,7 +2179,7 @@ async fn test_on_compaction_finished_returns_empty_when_region_absent() {
     let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
 
     let pending_ddls = scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager, true)
         .await;
 
     assert!(pending_ddls.is_empty());
@@ -2111,7 +2234,12 @@ async fn test_on_compaction_finished_manual_schedule_error_cleans_status() {
     });
 
     let pending_ddls = scheduler
-        .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+        .on_compaction_finished(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            true,
+        )
         .await;
 
     assert!(pending_ddls.is_empty());

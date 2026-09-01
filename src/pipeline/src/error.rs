@@ -389,6 +389,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Invalid JSON2 type hint: {reason}"))]
+    InvalidJson2TypeHint {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid JSON2 type hint path '{path}'"))]
+    ParseJson2TypeHintPath {
+        path: String,
+        #[snafu(source)]
+        source: sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Transform index `type` must be set."))]
     TransformIndexTypeMustBeSet {
         #[snafu(implicit)]
@@ -952,6 +966,8 @@ impl ErrorExt for Error {
             | TransformElementMustBeMap { .. }
             | TransformFieldMustBeSet { .. }
             | TransformTypeMustBeSet { .. }
+            | InvalidJson2TypeHint { .. }
+            | ParseJson2TypeHintPath { .. }
             | TransformIndexTypeMustBeSet { .. }
             | TransformIndexUnsupportedField { .. }
             | TransformIndexOptionMustBeScalar { .. }

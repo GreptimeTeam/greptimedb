@@ -28,6 +28,7 @@ pub mod file_range;
 pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
+pub(crate) mod index_writer;
 pub(crate) mod json_align;
 pub mod metadata;
 pub mod prefilter;
@@ -118,8 +119,8 @@ mod tests {
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringArray, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        ArrayRef, AsArray, BinaryDictionaryBuilder, RecordBatch, StringArray,
+        StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datatypes::arrow::util::pretty::pretty_format_batches;
@@ -1625,91 +1626,178 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_with_override_sequence() {
+        test_read_with_override_sequence_with_format(false).await;
+        test_read_with_override_sequence_with_format(true).await;
+    }
+
+    async fn test_read_with_override_sequence_with_format(flat_format: bool) {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
-        let handle = sst_file_handle(0, 1000);
-        let file_path = FixedPathProvider {
-            region_file_id: handle.file_id(),
-        };
         let metadata = Arc::new(sst_region_metadata());
 
-        // Create batches with sequence 0 to trigger override functionality.
-        let source = new_flat_source_from_record_batches(vec![
-            new_record_batch_with_custom_sequence(&["a", "d"], 0, 60, 0),
-            new_record_batch_with_custom_sequence(&["b", "f"], 0, 40, 0),
-        ]);
+        async fn read_sequences(builder: ParquetReaderBuilder) -> Vec<u64> {
+            let mut reader = builder.build().await.unwrap().unwrap();
+            let mut sequences = Vec::new();
+            while let Some(batch) = reader.next_record_batch().await.unwrap() {
+                let sequence = batch
+                    .column(batch.num_columns() - 2)
+                    .as_primitive::<datatypes::arrow::datatypes::UInt64Type>();
+                sequences.extend((0..sequence.len()).map(|idx| sequence.value(idx)));
+            }
+            sequences
+        }
 
-        let write_opts = WriteOptions {
-            row_group_size: 50,
-            ..Default::default()
-        };
+        async fn write_sst(
+            object_store: ObjectStore,
+            metadata: Arc<RegionMetadata>,
+            handle: FileHandle,
+            flat_format: bool,
+            sequence: u64,
+        ) {
+            let file_path = FixedPathProvider {
+                region_file_id: handle.file_id(),
+            };
+            let source = new_flat_source_from_record_batches(vec![
+                new_record_batch_with_custom_sequence(&["a", "d"], 0, 60, sequence),
+                new_record_batch_with_custom_sequence(&["b", "f"], 0, 40, sequence),
+            ]);
+            let write_opts = WriteOptions {
+                row_group_size: 50,
+                ..Default::default()
+            };
+            let mut metrics = Metrics::new(WriteType::Flush);
+            let mut writer = ParquetWriter::new_with_object_store(
+                object_store,
+                metadata,
+                IndexConfig::default(),
+                NoopIndexBuilder,
+                file_path,
+                &mut metrics,
+            )
+            .await;
+            if flat_format {
+                writer
+                    .write_all_flat(source, None, &write_opts)
+                    .await
+                    .unwrap();
+            } else {
+                writer
+                    .write_all_flat_as_primary_key(source, None, &write_opts)
+                    .await
+                    .unwrap();
+            }
+        }
 
-        let mut metrics = Metrics::new(WriteType::Flush);
-        let mut writer = ParquetWriter::new_with_object_store(
+        let custom_sequence = 12345u64;
+        let local_zero_handle = sst_file_handle(0, 1000);
+        write_sst(
             object_store.clone(),
             metadata.clone(),
-            IndexConfig::default(),
-            NoopIndexBuilder,
-            file_path,
-            &mut metrics,
+            local_zero_handle.clone(),
+            flat_format,
+            0,
         )
         .await;
 
-        writer
-            .write_all_flat_as_primary_key(source, None, &write_opts)
-            .await
-            .unwrap()
-            .remove(0);
+        // Local all-zero SSTs retain the compatibility override.
+        let local_zero_none = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                local_zero_handle.clone(),
+                object_store.clone(),
+            )
+            .expected_metadata(Some(metadata.clone())),
+        )
+        .await;
+        assert!(local_zero_none.iter().all(|sequence| *sequence == 0));
 
-        // Read without override sequence (should read sequence 0)
-        let builder = ParquetReaderBuilder::new(
-            FILE_DIR.to_string(),
-            PathType::Bare,
-            handle.clone(),
-            object_store.clone(),
-        );
-        let mut reader = builder.build().await.unwrap().unwrap();
-        let mut normal_batches = Vec::new();
-        while let Some(batch) = reader.next_record_batch().await.unwrap() {
-            normal_batches.push(batch);
-        }
-
-        // Read with override sequence using FileMeta.sequence
-        let custom_sequence = 12345u64;
-        let file_meta = handle.meta_ref();
-        let mut override_file_meta = file_meta.clone();
-        override_file_meta.sequence = Some(std::num::NonZero::new(custom_sequence).unwrap());
-        let override_handle = FileHandle::new(
-            override_file_meta,
+        let mut local_zero_meta = local_zero_handle.meta_ref().clone();
+        local_zero_meta.sequence = Some(std::num::NonZeroU64::new(custom_sequence).unwrap());
+        let local_zero_override_handle = FileHandle::new(
+            local_zero_meta,
             Arc::new(crate::sst::file_purger::NoopFilePurger),
         );
-
-        let builder = ParquetReaderBuilder::new(
-            FILE_DIR.to_string(),
-            PathType::Bare,
-            override_handle,
-            object_store.clone(),
+        let local_zero_override = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                local_zero_override_handle,
+                object_store.clone(),
+            )
+            .expected_metadata(Some(metadata.clone())),
+        )
+        .await;
+        assert!(
+            local_zero_override
+                .iter()
+                .all(|sequence| *sequence == custom_sequence)
         );
-        let mut reader = builder.build().await.unwrap().unwrap();
-        let mut override_batches = Vec::new();
-        while let Some(batch) = reader.next_record_batch().await.unwrap() {
-            override_batches.push(batch);
-        }
 
-        // Compare the results
-        assert_eq!(normal_batches.len(), override_batches.len());
-        for (normal, override_batch) in normal_batches.into_iter().zip(override_batches.iter()) {
-            let expected_batch = {
-                let mut columns = normal.columns().to_vec();
-                let num_cols = columns.len();
-                columns[num_cols - 2] =
-                    Arc::new(UInt64Array::from_value(custom_sequence, normal.num_rows()));
-                RecordBatch::try_new(normal.schema(), columns).unwrap()
-            };
+        let local_nonzero_handle = sst_file_handle(0, 1000);
+        write_sst(
+            object_store.clone(),
+            metadata.clone(),
+            local_nonzero_handle.clone(),
+            flat_format,
+            7,
+        )
+        .await;
 
-            // Override batch should match expected batch
-            assert_eq!(*override_batch, expected_batch);
-        }
+        // Local nonzero SSTs retain physical per-row sequences, even with FileMeta.sequence.
+        let mut local_nonzero_meta = local_nonzero_handle.meta_ref().clone();
+        local_nonzero_meta.sequence = Some(std::num::NonZeroU64::new(custom_sequence).unwrap());
+        let local_nonzero_override_handle = FileHandle::new(
+            local_nonzero_meta,
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
+        let local_nonzero_override = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                local_nonzero_override_handle,
+                object_store.clone(),
+            )
+            .expected_metadata(Some(metadata.clone())),
+        )
+        .await;
+        assert!(local_nonzero_override.iter().all(|sequence| *sequence == 7));
+
+        // None never overrides a local nonzero physical sequence.
+        let local_nonzero_none = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                local_nonzero_handle.clone(),
+                object_store.clone(),
+            )
+            .expected_metadata(Some(metadata.clone())),
+        )
+        .await;
+        assert!(local_nonzero_none.iter().all(|sequence| *sequence == 7));
+
+        // A source-owned handle is foreign when read against target metadata, so the
+        // target-local manifest barrier is applied even for nonzero physical sequences.
+        let mut target_metadata = (*metadata).clone();
+        target_metadata.region_id = RegionId::new(0, 1);
+        let target_metadata = Arc::new(target_metadata);
+        let mut foreign_meta = local_nonzero_handle.meta_ref().clone();
+        foreign_meta.sequence = Some(std::num::NonZeroU64::new(custom_sequence).unwrap());
+        let foreign_handle = FileHandle::new(
+            foreign_meta,
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
+        let foreign = read_sequences(
+            ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                foreign_handle,
+                object_store,
+            )
+            .expected_metadata(Some(target_metadata)),
+        )
+        .await;
+        assert!(foreign.iter().all(|sequence| *sequence == custom_sequence));
     }
 
     #[tokio::test]

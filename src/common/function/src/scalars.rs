@@ -33,3 +33,4 @@ pub(crate) mod timestamp;
 pub(crate) mod uddsketch_calc;
 pub(crate) mod uddsketch_rank;
 pub mod udf;
+pub(crate) mod welford_stddev;

@@ -113,7 +113,7 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
@@ -307,6 +307,7 @@ fn test_load_flownode_example_config() {
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::Percentage(50),
                 enable_per_region_metrics: false,
+                ..Default::default()
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
@@ -354,7 +355,7 @@ fn test_load_standalone_example_config() {
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,

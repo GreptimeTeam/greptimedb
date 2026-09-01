@@ -278,6 +278,30 @@ parallelism = 0
 ## NOTE: This does NOT limit memory used by table scans.
 memory_pool_size = "50%"
 
+## Experimental memory pool allocation policy:
+## - "greedy" (default): first-come-first-served allocation; preserves current behavior.
+## - "fair": divides available memory among spillable operators and may spill earlier.
+## Only effective when `memory_pool_size` is bounded (>0).
+#+ experimental_memory_pool_policy = "greedy"
+
+# --- Experimental: DataFusion spill-to-disk controls ---
+## Spill mode:
+## - "default": preserve DataFusion built-in OS temp directory (default).
+## - "custom": explicitly configure spill path, quota, and compression.
+## - "disabled": explicitly disable disk spilling.
+## Set this to "custom" before using the path/quota/compression keys below.
+#+ experimental_spill_mode = "default"
+## Spill directory path. Ignored unless mode is "custom".
+## @toml2docs:none-default
+#+ experimental_spill_path = "/path/to/spill"
+## Maximum total size of spill directory (default: "1GiB").
+## Ignored unless mode is "custom".
+#+ experimental_spill_max_temp_directory_size = "1GiB"
+## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
+## Ignored unless mode is "custom".
+#+ experimental_spill_compression = "uncompressed"
+# --- End spill-to-disk ---
+
 ## The data storage options.
 [storage]
 ## The working home directory.
@@ -462,7 +486,7 @@ compress_manifest = false
 #+ experimental_compaction_on_exhausted = "wait"
 
 ## Interval to auto flush a region if it has not flushed yet.
-auto_flush_interval = "1h"
+auto_flush_interval = "10m"
 
 ## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 ## @toml2docs:none-default="Auto"

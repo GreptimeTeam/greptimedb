@@ -44,7 +44,7 @@ The audience is broader than LLM agents. Alert generators need to choose between
 
 1. **`greptime.semantic.*` table options** — table-level identity and lineage. Carried inside the existing `table_options` blob. This is the same slot that today carries `table_data_model = 'greptime_trace_v1'` and `otlp_metric_compat = 'prom'`, so the mechanism is generalising what the OTLP trace auto-create path already does.
 2. **Column `COMMENT`** — column-level supplements ("this column is `resource.service.name`"; "this column carries delta values"). Standard SQL.
-3. **`information_schema.table_semantics` view** — a denormalised projection of the options, registered through the existing `with_extra_table_factories()` hook. Tables without a `greptime.semantic.*` option do not appear in the view.
+3. **`information_schema.table_semantics` view** — a denormalised projection of the options, registered through the existing `with_extra_table_factories()` hook. A table appears in the view when it carries a `greptime.semantic.*` option or when the built-in conventions derive entities from it.
 
 ## Vocabulary
 
@@ -102,7 +102,7 @@ SELECT table_catalog, table_schema, table_name, signal_type, source, pipeline
 FROM information_schema.table_semantics;
 ```
 
-returns one row per semantic-tagged table. The view exposes a stable set of core columns (`table_catalog`, `table_schema`, `table_name`, `signal_type`, `source`, `source_version`, `pipeline`) plus a `semantic_options` JSON column carrying the rest of the `greptime.semantic.*` keys verbatim. Future keys appear inside `semantic_options` without forcing a view-schema change; only widely-used keys are ever promoted to first-class columns.
+returns one row per semantic-tagged table. The view exposes a stable set of core columns (`table_catalog`, `table_schema`, `table_name`, `signal_type`, `source`, `source_version`, `pipeline`) plus a `semantic_options` JSON column carrying the rest of the `greptime.semantic.*` keys verbatim and an `entity_declarations` JSON column listing the entities the table contributes to the graph, whether declared by option or derived by convention. Future keys appear inside `semantic_options` without forcing a view-schema change; only widely-used keys are ever promoted to first-class columns.
 
 # Implementation Plan
 

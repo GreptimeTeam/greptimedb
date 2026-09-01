@@ -19,6 +19,10 @@ mod writer;
 
 use futures::stream::BoxStream;
 pub use searcher::SeriesIndexSearcher;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
+    DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
+};
 pub use writer::{
     SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,
 };
@@ -28,8 +32,6 @@ use crate::error::Result;
 pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";
 pub(crate) const MAX_TS_COLUMN: &str = "__series_max_ts";
 pub(crate) const ROW_COUNT_COLUMN: &str = "__series_row_count";
-pub(crate) const TABLE_ID_COLUMN: &str = "__table_id";
-pub(crate) const TSID_COLUMN: &str = "__tsid";
 pub(crate) const METRIC_SERIES_ID_BATCH_SIZE: usize = 500;
 
 /// Identifies one series in a physical metric region.

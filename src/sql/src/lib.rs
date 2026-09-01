@@ -23,6 +23,6 @@ pub mod partition;
 pub mod statements;
 pub mod util;
 
-pub use parsers::create_parser::{ENGINE, MAXVALUE};
+pub use parsers::create_parser::{ENGINE, MAXVALUE, parse_json2_type_hint_path};
 pub use parsers::tql_parser::TQL;
 pub use parsers::with_tql_parser::{CteContent, HybridCteWith};

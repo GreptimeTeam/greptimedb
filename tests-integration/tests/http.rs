@@ -2278,7 +2278,7 @@ experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
-auto_flush_interval = "30m"
+auto_flush_interval = "10m"
 default_region_write_buffer_size = "0KiB"
 enable_write_cache = false
 write_cache_path = ""
@@ -2345,6 +2345,10 @@ ttl = "2months 29days 2h 52m 48s"
 [query]
 parallelism = 0
 allow_query_fallback = false
+experimental_spill_mode = "default"
+experimental_spill_max_temp_directory_size = "1GiB"
+experimental_spill_compression = "uncompressed"
+experimental_memory_pool_policy = "greedy"
 
 [memory]
 enable_heap_profiling = true
