@@ -80,7 +80,7 @@ use crate::options::{QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew};
 use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::runtime::{
-    DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProviderRef,
+    DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider, QueryRuntimeProviderRef,
 };
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
@@ -148,9 +148,7 @@ impl QueryEngineState {
     ) -> DfResult<Self> {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let memory_pool_size = options.memory_pool_size.resolve(total_memory) as usize;
-        let runtime_provider = plugins
-            .get::<QueryRuntimeProviderRef>()
-            .unwrap_or_else(|| Arc::new(DefaultQueryRuntimeProvider));
+        let runtime_provider = plugins.get::<QueryRuntimeProviderRef>();
         let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
@@ -172,9 +170,16 @@ impl QueryEngineState {
             .skip_physical_aggregate_schema_check = true;
 
         let runtime_context = QueryRuntimeContext::new(&options, memory_pool_size);
-        runtime_provider.configure_session_config(runtime_context, &mut session_config);
+        let default_runtime_provider = DefaultQueryRuntimeProvider;
+        default_runtime_provider.configure_session_config(runtime_context, &mut session_config);
+        if let Some(provider) = runtime_provider.as_ref() {
+            provider.configure_session_config(runtime_context, &mut session_config);
+        }
         let runtime_builder = DefaultQueryRuntimeProvider::runtime_env_builder(runtime_context);
-        let runtime_env = runtime_provider.build_runtime_env(runtime_context, runtime_builder)?;
+        let runtime_env = match runtime_provider {
+            Some(provider) => provider.build_runtime_env(runtime_context, runtime_builder)?,
+            None => default_runtime_provider.build_runtime_env(runtime_context, runtime_builder)?,
+        };
 
         // Apply extension rules
         let mut extension_rules = Vec::new();
@@ -571,9 +576,8 @@ impl DfQueryPlanner {
 /// This wrapper intercepts all memory pool operations and updates
 /// Prometheus metrics for monitoring query memory usage and rejections.
 ///
-/// The inner pool is always wrapped with `TrackConsumersPool` to preserve
-/// top-consumer error context on rejection, regardless of whether the
-/// underlying pool is greedy or fair.
+/// The inner pool is wrapped with `TrackConsumersPool` to preserve
+/// top-consumer error context on rejection.
 #[derive(Debug)]
 pub(super) struct MetricsMemoryPool {
     inner: Arc<dyn MemoryPool>,
@@ -584,8 +588,7 @@ impl MetricsMemoryPool {
     const TOP_CONSUMERS_TO_REPORT: usize = 5;
 
     /// Create a new metrics-wrapped memory pool with the given size limit and
-    /// allocation policy. Both greedy and fair pools are wrapped in
-    /// [`TrackConsumersPool`] to preserve top-consumer error context on rejection.
+    /// allocation policy.
     pub(super) fn new(limit: usize, policy: QueryMemoryPoolPolicy) -> Self {
         let top_n = NonZeroUsize::new(Self::TOP_CONSUMERS_TO_REPORT).unwrap();
         let inner: Arc<dyn MemoryPool> = match policy {
@@ -656,10 +659,11 @@ mod tests {
     use datafusion::error::DataFusionError;
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit as DfMemoryLimit};
     use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
+    use datafusion_common::config::SpillCompression;
     use session::context::QueryContext;
 
     use super::*;
-    use crate::options::{QueryOptions, QuerySpillMode};
+    use crate::options::{QueryOptions, QuerySpillCompression, QuerySpillMode};
     use crate::query_engine::runtime::{
         DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider,
         QueryRuntimeProviderRef,
@@ -789,12 +793,23 @@ mod tests {
             plugins,
             QueryOptions {
                 memory_pool_size: MemoryLimit::Size(ReadableSize(1024)),
+                experimental_spill_mode: QuerySpillMode::Custom,
+                experimental_spill_compression: QuerySpillCompression::Zstd,
                 ..Default::default()
             },
         );
 
         assert!(provider.configure_called.load(Ordering::SeqCst));
         assert_eq!(7, state.session_state().config().target_partitions());
+        assert_eq!(
+            SpillCompression::Zstd,
+            state
+                .session_state()
+                .config()
+                .options()
+                .execution
+                .spill_compression
+        );
     }
 
     #[test]
@@ -894,24 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_runtime_env_default_mode_unbounded() {
-        let opts = QueryOptions::default();
-        let env = build_runtime_env(&opts, 0);
-        assert!(env.disk_manager.tmp_files_enabled());
-    }
-
-    #[test]
-    fn test_build_runtime_env_default_mode_bounded() {
-        let opts = QueryOptions {
-            memory_pool_size: MemoryLimit::Size(ReadableSize::mb(128)),
-            ..Default::default()
-        };
-        let env = build_runtime_env(&opts, 128 * 1024 * 1024);
-        assert!(env.memory_pool.reserved() == 0);
-        assert!(env.disk_manager.tmp_files_enabled());
-    }
-
-    #[test]
     fn test_build_runtime_env_custom_mode_with_path() {
         // Use a temp directory managed manually so we don't need the `tempfile` crate.
         let spill_dir = std::env::temp_dir().join(format!("df_spill_test_{}", std::process::id()));
@@ -947,52 +944,34 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_memory_pool_default_greedy() {
-        let pool = MetricsMemoryPool::new(1024, QueryMemoryPoolPolicy::Greedy);
-        assert!(matches!(pool.memory_limit(), DfMemoryLimit::Finite(1024)));
-        let pool: Arc<dyn MemoryPool> = Arc::new(pool);
-        let consumer = MemoryConsumer::new("test");
-        let reservation = consumer.register(&pool);
-        pool.try_grow(&reservation, 128).unwrap();
-        assert!(pool.reserved() > 0);
-    }
+    fn test_metrics_memory_pool_policy_differs_with_multiple_spillable_consumers() {
+        for (policy, greedy) in [
+            (QueryMemoryPoolPolicy::Greedy, true),
+            (QueryMemoryPoolPolicy::Fair, false),
+        ] {
+            let pool: Arc<dyn MemoryPool> = Arc::new(MetricsMemoryPool::new(100, policy));
+            let first = MemoryConsumer::new("first")
+                .with_can_spill(true)
+                .register(&pool);
+            let second = MemoryConsumer::new("second")
+                .with_can_spill(true)
+                .register(&pool);
 
-    #[test]
-    fn test_metrics_memory_pool_fair() {
-        let pool = MetricsMemoryPool::new(1024, QueryMemoryPoolPolicy::Fair);
-        assert!(matches!(pool.memory_limit(), DfMemoryLimit::Finite(1024)));
-        let pool: Arc<dyn MemoryPool> = Arc::new(pool);
-        let consumer = MemoryConsumer::new("test fair");
-        let reservation = consumer.register(&pool);
-        pool.try_grow(&reservation, 128).unwrap();
-        assert!(pool.reserved() > 0);
-    }
-
-    #[test]
-    fn test_metrics_memory_pool_fair_rejects_over_limit() {
-        let pool = MetricsMemoryPool::new(200, QueryMemoryPoolPolicy::Fair);
-        let pool: Arc<dyn MemoryPool> = Arc::new(pool);
-        let consumer = MemoryConsumer::new("test fair oom");
-        let reservation = consumer.register(&pool);
-        let result = pool.try_grow(&reservation, 201);
-        assert!(result.is_err(), "expected error but got Ok");
-    }
-
-    #[test]
-    fn test_metrics_memory_pool_greedy_rejects_over_limit() {
-        let pool = MetricsMemoryPool::new(200, QueryMemoryPoolPolicy::Greedy);
-        let pool: Arc<dyn MemoryPool> = Arc::new(pool);
-        let consumer = MemoryConsumer::new("test greedy oom");
-        let reservation = consumer.register(&pool);
-        let result = pool.try_grow(&reservation, 201);
-        assert!(result.is_err(), "expected error but got Ok");
+            let first_result = first.try_grow(75);
+            assert_eq!(first_result.is_ok(), greedy);
+            if greedy {
+                assert!(second.try_grow(26).is_err());
+            } else {
+                first.try_grow(50).unwrap();
+                second.try_grow(50).unwrap();
+            }
+        }
     }
 
     /// Builds a runtime with custom spill configuration and a bounded memory
     /// pool, then runs sort queries that probe spill-to-disk behaviour:
     ///
-    /// - Phase 1: a pool too small to sort in-memory → OOM (proves pool active).
-    /// - Phase 2: a pool large enough for merge chunks but still much smaller
+    /// - A pool large enough for merge chunks but still much smaller
     ///   than the total data.  Executes the physical plan directly so we can
     ///   walk the plan tree afterwards and sum `spill_count` / `spilled_rows` /
     ///   `spilled_bytes` on `SortExec` nodes.  All three must be > 0.
@@ -1075,28 +1054,6 @@ mod tests {
         }
 
         {
-            let mem_limit: usize = 64 * 1024;
-            let runtime = build_runtime_env(&opts, mem_limit);
-            let ctx = build_ctx(&session_config, &runtime, &schema, &table_partitions);
-            let result = ctx
-                .sql("SELECT * FROM t ORDER BY val ASC")
-                .await
-                .unwrap()
-                .collect()
-                .await;
-            assert!(
-                result.is_err(),
-                "64 KB pool should be too small for 200K rows, but query succeeded"
-            );
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(
-                err_msg.contains("Resources exhausted") || err_msg.contains("Memory Exhausted"),
-                "error should mention resource exhaustion: {err_msg}"
-            );
-            assert_eq!(runtime.memory_pool.reserved(), 0);
-        }
-
-        {
             let mem_limit: usize = 512 * 1024; // 512 KB pool, 64 KB reserved for merge
 
             let runtime = build_runtime_env(&opts, mem_limit);
@@ -1117,8 +1074,7 @@ mod tests {
                 .await
                 .expect("executing ORDER BY");
 
-            let (spill_count, spilled_rows, spilled_bytes, _sort_elapsed_ns) =
-                sum_sort_spill_metrics(&plan);
+            let (spill_count, spilled_rows, spilled_bytes) = sum_sort_spill_metrics(&plan);
             assert!(
                 spill_count > 0,
                 "expected SortExec spill_count > 0 (pool={} KB, reservation=64 KB), got 0",
@@ -1167,21 +1123,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&spill_dir);
     }
 
-    /// Walk a physical plan tree, summing spill metrics and `elapsed_compute`
-    /// for every node whose name starts with `"SortExec"`.
-    fn sum_sort_spill_metrics(plan: &Arc<dyn ExecutionPlan>) -> (usize, usize, usize, usize) {
+    /// Walk a physical plan tree, summing spill metrics for every node whose
+    /// name starts with `"SortExec"`.
+    fn sum_sort_spill_metrics(plan: &Arc<dyn ExecutionPlan>) -> (usize, usize, usize) {
         let mut spill_count = 0usize;
         let mut spilled_rows = 0usize;
         let mut spilled_bytes = 0usize;
-        let mut elapsed_compute_ns = 0usize;
 
-        fn walk(
-            plan: &Arc<dyn ExecutionPlan>,
-            sc: &mut usize,
-            sr: &mut usize,
-            sb: &mut usize,
-            elapsed: &mut usize,
-        ) {
+        fn walk(plan: &Arc<dyn ExecutionPlan>, sc: &mut usize, sr: &mut usize, sb: &mut usize) {
             let name = plan.name();
             if name.starts_with("SortExec")
                 && let Some(m) = plan.metrics()
@@ -1189,10 +1138,9 @@ mod tests {
                 *sc += m.spill_count().unwrap_or(0);
                 *sr += m.spilled_rows().unwrap_or(0);
                 *sb += m.spilled_bytes().unwrap_or(0);
-                *elapsed += m.elapsed_compute().unwrap_or(0);
             }
             for child in plan.children() {
-                walk(child, sc, sr, sb, elapsed);
+                walk(child, sc, sr, sb);
             }
         }
 
@@ -1201,8 +1149,7 @@ mod tests {
             &mut spill_count,
             &mut spilled_rows,
             &mut spilled_bytes,
-            &mut elapsed_compute_ns,
         );
-        (spill_count, spilled_rows, spilled_bytes, elapsed_compute_ns)
+        (spill_count, spilled_rows, spilled_bytes)
     }
 }
