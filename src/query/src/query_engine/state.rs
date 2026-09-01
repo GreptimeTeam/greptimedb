@@ -850,7 +850,7 @@ mod tests {
         let plugins = Plugins::default();
         plugins.insert::<QueryRuntimeProviderRef>(Arc::new(ErrorRuntimeProvider));
 
-        let err = QueryEngineState::try_new(
+        let err = match QueryEngineState::try_new(
             catalog::memory::new_memory_catalog_manager().unwrap(),
             None,
             None,
@@ -860,8 +860,10 @@ mod tests {
             false,
             plugins,
             QueryOptions::default(),
-        )
-        .unwrap_err();
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("expected runtime provider error"),
+        };
 
         assert!(
             matches!(err, DataFusionError::Execution(message) if message == "runtime provider error")
