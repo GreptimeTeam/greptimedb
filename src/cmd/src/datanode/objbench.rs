@@ -482,7 +482,7 @@ async fn build_cache_manager(
     puffin_manager: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
 ) -> error::Result<CacheManagerRef> {
-    let write_cache = write_cache_from_config(config, puffin_manager, intermediate_manager)
+    let write_cache = write_cache_from_config(config, puffin_manager, intermediate_manager, None)
         .await
         .map_err(|e| {
             error::IllegalConfigSnafu {
