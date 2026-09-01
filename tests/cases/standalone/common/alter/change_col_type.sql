@@ -126,6 +126,7 @@ CREATE TABLE ts_overflow (host STRING, ts TIMESTAMP TIME INDEX);
 INSERT INTO ts_overflow VALUES ("a", "3000-01-01 00:00:00");
 
 -- widening to nanoseconds is rejected by region validation: data overflows the target unit
+-- SQLNESS REPLACE region_id:\s\d+\(\d+,\s\d+\) region_id: REDACTED
 ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
 
 DESCRIBE ts_overflow;

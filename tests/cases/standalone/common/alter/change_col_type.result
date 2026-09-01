@@ -353,9 +353,10 @@ INSERT INTO ts_overflow VALUES ("a", "3000-01-01 00:00:00");
 Affected Rows: 1
 
 -- widening to nanoseconds is rejected by region validation: data overflows the target unit
+-- SQLNESS REPLACE region_id:\s\d+\(\d+,\s\d+\) region_id: REDACTED
 ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
 
-Error: 1004(InvalidArguments), Invalid region request, region_id: 4428111282176(1031, 0), err: cannot widen time index column 'ts' to Nanosecond: data spans [3000-01-01 00:00:00+0000, 3000-01-01 00:00:00+0000] which overflows the target unit's i64 range
+Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: cannot widen time index column 'ts' to Nanosecond: data spans [3000-01-01 00:00:00+0000, 3000-01-01 00:00:00+0000] which overflows the target unit's i64 range
 
 DESCRIBE ts_overflow;
 
