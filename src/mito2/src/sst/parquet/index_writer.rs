@@ -125,7 +125,7 @@ impl ParquetIndexWriter {
     pub(crate) async fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         self.writer
             .as_mut()
-            .context(UnexpectedSnafu {
+            .with_context(|| UnexpectedSnafu {
                 reason: format!("{} Parquet writer is closed", self.name),
             })?
             .write(batch)
@@ -137,13 +137,13 @@ impl ParquetIndexWriter {
     pub(crate) async fn finish(&mut self) -> Result<u64> {
         self.writer
             .as_mut()
-            .context(UnexpectedSnafu {
+            .with_context(|| UnexpectedSnafu {
                 reason: format!("{} Parquet writer is closed", self.name),
             })?
             .finish()
             .await
             .context(WriteParquetSnafu)?;
-        let writer = self.writer.take().context(UnexpectedSnafu {
+        let writer = self.writer.take().with_context(|| UnexpectedSnafu {
             reason: format!("{} Parquet writer is closed", self.name),
         })?;
         Ok(writer.into_inner().output_bytes())
