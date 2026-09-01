@@ -25,11 +25,11 @@ use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
 
-use super::json2::{
-    Json2RewritePlans, collect_json2_rewrite_plans_from_parquet, rewrite_json2_schema,
-};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManagerRef, CacheStrategy};
+use crate::compaction::json2::{
+    Json2RewritePlans, collect_json2_rewrite_plans_from_parquet, rewrite_json2_schema,
+};
 use crate::error::{InvalidRecordBatchSnafu, Result, TimeRangePredicateOverflowSnafu};
 use crate::read::FlatSource;
 use crate::read::flat_projection::FlatProjectionMapper;
