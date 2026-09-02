@@ -13,65 +13,34 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::ops::Range;
-use std::sync::Arc;
 
-use datafusion_common::pruning::PruningStatistics;
-use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::{Expr, col, lit};
-use datatypes::arrow::array::{ArrayRef, BooleanArray, Int64Array, UInt32Array, UInt64Array};
+use datatypes::arrow::array::{Int64Array, UInt32Array, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
+use futures::TryStreamExt;
 use object_store::ObjectStore;
-use parquet::DecodeResult;
-use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
-use parquet::arrow::push_decoder::ParquetPushDecoderBuilder;
-use parquet::file::metadata::RowGroupMetaData;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ensure};
 use table::predicate::Predicate;
 
-use crate::error::{
-    InvalidRecordBatchSnafu, OpenDalSnafu, ReadParquetSnafu, Result, UnexpectedSnafu,
-};
+use crate::error::{InvalidRecordBatchSnafu, Result, UnexpectedSnafu};
 use crate::series_index::MetricSeriesId;
-use crate::sst::parquet::format::{column_null_counts, column_values_by_type};
-use crate::sst::parquet::helper::fetch_byte_ranges;
-use crate::sst::parquet::metadata::MetadataLoader;
-use crate::sst::parquet::reader::MetadataCacheMetrics;
+use crate::sst::parquet::index_reader::ParquetIndexReader;
 use crate::sst::range_index::{
     END_COLUMN, ROW_GROUP_ID_COLUMN, START_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN,
 };
 
 /// Searches per-SST range-index files for the rows of candidate metric series.
 pub struct SstRangeIndexSearcher {
-    object_store: ObjectStore,
-    path: String,
-    arrow_metadata: ArrowReaderMetadata,
-    projection: ProjectionMask,
+    reader: ParquetIndexReader,
 }
 
 impl SstRangeIndexSearcher {
     /// Opens the range-index file at `path` and loads its Parquet metadata.
     pub async fn open(object_store: ObjectStore, path: &str) -> Result<Self> {
-        let mut metrics = MetadataCacheMetrics::default();
-        let parquet_metadata = MetadataLoader::new(object_store.clone(), path, 0)
-            .load(&mut metrics)
-            .await?;
-        let arrow_metadata =
-            ArrowReaderMetadata::try_new(Arc::new(parquet_metadata), ArrowReaderOptions::new())
-                .with_context(|_| ReadParquetSnafu {
-                    path: path.to_string(),
-                })?;
-        validate_index_schema(arrow_metadata.schema())?;
-        let projection = projection_mask(arrow_metadata.parquet_schema(), arrow_metadata.schema())?;
-
-        Ok(Self {
-            object_store,
-            path: path.to_string(),
-            arrow_metadata,
-            projection,
-        })
+        let reader = ParquetIndexReader::open(object_store, path).await?;
+        validate_index_schema(reader.schema())?;
+        Ok(Self { reader })
     }
 
     /// Returns the row ranges for `series` in one source SST row group.
@@ -91,43 +60,19 @@ impl SstRangeIndexSearcher {
 
         validate_sorted_series(series)?;
         let predicate = search_predicate(row_group_id, series)?;
-        let row_groups = row_groups_to_read(
-            self.arrow_metadata.metadata().row_groups(),
-            self.arrow_metadata.schema().clone(),
+        let mut batches = self.reader.read(
             &predicate,
-        );
-        if row_groups.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut decoder = ParquetPushDecoderBuilder::new_with_metadata(self.arrow_metadata.clone())
-            .with_row_groups(row_groups)
-            .with_projection(self.projection.clone())
-            .build()
-            .with_context(|_| ReadParquetSnafu {
-                path: self.path.clone(),
-            })?;
+            &[
+                ROW_GROUP_ID_COLUMN,
+                TABLE_ID_COLUMN,
+                TSID_COLUMN,
+                START_COLUMN,
+                END_COLUMN,
+            ],
+        )?;
         let mut merge = RangeMergeState::new(row_group_id, series);
 
-        loop {
-            let batch = match decoder.try_decode().with_context(|_| ReadParquetSnafu {
-                path: self.path.clone(),
-            })? {
-                DecodeResult::NeedsData(byte_ranges) => {
-                    let data =
-                        fetch_byte_ranges(&self.path, self.object_store.clone(), &byte_ranges)
-                            .await
-                            .context(OpenDalSnafu)?;
-                    decoder
-                        .push_ranges(byte_ranges, data)
-                        .with_context(|_| ReadParquetSnafu {
-                            path: self.path.clone(),
-                        })?;
-                    continue;
-                }
-                DecodeResult::Data(batch) => batch,
-                DecodeResult::Finished => break,
-            };
-
+        while let Some(batch) = batches.try_next().await? {
             if merge.append_batch(&batch)? {
                 break;
             }
@@ -212,27 +157,6 @@ fn validate_index_schema(schema: &SchemaRef) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn projection_mask(
-    parquet_schema: &parquet::schema::types::SchemaDescriptor,
-    arrow_schema: &SchemaRef,
-) -> Result<ProjectionMask> {
-    let mut indices = Vec::with_capacity(5);
-    for name in [
-        ROW_GROUP_ID_COLUMN,
-        TABLE_ID_COLUMN,
-        TSID_COLUMN,
-        START_COLUMN,
-        END_COLUMN,
-    ] {
-        indices.push(arrow_schema.index_of(name).ok().with_context(|| {
-            InvalidRecordBatchSnafu {
-                reason: format!("range index is missing column {name}"),
-            }
-        })?);
-    }
-    Ok(ProjectionMask::roots(parquet_schema, indices))
 }
 
 struct RangeMergeState<'a> {
@@ -389,62 +313,10 @@ fn typed_column<'a, T: 'static>(
         })
 }
 
-struct RangeIndexPruningStats<'a> {
-    row_groups: &'a [RowGroupMetaData],
-    schema: SchemaRef,
-}
-
-impl PruningStatistics for RangeIndexPruningStats<'_> {
-    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
-        self.column_values(column, true)
-    }
-
-    fn max_values(&self, column: &Column) -> Option<ArrayRef> {
-        self.column_values(column, false)
-    }
-
-    fn num_containers(&self) -> usize {
-        self.row_groups.len()
-    }
-
-    fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
-        let column_index = self.schema.index_of(&column.name).ok()?;
-        column_null_counts(self.row_groups, column_index)
-    }
-
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
-        None
-    }
-
-    fn contained(&self, _column: &Column, _values: &HashSet<ScalarValue>) -> Option<BooleanArray> {
-        None
-    }
-}
-
-impl RangeIndexPruningStats<'_> {
-    fn column_values(&self, column: &Column, is_min: bool) -> Option<ArrayRef> {
-        let column_index = self.schema.index_of(&column.name).ok()?;
-        let data_type = self.schema.field(column_index).data_type();
-        column_values_by_type(self.row_groups, data_type, column_index, is_min)
-    }
-}
-
-fn row_groups_to_read(
-    row_groups: &[RowGroupMetaData],
-    schema: SchemaRef,
-    predicate: &Predicate,
-) -> Vec<usize> {
-    let stats = RangeIndexPruningStats { row_groups, schema };
-    predicate
-        .prune_with_stats(&stats, &stats.schema)
-        .into_iter()
-        .enumerate()
-        .filter_map(|(row_group, keep)| keep.then_some(row_group))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use datatypes::arrow::array::{ArrayRef, BinaryArray};
     use datatypes::arrow::datatypes::{Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -565,23 +437,10 @@ mod tests {
         let store = object_store();
         let path = "range-pruning.parquet";
         write_index(&store, path).await;
-        let mut metrics = MetadataCacheMetrics::default();
-        let metadata = MetadataLoader::new(store, path, 0)
-            .load(&mut metrics)
-            .await
-            .unwrap();
-        let metadata =
-            ArrowReaderMetadata::try_new(Arc::new(metadata), ArrowReaderOptions::new()).unwrap();
+        let reader = ParquetIndexReader::open(store, path).await.unwrap();
         let predicate = search_predicate(1, &[series(2, 20)]).unwrap();
 
-        assert_eq!(
-            row_groups_to_read(
-                metadata.metadata().row_groups(),
-                metadata.schema().clone(),
-                &predicate,
-            ),
-            vec![2]
-        );
+        assert_eq!(reader.row_groups_to_read(&predicate), vec![2]);
     }
 
     #[test]
