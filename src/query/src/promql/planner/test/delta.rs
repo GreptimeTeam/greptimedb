@@ -256,6 +256,86 @@ async fn rate_and_increase_select_raw_delta_math_per_series() {
 }
 
 #[tokio::test]
+async fn empty_metric_broadcasts_over_temporality_marker() {
+    let eval_time = UNIX_EPOCH.checked_add(Duration::from_secs(180)).unwrap();
+    let marker = greptime_temporality_label();
+    for query in [
+        "vector(2) * delta_metric".to_string(),
+        format!("vector(2) * ignoring({marker}) delta_metric"),
+        "delta_metric * vector(2)".to_string(),
+        format!("delta_metric * ignoring({marker}) vector(2)"),
+    ] {
+        let eval_stmt = EvalStmt {
+            expr: parser::parse(&query).unwrap(),
+            start: eval_time,
+            end: eval_time,
+            interval: Duration::from_secs(60),
+            lookback_delta: Duration::from_secs(300),
+        };
+        let (provider, state, _) = delta_temporality_table_provider();
+        let plan = PromPlanner::stmt_to_plan(provider, &eval_stmt, &state)
+            .await
+            .unwrap();
+        let plan_text = plan.display_indent_schema().to_string();
+        assert!(
+            !plan_text.contains("Filter: Boolean(false)"),
+            "{query}: {plan_text}"
+        );
+        let value_field = plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.data_type() == &ArrowDataType::Float64)
+            .unwrap()
+            .name()
+            .clone();
+        let (_, batches) = execute(plan, &state).await;
+        let mut results = HashMap::new();
+        for batch in batches {
+            let series = batch
+                .column_by_name("series")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let values = batch
+                .column_by_name(&value_field)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let temporality = batch
+                .column_by_name(marker)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                results.insert(
+                    series.value(row).to_string(),
+                    (
+                        (!temporality.is_null(row)).then(|| temporality.value(row).to_string()),
+                        values.value(row),
+                    ),
+                );
+            }
+        }
+        assert_eq!(3, results.len(), "{query}");
+        assert_eq!(
+            Some(&(Some(GREPTIME_TEMPORALITY_DELTA.to_string()), 30.0)),
+            results.get("delta"),
+            "{query}"
+        );
+        assert_eq!(
+            Some(&(Some(GREPTIME_TEMPORALITY_DELTA.to_string()), 14.0)),
+            results.get("single"),
+            "{query}"
+        );
+        assert_eq!(Some(&(None, 60.0)), results.get("cumulative"), "{query}");
+    }
+}
+
+#[tokio::test]
 async fn native_histogram_rate_ignores_delta_marker() {
     let provider =
         build_test_native_histogram_table_provider_with_marker("native_delta_metric", true).await;

@@ -89,6 +89,51 @@ TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__!="delta"};
 | 1970-01-01T00:03:00 | 30.0           | cumulative |                          |
 +---------------------+----------------+------------+--------------------------+
 
+-- Generated vector plans retain timestamp broadcast across the temporality marker.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') vector(2) * delta_temporality;
+
++------------+--------------------------+---------------------+----------------------------------------------------+
+| series     | __greptime_temporality__ | ts                  | .greptime_value * delta_temporality.greptime_value |
++------------+--------------------------+---------------------+----------------------------------------------------+
+| cumulative |                          | 1970-01-01T00:03:00 | 60.0                                               |
+| delta      | delta                    | 1970-01-01T00:03:00 | 30.0                                               |
+| single     | delta                    | 1970-01-01T00:03:00 | 14.0                                               |
++------------+--------------------------+---------------------+----------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') vector(2) * ignoring(__greptime_temporality__) delta_temporality;
+
++------------+--------------------------+---------------------+----------------------------------------------------+
+| series     | __greptime_temporality__ | ts                  | .greptime_value * delta_temporality.greptime_value |
++------------+--------------------------+---------------------+----------------------------------------------------+
+| cumulative |                          | 1970-01-01T00:03:00 | 60.0                                               |
+| delta      | delta                    | 1970-01-01T00:03:00 | 30.0                                               |
+| single     | delta                    | 1970-01-01T00:03:00 | 14.0                                               |
++------------+--------------------------+---------------------+----------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') delta_temporality * vector(2);
+
++------------+--------------------------+---------------------+----------------------------------------------------+
+| series     | __greptime_temporality__ | ts                  | delta_temporality.greptime_value * .greptime_value |
++------------+--------------------------+---------------------+----------------------------------------------------+
+| cumulative |                          | 1970-01-01T00:03:00 | 60.0                                               |
+| delta      | delta                    | 1970-01-01T00:03:00 | 30.0                                               |
+| single     | delta                    | 1970-01-01T00:03:00 | 14.0                                               |
++------------+--------------------------+---------------------+----------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') delta_temporality * ignoring(__greptime_temporality__) vector(2);
+
++------------+--------------------------+---------------------+----------------------------------------------------+
+| series     | __greptime_temporality__ | ts                  | delta_temporality.greptime_value * .greptime_value |
++------------+--------------------------+---------------------+----------------------------------------------------+
+| cumulative |                          | 1970-01-01T00:03:00 | 60.0                                               |
+| delta      | delta                    | 1970-01-01T00:03:00 | 30.0                                               |
+| single     | delta                    | 1970-01-01T00:03:00 | 14.0                                               |
++------------+--------------------------+---------------------+----------------------------------------------------+
+
 -- Aggregation preserves or deliberately removes the visible stored marker.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') sum by (series, __greptime_temporality__) (rate(delta_temporality[3m]));

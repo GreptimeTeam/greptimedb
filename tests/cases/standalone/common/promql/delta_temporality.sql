@@ -40,6 +40,16 @@ TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__=""};
 TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__!="delta"};
 
+-- Generated vector plans retain timestamp broadcast across the temporality marker.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') vector(2) * delta_temporality;
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') vector(2) * ignoring(__greptime_temporality__) delta_temporality;
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') delta_temporality * vector(2);
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') delta_temporality * ignoring(__greptime_temporality__) vector(2);
+
 -- Aggregation preserves or deliberately removes the visible stored marker.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') sum by (series, __greptime_temporality__) (rate(delta_temporality[3m]));

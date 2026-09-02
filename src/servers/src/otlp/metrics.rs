@@ -1215,7 +1215,7 @@ fn encode_histogram(
             bucket_table.reserve_rows(data_point.explicit_bounds.len());
             bucket_table.reserve_rows(1);
         } else {
-            bucket_table.reserve_rows(data_point.bucket_counts.len());
+            bucket_table.reserve_rows(data_point.bucket_counts.len().max(1));
         }
         let bucket_values = if no_recorded_value {
             data_point
@@ -1225,6 +1225,9 @@ fn encode_histogram(
                 .chain(std::iter::once(f64::INFINITY))
                 .map(|bound| (bound, stale_value))
                 .collect::<Vec<_>>()
+        } else if data_point.bucket_counts.is_empty() && data_point.explicit_bounds.is_empty() {
+            // OTLP count-only histograms map to one implicit Prometheus infinity bucket.
+            vec![(f64::INFINITY, data_point.count as f64)]
         } else {
             let mut accumulated_count = 0u64;
             let mut values = Vec::with_capacity(data_point.bucket_counts.len());

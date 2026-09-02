@@ -1511,6 +1511,8 @@ impl PromPlanner {
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
                 let right_context = self.ctx.clone();
+                let left_is_empty_metric = Self::is_empty_metric(&left_input);
+                let right_is_empty_metric = Self::is_empty_metric(&right_input);
 
                 // TODO(ruihang): avoid join if left and right are the same table
 
@@ -1550,6 +1552,8 @@ impl PromPlanner {
                     } else {
                         self.ctx.table_name = Some("rhs".to_string());
                     }
+                } else if right_is_empty_metric && !left_is_empty_metric {
+                    self.ctx = left_context.clone();
                 }
                 // Computed scalars reach this join path instead of the literal projection paths.
                 // Broadcast them for arithmetic in the same way as literal scalars.
@@ -1586,6 +1590,8 @@ impl PromPlanner {
                     .map(|(output, _)| output.clone())
                     .collect();
                 let mut field_groups = field_groups.into_iter();
+                // `vector()` uses EmptyMetric and keeps GreptimeDB's timestamp broadcast.
+                let has_empty_metric_operand = left_is_empty_metric || right_is_empty_metric;
 
                 let join_plan = self.join_on_non_field_columns(
                     left_input,
@@ -1596,6 +1602,7 @@ impl PromPlanner {
                     right_time_index_column,
                     lhs.value_type() == ValueType::Scalar
                         || rhs.value_type() == ValueType::Scalar
+                        || has_empty_metric_operand
                         || ((left_context.tag_columns.is_empty()
                             || right_context.tag_columns.is_empty())
                             && !left_context
@@ -5554,6 +5561,10 @@ impl PromPlanner {
             .fields()
             .iter()
             .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+    }
+
+    fn is_empty_metric(plan: &LogicalPlan) -> bool {
+        matches!(plan, LogicalPlan::Extension(Extension { node }) if node.as_any().is::<EmptyMetric>())
     }
 
     fn native_histogram_arrow_type() -> ArrowDataType {

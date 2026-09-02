@@ -269,19 +269,36 @@ fn test_histogram_validation_preserves_supported_siblings() {
                 .unwrap()
                 .contains("overflows u64")
         );
+        let count = conversion
+            .requests
+            .inserts
+            .iter()
+            .find(|insert| insert.table_name.ends_with(COUNT_TABLE_SUFFIX))
+            .unwrap()
+            .rows
+            .as_ref()
+            .unwrap();
+        assert_eq!(1, count.rows.len());
+
+        let buckets = conversion
+            .requests
+            .inserts
+            .iter()
+            .find(|insert| insert.table_name.ends_with(BUCKET_TABLE_SUFFIX))
+            .unwrap()
+            .rows
+            .as_ref()
+            .unwrap();
+        assert_eq!(1, buckets.rows.len());
+        let le = column_index(buckets, HISTOGRAM_LE_COLUMN);
+        let value = column_index(buckets, greptime_value());
         assert_eq!(
-            1,
-            conversion
-                .requests
-                .inserts
-                .iter()
-                .find(|insert| { insert.table_name.ends_with(COUNT_TABLE_SUFFIX) })
-                .unwrap()
-                .rows
-                .as_ref()
-                .unwrap()
-                .rows
-                .len()
+            Some(&ValueData::StringValue("inf".to_string())),
+            buckets.rows[0].values[le].value_data.as_ref()
+        );
+        assert_eq!(
+            Some(&ValueData::F64Value(2.0)),
+            buckets.rows[0].values[value].value_data.as_ref()
         );
     }
 }
