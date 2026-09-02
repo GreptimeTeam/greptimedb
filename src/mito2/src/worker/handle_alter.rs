@@ -408,6 +408,24 @@ fn set_twcs_options(
             log_option_update(region_id, key, options.trigger_file_num, files);
             options.trigger_file_num = files;
         }
+        mito_engine_options::TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER => {
+            let files = parse_usize_with_default(
+                key,
+                value,
+                default_option.active_window_l1_merge_trigger,
+            )?;
+            ensure!(
+                files >= 2,
+                InvalidSetRegionOptionRequestSnafu { key, value }
+            );
+            log_option_update(
+                region_id,
+                key,
+                options.active_window_l1_merge_trigger,
+                files,
+            );
+            options.active_window_l1_merge_trigger = files;
+        }
         mito_engine_options::TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM => {
             let files = parse_usize_with_default(
                 key,
@@ -515,18 +533,35 @@ mod tests {
         set_twcs_options(
             &mut options,
             &defaults,
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "16",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
             "compaction.twcs.inactive_window.trigger_file_num",
             "3",
             region_id,
         )
         .unwrap();
         assert_eq!(8, options.trigger_file_num);
+        assert_eq!(16, options.active_window_l1_merge_trigger);
         assert_eq!(3, options.inactive_window_trigger_file_num);
 
         set_twcs_options(
             &mut options,
             &defaults,
             "compaction.twcs.active_window.trigger_file_num",
+            "",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.active_window.l1_merge_trigger",
             "",
             region_id,
         )
@@ -548,6 +583,7 @@ mod tests {
         for key in [
             "compaction.twcs.trigger_file_num",
             "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.active_window.l1_merge_trigger",
             "compaction.twcs.inactive_window.trigger_file_num",
         ] {
             let mut options = defaults.clone();

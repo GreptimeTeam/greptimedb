@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{TableId, TableInfo};
-use table::requests::validate_database_option;
+use table::requests::{validate_database_option, validate_database_option_value};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -1222,7 +1222,9 @@ impl TryFrom<PbOption> for SetDatabaseOption {
                 Ok(SetDatabaseOption::Ttl(ttl))
             }
             _ => {
-                if validate_database_option(&key_lower) {
+                if validate_database_option(&key_lower)
+                    && validate_database_option_value(&key_lower, Some(&value))
+                {
                     Ok(SetDatabaseOption::Other(key_lower, value))
                 } else {
                     InvalidSetDatabaseOptionSnafu { key, value }.fail()
@@ -1866,6 +1868,16 @@ mod tests {
             ddl_timeout_secs(Duration::from_secs(u32::MAX as u64 + 1)),
             u32::MAX
         );
+    }
+
+    #[test]
+    fn test_set_database_option_rejects_invalid_active_window_l1_merge_trigger() {
+        let option = PbOption {
+            key: "compaction.twcs.active_window.l1_merge_trigger".to_string(),
+            value: "1".to_string(),
+        };
+
+        assert!(SetDatabaseOption::try_from(option).is_err());
     }
 
     #[test]
