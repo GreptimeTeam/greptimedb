@@ -10333,7 +10333,6 @@ dependencies = [
  "parquet-variant",
  "parquet-variant-compute",
  "parquet-variant-json",
- "paste",
  "seq-macro",
  "simdutf8",
  "snap",
