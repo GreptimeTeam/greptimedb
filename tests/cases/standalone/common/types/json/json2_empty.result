@@ -289,3 +289,67 @@ drop table json_empty_null_mixed;
 
 Affected Rows: 0
 
+-- Explicit SQL NULL and omitted-column inserts must be accepted and round trip
+-- as NULL (not panic), remaining distinct from empty objects.
+create table json_empty_null_forms (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+insert into json_empty_null_forms (ts, j) values (1, NULL);
+
+Affected Rows: 1
+
+insert into json_empty_null_forms (ts) values (2);
+
+Affected Rows: 1
+
+insert into json_empty_null_forms (ts, j) values (3, '{}');
+
+Affected Rows: 1
+
+select ts, j, j is null from json_empty_null_forms order by ts;
+
++-------------------------+----+---------------------------------+
+| ts                      | j  | json_empty_null_forms.j IS NULL |
++-------------------------+----+---------------------------------+
+| 1970-01-01T00:00:00.001 |    | true                            |
+| 1970-01-01T00:00:00.002 |    | true                            |
+| 1970-01-01T00:00:00.003 | {} | false                           |
++-------------------------+----+---------------------------------+
+
+admin flush_table('json_empty_null_forms');
+
++--------------------------------------------+
+| ADMIN flush_table('json_empty_null_forms') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+admin compact_table('json_empty_null_forms');
+
++----------------------------------------------+
+| ADMIN compact_table('json_empty_null_forms') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+select ts, j, j is null from json_empty_null_forms order by ts;
+
++-------------------------+----+---------------------------------+
+| ts                      | j  | json_empty_null_forms.j IS NULL |
++-------------------------+----+---------------------------------+
+| 1970-01-01T00:00:00.001 |    | true                            |
+| 1970-01-01T00:00:00.002 |    | true                            |
+| 1970-01-01T00:00:00.003 | {} | false                           |
++-------------------------+----+---------------------------------+
+
+drop table json_empty_null_forms;
+
+Affected Rows: 0
+

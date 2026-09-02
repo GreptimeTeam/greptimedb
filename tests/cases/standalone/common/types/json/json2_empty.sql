@@ -103,3 +103,29 @@ select ts, j, j.a, j is null from json_empty_null_mixed order by ts;
 select count(*) from json_empty_null_mixed;
 
 drop table json_empty_null_mixed;
+
+-- Explicit SQL NULL and omitted-column inserts must be accepted and round trip
+-- as NULL (not panic), remaining distinct from empty objects.
+create table json_empty_null_forms (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+insert into json_empty_null_forms (ts, j) values (1, NULL);
+
+insert into json_empty_null_forms (ts) values (2);
+
+insert into json_empty_null_forms (ts, j) values (3, '{}');
+
+select ts, j, j is null from json_empty_null_forms order by ts;
+
+admin flush_table('json_empty_null_forms');
+
+admin compact_table('json_empty_null_forms');
+
+select ts, j, j is null from json_empty_null_forms order by ts;
+
+drop table json_empty_null_forms;
