@@ -31,7 +31,7 @@ use table::metadata::TableInfoRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
-    ColumnNotFoundSnafu, InvalidInsertRequestSnafu, InvalidSqlSnafu, MissingInsertBodySnafu,
+    ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu,
     ParseSqlSnafu, Result, SchemaReadOnlySnafu, TableNotFoundSnafu, TableReadOnlySnafu,
 };
 use crate::insert::InstantAndNormalInsertRequests;
@@ -286,25 +286,7 @@ fn sql_value_to_value(
         )
         .context(crate::error::SqlCommonSnafu)?
     };
-    validate(&value)?;
     Ok(value)
-}
-
-fn validate(value: &Value) -> Result<()> {
-    match value {
-        Value::Json(value) => {
-            // Json object will be stored as Arrow struct in parquet, and it has the restriction:
-            // "Parquet does not support writing empty structs".
-            ensure!(
-                !value.is_empty_object(),
-                InvalidInsertRequestSnafu {
-                    reason: "empty json object is not supported, consider adding a dummy field"
-                }
-            );
-            Ok(())
-        }
-        _ => Ok(()),
-    }
 }
 
 fn replace_default(sql_val: &SqlValue) -> bool {

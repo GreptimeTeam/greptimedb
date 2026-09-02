@@ -155,6 +155,10 @@ impl JsonVectorBuilderState {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
+        if matches!(value, ValueRef::Null) {
+            self.push_null();
+            return Ok(());
+        }
         let ValueRef::Json(value) = value else {
             return TryFromValueSnafu {
                 reason: format!("expected JSON value, got {value:?}"),
@@ -1268,6 +1272,23 @@ mod tests {
         assert_eq!(
             values[2],
             decode_json_variant(reconstructed.value(2)).unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_v2_builder_accepts_sql_null() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![], Some(1))?;
+        let mut builder = JsonVectorBuilder::with_settings(&settings, 2);
+        builder.try_push_value_ref(&ValueRef::Null)?;
+        let value = settings.encode(json!({}))?;
+        builder.try_push_value_ref(&value.as_value_ref())?;
+
+        let array = builder.to_vector().to_arrow_array();
+        let structs = array.as_struct();
+        assert_eq!(
+            vec![None, Some(json!({}))],
+            variant_to_json_values(structs.column_by_name(JSON2_REMAINDER_FIELD_NAME).unwrap())?
         );
         Ok(())
     }
