@@ -367,6 +367,29 @@ def write_outputs(decision: Decision) -> None:
         print(f"{key}={value}")
 
 
+def write_admission_identity(decision: Decision) -> None:
+    """Persist PR identity from the trusted admission job for the comment workflow."""
+    if decision.skip:
+        return
+    run_id = parse_github_id(os.environ.get("GITHUB_RUN_ID") or "")
+    pr_number = parse_github_id(decision.pr_number)
+    if run_id is None or pr_number is None:
+        return
+    payload = {
+        "pr_number": pr_number,
+        "head_sha": decision.head_sha,
+        "head_repo": decision.head_repo,
+        "base_repo": decision.base_repo,
+        "candidate_sha": decision.candidate_sha,
+        "base_sha": decision.base_sha,
+        "run_id": run_id,
+        "run_attempt": parse_github_id(os.environ.get("GITHUB_RUN_ATTEMPT") or "1") or 1,
+    }
+    with open("query-regression-admission.json", "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY") or "")
@@ -434,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
         pr_number=str(identity.pr_number),
     )
     write_outputs(decision)
+    write_admission_identity(decision)
     return 0
 
 

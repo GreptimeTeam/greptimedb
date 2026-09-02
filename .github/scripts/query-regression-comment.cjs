@@ -302,34 +302,48 @@ function renderSummaryTable(rows) {
 
 module.exports = async function validateQueryRegressionComment({ github, context, core }) {
   const artifactDir = 'query-regression-comment';
+  const admissionPath = path.join('query-regression-admission', 'query-regression-admission.json');
   const metadataPath = path.join(artifactDir, 'query-regression-pr.json');
   const summaryPath = path.join(artifactDir, 'query-regression-summary.md');
 
+  if (!fs.existsSync(admissionPath)) {
+    return skip(core, 'Missing trusted admission identity; skipping sticky comment.');
+  }
   if (!fs.existsSync(metadataPath)) {
     return skip(core, 'Missing query-regression-pr.json; skipping sticky comment.');
   }
 
+  let admission;
   let metadata;
   try {
+    admission = JSON.parse(fs.readFileSync(admissionPath, 'utf8'));
     metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
   } catch (error) {
-    core.warning(`Invalid PR metadata JSON: ${error.message}`);
-    return skip(core, 'Invalid PR metadata JSON; skipping sticky comment.');
+    core.warning(`Invalid admission or PR metadata JSON: ${error.message}`);
+    return skip(core, 'Invalid admission or PR metadata JSON; skipping.');
+  }
+
+  // Where to post comes from the ubuntu-latest admission job, not the ECS runner.
+  if (
+    Number(admission.pr_number) !== Number(metadata.pr_number) ||
+    String(admission.head_sha).toLowerCase() !== String(metadata.head_sha).toLowerCase()
+  ) {
+    return skip(core, 'Runner artifact identity does not match trusted admission; skipping.');
   }
 
   const expectedRunId = Number(process.env.WORKFLOW_RUN_ID);
   const expectedRunAttempt = Number(process.env.WORKFLOW_RUN_ATTEMPT);
-  if (metadata.run_id !== expectedRunId || metadata.run_attempt !== expectedRunAttempt) {
-    return skip(core, 'Artifact metadata does not match this workflow_run; skipping.');
+  if (Number(admission.run_id) !== expectedRunId || Number(admission.run_attempt) !== expectedRunAttempt) {
+    return skip(core, 'Trusted admission does not match this workflow_run; skipping.');
   }
 
-  if (metadata.base_repo !== `${context.repo.owner}/${context.repo.repo}`) {
-    return skip(core, `PR targets ${metadata.base_repo}, not this repository; skipping.`);
+  if (admission.base_repo !== `${context.repo.owner}/${context.repo.repo}`) {
+    return skip(core, `PR targets ${admission.base_repo}, not this repository; skipping.`);
   }
 
-  const prNumber = Number(metadata.pr_number);
+  const prNumber = Number(admission.pr_number);
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
-    return skip(core, 'Invalid PR number in metadata; skipping.');
+    return skip(core, 'Invalid PR number in trusted admission; skipping.');
   }
 
   const run = context.payload.workflow_run;
@@ -355,11 +369,11 @@ module.exports = async function validateQueryRegressionComment({ github, context
   if (pull.state !== 'open') {
     return skip(core, `PR #${prNumber} is ${pull.state}; skipping.`);
   }
-  if (pull.base.repo.full_name !== metadata.base_repo || pull.head.repo.full_name !== metadata.head_repo) {
-    return skip(core, 'Current PR repository metadata does not match artifact; skipping.');
+  if (pull.base.repo.full_name !== admission.base_repo || pull.head.repo.full_name !== admission.head_repo) {
+    return skip(core, 'Current PR repository metadata does not match trusted admission; skipping.');
   }
-  if (pull.head.sha !== metadata.head_sha) {
-    return skip(core, 'Current PR head SHA differs from artifact; skipping stale run.');
+  if (pull.head.sha !== admission.head_sha) {
+    return skip(core, 'Current PR head SHA differs from trusted admission; skipping stale run.');
   }
 
   const reportPaths = findReports(artifactDir);
@@ -371,9 +385,9 @@ module.exports = async function validateQueryRegressionComment({ github, context
     '',
     `- **Workflow run:** ${serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${expectedRunId}`,
     `- **Built base SHA:** \`${text(metadata.built_base_sha)}\``,
-    `- **Event base SHA:** \`${text(metadata.event_base_sha)}\``,
-    `- **Head SHA:** \`${text(metadata.head_sha)}\``,
-    `- **Candidate merge SHA:** \`${text(metadata.candidate_sha)}\``,
+    `- **Event base SHA:** \`${text(admission.base_sha)}\``,
+    `- **Head SHA:** \`${text(admission.head_sha)}\``,
+    `- **Candidate merge SHA:** \`${text(admission.candidate_sha)}\``,
     '',
   ].join('\n');
 

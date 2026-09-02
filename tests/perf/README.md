@@ -416,9 +416,12 @@ in the dispatcher and add a `repository_dispatch` handler.
 The main report artifact uploads only aggregate/per-target JSON reports,
 component logs, and `query-regression-summary.md` with seven-day retention;
 fixture data, SSTs, and cluster state are excluded. PR runs also upload a
-separate trusted-comment artifact containing PR metadata and aggregate reports.
-The workflow writes the Markdown summary to the workflow step summary and
-updates a sticky PR comment through the trusted follow-up workflow.
+runner comment artifact with reports. The ubuntu-latest admission job uploads
+a separate `query-regression-admission` identity; the sticky-comment workflow
+posts only if that identity matches the runner artifact, so untrusted candidate
+code cannot retarget the report to another PR. The workflow writes the Markdown
+summary to the workflow step summary and updates a sticky PR comment through
+the trusted follow-up workflow.
 
 ## Built-in cases
 

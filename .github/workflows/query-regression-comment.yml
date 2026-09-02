@@ -26,7 +26,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Locate query regression comment artifact
+      - name: Locate query regression artifacts
         id: artifact
         uses: actions/github-script@v7
         with:
@@ -39,24 +39,41 @@ jobs:
               run_id,
               per_page: 100,
             });
-            const artifact = data.artifacts.find(
+            const admission = data.artifacts.find(
+              item => item.name === 'query-regression-admission' && !item.expired
+            );
+            const comment = data.artifacts.find(
               item => item.name === 'query-regression-comment' && !item.expired
             );
-            if (!artifact) {
-              core.info('No query-regression-comment artifact found; skipping.');
+            if (!admission || !comment) {
+              core.info('Trusted admission identity or comment artifact missing; skipping.');
               core.setOutput('found', 'false');
               return;
             }
             core.setOutput('found', 'true');
-            core.setOutput('id', String(artifact.id));
+            core.setOutput('admission_id', String(admission.id));
+            core.setOutput('comment_id', String(comment.id));
 
-      - name: Download query regression comment artifact
-        id: download
+      - name: Download admission identity
+        id: download-admission
         if: ${{ steps.artifact.outputs.found == 'true' }}
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          artifact-ids: ${{ steps.artifact.outputs.id }}
+          artifact-ids: ${{ steps.artifact.outputs.admission_id }}
+          path: query-regression-admission
+          repository: ${{ github.repository }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+          merge-multiple: true
+
+      - name: Download query regression comment artifact
+        id: download
+        if: ${{ steps.download-admission.outcome == 'success' }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          artifact-ids: ${{ steps.artifact.outputs.comment_id }}
           path: query-regression-comment
           repository: ${{ github.repository }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

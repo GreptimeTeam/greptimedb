@@ -61,16 +61,29 @@ jobs:
           HEAD_SHA: ${{ steps.admit.outputs.head_sha }}
         run: |
           set -euo pipefail
-          {
-            if [[ "${SKIP}" == "true" ]]; then
-              printf 'Skipping query-regression command: %s\n' "${REASON}"
-            else
+          if [[ "${SKIP}" == "true" ]]; then
+            printf 'Skipping query-regression command: %s\n' "${REASON}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          elif [[ "${SKIP}" == "false" ]]; then
+            {
               printf 'Admitted `/query-regression` (`%s`) on PR #%s\n' "${CASE}" "${PR_NUMBER}"
               printf -- '- Head SHA: `%s`\n' "${HEAD_SHA}"
               printf -- '- Merge SHA: `%s`\n' "${CANDIDATE_SHA}"
               printf -- '- Base SHA: `%s`\n' "${BASE_SHA}"
-            fi
-          } | tee -a "${GITHUB_STEP_SUMMARY}"
+            } | tee -a "${GITHUB_STEP_SUMMARY}"
+          else
+            printf 'Admission failed without a decision (the admit step crashed); see its logs.\n' \
+              | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            exit 1
+          fi
+
+      - name: Upload admission identity
+        if: ${{ steps.admit.outputs.skip == 'false' && steps.admit.outputs.candidate_sha != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: query-regression-admission
+          path: query-regression-admission.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Reply with admission result
         if: ${{ steps.admit.outputs.reply != '' }}

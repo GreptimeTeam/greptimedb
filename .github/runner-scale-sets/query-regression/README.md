@@ -115,8 +115,12 @@ the revision so secrets work for fork PRs. It snapshots merge, head, and base
 SHAs at admission. A queued job fetches that immutable event merge SHA
 directly, verifies it is a two-parent merge whose parents include the
 snapshotted head exactly once, and uses its other parent as the actual base
-build revision. The snapshotted event base is retained for audit only, so a
-difference from the merge's non-head parent is not a failure. The job never
+build revision. The ubuntu-latest admission job also uploads a
+`query-regression-admission` artifact; the sticky-comment workflow will not
+post unless that identity matches the runner-produced metadata, so untrusted
+candidate code cannot retarget the report to another PR. The snapshotted event
+base is retained for audit only, so a difference from the merge's non-head
+parent is not a failure. The job never
 follows a newer mutable PR merge ref. An unavailable event merge, or one that
 does not contain exactly one snapshotted head parent, fails closed. A later
 PR head change does not retarget an already queued run: it may execute only
