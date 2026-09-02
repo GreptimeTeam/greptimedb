@@ -382,6 +382,7 @@ pub async fn sql_analyze_stream(
         .await;
 
         if worker_result.is_err() {
+            tracing::debug!("analyze stream worker panicked");
             let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
                 seq: sequence.load(Ordering::Relaxed),
                 state: "error",
