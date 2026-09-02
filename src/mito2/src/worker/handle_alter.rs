@@ -401,10 +401,6 @@ fn set_twcs_options(
         mito_engine_options::TWCS_TRIGGER_FILE_NUM
         | mito_engine_options::TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM => {
             let files = parse_usize_with_default(key, value, default_option.trigger_file_num)?;
-            ensure!(
-                files >= 2,
-                InvalidSetRegionOptionRequestSnafu { key, value }
-            );
             log_option_update(region_id, key, options.trigger_file_num, files);
             options.trigger_file_num = files;
         }
@@ -432,10 +428,6 @@ fn set_twcs_options(
                 value,
                 default_option.inactive_window_trigger_file_num,
             )?;
-            ensure!(
-                files >= 2,
-                InvalidSetRegionOptionRequestSnafu { key, value }
-            );
             log_option_update(
                 region_id,
                 key,
@@ -578,20 +570,28 @@ mod tests {
     }
 
     #[test]
-    fn test_set_twcs_window_trigger_rejects_values_below_two() {
+    fn test_set_twcs_window_trigger_accepts_one() {
         let defaults = TwcsOptions::default();
         for key in [
             "compaction.twcs.trigger_file_num",
             "compaction.twcs.active_window.trigger_file_num",
-            "compaction.twcs.active_window.l1_merge_trigger",
             "compaction.twcs.inactive_window.trigger_file_num",
         ] {
             let mut options = defaults.clone();
             assert!(
-                set_twcs_options(&mut options, &defaults, key, "1", RegionId::new(1, 1)).is_err(),
+                set_twcs_options(&mut options, &defaults, key, "1", RegionId::new(1, 1)).is_ok(),
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn test_set_twcs_active_window_l1_merge_trigger_rejects_one() {
+        let mut options = TwcsOptions::default();
+        let defaults = options.clone();
+        let key = "compaction.twcs.active_window.l1_merge_trigger";
+
+        assert!(set_twcs_options(&mut options, &defaults, key, "1", RegionId::new(1, 1)).is_err());
     }
 
     #[test]
