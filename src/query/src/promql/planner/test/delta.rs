@@ -370,10 +370,154 @@ async fn mixed_range_rate_selects_delta_math_only_for_float_samples() {
     .to_string();
 
     assert!(plan.contains("CASE WHEN"), "{plan}");
-    assert!(plan.contains("prom_sum_over_time"), "{plan}");
     assert!(plan.contains("prom_mixed_range_float"), "{plan}");
     assert!(plan.contains("prom_mixed_range_histogram"), "{plan}");
     assert!(plan.contains(OTLP_AGGREGATION_TEMPORALITY_LABEL), "{plan}");
+}
+
+#[tokio::test]
+async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
+    for function in ["rate", "increase"] {
+        for histogram_present in [true, false] {
+            let float = source(
+                "lhs",
+                false,
+                1_000,
+                vec![
+                    ("job", Some("job")),
+                    (marker, Some(GREPTIME_TEMPORALITY_DELTA)),
+                ],
+                DirectOrValue::Float64(1.0),
+            );
+            let histogram = source(
+                "rhs",
+                !histogram_present,
+                2_000,
+                vec![
+                    ("job", Some("job")),
+                    (marker, Some(GREPTIME_TEMPORALITY_DELTA)),
+                ],
+                DirectOrValue::NativeHistogram(direct_or_histogram()),
+            );
+            let collector = PromqlAnnotationCollector::default();
+            let mut planner = PromPlanner {
+                table_provider: build_test_table_provider_with_fields(
+                    &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                    &[],
+                )
+                .await,
+                ctx: PromPlannerContext::default(),
+                promql_annotations: Some(collector.clone()),
+            };
+            let left_context = direct_or_context("lhs", &["job", marker], "v");
+            let right_context = direct_or_context("rhs", &["job", marker], "v");
+            let input = planner
+                .or_operator(
+                    scan(&float),
+                    scan(&histogram),
+                    left_context.tag_columns.iter().cloned().collect(),
+                    right_context.tag_columns.iter().cloned().collect(),
+                    left_context,
+                    right_context,
+                    &or_modifier("lhs or rhs"),
+                )
+                .unwrap();
+
+            let mut sort_exprs = planner
+                .ctx
+                .tag_columns
+                .iter()
+                .map(|tag| DfExpr::Column(Column::from_name(tag)).sort(true, true))
+                .collect_vec();
+            sort_exprs.push(DfExpr::Column(Column::from_name("ts")).sort(true, true));
+            let input = LogicalPlanBuilder::from(input)
+                .sort(sort_exprs)
+                .unwrap()
+                .build()
+                .unwrap();
+            let input = LogicalPlan::Extension(Extension {
+                node: Arc::new(SeriesDivide::new(
+                    planner.ctx.tag_columns.clone(),
+                    "ts".to_string(),
+                    input,
+                )),
+            });
+            planner.ctx.start = 2_000;
+            planner.ctx.end = 2_000;
+            planner.ctx.interval = 1_000;
+            planner.ctx.range = Some(2_000);
+            let input = LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RangeManipulate::new(
+                        2_000,
+                        2_000,
+                        1_000,
+                        2_000,
+                        "ts".to_string(),
+                        planner.ctx.field_columns.clone(),
+                        input,
+                    )
+                    .unwrap(),
+                ),
+            });
+
+            let PromExpr::Call(call) = parser::parse(&format!("{function}(mixed[2s])")).unwrap()
+            else {
+                unreachable!()
+            };
+            let preserve_any_value = PromPlanner::field_columns_are_alternative_samples(
+                input.schema(),
+                &planner.ctx.field_columns,
+            );
+            let state = build_query_engine_state();
+            let (mut exprs, _) = planner
+                .create_function_expr(&call.func, vec![], input.schema(), &state)
+                .unwrap();
+            exprs.insert(0, planner.create_time_index_column_expr().unwrap());
+            let plan = LogicalPlanBuilder::from(input)
+                .project(exprs)
+                .unwrap()
+                .filter(
+                    planner
+                        .create_empty_values_filter_expr(preserve_any_value)
+                        .unwrap(),
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            let value_field = plan
+                .schema()
+                .fields()
+                .iter()
+                .find(|field| field.data_type() == &ArrowDataType::Float64)
+                .unwrap()
+                .name()
+                .clone();
+
+            let (_, batches) = execute(plan, &state).await;
+            let row_count = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+            if histogram_present {
+                assert_eq!(0, row_count, "{function}");
+            } else {
+                assert_eq!(1, row_count, "{function}");
+                let expected = if function == "rate" { 0.5 } else { 1.0 };
+                assert_eq!(vec![expected], values(&batches, &value_field), "{function}");
+            }
+            let mut warnings = Vec::new();
+            let mut infos = Vec::new();
+            collector.append_to(&mut warnings, &mut infos);
+            let expected_warnings = if histogram_present {
+                vec![format!(
+                    "{function}: encountered a mix of float and native histogram samples"
+                )]
+            } else {
+                vec![]
+            };
+            assert_eq!(expected_warnings, warnings);
+            assert!(infos.is_empty(), "{function}: {infos:?}");
+        }
+    }
 }
 
 #[tokio::test]

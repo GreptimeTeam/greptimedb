@@ -3334,15 +3334,18 @@ impl PromPlanner {
             });
         }
 
-        let mut args = Vec::with_capacity(other_input_exprs.len() + 6);
-        args.push(lit(func.name));
-        args.push(DfExpr::Column(Column::from_name(
+        let timestamp_range = DfExpr::Column(Column::from_name(
             RangeManipulate::build_timestamp_range_name(
                 self.ctx.time_index_column.as_ref().unwrap(),
             ),
-        )));
-        args.push(DfExpr::Column(Column::from_name(float_field)));
-        args.push(DfExpr::Column(Column::from_name(histogram_field)));
+        ));
+        let float_range = DfExpr::Column(Column::from_name(float_field));
+        let histogram_range = DfExpr::Column(Column::from_name(histogram_field));
+        let mut args = Vec::with_capacity(other_input_exprs.len() + 6);
+        args.push(lit(func.name));
+        args.push(timestamp_range.clone());
+        args.push(float_range.clone());
+        args.push(histogram_range.clone());
         args.extend(other_input_exprs);
         if matches!(func.name, "rate" | "increase" | "delta") {
             args.push(self.create_time_index_column_expr()?);
@@ -3354,16 +3357,25 @@ impl PromPlanner {
             args: args.clone(),
         });
         if matches!(func.name, "rate" | "increase") {
+            let raw_delta_function = if func.name == "rate" {
+                "raw_delta_rate"
+            } else {
+                "raw_delta_increase"
+            };
+            let delta_sum = DfExpr::ScalarFunction(ScalarFunction {
+                func: Arc::new(MixedRange::float_udf(self.promql_annotations.clone())),
+                args: vec![
+                    lit(raw_delta_function),
+                    timestamp_range,
+                    float_range,
+                    histogram_range,
+                ],
+            });
             float_expr = self.select_delta_range_math(
                 func.name,
                 input_schema,
-                DfExpr::Column(Column::from_name(
-                    RangeManipulate::build_timestamp_range_name(
-                        self.ctx.time_index_column.as_ref().unwrap(),
-                    ),
-                )),
-                DfExpr::Column(Column::from_name(float_field)),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                delta_sum,
                 float_expr,
             )?;
         }
@@ -3948,12 +3960,15 @@ impl PromPlanner {
                     let fn_expr = if matches!(func.name, "rate" | "increase")
                         && !all_field_columns_are_native_histogram_ranges
                     {
+                        let delta_sum = DfExpr::ScalarFunction(ScalarFunction {
+                            func: Arc::new(SumOverTime::scalar_udf()),
+                            args: vec![ts_range_expr, col_expr],
+                        });
                         self.select_delta_range_math(
                             func.name,
                             input_schema,
-                            ts_range_expr,
-                            col_expr,
                             range_length,
+                            delta_sum,
                             fn_expr,
                         )?
                     } else {
@@ -3995,9 +4010,8 @@ impl PromPlanner {
         &self,
         function: &str,
         input_schema: &DFSchemaRef,
-        timestamp_range: DfExpr,
-        value_range: DfExpr,
         range_length: Millisecond,
+        delta_sum: DfExpr,
         cumulative: DfExpr,
     ) -> Result<DfExpr> {
         let marker_is_delta = if self
@@ -4019,10 +4033,6 @@ impl PromPlanner {
             return Ok(cumulative);
         };
 
-        let delta_sum = DfExpr::ScalarFunction(ScalarFunction {
-            func: Arc::new(SumOverTime::scalar_udf()),
-            args: vec![timestamp_range, value_range],
-        });
         let delta = if function == "rate" {
             DfExpr::BinaryExpr(BinaryExpr {
                 left: Box::new(delta_sum),
