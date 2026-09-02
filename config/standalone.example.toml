@@ -62,7 +62,8 @@ max_concurrent_queries = 0
 
 ## Experimental weighted, work-conserving query/write task scheduler.
 #+ [runtime.experimental_workload_scheduler]
-## Enable when concurrent query and write workloads need weighted runtime sharing. Disabled by default.
+## Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.
+## The weights set their relative runtime shares while both are backlogged. Disabled by default.
 #+ enable = false
 ## Relative query share while both query and write workloads are backlogged.
 #+ query_weight = 2
