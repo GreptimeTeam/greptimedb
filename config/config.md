@@ -27,7 +27,7 @@
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
-| `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable the scheduler. Disabled by default. |
+| `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable when concurrent query and write workloads need weighted runtime sharing. Disabled by default. |
 | `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
 | `runtime.experimental_workload_scheduler.write_weight` | Integer | `8` | Relative write share while both query and write workloads are backlogged. |
 | `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
@@ -522,7 +522,7 @@
 | `runtime.query_rt_size` | Integer | `7` | The number of threads to execute datanode query operations.<br/>Defaults to max(num_cpus - 1, 2). |
 | `runtime.ingest_rt_size` | Integer | `8` | The number of threads to execute datanode ingestion operations. |
 | `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
-| `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable the scheduler. Disabled by default. |
+| `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable when concurrent query and write workloads need weighted runtime sharing. Disabled by default. |
 | `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
 | `runtime.experimental_workload_scheduler.write_weight` | Integer | `8` | Relative write share while both query and write workloads are backlogged. |
 | `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
