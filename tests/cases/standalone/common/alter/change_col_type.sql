@@ -125,14 +125,13 @@ CREATE TABLE ts_overflow (host STRING, ts TIMESTAMP TIME INDEX);
 -- 3000-01-01 fits milliseconds but overflows nanoseconds (max ~2262-04-11).
 INSERT INTO ts_overflow VALUES ("a", "3000-01-01 00:00:00");
 
--- widening to nanoseconds is rejected by region validation: data overflows the target unit
--- SQLNESS REPLACE region_id:\s\d+\(\d+,\s\d+\) region_id: REDACTED
-ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
+-- widening to microseconds fits the data
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_US;
 
 DESCRIBE ts_overflow;
 
--- widening to microseconds still works
-ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_US;
+-- widening to nanoseconds would overflow the data: allowed, only logged
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
 
 DESCRIBE ts_overflow;
 

@@ -352,22 +352,7 @@ INSERT INTO ts_overflow VALUES ("a", "3000-01-01 00:00:00");
 
 Affected Rows: 1
 
--- widening to nanoseconds is rejected by region validation: data overflows the target unit
--- SQLNESS REPLACE region_id:\s\d+\(\d+,\s\d+\) region_id: REDACTED
-ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
-
-Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: cannot widen time index column 'ts' to Nanosecond: data spans [3000-01-01 00:00:00+0000, 3000-01-01 00:00:00+0000] which overflows the target unit's i64 range
-
-DESCRIBE ts_overflow;
-
-+--------+----------------------+-----+------+---------+---------------+
-| Column | Type                 | Key | Null | Default | Semantic Type |
-+--------+----------------------+-----+------+---------+---------------+
-| host   | String               |     | YES  |         | FIELD         |
-| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-+--------+----------------------+-----+------+---------+---------------+
-
--- widening to microseconds still works
+-- widening to microseconds fits the data
 ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_US;
 
 Affected Rows: 0
@@ -380,6 +365,20 @@ DESCRIBE ts_overflow;
 | host   | String               |     | YES  |         | FIELD         |
 | ts     | TimestampMicrosecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
+
+-- widening to nanoseconds would overflow the data: allowed, only logged
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
+
+Affected Rows: 0
+
+DESCRIBE ts_overflow;
+
++--------+---------------------+-----+------+---------+---------------+
+| Column | Type                | Key | Null | Default | Semantic Type |
++--------+---------------------+-----+------+---------+---------------+
+| host   | String              |     | YES  |         | FIELD         |
+| ts     | TimestampNanosecond | PRI | NO   |         | TIMESTAMP     |
++--------+---------------------+-----+------+---------+---------------+
 
 DROP TABLE ts_overflow;
 

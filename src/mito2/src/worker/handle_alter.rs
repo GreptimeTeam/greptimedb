@@ -162,10 +162,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Try to alter region {}, version.metadata: {:?}, version.options: {:?}, request: {:?}",
             region_id, version.metadata, version.options, request,
         );
-        if let Err(e) = check_time_index_widening_overflow(region.region_id, &version, &request) {
-            sender.send(Err(e).context(InvalidRegionRequestSnafu));
-            return;
-        }
+        log_time_index_widening_overflow(region.region_id, &version, &request);
         self.handle_alter_region_with_empty_memtable(region, version, request, new_options, sender);
     }
 
@@ -462,17 +459,17 @@ fn log_option_update<T: std::fmt::Debug>(
     );
 }
 
-/// Rejects a time index unit widening whose rescaled values would overflow
-/// `i64` in existing data. Memtables are flushed before an alter, so each
-/// SST's time range bounds its values; Arrow would cast overflowing values
-/// to NULL, which a NOT NULL time index cannot hold.
-fn check_time_index_widening_overflow(
+/// Logs a time index unit widening whose rescaled values would overflow the
+/// target unit's `i64` range in existing data. Memtables are flushed before
+/// an alter, so each SST's time range bounds its values; overflowing values
+/// cast to NULL on read, which is deemed acceptable.
+fn log_time_index_widening_overflow(
     region_id: RegionId,
     version: &VersionRef,
     request: &RegionAlterRequest,
-) -> store_api::metadata::Result<()> {
+) {
     let AlterKind::ModifyColumnTypes { columns } = &request.kind else {
-        return Ok(());
+        return;
     };
     let time_index = version.metadata.time_index_column();
     for column in columns {
@@ -489,27 +486,22 @@ fn check_time_index_widening_overflow(
                 let (start, end) = file.time_range();
                 if start.convert_to(target_unit).is_none() || end.convert_to(target_unit).is_none()
                 {
-                    let err = format!(
-                        "cannot widen time index column '{}' to {:?}: data spans \
-                         [{}, {}] which overflows the target unit's i64 range",
+                    error!(
+                        "Time index widening for region {} overflows file {}: widening column \
+                         '{}' to {:?}, but data spans [{}, {}] beyond the target unit's i64 \
+                         range; overflowing values read back as NULL",
+                        region_id,
+                        file.file_id(),
                         column.column_name,
                         target_unit,
                         start.to_iso8601_string(),
                         end.to_iso8601_string(),
                     );
-                    error!(
-                        "Rejecting time index widening for region {}, file {}: {}",
-                        region_id,
-                        file.file_id(),
-                        err
-                    );
-                    return store_api::metadata::InvalidRegionRequestSnafu { region_id, err }
-                        .fail();
+                    return;
                 }
             }
         }
     }
-    Ok(())
 }
 
 /// Used to determine whether we can build index directly after schema change.

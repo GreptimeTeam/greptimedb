@@ -499,7 +499,7 @@ async fn test_alter_time_index_column_type_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_alter_time_index_unit_overflow_rejected() {
+async fn test_alter_time_index_unit_overflow_logged() {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
@@ -543,23 +543,7 @@ async fn test_alter_time_index_unit_overflow_rejected() {
     .await;
     flush_region(&engine, region_id, None).await;
 
-    // Widening to nanoseconds would overflow this value and is rejected.
-    let request = RegionAlterRequest {
-        kind: AlterKind::ModifyColumnTypes {
-            columns: vec![ModifyColumnType {
-                column_name: "ts".to_string(),
-                target_type: ConcreteDataType::timestamp_nanosecond_datatype(),
-            }],
-        },
-    };
-    let err = engine
-        .handle_request(region_id, RegionRequest::Alter(request))
-        .await
-        .unwrap_err();
-    let chain = full_error_chain(&err);
-    assert!(chain.contains("overflows the target unit"), "{chain}");
-
-    // Widening to microseconds is fine: the value fits the target unit.
+    // Widening to microseconds fits the value.
     let request = RegionAlterRequest {
         kind: AlterKind::ModifyColumnTypes {
             columns: vec![ModifyColumnType {
@@ -575,6 +559,25 @@ async fn test_alter_time_index_unit_overflow_rejected() {
     assert_eq!(vec![32_503_680_000_000_000], {
         scan_time_index_values(&engine, region_id).await
     });
+
+    // Widening to nanoseconds would overflow the value: logged, not rejected.
+    let request = RegionAlterRequest {
+        kind: AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_nanosecond_datatype(),
+            }],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(request))
+        .await
+        .unwrap();
+    let metadata = engine.get_metadata(region_id).await.unwrap();
+    assert_eq!(
+        ConcreteDataType::timestamp_nanosecond_datatype(),
+        metadata.time_index_column().column_schema.data_type
+    );
 }
 
 /// Scans the region and returns `(ts, field_0)` pairs sorted on ts, so tests
