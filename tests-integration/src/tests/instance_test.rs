@@ -3341,7 +3341,7 @@ async fn test_copy_parquet_map_to_binary(instance: Arc<dyn MockInstance>) {
 | 2  | {"x":"42","y":"test"}                   |
 | 3  | {}                                      |
 | 4  | {"single":"value"}                      |
-| 5  | {"complex":"structure","nested":"data"} |
+| 5  | {"nested":"data","complex":"structure"} |
 +----+-----------------------------------------+"#;
     check_output_stream(output, expected).await;
 }
