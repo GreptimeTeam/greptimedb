@@ -31,8 +31,8 @@ use table::metadata::TableInfoRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
-    ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu,
-    ParseSqlSnafu, Result, SchemaReadOnlySnafu, TableNotFoundSnafu, TableReadOnlySnafu,
+    ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
+    SchemaReadOnlySnafu, TableNotFoundSnafu, TableReadOnlySnafu,
 };
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
