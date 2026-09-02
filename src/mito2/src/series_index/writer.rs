@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common_time::timestamp::TimeUnit;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray, UInt32Array,
     UInt64Array,
@@ -430,15 +431,7 @@ impl SeriesIndexWriter {
 /// Returns the Arrow schema of a series index.
 pub fn series_index_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
     validate_metadata(metadata)?;
-    // Safety: `validate_metadata` ensures a timestamp time index.
-    let unit = metadata
-        .time_index_column()
-        .column_schema
-        .data_type
-        .as_timestamp()
-        .unwrap()
-        .unit();
-    let ts_metadata = time_unit_metadata(unit);
+    let ts_metadata = time_unit_metadata(time_index_unit(metadata)?);
     let mut fields = vec![
         Field::new(MIN_TS_COLUMN, DataType::Int64, false).with_metadata(ts_metadata.clone()),
         Field::new(MAX_TS_COLUMN, DataType::Int64, false).with_metadata(ts_metadata),
@@ -452,6 +445,21 @@ pub fn series_index_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
             .map(|(_, name)| Field::new(name, DataType::Utf8, true)),
     );
     Ok(Arc::new(Schema::new(fields)))
+}
+
+/// Returns the unit of the region's timestamp time index; the writer stamps
+/// it into index files so a searcher interprets each file in the unit it was
+/// written with (the region's time index unit may have been widened since).
+fn time_index_unit(metadata: &RegionMetadataRef) -> Result<TimeUnit> {
+    Ok(metadata
+        .time_index_column()
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .context(InvalidMetaSnafu {
+            reason: "series index requires a timestamp time index",
+        })?
+        .unit())
 }
 
 fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
@@ -469,17 +477,6 @@ fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
             }
         );
     }
-    ensure!(
-        metadata
-            .time_index_column()
-            .column_schema
-            .data_type
-            .as_timestamp()
-            .is_some(),
-        InvalidMetaSnafu {
-            reason: "series index requires a timestamp time index",
-        }
-    );
     ensure!(
         metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
         InvalidMetaSnafu {
@@ -666,7 +663,7 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
-    use crate::series_index::parse_time_unit;
+    use crate::series_index::{TIME_UNIT_META_KEY, parse_time_unit};
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn object_store() -> ObjectStore {
@@ -759,11 +756,19 @@ mod tests {
         // The min/max ts fields record the time index unit they are stored in.
         assert_eq!(
             Some(TimeUnit::Millisecond),
-            parse_time_unit(schema.field(0).metadata())
+            schema
+                .field(0)
+                .metadata()
+                .get(TIME_UNIT_META_KEY)
+                .and_then(|unit| parse_time_unit(unit.as_str()))
         );
         assert_eq!(
             Some(TimeUnit::Millisecond),
-            parse_time_unit(schema.field(1).metadata())
+            schema
+                .field(1)
+                .metadata()
+                .get(TIME_UNIT_META_KEY)
+                .and_then(|unit| parse_time_unit(unit.as_str()))
         );
 
         let dense = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));

@@ -43,14 +43,32 @@ pub(crate) const METRIC_SERIES_ID_BATCH_SIZE: usize = 500;
 /// index unit may have been widened after the file was written).
 pub(crate) const TIME_UNIT_META_KEY: &str = "time_unit";
 
-/// Builds the field metadata recording that ts values are stored in `unit`.
-pub(crate) fn time_unit_metadata(unit: TimeUnit) -> HashMap<String, String> {
-    HashMap::from([(TIME_UNIT_META_KEY.to_string(), format!("{unit:?}"))])
+/// Maps a time unit to the string recorded under [`TIME_UNIT_META_KEY`].
+/// Written as an explicit exhaustive `match` (rather than derived from
+/// `Debug`) so the on-disk encoding is stable and reviewed next to its
+/// parser below.
+fn time_unit_as_str(unit: TimeUnit) -> &'static str {
+    match unit {
+        TimeUnit::Second => "Second",
+        TimeUnit::Millisecond => "Millisecond",
+        TimeUnit::Microsecond => "Microsecond",
+        TimeUnit::Nanosecond => "Nanosecond",
+    }
 }
 
-/// Parses the time unit recorded by [`time_unit_metadata`].
-pub(crate) fn parse_time_unit(metadata: &HashMap<String, String>) -> Option<TimeUnit> {
-    match metadata.get(TIME_UNIT_META_KEY)?.as_str() {
+/// Builds the field metadata recording that ts values are stored in `unit`.
+pub(crate) fn time_unit_metadata(unit: TimeUnit) -> HashMap<String, String> {
+    HashMap::from([(
+        TIME_UNIT_META_KEY.to_string(),
+        time_unit_as_str(unit).to_string(),
+    )])
+}
+
+/// Parses a time unit string recorded by [`time_unit_as_str`]. Returns `None`
+/// for any unit this version does not know, so callers can distinguish an
+/// unknown unit from a missing one.
+pub(crate) fn parse_time_unit(unit: &str) -> Option<TimeUnit> {
+    match unit {
         "Second" => Some(TimeUnit::Second),
         "Millisecond" => Some(TimeUnit::Millisecond),
         "Microsecond" => Some(TimeUnit::Microsecond),

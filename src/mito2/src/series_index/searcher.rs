@@ -129,7 +129,8 @@ impl SeriesIndexSearcher {
                 .with_context(|_| ReadParquetSnafu {
                     path: path.to_string(),
                 })?;
-        let unit = validate_index_schema(arrow_metadata.schema())?;
+        validate_index_schema(arrow_metadata.schema())?;
+        let unit = index_time_unit(arrow_metadata.schema())?;
 
         // An older index file may not contain tags added by schema evolution.
         // Ignore filters on those tags to preserve a conservative candidate set.
@@ -267,7 +268,7 @@ fn time_range_exprs(unit: TimeUnit, time_range: Option<&TimestampRange>) -> Vec<
     exprs
 }
 
-fn validate_index_schema(schema: &SchemaRef) -> Result<TimeUnit> {
+fn validate_index_schema(schema: &SchemaRef) -> Result<()> {
     for (name, data_type) in [
         (MIN_TS_COLUMN, DataType::Int64),
         (MAX_TS_COLUMN, DataType::Int64),
@@ -291,14 +292,32 @@ fn validate_index_schema(schema: &SchemaRef) -> Result<TimeUnit> {
             }
         );
     }
-    let unit = |name: &str| parse_time_unit(schema.field_with_name(name).ok()?.metadata());
-    let min_unit = unit(MIN_TS_COLUMN).with_context(|| InvalidRecordBatchSnafu {
-        reason: format!(
-            "series index column {MIN_TS_COLUMN} is missing a valid '{TIME_UNIT_META_KEY}' field metadata"
-        ),
-    })?;
+    Ok(())
+}
+
+/// Reads the time unit recorded in an index file's schema, i.e. the unit its
+/// raw `__series_min_ts`/`__series_max_ts` values are stored in.
+fn index_time_unit(schema: &SchemaRef) -> Result<TimeUnit> {
+    let unit = |name: &str| {
+        let recorded = schema
+            .field_with_name(name)
+            .ok()
+            .and_then(|field| field.metadata().get(TIME_UNIT_META_KEY))
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!(
+                    "series index column {name} is missing the '{TIME_UNIT_META_KEY}' field metadata; the file was probably written before time units were recorded"
+                ),
+            })?;
+        parse_time_unit(recorded).with_context(|| InvalidRecordBatchSnafu {
+            reason: format!(
+                "series index column {name} records unsupported time unit '{recorded}'"
+            ),
+        })
+    };
+    let min_unit = unit(MIN_TS_COLUMN)?;
+    let max_unit = unit(MAX_TS_COLUMN)?;
     ensure!(
-        unit(MAX_TS_COLUMN) == Some(min_unit),
+        min_unit == max_unit,
         InvalidRecordBatchSnafu {
             reason: format!(
                 "series index columns {MIN_TS_COLUMN} and {MAX_TS_COLUMN} record different time units"
@@ -408,9 +427,14 @@ fn row_groups_to_read(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use api::v1::SemanticType;
     use datafusion_expr::{col, lit};
-    use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt8Array};
+    use datatypes::arrow::array::{
+        BinaryArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+    };
     use datatypes::arrow::datatypes::{Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
@@ -428,13 +452,27 @@ mod tests {
         ObjectStore::new(Memory::default()).unwrap().finish()
     }
 
-    fn flat_batch(primary_keys: &[Vec<u8>], timestamps: &[i64]) -> RecordBatch {
+    fn flat_batch_with_time_unit(
+        primary_keys: &[Vec<u8>],
+        timestamps: &[i64],
+        unit: datatypes::arrow::datatypes::TimeUnit,
+    ) -> RecordBatch {
+        let ts_column = match unit {
+            datatypes::arrow::datatypes::TimeUnit::Second => {
+                Arc::new(TimestampSecondArray::from(timestamps.to_vec())) as ArrayRef
+            }
+            datatypes::arrow::datatypes::TimeUnit::Millisecond => {
+                Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())) as ArrayRef
+            }
+            datatypes::arrow::datatypes::TimeUnit::Microsecond => {
+                Arc::new(TimestampMicrosecondArray::from(timestamps.to_vec())) as ArrayRef
+            }
+            datatypes::arrow::datatypes::TimeUnit::Nanosecond => {
+                Arc::new(TimestampNanosecondArray::from(timestamps.to_vec())) as ArrayRef
+            }
+        };
         let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
+            Field::new("ts", DataType::Timestamp(unit, None), false),
             Field::new("__primary_key", DataType::Binary, false),
             Field::new("__sequence", DataType::UInt64, false),
             Field::new("__op_type", DataType::UInt8, false),
@@ -442,7 +480,7 @@ mod tests {
         RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())),
+                ts_column,
                 Arc::new(BinaryArray::from_iter_values(
                     primary_keys.iter().map(Vec::as_slice),
                 )),
@@ -460,6 +498,25 @@ mod tests {
         rows: &[(u32, u64, &str, &str, i64)],
         row_group_size: usize,
     ) {
+        write_index_with_time_unit(
+            metadata,
+            object_store,
+            path,
+            rows,
+            row_group_size,
+            datatypes::arrow::datatypes::TimeUnit::Millisecond,
+        )
+        .await
+    }
+
+    async fn write_index_with_time_unit(
+        metadata: RegionMetadataRef,
+        object_store: ObjectStore,
+        path: &str,
+        rows: &[(u32, u64, &str, &str, i64)],
+        row_group_size: usize,
+        unit: datatypes::arrow::datatypes::TimeUnit,
+    ) {
         let primary_keys = rows
             .iter()
             .map(|(table_id, tsid, tag_0, tag_1, _)| {
@@ -476,7 +533,7 @@ mod tests {
         .await
         .unwrap();
         writer
-            .write(&flat_batch(&primary_keys, &timestamps))
+            .write(&flat_batch_with_time_unit(&primary_keys, &timestamps, unit))
             .await
             .unwrap();
         writer.finish().await.unwrap();
@@ -700,6 +757,125 @@ mod tests {
                 table_id: 1,
                 tsid: 20
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_reads_each_file_in_its_recorded_unit() {
+        // The first file is written while the region's time index is
+        // milliseconds; its series sit at 10ms and 20ms.
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let object_store = object_store();
+        write_index(
+            metadata.clone(),
+            object_store.clone(),
+            "old_ms.parquet",
+            &[(1, 10, "a", "x", 10), (1, 20, "b", "x", 20)],
+            2,
+        )
+        .await;
+
+        // The region's time index is then widened to microseconds and a
+        // second file is written; its series sit at 15_000µs and 15µs.
+        let mut widened = (*metadata).clone();
+        for column in &mut widened.column_metadatas {
+            if column.column_schema.name == "ts" {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let widened = Arc::new(widened);
+        write_index_with_time_unit(
+            widened.clone(),
+            object_store.clone(),
+            "new_us.parquet",
+            &[(1, 30, "c", "x", 15_000), (1, 40, "d", "x", 15)],
+            2,
+            datatypes::arrow::datatypes::TimeUnit::Microsecond,
+        )
+        .await;
+
+        // One searcher over the widened region must interpret each file in
+        // the unit it was written with. For [10.5ms, 25ms):
+        // - the millisecond file (ceil: [11ms, 25ms)) keeps only the 20ms
+        //   series; reading it in microseconds would match nothing;
+        // - the microsecond file keeps only the 15_000µs series; reading it
+        //   in milliseconds would also keep the 15µs series.
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_microsecond(10_500),
+            common_time::Timestamp::new_microsecond(25_000),
+        )
+        .unwrap();
+        let searcher =
+            SeriesIndexSearcher::try_new(widened, object_store, None, Some(time_range)).unwrap();
+        let ids = collect_ids(searcher.search("old_ms.parquet").await.unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 20
+            }]
+        );
+        let ids = collect_ids(searcher.search("new_us.parquet").await.unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 30
+            }]
+        );
+    }
+
+    fn ts_field(name: &str, unit: Option<&str>) -> Field {
+        match unit {
+            Some(unit) => {
+                Field::new(name, DataType::Int64, false).with_metadata(HashMap::from([(
+                    TIME_UNIT_META_KEY.to_string(),
+                    unit.to_string(),
+                )]))
+            }
+            None => Field::new(name, DataType::Int64, false),
+        }
+    }
+
+    fn index_file_schema(min_unit: Option<&str>, max_unit: Option<&str>) -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            ts_field(MIN_TS_COLUMN, min_unit),
+            ts_field(MAX_TS_COLUMN, max_unit),
+            Field::new(ROW_COUNT_COLUMN, DataType::UInt64, false),
+            Field::new(TABLE_ID_COLUMN, DataType::UInt32, false),
+            Field::new(TSID_COLUMN, DataType::UInt64, false),
+        ]))
+    }
+
+    #[test]
+    fn index_time_unit_rejects_unusable_units() {
+        // Index files written before units were recorded are rejected, with
+        // an error distinguishing them from files with an unknown unit.
+        let err = index_time_unit(&index_file_schema(None, None))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("is missing the 'time_unit' field metadata"),
+            "{err}"
+        );
+
+        // A unit a newer writer may record but this searcher cannot parse.
+        let err = index_time_unit(&index_file_schema(Some("Femtosecond"), Some("Femtosecond")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsupported time unit 'Femtosecond'"), "{err}");
+
+        // The min and max columns must agree on the unit.
+        let err = index_time_unit(&index_file_schema(Some("Millisecond"), Some("Microsecond")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("record different time units"), "{err}");
+
+        assert_eq!(
+            TimeUnit::Nanosecond,
+            index_time_unit(&index_file_schema(Some("Nanosecond"), Some("Nanosecond"))).unwrap()
         );
     }
 
