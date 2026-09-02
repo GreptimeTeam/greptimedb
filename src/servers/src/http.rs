@@ -253,8 +253,6 @@ pub struct HttpOptions {
 
     pub enable_cors: bool,
 
-    pub experimental_enable_explain_analyze_stream: bool,
-
     /// Whether to start the dedicated public HTTP **API** server, which serves
     /// only the `v1` interfaces plus the dashboard. It shares every other
     /// `[http]` option with the main server and only differs by its bound
@@ -274,7 +272,6 @@ impl Default for HttpOptions {
             body_limit: DEFAULT_BODY_LIMIT,
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
-            experimental_enable_explain_analyze_stream: true,
             enable_api_server: false,
             api_server_addr: format!("127.0.0.1:{}", DEFAULT_HTTP_API_ADDR_PORT),
         }
@@ -601,7 +598,6 @@ impl From<NullResponse> for HttpResponse {
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
-    pub experimental_enable_explain_analyze_stream: bool,
 }
 
 #[derive(Clone)]
@@ -638,12 +634,7 @@ impl HttpServerBuilder {
     }
 
     pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState {
-            sql_handler,
-            experimental_enable_explain_analyze_stream: self
-                .options
-                .experimental_enable_explain_analyze_stream,
-        });
+        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
 
         Self {
             router: self
@@ -1315,7 +1306,7 @@ impl HttpServer {
     }
 
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
-        let mut router = Router::new()
+        Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))
             .route(
                 "/sql/parse",
@@ -1328,16 +1319,12 @@ impl HttpServer {
             .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
-            );
-
-        if api_state.experimental_enable_explain_analyze_stream {
-            router = router.route(
+            )
+            .route(
                 "/sql/analyze/stream",
                 routing::post(handler::sql_analyze_stream),
-            );
-        }
-
-        router.with_state(api_state)
+            )
+            .with_state(api_state)
     }
 
     fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
@@ -1652,31 +1639,6 @@ mod test {
         server.build(app).unwrap()
     }
 
-    #[tokio::test]
-    pub async fn test_analyze_stream_route_config_gate() {
-        let (tx, _rx) = mpsc::channel(100);
-        let options = HttpOptions {
-            experimental_enable_explain_analyze_stream: false,
-            ..Default::default()
-        };
-        let app = make_test_app_custom(tx, options);
-        let client = TestClient::new(app).await;
-        let res = client
-            .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")
-            .send()
-            .await;
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
-
-        let (tx, _rx) = mpsc::channel(100);
-        let app = make_test_app_custom(tx, HttpOptions::default());
-        let client = TestClient::new(app).await;
-        let res = client
-            .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")
-            .send()
-            .await;
-        assert_ne!(res.status(), StatusCode::NOT_FOUND);
-    }
-
     fn make_split_builder() -> HttpServerBuilder {
         let (tx, _rx) = mpsc::channel(100);
         let instance = Arc::new(DummyInstance { _tx: tx });
@@ -1985,6 +1947,36 @@ mod test {
         let default = HttpOptions::default();
         assert_eq!("127.0.0.1:4000".to_string(), default.addr);
         assert_eq!(Duration::from_secs(0), default.timeout)
+    }
+
+    #[tokio::test]
+    async fn test_http_options_legacy_analyze_stream_config_is_ignored() {
+        let options: HttpOptions = serde_json::from_value(serde_json::json!({
+            "addr": "127.0.0.1:4000",
+            "timeout": "0s",
+            "body_limit": "64MiB",
+            "cors_allowed_origins": [],
+            "enable_cors": true,
+            "experimental_enable_explain_analyze_stream": false,
+            "enable_api_server": false,
+            "api_server_addr": "127.0.0.1:4006"
+        }))
+        .unwrap();
+        let serialized = serde_json::to_string(&options).unwrap();
+        assert!(!serialized.contains("experimental_enable_explain_analyze_stream"));
+
+        let (tx, _rx) = mpsc::channel(100);
+        let app = make_test_app_custom(tx, options);
+        let client = TestClient::new(app).await;
+        let response = client
+            .post("/v1/sql/analyze/stream")
+            .form(&handler::SqlQuery {
+                sql: Some("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
+                ..Default::default()
+            })
+            .send()
+            .await;
+        assert_ne!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

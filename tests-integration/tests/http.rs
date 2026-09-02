@@ -119,6 +119,7 @@ macro_rules! http_tests {
 
                 test_http_auth,
                 test_sql_api,
+                test_http_analyze_stream_tql,
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
                 test_prometheus_label_replace_response,
@@ -803,6 +804,61 @@ async fn test_sql_format_api() {
         formatted,
         "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;"
     );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_http_analyze_stream_tql(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "analyze_stream_tql").await;
+    let client = TestClient::new(app).await;
+
+    let res = client
+        .post("/v1/sql/analyze/stream")
+        .header("Accept", "text/event-stream")
+        .form(&BTreeMap::from([(
+            "sql".to_string(),
+            "TQL ANALYZE VERBOSE (0, 10, '5s') demo".to_string(),
+        )]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"))
+    );
+    let body = res.text().await;
+    let final_event = body
+        .split("\n\n")
+        .find(|event| event.lines().any(|line| line == "event: final"))
+        .expect(&body);
+    let payload = final_event
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .unwrap();
+    assert_eq!(payload["state"], "final");
+    assert!(payload["metrics"].as_array().is_some_and(|v| !v.is_empty()));
+    assert!(
+        payload["output"]["records"]["rows"]
+            .as_array()
+            .is_some_and(|v| !v.is_empty())
+    );
+
+    let res = client
+        .post("/v1/sql/analyze/stream")
+        .header("Accept", "text/event-stream")
+        .form(&BTreeMap::from([(
+            "sql".to_string(),
+            "TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') demo".to_string(),
+        )]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.text().await.contains("event: final"));
 
     guard.remove_all().await;
 }
@@ -2147,7 +2203,6 @@ timeout = "0s"
 body_limit = "64MiB"
 cors_allowed_origins = []
 enable_cors = true
-experimental_enable_explain_analyze_stream = true
 enable_api_server = false
 api_server_addr = "127.0.0.1:4006"
 

@@ -754,6 +754,19 @@ impl MergeScanExec {
                         stream.next().instrument(region_span.clone()).await
                     };
                     let Some(batch) = batch else {
+                        // The remote Flight stream publishes its terminal metrics
+                        // immediately after EOF. Capture them before leaving the
+                        // loop so the final verbose snapshot is not lost.
+                        if let Some(metrics) = stream.metrics() {
+                            let load = region_scan_load(&metrics);
+                            let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
+                            let value = read_meter!(c, s, load, current_channel as u8);
+                            metric.record_greptime_exec_cost(value as usize);
+                            sub_stage_metrics_moved
+                                .lock()
+                                .unwrap()
+                                .insert(region_id, metrics);
+                        }
                         break;
                     };
                     let poll_elapsed = poll_timer.elapsed();
@@ -821,18 +834,6 @@ impl MergeScanExec {
                         metric.first_consume_time(),
                         do_get_cost
                     );
-                }
-
-                // process metrics after all data is drained.
-                if let Some(metrics) = stream.metrics() {
-                    let load = region_scan_load(&metrics);
-                    let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                    let value = read_meter!(c, s, load, current_channel as u8);
-                    metric.record_greptime_exec_cost(value as usize);
-
-                    // record metrics from sub sgates
-                    let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
-                    sub_stage_metrics.insert(region_id, metrics);
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());

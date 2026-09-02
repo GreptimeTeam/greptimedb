@@ -91,8 +91,6 @@ enable_cors = true
 ## @toml2docs:none-default
 cors_allowed_origins = ["https://example.com"]
 
-## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
-experimental_enable_explain_analyze_stream = true
 
 ## Whether to start the dedicated public HTTP **API** server. This server serves
 ## only the `v1` interfaces plus the dashboard, and shares every other `[http]`
