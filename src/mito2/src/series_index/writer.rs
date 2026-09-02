@@ -38,6 +38,7 @@ use crate::error::{
 };
 use crate::series_index::{
     MAX_TS_COLUMN, MIN_TS_COLUMN, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN,
+    time_unit_metadata,
 };
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
@@ -429,9 +430,18 @@ impl SeriesIndexWriter {
 /// Returns the Arrow schema of a series index.
 pub fn series_index_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
     validate_metadata(metadata)?;
+    // Safety: `validate_metadata` ensures a timestamp time index.
+    let unit = metadata
+        .time_index_column()
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .unwrap()
+        .unit();
+    let ts_metadata = time_unit_metadata(unit);
     let mut fields = vec![
-        Field::new(MIN_TS_COLUMN, DataType::Int64, false),
-        Field::new(MAX_TS_COLUMN, DataType::Int64, false),
+        Field::new(MIN_TS_COLUMN, DataType::Int64, false).with_metadata(ts_metadata.clone()),
+        Field::new(MAX_TS_COLUMN, DataType::Int64, false).with_metadata(ts_metadata),
         Field::new(ROW_COUNT_COLUMN, DataType::UInt64, false),
         Field::new(TABLE_ID_COLUMN, DataType::UInt32, false),
         Field::new(TSID_COLUMN, DataType::UInt64, false),
@@ -459,6 +469,17 @@ fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
             }
         );
     }
+    ensure!(
+        metadata
+            .time_index_column()
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .is_some(),
+        InvalidMetaSnafu {
+            reason: "series index requires a timestamp time index",
+        }
+    );
     ensure!(
         metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
         InvalidMetaSnafu {
@@ -520,11 +541,8 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
 }
 
 /// Extracts raw i64 timestamp values for the `__series_min_ts`/`__series_max_ts`
-/// columns. NOTE: the unit is dropped; the values must always be interpreted in
-/// the unit of the region metadata the index is written with. Once this index
-/// is wired into scans, files written before/after a time index unit widening
-/// would carry mixed units — the index schema or the searcher must record the
-/// unit per file, or the index must be rebuilt on such an alter.
+/// columns. NOTE: the unit is dropped; the values are interpreted in the unit
+/// recorded on the file schema by [`series_index_schema`].
 fn timestamp_values(array: &ArrayRef) -> Result<Int64Array> {
     let timestamps = if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
         array.clone()
@@ -633,11 +651,12 @@ fn rows_to_batch(schema: &SchemaRef, rows: &[SeriesIndexRow]) -> Result<RecordBa
 mod tests {
     use api::v1::SemanticType;
     use bytes::Bytes;
+    use common_time::timestamp::TimeUnit;
     use datatypes::arrow::array::{
         BinaryDictionaryBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
         TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
     };
-    use datatypes::arrow::datatypes::{TimeUnit, UInt32Type};
+    use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
     use object_store::ErrorKind;
@@ -647,6 +666,7 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
+    use crate::series_index::parse_time_unit;
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn object_store() -> ObjectStore {
@@ -657,7 +677,7 @@ mod tests {
         Arc::new(Schema::new(vec![
             Field::new(
                 "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
+                DataType::Timestamp(TimeUnit::Millisecond.into(), None),
                 false,
             ),
             Field::new("__primary_key", primary_key_type, false),
@@ -736,6 +756,15 @@ mod tests {
         );
         assert!(!schema.field(4).is_nullable());
         assert!(schema.field(5).is_nullable());
+        // The min/max ts fields record the time index unit they are stored in.
+        assert_eq!(
+            Some(TimeUnit::Millisecond),
+            parse_time_unit(schema.field(0).metadata())
+        );
+        assert_eq!(
+            Some(TimeUnit::Millisecond),
+            parse_time_unit(schema.field(1).metadata())
+        );
 
         let dense = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         assert!(series_index_schema(&dense).is_err());

@@ -17,6 +17,9 @@
 mod searcher;
 mod writer;
 
+use std::collections::HashMap;
+
+use common_time::timestamp::TimeUnit;
 use futures::stream::BoxStream;
 pub use searcher::SeriesIndexSearcher;
 use store_api::metric_engine_consts::{
@@ -33,6 +36,28 @@ pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";
 pub(crate) const MAX_TS_COLUMN: &str = "__series_max_ts";
 pub(crate) const ROW_COUNT_COLUMN: &str = "__series_row_count";
 pub(crate) const METRIC_SERIES_ID_BATCH_SIZE: usize = 500;
+
+/// Arrow field metadata key on `__series_min_ts`/`__series_max_ts` recording
+/// the time index unit their raw i64 values are stored in, so a searcher can
+/// interpret each file with the unit it was written with (the region's time
+/// index unit may have been widened after the file was written).
+pub(crate) const TIME_UNIT_META_KEY: &str = "time_unit";
+
+/// Builds the field metadata recording that ts values are stored in `unit`.
+pub(crate) fn time_unit_metadata(unit: TimeUnit) -> HashMap<String, String> {
+    HashMap::from([(TIME_UNIT_META_KEY.to_string(), format!("{unit:?}"))])
+}
+
+/// Parses the time unit recorded by [`time_unit_metadata`].
+pub(crate) fn parse_time_unit(metadata: &HashMap<String, String>) -> Option<TimeUnit> {
+    match metadata.get(TIME_UNIT_META_KEY)?.as_str() {
+        "Second" => Some(TimeUnit::Second),
+        "Millisecond" => Some(TimeUnit::Millisecond),
+        "Microsecond" => Some(TimeUnit::Microsecond),
+        "Nanosecond" => Some(TimeUnit::Nanosecond),
+        _ => None,
+    }
+}
 
 /// Identifies one series in a physical metric region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
