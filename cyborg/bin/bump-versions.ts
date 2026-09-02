@@ -20,8 +20,15 @@ import {obtainClient} from "@/common";
 interface RepoConfig {
   tokenEnv: string;
   repo: string;
-  workflowLogic: (version: string) => [string, string] | null;
+  workflowLogic: (version: string) => WorkflowDispatch | null | Promise<WorkflowDispatch | null>;
 }
+
+interface WorkflowDispatch {
+  workflowId: string;
+  inputs: Record<string, string>;
+}
+
+const DOCS_VERSION_RE = /^(\d+)\.(\d+)\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 const REPO_CONFIGS: Record<string, RepoConfig> = {
   website: {
@@ -33,7 +40,10 @@ const REPO_CONFIGS: Record<string, RepoConfig> = {
         console.log('Nightly version detected for website, skipping workflow trigger.');
         return null;
       }
-      return ['bump-patch-version.yml', version];
+      return {
+        workflowId: 'bump-patch-version.yml',
+        inputs: {version},
+      };
     }
   },
   demo: {
@@ -45,62 +55,72 @@ const REPO_CONFIGS: Record<string, RepoConfig> = {
         console.log('Nightly version detected for demo, skipping workflow trigger.');
         return null;
       }
-      return ['bump-patch-version.yml', version];
+      return {
+        workflowId: 'bump-patch-version.yml',
+        inputs: {version},
+      };
     }
   },
   docs: {
     tokenEnv: "DOCS_REPO_TOKEN",
     repo: "docs",
-    workflowLogic: (version: string) => {
+    workflowLogic: async (version: string): Promise<WorkflowDispatch | null> => {
       // Check if it's a nightly version
       if (version.includes('nightly')) {
-        return ['bump-nightly-version.yml', version];
+        return {
+          workflowId: 'bump-nightly-version.yml',
+          inputs: {version},
+        };
       }
 
-      // Check for prerelease versions (e.g., 1.0.0-beta.3, 1.0.0-rc.1)
-      const prereleaseMatch = version.match(/^(\d+)\.(\d+)\.(\d+)-(beta|rc)\.(\d+)$/);
-      if (prereleaseMatch) {
-        const [, major, minor, patch, prereleaseType, prereleaseNum] = prereleaseMatch;
-
-        // If it's beta.1 and patch version is 0, treat as major version
-        if (prereleaseType === 'beta' && prereleaseNum === '1' && patch === '0') {
-          return ['bump-version.yml', `${major}.${minor}`];
-        }
-
-        // Otherwise (beta.x where x > 1, or rc.x), treat as patch version
-        return ['bump-patch-version.yml', version];
-      }
-
-      const parts = version.split('.');
-      if (parts.length !== 3) {
+      const match = version.match(DOCS_VERSION_RE);
+      if (!match) {
         throw new Error('Invalid version format');
       }
 
-      // If patch version (last number) is 0, it's a major version
-      // Return only major.minor version
-      if (parts[2] === '0') {
-        return ['bump-version.yml', `${parts[0]}.${parts[1]}`];
+      const docsVersion = `${match[1]}.${match[2]}`;
+      const client = obtainClient('DOCS_REPO_TOKEN');
+      const {data} = await client.rest.repos.getContent({
+        owner: 'GreptimeTeam',
+        repo: 'docs',
+        path: 'versions.json',
+        ref: 'main',
+      });
+      if (Array.isArray(data) || data.type !== 'file') {
+        throw new Error('Expected docs versions.json to be a file');
       }
 
-      // Otherwise it's a patch version, use full version
-      return ['bump-patch-version.yml', version];
+      const versions = JSON.parse(Buffer.from(data.content, 'base64').toString('utf-8'));
+      if (!Array.isArray(versions) || !versions.every((entry) => typeof entry === 'string')) {
+        throw new Error('Expected docs versions.json to be a string array');
+      }
+
+      if (versions.includes(docsVersion)) {
+        return {
+          workflowId: 'bump-patch-version.yml',
+          inputs: {version},
+        };
+      }
+
+      return {
+        workflowId: 'bump-version.yml',
+        inputs: {version: docsVersion},
+      };
     }
   }
 };
 
-async function triggerWorkflow(repoConfig: RepoConfig, workflowId: string, version: string) {
+async function triggerWorkflow(repoConfig: RepoConfig, dispatch: WorkflowDispatch) {
   const client = obtainClient(repoConfig.tokenEnv);
   try {
     await client.rest.actions.createWorkflowDispatch({
       owner: "GreptimeTeam",
       repo: repoConfig.repo,
-      workflow_id: workflowId,
+      workflow_id: dispatch.workflowId,
       ref: "main",
-      inputs: {
-        version,
-      },
+      inputs: dispatch.inputs,
     });
-    console.log(`Successfully triggered ${workflowId} workflow for ${repoConfig.repo} with version ${version}`);
+    console.log(`Successfully triggered ${dispatch.workflowId} workflow for ${repoConfig.repo} with version ${dispatch.inputs.version}`);
   } catch (error) {
     core.setFailed(`Failed to trigger workflow for ${repoConfig.repo}: ${error.message}`);
     throw error;
@@ -114,14 +134,13 @@ async function processRepo(repoName: string, version: string) {
   }
 
   try {
-    const workflowResult = repoConfig.workflowLogic(version);
-    if (workflowResult === null) {
+    const dispatch = await repoConfig.workflowLogic(version);
+    if (dispatch === null) {
       // Skip this repo (e.g., nightly version for website)
       return;
     }
 
-    const [workflowId, apiVersion] = workflowResult;
-    await triggerWorkflow(repoConfig, workflowId, apiVersion);
+    await triggerWorkflow(repoConfig, dispatch);
   } catch (error) {
     core.setFailed(`Error processing ${repoName} with version ${version}: ${error.message}`);
     throw error;
