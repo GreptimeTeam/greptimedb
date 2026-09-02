@@ -33,11 +33,11 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, TryStreamExt};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::SequenceNumber;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
 use crate::memtable::BoxedRecordBatchIterator;
 use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::BoxedRecordBatchStream;
@@ -492,14 +492,14 @@ impl<T: Ord> TournamentTree<T> {
     /// Returns the winner (greatest element among occupied slots).
     fn peek(&self) -> Option<&T> {
         self.winner_slot()
-            .and_then(|slot| self.nodes[slot].as_ref())
+            .and_then(|slot| self.nodes.get(slot)?.as_ref())
     }
 
     /// Returns the winner mutably. Call [TournamentTree::replay_winner] after
     /// mutating it, or remove it with `pop()` if it reached EOF or moved cold.
     fn winner_mut(&mut self) -> Option<&mut T> {
         let slot = self.winner_slot()?;
-        self.nodes[slot].as_mut()
+        self.nodes.get_mut(slot)?.as_mut()
     }
 
     /// Returns the second greatest element among occupied slots.
@@ -509,7 +509,7 @@ impl<T: Ord> TournamentTree<T> {
     #[cfg(test)]
     fn second_best(&mut self) -> Option<&T> {
         let slot = self.second_best_slot()?;
-        Some(self.nodes[slot].as_ref().unwrap())
+        self.nodes.get(slot)?.as_ref()
     }
 
     /// Returns the winner and the second greatest element among occupied slots.
@@ -517,8 +517,8 @@ impl<T: Ord> TournamentTree<T> {
         let second = self.second_best_slot();
         let winner = self.winner_slot();
         (
-            winner.map(|slot| self.nodes[slot].as_ref().unwrap()),
-            second.map(|slot| self.nodes[slot].as_ref().unwrap()),
+            winner.and_then(|slot| self.nodes.get(slot)?.as_ref()),
+            second.and_then(|slot| self.nodes.get(slot)?.as_ref()),
         )
     }
 
@@ -528,29 +528,45 @@ impl<T: Ord> TournamentTree<T> {
     /// cheap to construct. This is O(capacity), but pushes only happen on
     /// batch transitions, never per row.
     ///
-    /// # Panics
-    /// Panics if the tree is full.
-    fn push(&mut self, value: T) {
+    fn push(&mut self, value: T) -> Result<()> {
         let slot = self
             .nodes
             .iter()
             .position(Option::is_none)
-            .expect("tournament tree is full");
+            .context(UnexpectedSnafu {
+                reason: "Tournament tree is full".to_string(),
+            })?;
         self.nodes[slot] = Some(value);
         self.tree[self.leaves + slot] = slot;
         self.len += 1;
         self.replay(slot);
+        Ok(())
     }
 
     /// Removes and returns the winner, leaving its slot empty.
-    fn pop(&mut self) -> Option<T> {
-        let slot = self.winner_slot()?;
-        let value = self.nodes[slot].take();
-        debug_assert!(value.is_some());
-        self.tree[self.leaves + slot] = EMPTY_SLOT;
-        self.len -= 1;
+    fn pop(&mut self) -> Result<Option<T>> {
+        let Some(slot) = self.winner_slot() else {
+            return Ok(None);
+        };
+        let leaf_index = self.leaves.checked_add(slot).context(UnexpectedSnafu {
+            reason: "Tournament tree leaf index overflow".to_string(),
+        })?;
+        let new_len = self.len.checked_sub(1).context(UnexpectedSnafu {
+            reason: "Tournament tree length is inconsistent".to_string(),
+        })?;
+        let node = self.nodes.get_mut(slot).context(UnexpectedSnafu {
+            reason: "Tournament tree winner slot is invalid".to_string(),
+        })?;
+        let leaf = self.tree.get_mut(leaf_index).context(UnexpectedSnafu {
+            reason: "Tournament tree winner leaf is invalid".to_string(),
+        })?;
+        let value = node.take().context(UnexpectedSnafu {
+            reason: "Tournament tree winner slot is empty".to_string(),
+        })?;
+        *leaf = EMPTY_SLOT;
+        self.len = new_len;
         self.replay(slot);
-        value
+        Ok(Some(value))
     }
 
     /// Replays the winner's path after its value was mutated in place.
@@ -562,7 +578,7 @@ impl<T: Ord> TournamentTree<T> {
 
     /// Returns the slot of the champion at the root, if any slot is occupied.
     fn winner_slot(&self) -> Option<usize> {
-        (self.tree[1] != EMPTY_SLOT).then_some(self.tree[1])
+        self.tree.get(1).copied().filter(|slot| *slot != EMPTY_SLOT)
     }
 
     /// Returns the slot of the second greatest element among occupied slots.
@@ -584,7 +600,7 @@ impl<T: Ord> TournamentTree<T> {
         let mut node = self.leaves + winner;
         let mut best = EMPTY_SLOT;
         while node > 1 {
-            let challenger = self.tree[node ^ 1];
+            let challenger = self.tree.get(node ^ 1).copied().unwrap_or(EMPTY_SLOT);
             if self.wins(challenger, best) {
                 best = challenger;
             }
@@ -650,7 +666,7 @@ impl<T: NodeCmp> MergeAlgo<T> {
     /// Creates a new merge algorithm from `nodes`.
     ///
     /// All nodes must be initialized.
-    fn new(mut nodes: Vec<T>) -> Self {
+    fn new(mut nodes: Vec<T>) -> Result<Self> {
         // Skips EOF nodes.
         nodes.retain(|node| !node.is_eof());
         let hot = TournamentTree::with_capacity(nodes.len());
@@ -658,28 +674,30 @@ impl<T: NodeCmp> MergeAlgo<T> {
 
         let mut algo = MergeAlgo { hot, cold };
         // Initializes the algorithm.
-        algo.refill_hot();
+        algo.refill_hot()?;
 
-        algo
+        Ok(algo)
     }
 
     /// Moves nodes in `cold` heap, whose key range is overlapped with current merge
     /// window to `hot` tree.
-    fn refill_hot(&mut self) {
-        while !self.cold.is_empty() {
-            if let Some(merge_window) = self.hot.peek() {
-                let warmest = self.cold.peek().unwrap();
-                if warmest.is_behind(merge_window) {
-                    // if the warmest node in the `cold` heap is totally after the
-                    // `merge_window`, then no need to add more nodes into the `hot`
-                    // heap for merge sorting.
-                    break;
-                }
+    fn refill_hot(&mut self) -> Result<()> {
+        while let Some(warmest) = self.cold.peek() {
+            if let Some(merge_window) = self.hot.peek()
+                && warmest.is_behind(merge_window)
+            {
+                // if the warmest node in the `cold` heap is totally after the
+                // `merge_window`, then no need to add more nodes into the `hot`
+                // heap for merge sorting.
+                break;
             }
 
-            let warmest = self.cold.pop().unwrap();
-            self.hot.push(warmest);
+            let Some(warmest) = self.cold.pop() else {
+                break;
+            };
+            self.hot.push(warmest)?;
         }
+        Ok(())
     }
 
     /// Returns the hottest node mutably.
@@ -688,15 +706,14 @@ impl<T: NodeCmp> MergeAlgo<T> {
     }
 
     /// Removes the hottest node before a transition that can fetch a batch.
-    fn pop_hot_for_batch_transition(&mut self) -> Option<T> {
+    fn pop_hot_for_batch_transition(&mut self) -> Result<Option<T>> {
         self.hot.pop()
     }
 
     /// Returns a node to the appropriate heap after a batch transition.
-    fn reheap_after_batch_transition(&mut self, node: T) {
+    fn reheap_after_batch_transition(&mut self, node: T) -> Result<()> {
         if node.is_eof() {
-            self.refill_hot();
-            return;
+            return self.refill_hot();
         }
 
         let node_is_cold = self
@@ -706,20 +723,19 @@ impl<T: NodeCmp> MergeAlgo<T> {
         if node_is_cold {
             self.cold.push(node);
         } else {
-            self.hot.push(node);
+            self.hot.push(node)?;
         }
-        self.refill_hot();
+        self.refill_hot()
     }
 
     /// Repairs the hot tree after mutating its winner and refills the merge window.
-    fn repair_hot_root(&mut self) {
+    fn repair_hot_root(&mut self) -> Result<()> {
         if self.hot.peek().is_some_and(NodeCmp::is_eof) {
-            self.hot.pop();
+            self.hot.pop()?;
         } else {
             let (winner, second_best) = self.hot.winner_and_second_best();
             let Some(winner) = winner else {
-                self.refill_hot();
-                return;
+                return self.refill_hot();
             };
             let root_is_cold = second_best.is_some_and(|best| winner.is_behind(best));
             // If the winner still wins (tie included), every cached champion on its
@@ -727,13 +743,16 @@ impl<T: NodeCmp> MergeAlgo<T> {
             // can be skipped.
             let winner_lost = second_best.is_some_and(|best| winner < best);
             if root_is_cold {
-                self.cold.push(self.hot.pop().unwrap());
+                let winner = self.hot.pop()?.context(UnexpectedSnafu {
+                    reason: "Hot tournament tree is unexpectedly empty".to_string(),
+                })?;
+                self.cold.push(winner);
             } else if winner_lost {
                 self.hot.replay_winner();
             }
         }
 
-        self.refill_hot();
+        self.refill_hot()
     }
 
     /// Returns true if there are rows in the hot tree.
@@ -954,7 +973,7 @@ impl FlatMergeIterator {
             }
         }
 
-        let algo = MergeAlgo::new(nodes);
+        let algo = MergeAlgo::new(nodes)?;
 
         let iter = Self {
             algo,
@@ -987,15 +1006,19 @@ impl FlatMergeIterator {
     fn fetch_batch_from_hottest(&mut self) -> Result<()> {
         debug_assert!(self.in_progress.is_empty());
 
-        // Safety: next_batch() ensures the heap is not empty.
-        let mut hottest = self.algo.pop_hot_for_batch_transition().unwrap();
+        let mut hottest = self
+            .algo
+            .pop_hot_for_batch_transition()?
+            .context(UnexpectedSnafu {
+                reason: "Hot tournament tree is unexpectedly empty".to_string(),
+            })?;
         debug_assert!(!hottest.current_cursor().is_finished());
         let node_index = hottest.node_index;
         let next = hottest.advance_batch()?;
         // The node is the heap is not empty, so it must have existing rows in the builder.
         let batch = self.in_progress.take_remaining_rows(node_index, next);
         Self::maybe_output_batch(batch, &mut self.output_batch);
-        self.algo.reheap_after_batch_transition(hottest);
+        self.algo.reheap_after_batch_transition(hottest)?;
 
         Ok(())
     }
@@ -1003,13 +1026,23 @@ impl FlatMergeIterator {
     /// Fetches a row from the hottest node.
     fn fetch_row_from_hottest(&mut self) -> Result<()> {
         let (node_index, at_batch_boundary) = {
-            // Safety: next_batch() ensures the heap has more than 1 element.
-            let hottest = self.algo.hottest_mut().unwrap();
+            let hottest = self.algo.hottest_mut().context(UnexpectedSnafu {
+                reason: "Hot tournament tree is unexpectedly empty".to_string(),
+            })?;
             debug_assert!(!hottest.current_cursor().is_finished());
             (hottest.node_index, hottest.current_cursor().is_last_row())
         };
-        let mut boundary_node =
-            at_batch_boundary.then(|| self.algo.pop_hot_for_batch_transition().unwrap());
+        let mut boundary_node = if at_batch_boundary {
+            Some(
+                self.algo
+                    .pop_hot_for_batch_transition()?
+                    .context(UnexpectedSnafu {
+                        reason: "Hot tournament tree is unexpectedly empty".to_string(),
+                    })?,
+            )
+        } else {
+            None
+        };
         self.in_progress.push_row(node_index);
         if self.in_progress.len() >= self.batch_size {
             // We buffered enough rows.
@@ -1021,16 +1054,21 @@ impl FlatMergeIterator {
         let next = if let Some(hottest) = &mut boundary_node {
             hottest.advance_row()?
         } else {
-            self.algo.hottest_mut().unwrap().advance_row()?
+            self.algo
+                .hottest_mut()
+                .context(UnexpectedSnafu {
+                    reason: "Hot tournament tree is unexpectedly empty".to_string(),
+                })?
+                .advance_row()?
         };
         if let Some(next) = next {
             self.in_progress.push_batch(node_index, next);
         }
 
         if let Some(hottest) = boundary_node {
-            self.algo.reheap_after_batch_transition(hottest);
+            self.algo.reheap_after_batch_transition(hottest)?;
         } else {
-            self.algo.repair_hot_root();
+            self.algo.repair_hot_root()?;
         }
         Ok(())
     }
@@ -1097,7 +1135,7 @@ impl FlatMergeReader {
             }
         }
 
-        let algo = MergeAlgo::new(nodes);
+        let algo = MergeAlgo::new(nodes)?;
 
         let mut reader = Self {
             algo,
@@ -1156,8 +1194,12 @@ impl FlatMergeReader {
     async fn fetch_batch_from_hottest(&mut self) -> Result<()> {
         debug_assert!(self.in_progress.is_empty());
 
-        // Safety: next_batch() ensures the heap is not empty.
-        let mut hottest = self.algo.pop_hot_for_batch_transition().unwrap();
+        let mut hottest = self
+            .algo
+            .pop_hot_for_batch_transition()?
+            .context(UnexpectedSnafu {
+                reason: "Hot tournament tree is unexpectedly empty".to_string(),
+            })?;
         debug_assert!(!hottest.current_cursor().is_finished());
         let node_index = hottest.node_index;
         let start = Instant::now();
@@ -1166,7 +1208,7 @@ impl FlatMergeReader {
         // The node is the heap is not empty, so it must have existing rows in the builder.
         let batch = self.in_progress.take_remaining_rows(node_index, next);
         Self::maybe_output_batch(batch, &mut self.output_batch);
-        self.algo.reheap_after_batch_transition(hottest);
+        self.algo.reheap_after_batch_transition(hottest)?;
 
         Ok(())
     }
@@ -1174,13 +1216,23 @@ impl FlatMergeReader {
     /// Fetches a row from the hottest node.
     async fn fetch_row_from_hottest(&mut self) -> Result<()> {
         let (node_index, at_batch_boundary) = {
-            // Safety: next_batch() ensures the heap has more than 1 element.
-            let hottest = self.algo.hottest_mut().unwrap();
+            let hottest = self.algo.hottest_mut().context(UnexpectedSnafu {
+                reason: "Hot tournament tree is unexpectedly empty".to_string(),
+            })?;
             debug_assert!(!hottest.current_cursor().is_finished());
             (hottest.node_index, hottest.current_cursor().is_last_row())
         };
-        let mut boundary_node =
-            at_batch_boundary.then(|| self.algo.pop_hot_for_batch_transition().unwrap());
+        let mut boundary_node = if at_batch_boundary {
+            Some(
+                self.algo
+                    .pop_hot_for_batch_transition()?
+                    .context(UnexpectedSnafu {
+                        reason: "Hot tournament tree is unexpectedly empty".to_string(),
+                    })?,
+            )
+        } else {
+            None
+        };
         self.in_progress.push_row(node_index);
         if self.in_progress.len() >= self.batch_size {
             // We buffered enough rows.
@@ -1193,7 +1245,13 @@ impl FlatMergeReader {
         let next = if let Some(hottest) = &mut boundary_node {
             hottest.advance_row().await?
         } else {
-            self.algo.hottest_mut().unwrap().advance_row().await?
+            self.algo
+                .hottest_mut()
+                .context(UnexpectedSnafu {
+                    reason: "Hot tournament tree is unexpectedly empty".to_string(),
+                })?
+                .advance_row()
+                .await?
         };
         if let Some(start) = start {
             self.metrics.fetch_cost += start.elapsed();
@@ -1203,9 +1261,9 @@ impl FlatMergeReader {
         }
 
         if let Some(hottest) = boundary_node {
-            self.algo.reheap_after_batch_transition(hottest);
+            self.algo.reheap_after_batch_transition(hottest)?;
         } else {
-            self.algo.repair_hot_root();
+            self.algo.repair_hot_root()?;
         }
         Ok(())
     }
@@ -1444,12 +1502,13 @@ mod tests {
             TestNode::new(0, 0, 10),
             TestNode::new(1, 5, 15),
             TestNode::new(2, 20, 25),
-        ]);
+        ])
+        .unwrap();
         assert_eq!(0, algo.hot.peek().unwrap().id);
         assert_eq!((2, 1), (algo.hot.len(), algo.cold.len()));
 
         algo.hottest_mut().unwrap().current_rank = Some(6);
-        algo.repair_hot_root();
+        algo.repair_hot_root().unwrap();
 
         assert_eq!(1, algo.hot.peek().unwrap().id);
         assert_eq!((2, 1), (algo.hot.len(), algo.cold.len()));
@@ -1461,10 +1520,11 @@ mod tests {
             TestNode::new(0, 0, 10),
             TestNode::new(1, 5, 7),
             TestNode::new(2, 20, 25),
-        ]);
+        ])
+        .unwrap();
 
         algo.hottest_mut().unwrap().current_rank = Some(8);
-        algo.repair_hot_root();
+        algo.repair_hot_root().unwrap();
 
         assert_eq!(1, algo.hot.peek().unwrap().id);
         assert_eq!((1, 2), (algo.hot.len(), algo.cold.len()));
@@ -1472,11 +1532,12 @@ mod tests {
 
     #[test]
     fn test_merge_algo_removes_eof_root_and_refills_hot() {
-        let mut algo = MergeAlgo::new(vec![TestNode::new(0, 0, 4), TestNode::new(1, 10, 14)]);
+        let mut algo =
+            MergeAlgo::new(vec![TestNode::new(0, 0, 4), TestNode::new(1, 10, 14)]).unwrap();
         assert_eq!((1, 1), (algo.hot.len(), algo.cold.len()));
 
         algo.hottest_mut().unwrap().current_rank = None;
-        algo.repair_hot_root();
+        algo.repair_hot_root().unwrap();
 
         assert_eq!(1, algo.hot.peek().unwrap().id);
         assert_eq!((1, 0), (algo.hot.len(), algo.cold.len()));
@@ -1484,7 +1545,7 @@ mod tests {
 
     #[test]
     fn test_merge_algo_single_hot_node_can_fetch_batch() {
-        let algo = MergeAlgo::new(vec![TestNode::new(0, 0, 4), TestNode::new(1, 10, 14)]);
+        let algo = MergeAlgo::new(vec![TestNode::new(0, 0, 4), TestNode::new(1, 10, 14)]).unwrap();
 
         assert_eq!(0, algo.hot.peek().unwrap().id);
         assert_eq!((1, 1), (algo.hot.len(), algo.cold.len()));
@@ -1548,7 +1609,7 @@ mod tests {
 
     fn drain_merge_algo<T: NodeCmp>(algo: &mut MergeAlgo<T>) -> Vec<T> {
         let mut nodes = Vec::with_capacity(algo.hot.len());
-        while let Some(node) = algo.pop_hot_for_batch_transition() {
+        while let Some(node) = algo.pop_hot_for_batch_transition().unwrap() {
             nodes.push(node);
         }
         nodes
@@ -1562,7 +1623,8 @@ mod tests {
             CountedNode::new(1, 50, &compares),
             CountedNode::new(2, 40, &compares),
             CountedNode::new(3, 30, &compares),
-        ]);
+        ])
+        .unwrap();
         assert_eq!(0, algo.hot.peek().unwrap().id);
         assert_eq!((4, 0), (algo.hot.len(), algo.cold.len()));
 
@@ -1570,7 +1632,7 @@ mod tests {
         // other node, so it remains the champion.
         algo.hottest_mut().unwrap().current_rank = Some(20);
         compares.set(0);
-        algo.repair_hot_root();
+        algo.repair_hot_root().unwrap();
 
         // The second-best scan (1 compare) plus the champion-retention check
         // (1 compare) suffice; a full replay would cost 2 more compares.
@@ -1593,13 +1655,14 @@ mod tests {
             CountedNode::new(0, 10, &compares),
             CountedNode::new(1, 20, &compares),
             CountedNode::new(2, 20, &compares),
-        ]);
+        ])
+        .unwrap();
         let winner_id = algo.hot.peek().unwrap().id;
 
         // The winner drops to exactly tie the second hottest node.
         algo.hottest_mut().unwrap().current_rank = Some(20);
         compares.set(0);
-        algo.repair_hot_root();
+        algo.repair_hot_root().unwrap();
 
         // A tie retains the champion without a replay: the same node stays
         // the winner and nothing moves to the cold heap.
@@ -1623,11 +1686,12 @@ mod tests {
             CountedNode::new(1, 50, &compares),
             CountedNode::new(2, 40, &compares),
             CountedNode::new(3, 30, &compares),
-        ]);
+        ])
+        .unwrap();
 
         // First retention repair computes the second-best slot.
         algo.hottest_mut().unwrap().current_rank = Some(20);
-        algo.repair_hot_root();
+        algo.repair_hot_root().unwrap();
         assert_eq!(0, algo.hot.peek().unwrap().id);
 
         // While the winner keeps its slot and the tree is structurally
@@ -1636,7 +1700,7 @@ mod tests {
         compares.set(0);
         for rank in 21..=23 {
             algo.hottest_mut().unwrap().current_rank = Some(rank);
-            algo.repair_hot_root();
+            algo.repair_hot_root().unwrap();
         }
         assert_eq!(3, compares.get());
         assert_eq!(0, algo.hot.peek().unwrap().id);
@@ -1652,7 +1716,7 @@ mod tests {
 
     fn drain_tournament_tree<T: Ord>(tree: &mut TournamentTree<T>) -> Vec<T> {
         let mut values = Vec::with_capacity(tree.len());
-        while let Some(value) = tree.pop() {
+        while let Some(value) = tree.pop().unwrap() {
             values.push(value);
         }
         values
@@ -1667,20 +1731,39 @@ mod tests {
         assert_eq!(None, tree.peek());
         assert_eq!(None, tree.winner_mut());
         assert_eq!(None, tree.second_best());
-        assert_eq!(None, tree.pop());
+        assert_eq!(None, tree.pop().unwrap());
         tree.replay_winner();
+    }
+
+    #[test]
+    fn test_tournament_tree_rejects_full_push_without_panicking() {
+        let mut tree = TournamentTree::with_capacity(1);
+        tree.push(1).unwrap();
+
+        assert!(tree.push(2).is_err());
+        assert_eq!(Some(&1), tree.peek());
+    }
+
+    #[test]
+    fn test_tournament_tree_pop_error_preserves_state() {
+        let mut tree = TournamentTree::with_capacity(1);
+        tree.push(7).unwrap();
+        tree.len = 0;
+
+        assert!(tree.pop().is_err());
+        assert_eq!(Some(&7), tree.peek());
     }
 
     #[test]
     fn test_tournament_tree_single_element() {
         let mut tree = TournamentTree::with_capacity(1);
-        tree.push(7);
+        tree.push(7).unwrap();
 
         assert!(!tree.is_empty());
         assert_eq!(1, tree.len());
         assert_eq!(Some(&7), tree.peek());
         assert_eq!(None, tree.second_best());
-        assert_eq!(Some(7), tree.pop());
+        assert_eq!(Some(7), tree.pop().unwrap());
         assert!(tree.is_empty());
     }
 
@@ -1688,7 +1771,7 @@ mod tests {
     fn test_tournament_tree_drains_in_descending_order() {
         let mut tree = TournamentTree::with_capacity(8);
         for value in [3, 1, 4, 1, 5, 9, 2, 6] {
-            tree.push(value);
+            tree.push(value).unwrap();
         }
 
         assert_eq!(Some(&9), tree.peek());
@@ -1703,7 +1786,7 @@ mod tests {
     fn test_tournament_tree_non_power_of_two_capacity() {
         let mut tree = TournamentTree::with_capacity(5);
         for value in [40, 10, 50, 20, 30] {
-            tree.push(value);
+            tree.push(value).unwrap();
         }
 
         assert_eq!(Some(&50), tree.peek());
@@ -1715,7 +1798,7 @@ mod tests {
     fn test_tournament_tree_replays_winner_after_mutation() {
         let mut tree = TournamentTree::with_capacity(4);
         for value in [7, 3, 9, 5] {
-            tree.push(value);
+            tree.push(value).unwrap();
         }
 
         *tree.winner_mut().unwrap() = 1;
@@ -1730,7 +1813,7 @@ mod tests {
     fn test_tournament_tree_mutated_winner_can_stay_winner() {
         let mut tree = TournamentTree::with_capacity(3);
         for value in [1, 2, 9] {
-            tree.push(value);
+            tree.push(value).unwrap();
         }
 
         *tree.winner_mut().unwrap() = 8;
@@ -1744,18 +1827,18 @@ mod tests {
     fn test_tournament_tree_remove_and_reinsert() {
         let mut tree = TournamentTree::with_capacity(3);
         for value in [5, 9, 7] {
-            tree.push(value);
+            tree.push(value).unwrap();
         }
 
         // Remove the winner; its slot is freed for a later reinsert.
-        assert_eq!(Some(9), tree.pop());
-        tree.push(8);
+        assert_eq!(Some(9), tree.pop().unwrap());
+        tree.push(8).unwrap();
         assert_eq!(Some(&8), tree.peek());
         assert_eq!(vec![8, 7, 5], drain_tournament_tree(&mut tree));
 
         // Refill after the tree was drained to empty.
-        tree.push(4);
-        tree.push(6);
+        tree.push(4).unwrap();
+        tree.push(6).unwrap();
         assert_eq!(Some(&6), tree.peek());
         assert_eq!(vec![6, 4], drain_tournament_tree(&mut tree));
     }
@@ -1783,11 +1866,11 @@ mod tests {
                 0 if tree.len() < capacity => {
                     let pushed_value = next_value % value_range;
                     next_value += 1;
-                    tree.push(pushed_value);
+                    tree.push(pushed_value).unwrap();
                     oracle.push(pushed_value);
                 }
                 1 => {
-                    assert_eq!(oracle.pop(), tree.pop());
+                    assert_eq!(oracle.pop(), tree.pop().unwrap());
                 }
                 _ => {
                     let new_value = rng.random_range(0..value_range);
