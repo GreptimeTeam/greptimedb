@@ -42,6 +42,15 @@ SHOW CREATE DATABASE alter_database;
 
 ALTER DATABASE alter_database SET 'compaction.twcs.trigger_file_num'='8';
 
+ALTER DATABASE alter_database SET 'compaction.twcs.active_window.trigger_file_num'='16';
+
+SHOW CREATE DATABASE alter_database;
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
+ALTER DATABASE alter_database SET 'compaction.twcs.trigger_file_num'='8';
+
 ALTER DATABASE alter_database SET 'compaction.twcs.max_output_file_size'='512MB';
 
 SHOW CREATE DATABASE alter_database;

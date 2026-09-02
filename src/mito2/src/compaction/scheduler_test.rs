@@ -20,6 +20,9 @@ use api::v1::region::compact_request::Options;
 use common_datasource::compression::CompressionType;
 use common_meta::key::schema_name::SchemaNameValue;
 use common_time::{DatabaseTimeToLive, Timestamp};
+use store_api::mito_engine_options::{
+    COMPACTION_TYPE, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
+};
 use store_api::storage::FileId;
 use tokio::sync::{Barrier, mpsc, oneshot};
 
@@ -233,6 +236,44 @@ async fn test_find_compaction_options_db_level() {
             assert_eq!(t.active_window_l1_merge_trigger, 12);
         }
     }
+}
+
+#[tokio::test]
+async fn test_find_compaction_options_db_level_prefers_canonical_trigger_alias() {
+    let builder = VersionControlBuilder::new();
+    let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+    let region_id = builder.region_id();
+    let table_id = region_id.table_id();
+    let mut schema_value = SchemaNameValue::default();
+    schema_value
+        .extra_options
+        .insert(COMPACTION_TYPE.to_string(), "twcs".to_string());
+    schema_value
+        .extra_options
+        .insert(TWCS_TRIGGER_FILE_NUM.to_string(), "7".to_string());
+    schema_value.extra_options.insert(
+        TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+        "9".to_string(),
+    );
+    schema_metadata_manager
+        .register_region_table_info(
+            table_id,
+            "t",
+            "c",
+            "s",
+            Some(schema_value),
+            kv_backend.clone(),
+        )
+        .await;
+
+    let version_control = Arc::new(builder.build());
+    let region_opts = version_control.current().version.options.clone();
+    let (opts, _) = find_dynamic_options(region_id, &region_opts, &schema_metadata_manager)
+        .await
+        .unwrap();
+
+    let crate::region::options::CompactionOptions::Twcs(twcs) = opts;
+    assert_eq!(twcs.trigger_file_num, 9);
 }
 
 #[tokio::test]
