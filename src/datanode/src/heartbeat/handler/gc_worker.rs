@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use common_meta::instruction::{GcRegions, GcRegionsReply, InstructionReply};
+use common_meta::instruction::{GcRegions, GcRegionsReply, InstructionReply, PackedGcRegions};
 use common_meta::key::table_info::TableInfoManager;
 use common_meta::key::table_route::TableRouteManager;
 use common_telemetry::{debug, warn};
@@ -34,6 +34,7 @@ use crate::error::{GcMitoEngineSnafu, GetMetadataSnafu, Result, UnexpectedSnafu}
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 
 pub struct GcRegionsHandler;
+pub struct PackedGcRegionsHandler;
 
 #[async_trait::async_trait]
 impl InstructionHandler for GcRegionsHandler {
@@ -67,7 +68,7 @@ impl InstructionHandler for GcRegionsHandler {
                 .push(rid);
         }
 
-        let file_refs_manifest = gc_regions.file_refs_manifest.clone();
+        let file_refs_manifest = gc_regions.file_refs_manifest;
         let full_file_listing = gc_regions.full_file_listing;
 
         let ctx_clone = ctx.clone();
@@ -135,6 +136,38 @@ impl InstructionHandler for GcRegionsHandler {
                 result: Err(common_meta::instruction::InstructionError::from_error(&err)),
             })),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl InstructionHandler for PackedGcRegionsHandler {
+    type Instruction = PackedGcRegions;
+
+    async fn handle(
+        &self,
+        ctx: &HandlerContext,
+        instruction: Self::Instruction,
+    ) -> Option<InstructionReply> {
+        let manifest = match instruction.packed_file_refs_manifest.into_manifest() {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                return Some(InstructionReply::GcRegions(GcRegionsReply {
+                    result: Err(
+                        common_meta::instruction::InstructionError::legacy_internal_retryable(err),
+                    ),
+                }));
+            }
+        };
+        GcRegionsHandler
+            .handle(
+                ctx,
+                GcRegions {
+                    regions: instruction.regions,
+                    file_refs_manifest: manifest,
+                    full_file_listing: instruction.full_file_listing,
+                },
+            )
+            .await
     }
 }
 

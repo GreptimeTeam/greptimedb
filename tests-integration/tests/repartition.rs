@@ -812,6 +812,7 @@ async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
     let procedure = BatchGcProcedure::new(
         metasrv.mailbox().clone(),
         metasrv.table_metadata_manager().clone(),
+        metasrv.runtime_switch_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         region_ids.clone(),
         false,                   // full_file_listing
