@@ -1,0 +1,21 @@
+.github/workflows/release.yml
+  s_0d872f39c89c6f::t_b2b76e9e7123ba 718,744,765
+cyborg/bin/bump-versions.ts
+  s_0d872f39c89c6f::t_22faf78066df4d 23,26-32,43-46,58-61,67,70-73,76-79,81-90,93-95,98-102,105-108,113,119,121,123,137-138,143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "c281211d731ae64353253f33a27e1c395a575496",
+  "prompts": {},
+  "sessions": {
+    "s_0d872f39c89c6f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06000-f089-75d0-a34b-cafec6125bff",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
