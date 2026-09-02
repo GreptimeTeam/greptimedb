@@ -2,7 +2,6 @@
 -- DataFusion 55 decorrelates this shape into an inner join. The resulting
 -- scan-local IS NOT NULL predicates may be pushed down, but no outer_ref
 -- expression may be advertised as a remote TableScan.partial_filters predicate.
-
 CREATE TABLE lateral_fact (
     ts TIMESTAMP(3) TIME INDEX,
     k STRING,
