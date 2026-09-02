@@ -16,12 +16,13 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
+use base64::Engine;
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use store_api::region_engine::SyncRegionFromRequest;
 use store_api::region_request::{RegionFlushReason, RegionRequirements};
-use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
 use table::table_name::TableName;
@@ -579,6 +580,24 @@ impl Display for GetFileRefs {
     }
 }
 
+/// Instruction to get file references using the packed manifest format.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetPackedFileRefs {
+    /// List of region IDs to get file references from active FileHandles (in-memory).
+    pub query_regions: Vec<RegionId>,
+    /// Mapping from the src region IDs (whose file references to look for) to
+    /// the dst region IDs (where to read the manifests).
+    /// Key: The source region IDs (where files originally came from).
+    /// Value: The set of destination region IDs (whose manifests need to be read).
+    pub related_regions: HashMap<RegionId, HashSet<RegionId>>,
+}
+
+impl Display for GetPackedFileRefs {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GetPackedFileRefs(region_ids={:?})", self.query_regions)
+    }
+}
+
 /// Instruction to trigger garbage collection for a region.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GcRegions {
@@ -588,6 +607,121 @@ pub struct GcRegions {
     pub file_refs_manifest: FileRefsManifest,
     /// Whether to perform a full file listing to find orphan files.
     pub full_file_listing: bool,
+}
+
+/// Instruction to trigger garbage collection with a packed file-reference manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackedGcRegions {
+    /// The region ID to perform GC on.
+    pub regions: Vec<RegionId>,
+    /// Packed manifest used by the packed-only GC protocol.
+    pub packed_file_refs_manifest: PackedFileRefsManifest,
+    /// Whether to perform a full file listing to find orphan files.
+    pub full_file_listing: bool,
+}
+
+impl Display for PackedGcRegions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let file_refs_count = self.packed_file_refs_manifest.file_refs.len();
+        write!(
+            f,
+            "PackedGcRegions(regions={:?}, file_refs_count={}, full_file_listing={})",
+            self.regions, file_refs_count, self.full_file_listing
+        )
+    }
+}
+
+/// A packed, JSON-compatible encoding of a file reference manifest. UUIDs are
+/// packed as 16-byte records; indexed records append an 8-byte big-endian u64.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PackedFileRefsManifest {
+    pub file_refs: HashMap<RegionId, PackedRegionFileRefs>,
+    #[serde(default)]
+    pub manifest_version: HashMap<RegionId, u64>,
+    #[serde(default)]
+    pub cross_region_refs: HashMap<RegionId, HashSet<RegionId>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PackedRegionFileRefs {
+    pub files: String,
+    pub indexed: String,
+}
+
+impl PackedFileRefsManifest {
+    pub fn from_manifest(manifest: &FileRefsManifest) -> Self {
+        let engine = base64::engine::general_purpose::STANDARD;
+        let file_refs = manifest
+            .file_refs
+            .iter()
+            .map(|(region, refs)| {
+                let mut files = Vec::new();
+                let mut indexed = Vec::new();
+                for file_ref in refs {
+                    match file_ref.index_version {
+                        None => files.extend_from_slice(file_ref.file_id.as_bytes()),
+                        Some(version) => {
+                            indexed.extend_from_slice(file_ref.file_id.as_bytes());
+                            indexed.extend_from_slice(&version.to_be_bytes());
+                        }
+                    }
+                }
+                (
+                    *region,
+                    PackedRegionFileRefs {
+                        files: engine.encode(files),
+                        indexed: engine.encode(indexed),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            file_refs,
+            manifest_version: manifest.manifest_version.clone(),
+            cross_region_refs: manifest.cross_region_refs.clone(),
+        }
+    }
+
+    pub fn into_manifest(self) -> std::result::Result<FileRefsManifest, String> {
+        let engine = base64::engine::general_purpose::STANDARD;
+        let mut file_refs = HashMap::new();
+        for (region, encoded) in self.file_refs {
+            let files = engine
+                .decode(encoded.files)
+                .map_err(|e| format!("invalid packed file refs base64: {e}"))?;
+            let indexed = engine
+                .decode(encoded.indexed)
+                .map_err(|e| format!("invalid packed indexed refs base64: {e}"))?;
+            if files.len() % 16 != 0 || indexed.len() % 24 != 0 {
+                return Err(format!(
+                    "invalid packed file refs length for region {region}"
+                ));
+            }
+            let mut refs = HashSet::new();
+            for bytes in files.chunks_exact(16) {
+                let mut id = [0; 16];
+                id.copy_from_slice(bytes);
+                refs.insert(FileRef::new(region, FileId::from_bytes(id), None));
+            }
+            for bytes in indexed.chunks_exact(24) {
+                let mut id = [0; 16];
+                id.copy_from_slice(&bytes[..16]);
+                let mut version = [0; 8];
+                version.copy_from_slice(&bytes[16..]);
+                refs.insert(FileRef::new(
+                    region,
+                    FileId::from_bytes(id),
+                    Some(u64::from_be_bytes(version)),
+                ));
+            }
+            file_refs.insert(region, refs);
+        }
+        Ok(FileRefsManifest {
+            file_refs,
+            manifest_version: self.manifest_version,
+            cross_region_refs: self.cross_region_refs,
+        })
+    }
 }
 
 impl Display for GcRegions {
@@ -620,6 +754,26 @@ impl Display for GetFileRefsReply {
             "GetFileRefsReply(success={}, file_refs_count={}, error={:?})",
             self.success,
             self.file_refs_manifest.file_refs.len(),
+            self.error
+        )
+    }
+}
+
+/// Reply for GetPackedFileRefs instruction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetPackedFileRefsReply {
+    pub packed_file_refs_manifest: PackedFileRefsManifest,
+    pub success: bool,
+    pub error: Option<InstructionError>,
+}
+
+impl Display for GetPackedFileRefsReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GetPackedFileRefsReply(success={}, file_refs_count={}, error={:?})",
+            self.success,
+            self.packed_file_refs_manifest.file_refs.len(),
             self.error
         )
     }
@@ -827,8 +981,12 @@ pub enum Instruction {
     FlushRegions(FlushRegions),
     /// Gets file references for regions.
     GetFileRefs(GetFileRefs),
+    /// Gets file references using the packed manifest format.
+    GetPackedFileRefs(GetPackedFileRefs),
     /// Triggers garbage collection for a region.
     GcRegions(GcRegions),
+    /// Triggers garbage collection with a packed file-reference manifest.
+    PackedGcRegions(PackedGcRegions),
     /// Temporary suspend serving reads or writes
     Suspend,
     /// Makes regions enter staging state.
@@ -1111,6 +1269,7 @@ pub enum InstructionReply {
     DowngradeRegions(DowngradeRegionsReply),
     FlushRegions(FlushRegionReply),
     GetFileRefs(GetFileRefsReply),
+    GetPackedFileRefs(GetPackedFileRefsReply),
     GcRegions(GcRegionsReply),
     EnterStagingRegions(EnterStagingRegionsReply),
     SyncRegions(SyncRegionsReply),
@@ -1131,6 +1290,9 @@ impl Display for InstructionReply {
             }
             Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
             Self::GetFileRefs(reply) => write!(f, "InstructionReply::GetFileRefs({})", reply),
+            Self::GetPackedFileRefs(reply) => {
+                write!(f, "InstructionReply::GetPackedFileRefs({})", reply)
+            }
             Self::GcRegions(reply) => write!(f, "InstructionReply::GcRegion({})", reply),
             Self::EnterStagingRegions(reply) => {
                 write!(
@@ -1769,6 +1931,167 @@ mod tests {
             }
             _ => panic!("Expected FlushRegions instruction"),
         }
+    }
+
+    #[test]
+    fn test_legacy_gc_file_refs_compatibility() {
+        #[derive(Debug, Deserialize)]
+        struct LegacyGetFileRefs {
+            query_regions: Vec<RegionId>,
+            related_regions: HashMap<RegionId, HashSet<RegionId>>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct LegacyGetFileRefsReply {
+            file_refs_manifest: FileRefsManifest,
+            success: bool,
+            error: Option<InstructionError>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct LegacyGcRegions {
+            regions: Vec<RegionId>,
+            file_refs_manifest: serde_json::Value,
+            full_file_listing: bool,
+        }
+
+        #[derive(Debug, Deserialize)]
+        enum LegacyInstruction {
+            GetFileRefs(LegacyGetFileRefs),
+            GcRegions(LegacyGcRegions),
+        }
+
+        let get_file_refs = Instruction::GetFileRefs(GetFileRefs {
+            query_regions: vec![RegionId::new(7, 3)],
+            related_regions: HashMap::new(),
+        });
+        let get_file_refs_json = serde_json::to_string(&get_file_refs).unwrap();
+        let legacy_get_file_refs: LegacyInstruction =
+            serde_json::from_str(&get_file_refs_json).unwrap();
+        let LegacyInstruction::GetFileRefs(legacy_get_file_refs) = legacy_get_file_refs else {
+            panic!("expected legacy GetFileRefs instruction");
+        };
+        assert_eq!(legacy_get_file_refs.query_regions.len(), 1);
+        assert!(legacy_get_file_refs.related_regions.is_empty());
+
+        let reply = GetFileRefsReply {
+            file_refs_manifest: FileRefsManifest::default(),
+            success: true,
+            error: None,
+        };
+        let reply_json = serde_json::to_string(&reply).unwrap();
+        let legacy_reply: LegacyGetFileRefsReply = serde_json::from_str(&reply_json).unwrap();
+        let current_reply: GetFileRefsReply = serde_json::from_str(&reply_json).unwrap();
+        assert!(legacy_reply.success);
+        assert!(legacy_reply.error.is_none());
+        assert!(legacy_reply.file_refs_manifest.file_refs.is_empty());
+        assert_eq!(current_reply, reply);
+
+        let packed = Instruction::PackedGcRegions(PackedGcRegions {
+            regions: vec![],
+            packed_file_refs_manifest: PackedFileRefsManifest::default(),
+            full_file_listing: false,
+        });
+        let packed_json = serde_json::to_string(&packed).unwrap();
+        assert!(serde_json::from_str::<LegacyInstruction>(&packed_json).is_err());
+
+        let legacy_gc = serde_json::json!({
+            "GcRegions": {
+                "regions": [],
+                "file_refs_manifest": {},
+                "full_file_listing": false
+            }
+        });
+        let LegacyInstruction::GcRegions(legacy_gc) = serde_json::from_value(legacy_gc).unwrap()
+        else {
+            panic!("expected legacy GcRegions instruction");
+        };
+        assert!(legacy_gc.regions.is_empty());
+        assert!(!legacy_gc.full_file_listing);
+        assert!(legacy_gc.file_refs_manifest.is_object());
+    }
+
+    #[test]
+    fn test_packed_gc_regions_round_trip_is_distinct() {
+        let instruction = Instruction::PackedGcRegions(PackedGcRegions {
+            regions: vec![RegionId::new(7, 3)],
+            packed_file_refs_manifest: PackedFileRefsManifest::default(),
+            full_file_listing: true,
+        });
+        let serialized = serde_json::to_string(&instruction).unwrap();
+        assert!(serialized.contains("PackedGcRegions"));
+        assert_eq!(
+            serde_json::from_str::<Instruction>(&serialized).unwrap(),
+            instruction
+        );
+    }
+
+    #[test]
+    fn test_packed_file_refs_manifest_round_trip_and_validation() {
+        let region = RegionId::new(7, 3);
+        let file_id = FileId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let mut manifest = FileRefsManifest::default();
+        manifest.file_refs.insert(
+            region,
+            HashSet::from([
+                FileRef::new(region, file_id, None),
+                FileRef::new(region, file_id, Some(0)),
+                FileRef::new(region, file_id, Some(u64::MAX)),
+            ]),
+        );
+        manifest.manifest_version.insert(region, 42);
+        manifest
+            .cross_region_refs
+            .insert(region, HashSet::from([RegionId::new(7, 4)]));
+        let packed = PackedFileRefsManifest::from_manifest(&manifest);
+        assert_eq!(packed.clone().into_manifest().unwrap(), manifest);
+        let mut missing_files = serde_json::to_value(&packed).unwrap();
+        missing_files
+            .get_mut("file_refs")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|file_refs| file_refs.values_mut().next())
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("files");
+        assert!(serde_json::from_value::<PackedFileRefsManifest>(missing_files).is_err());
+
+        let mut missing_indexed = serde_json::to_value(&packed).unwrap();
+        missing_indexed
+            .get_mut("file_refs")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|file_refs| file_refs.values_mut().next())
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("indexed");
+        assert!(serde_json::from_value::<PackedFileRefsManifest>(missing_indexed).is_err());
+
+        let mut malformed = packed.clone();
+        malformed.file_refs.get_mut(&region).unwrap().indexed = "!".to_string();
+        assert!(malformed.clone().into_manifest().is_err());
+        malformed.file_refs.get_mut(&region).unwrap().indexed =
+            base64::engine::general_purpose::STANDARD.encode([0; 1]);
+        assert!(malformed.into_manifest().is_err());
+    }
+
+    #[test]
+    fn test_packed_file_refs_is_smaller_than_legacy() {
+        let region = RegionId::new(7, 3);
+        let mut manifest = FileRefsManifest::default();
+        manifest.file_refs.insert(
+            region,
+            (0..500)
+                .map(|i| {
+                    let id =
+                        FileId::parse_str(&format!("00000000-0000-0000-0000-{i:012}")).unwrap();
+                    FileRef::new(region, id, None)
+                })
+                .collect(),
+        );
+        let legacy = serde_json::to_vec(&manifest).unwrap().len();
+        let packed = serde_json::to_vec(&PackedFileRefsManifest::from_manifest(&manifest))
+            .unwrap()
+            .len();
+        assert!(packed * 2 < legacy, "packed={packed}, legacy={legacy}");
     }
 
     #[test]

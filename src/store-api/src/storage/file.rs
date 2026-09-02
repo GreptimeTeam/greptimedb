@@ -51,6 +51,11 @@ impl FileId {
     pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
+
+    /// Constructs a file id from its packed 16-byte UUID representation.
+    pub fn from_bytes(bytes: [u8; 16]) -> FileId {
+        FileId(Uuid::from_bytes(bytes))
+    }
 }
 
 impl From<FileId> for Uuid {

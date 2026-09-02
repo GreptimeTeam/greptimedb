@@ -18,8 +18,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::instruction::{self, GcRegions, GetFileRefs, GetFileRefsReply, InstructionReply};
+use common_meta::instruction::{
+    self, GetPackedFileRefs, GetPackedFileRefsReply, InstructionReply, PackedGcRegions,
+};
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::lock_key::{RegionLock, TableLock};
@@ -34,6 +37,7 @@ use common_telemetry::tracing::Instrument as _;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info, warn};
 use futures::future::join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
@@ -49,14 +53,14 @@ use crate::metrics::{METRIC_META_GC_DATANODE_CALLS_TOTAL, METRIC_META_GC_FAILED_
 use crate::procedure::utils::{instruction_error_result, instruction_to_error};
 use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 
-async fn send_get_file_refs_inner(
+async fn send_get_packed_file_refs_inner(
     mailbox: &MailboxRef,
     server_addr: &str,
     peer: &Peer,
-    instruction: GetFileRefs,
+    instruction: GetPackedFileRefs,
     timeout: Duration,
 ) -> Result<MailboxReceiver> {
-    let instruction = instruction::Instruction::GetFileRefs(instruction);
+    let instruction = instruction::Instruction::GetPackedFileRefs(instruction);
     let tracing_ctx = TracingContext::from_current_span();
     let msg = MailboxMessage::json_message(
         &format!("Get file references: {}", instruction),
@@ -75,25 +79,25 @@ async fn send_get_file_refs_inner(
         .await
 }
 
-async fn recv_get_file_refs_reply(
+async fn recv_get_packed_file_refs_reply(
     peer: &Peer,
     mailbox_rx: MailboxReceiver,
-) -> Result<GetFileRefsReply> {
+) -> Result<GetPackedFileRefsReply> {
     let reply = match mailbox_rx.await {
         Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
         Err(e) => {
             error!(
-                e; "Failed to receive reply from datanode {} for GetFileRefs instruction",
+                e; "Failed to receive reply from datanode {} for GetPackedFileRefs instruction",
                 peer,
             );
             return Err(e);
         }
     };
 
-    let InstructionReply::GetFileRefs(reply) = reply else {
+    let InstructionReply::GetPackedFileRefs(reply) = reply else {
         return error::UnexpectedInstructionReplySnafu {
-            mailbox_message: format!("{:?}", reply),
-            reason: "Unexpected reply of the GetFileRefs instruction",
+            mailbox_message: "unexpected instruction reply for GetPackedFileRefs".to_string(),
+            reason: "Unexpected reply of the GetPackedFileRefs instruction",
         }
         .fail();
     };
@@ -104,12 +108,11 @@ async fn recv_get_file_refs_reply(
 async fn send_gc_regions_inner(
     mailbox: &MailboxRef,
     peer: &Peer,
-    gc_regions: &GcRegions,
+    instruction: instruction::Instruction,
     server_addr: &str,
     timeout: Duration,
     description: &str,
 ) -> Result<MailboxReceiver> {
-    let instruction = instruction::Instruction::GcRegions(gc_regions.clone());
     let tracing_ctx = TracingContext::from_current_span();
     let msg = MailboxMessage::json_message(
         &format!("{}: {}", description, instruction),
@@ -128,9 +131,45 @@ async fn send_gc_regions_inner(
         .await
 }
 
+fn scoped_gc_instruction(
+    regions: Vec<RegionId>,
+    full_manifest: &FileRefsManifest,
+    full_file_listing: bool,
+) -> instruction::Instruction {
+    let scoped = FileRefsManifest {
+        file_refs: regions
+            .iter()
+            .filter_map(|region| {
+                full_manifest
+                    .file_refs
+                    .get(region)
+                    .map(|refs| (*region, refs.clone()))
+            })
+            .collect(),
+        manifest_version: regions
+            .iter()
+            .filter_map(|region| {
+                full_manifest
+                    .manifest_version
+                    .get(region)
+                    .map(|version| (*region, *version))
+            })
+            .collect(),
+        cross_region_refs: HashMap::new(),
+    };
+
+    instruction::Instruction::PackedGcRegions(PackedGcRegions {
+        regions,
+        packed_file_refs_manifest: common_meta::instruction::PackedFileRefsManifest::from_manifest(
+            &scoped,
+        ),
+        full_file_listing,
+    })
+}
+
 async fn recv_gc_regions_reply(
     peer: &Peer,
-    gc_regions: &GcRegions,
+    regions: &[RegionId],
     description: &str,
     mailbox_rx: MailboxReceiver,
 ) -> Result<GcReport> {
@@ -147,7 +186,7 @@ async fn recv_gc_regions_reply(
 
     let InstructionReply::GcRegions(reply) = reply else {
         return error::UnexpectedInstructionReplySnafu {
-            mailbox_message: format!("{:?}", reply),
+            mailbox_message: "unexpected instruction reply for GcRegions".to_string(),
             reason: "Unexpected reply of the GcRegions instruction",
         }
         .fail();
@@ -158,14 +197,16 @@ async fn recv_gc_regions_reply(
         Ok(report) => Ok(report),
         Err(e) => {
             error!(
-                e; "Datanode {} reported error during GC for regions {:?}",
-                peer, gc_regions
+                e; "Datanode {} reported error during GC for {} regions",
+                peer, regions.len()
             );
             instruction_error_result(
                 &e,
                 format!(
-                    "Datanode {} reported error during GC for regions {:?}: {}",
-                    peer, gc_regions, e
+                    "Datanode {} reported error during GC for {} regions: {}",
+                    peer,
+                    regions.len(),
+                    e
                 ),
             )
         }
@@ -177,6 +218,7 @@ async fn recv_gc_regions_reply(
 pub struct BatchGcProcedure {
     mailbox: MailboxRef,
     table_metadata_manager: TableMetadataManagerRef,
+    runtime_switch_manager: RuntimeSwitchManagerRef,
     data: BatchGcData,
 }
 
@@ -217,9 +259,11 @@ pub enum State {
 impl BatchGcProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::BatchGcProcedure";
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mailbox: MailboxRef,
         table_metadata_manager: TableMetadataManagerRef,
+        runtime_switch_manager: RuntimeSwitchManagerRef,
         server_addr: String,
         regions: Vec<RegionId>,
         full_file_listing: bool,
@@ -229,6 +273,7 @@ impl BatchGcProcedure {
         Self {
             mailbox,
             table_metadata_manager,
+            runtime_switch_manager,
             data: BatchGcData {
                 state: State::Start,
                 server_addr,
@@ -251,6 +296,7 @@ impl BatchGcProcedure {
     pub fn new_update_repartition_for_test(
         mailbox: MailboxRef,
         table_metadata_manager: TableMetadataManagerRef,
+        runtime_switch_manager: RuntimeSwitchManagerRef,
         server_addr: String,
         regions: Vec<RegionId>,
         file_refs: FileRefsManifest,
@@ -259,6 +305,7 @@ impl BatchGcProcedure {
         Self {
             mailbox,
             table_metadata_manager,
+            runtime_switch_manager,
             data: BatchGcData {
                 state: State::UpdateRepartition,
                 server_addr,
@@ -284,6 +331,24 @@ impl BatchGcProcedure {
             }
             .build()
         })
+    }
+
+    async fn check_maintenance_mode(&self) -> ProcedureResult<()> {
+        let enabled = self
+            .runtime_switch_manager
+            .maintenance_mode()
+            .await
+            .context(error::RuntimeSwitchManagerSnafu)
+            .map_err(ProcedureError::retry_later)?;
+        if enabled {
+            return Err(ProcedureError::retry_later(
+                error::RetryLaterSnafu {
+                    reason: "maintenance mode is enabled".to_string(),
+                }
+                .build(),
+            ));
+        }
+        Ok(())
     }
 
     fn merge_gc_report(&mut self, report: GcReport) {
@@ -644,10 +709,10 @@ impl BatchGcProcedure {
             }
         }
 
-        // Send GetFileRefs instructions to each datanode
+        // Send packed GetFileRefs instructions to each datanode
         let mut all_file_refs: HashMap<RegionId, HashSet<_>> = HashMap::new();
         let mut all_manifest_versions = HashMap::new();
-        let mut all_cross_region_refs = HashMap::new();
+        let mut all_cross_region_refs: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
 
         let mut peers = HashSet::new();
         peers.extend(datanode2query_regions.keys().cloned());
@@ -655,33 +720,34 @@ impl BatchGcProcedure {
 
         let mailbox = &self.mailbox;
         let server_addr = &self.data.server_addr;
-        let mut tasks = Vec::new();
-
+        // Each future owns both send and receive, so a completed reply is merged and
+        // dropped immediately rather than retained in a second join_all buffer.
+        let mut tasks = FuturesUnordered::new();
         for peer in peers {
             let regions = datanode2query_regions.remove(&peer).unwrap_or_default();
             let related_regions_for_peer =
                 datanode2related_regions.remove(&peer).unwrap_or_default();
-
             if regions.is_empty() && related_regions_for_peer.is_empty() {
                 continue;
             }
-
             tasks.push(async move {
-                let instruction = GetFileRefs {
-                    query_regions: regions.clone(),
-                    related_regions: related_regions_for_peer.clone(),
+                let instruction = GetPackedFileRefs {
+                    query_regions: regions,
+                    related_regions: related_regions_for_peer,
                 };
-
-                let reply =
-                    send_get_file_refs_inner(mailbox, server_addr, &peer, instruction, timeout)
-                        .await;
-
-                (peer, regions, related_regions_for_peer, reply)
+                let rx = send_get_packed_file_refs_inner(
+                    mailbox,
+                    server_addr,
+                    &peer,
+                    instruction,
+                    timeout,
+                )
+                .await?;
+                let reply = recv_get_packed_file_refs_reply(&peer, rx).await?;
+                Ok::<_, crate::error::Error>((peer, reply))
             });
         }
 
-        let mut recv_tasks = Vec::new();
-        // store error to make sure metrics doesn't ignore other peers
         let mut first_error = None;
         let mut record_get_file_refs_error = |e| {
             METRIC_META_GC_DATANODE_CALLS_TOTAL
@@ -691,80 +757,53 @@ impl BatchGcProcedure {
                 first_error = Some(e);
             }
         };
-        for (peer, regions, related_regions_for_peer, reply) in join_all(tasks).await {
-            match reply {
-                Ok(mailbox_rx) => {
-                    recv_tasks.push(async move {
-                        let reply = recv_get_file_refs_reply(&peer, mailbox_rx).await;
-                        (peer, regions, related_regions_for_peer, reply)
-                    });
-                }
-                Err(e) => record_get_file_refs_error(e),
-            }
-        }
-
-        let replies = join_all(recv_tasks).await;
-
-        for (peer, regions, related_regions_for_peer, reply) in replies {
-            let reply = match reply {
+        while let Some(result) = tasks.next().await {
+            let (peer, reply) = match result {
                 Ok(reply) => reply,
                 Err(e) => {
                     record_get_file_refs_error(e);
                     continue;
                 }
             };
-            debug!(
-                "Got file references from datanode: {:?}, query_regions: {:?}, related_regions: {:?}, reply: {:?}",
-                peer, regions, related_regions_for_peer, reply
-            );
-
             if !reply.success {
-                METRIC_META_GC_DATANODE_CALLS_TOTAL
-                    .with_label_values(&["get_file_refs", "error"])
-                    .inc();
                 let err = if let Some(error) = &reply.error {
                     instruction_to_error(
                         error,
-                        format!(
-                            "Failed to get file references from datanode {}: {:?}",
-                            peer, error
-                        ),
+                        format!("Failed to get file references from datanode {peer}"),
                     )
                 } else {
                     error::UnexpectedSnafu {
-                        violated: format!(
-                            "Failed to get file references from datanode {}: {:?}",
-                            peer, reply.error
-                        ),
+                        violated:
+                            "Datanode returned an unsuccessful GetPackedFileRefs reply without an error"
+                                .to_string(),
                     }
                     .build()
                 };
                 record_get_file_refs_error(err);
                 continue;
             }
+            let manifest = match reply.packed_file_refs_manifest.into_manifest() {
+                Ok(manifest) => manifest,
+                Err(err) => {
+                    record_get_file_refs_error(error::UnexpectedSnafu { violated: err }.build());
+                    continue;
+                }
+            };
             METRIC_META_GC_DATANODE_CALLS_TOTAL
                 .with_label_values(&["get_file_refs", "success"])
                 .inc();
-
-            // Merge the file references from this datanode
-            for (region_id, file_refs) in reply.file_refs_manifest.file_refs {
-                all_file_refs
-                    .entry(region_id)
-                    .or_default()
-                    .extend(file_refs);
+            for (region_id, refs) in manifest.file_refs {
+                all_file_refs.entry(region_id).or_default().extend(refs);
             }
-
-            // region manifest version should be the smallest one among all peers, so outdated region can be detected
-            for (region_id, version) in reply.file_refs_manifest.manifest_version {
+            for (region_id, version) in manifest.manifest_version {
                 let entry = all_manifest_versions.entry(region_id).or_insert(version);
                 *entry = (*entry).min(version);
             }
-
-            for (region_id, related_region_ids) in reply.file_refs_manifest.cross_region_refs {
-                let entry = all_cross_region_refs
+            for (region_id, related) in manifest.cross_region_refs {
+                all_cross_region_refs
                     .entry(region_id)
-                    .or_insert_with(HashSet::new);
-                entry.extend(related_region_ids);
+                    .or_default()
+                    .extend(related);
             }
         }
 
@@ -813,28 +852,23 @@ impl BatchGcProcedure {
         let tasks = datanode2regions
             .into_iter()
             .map(|(peer, regions_for_peer)| {
-                let gc_regions = GcRegions {
-                    regions: regions_for_peer.clone(),
-                    // file_refs_manifest could be somewhere large. But still intentionally clone per datanode here:
-                    // this path is admin-triggered or scheduler-triggered, peer count is expected to be bounded, and
-                    // and abnormal manifest growth should be addressed at the source
-                    file_refs_manifest: file_refs.clone(),
-                    full_file_listing,
-                };
-                let region_count = gc_regions.regions.len() as u64;
+                let region_count = regions_for_peer.len() as u64;
+                let regions = regions_for_peer.clone();
+                let instruction =
+                    scoped_gc_instruction(regions_for_peer, file_refs, full_file_listing);
 
                 async move {
                     let report = send_gc_regions_inner(
                         mailbox,
                         &peer,
-                        &gc_regions,
+                        instruction,
                         server_addr,
                         timeout,
                         "Batch GC",
                     )
                     .await;
 
-                    (peer, gc_regions, region_count, report)
+                    (peer, regions, region_count, report)
                 }
             });
 
@@ -851,12 +885,12 @@ impl BatchGcProcedure {
                 first_error = Some(e);
             }
         };
-        for (peer, gc_regions, region_count, report) in join_all(tasks).await {
+        for (peer, regions, region_count, report) in join_all(tasks).await {
             match report {
                 Ok(mailbox_rx) => {
                     recv_tasks.push(async move {
                         let report =
-                            recv_gc_regions_reply(&peer, &gc_regions, "Batch GC", mailbox_rx).await;
+                            recv_gc_regions_reply(&peer, &regions, "Batch GC", mailbox_rx).await;
                         (peer, region_count, report)
                     });
                 }
@@ -887,12 +921,12 @@ impl BatchGcProcedure {
 
             if need_retry.is_empty() {
                 info!(
-                    "GC report from datanode {}: successfully deleted files for regions {:?}",
+                    "GC report from datanode {}: successfully deleted files for region IDs {:?}",
                     peer, success
                 );
             } else {
                 warn!(
-                    "GC report from datanode {}: successfully deleted files for regions {:?}, need retry for regions {:?}",
+                    "GC report from datanode {}: successfully deleted files for region IDs {:?}, need retry for region IDs {:?}",
                     peer, success, need_retry
                 );
             }
@@ -921,6 +955,8 @@ impl Procedure for BatchGcProcedure {
     }
 
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
+        self.check_maintenance_mode().await?;
+
         match self.data.state {
             State::Start => {
                 let _regions_span = common_telemetry::tracing::debug_span!(
@@ -1122,11 +1158,15 @@ mod tests {
 
     use api::v1::meta::MailboxMessage;
     use api::v1::meta::mailbox_message::Payload;
-    use common_meta::instruction::{GcRegionsReply, InstructionReply};
+    use common_meta::instruction::{GcRegionsReply, Instruction, InstructionReply};
     use common_meta::key::TableMetadataManager;
+    use common_meta::key::runtime_switch::RuntimeSwitchManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::test_util::MockKvBackendBuilder;
     use common_meta::peer::Peer;
     use common_meta::sequence::SequenceBuilder;
+    use common_procedure::Context as ProcedureContext;
+    use common_procedure_test::MockContextProvider;
     use common_time::util::current_time_millis;
     use store_api::storage::FileId;
     use tokio::sync::mpsc;
@@ -1134,6 +1174,38 @@ mod tests {
     use super::*;
     use crate::procedure::test_util::{MailboxContext, send_mock_reply};
     use crate::service::mailbox::Channel;
+
+    #[test]
+    fn test_scoped_gc_instruction_selects_and_scopes_manifest() {
+        let region = RegionId::new(7, 3);
+        let other = RegionId::new(7, 4);
+        let mut manifest = FileRefsManifest::default();
+        manifest.file_refs.insert(region, HashSet::new());
+        manifest.file_refs.insert(other, HashSet::new());
+        manifest.manifest_version.insert(region, 42);
+
+        let packed = scoped_gc_instruction(vec![region], &manifest, true);
+        let Instruction::PackedGcRegions(packed) = packed else {
+            panic!("expected packed instruction");
+        };
+        assert_eq!(packed.regions, vec![region]);
+        assert_eq!(
+            packed.packed_file_refs_manifest.manifest_version[&region],
+            42
+        );
+        assert!(
+            !packed
+                .packed_file_refs_manifest
+                .file_refs
+                .contains_key(&other)
+        );
+        assert!(
+            packed
+                .packed_file_refs_manifest
+                .cross_region_refs
+                .is_empty()
+        );
+    }
 
     #[test]
     fn test_done_with_gc_report_keeps_report() {
@@ -1215,6 +1287,7 @@ mod tests {
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
         let mailbox_sequence =
             SequenceBuilder::new("test_batch_gc_partial_report", kv_backend).build();
         let mut mailbox = MailboxContext::new(mailbox_sequence);
@@ -1230,6 +1303,7 @@ mod tests {
         let mut procedure = BatchGcProcedure::new(
             mailbox.mailbox().clone(),
             table_metadata_manager,
+            runtime_switch_manager,
             "localhost".to_string(),
             vec![first_region, second_region],
             true,
@@ -1265,16 +1339,125 @@ mod tests {
     fn batch_gc_procedure() -> BatchGcProcedure {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
-        let mailbox_sequence = SequenceBuilder::new("test_batch_gc_procedure", kv_backend).build();
+        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend));
+        let mailbox_sequence =
+            SequenceBuilder::new("test_batch_gc_procedure", Arc::new(MemoryKvBackend::new()))
+                .build();
         let mailbox = MailboxContext::new(mailbox_sequence);
         BatchGcProcedure::new(
             mailbox.mailbox().clone(),
             table_metadata_manager,
+            runtime_switch_manager,
             "localhost".to_string(),
             vec![RegionId::new(1024, 1)],
             true,
             Duration::from_secs(10),
             HashMap::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_mode_gates_every_gc_state() {
+        let states = [
+            State::Start,
+            State::Acquiring,
+            State::Gcing,
+            State::UpdateRepartition,
+        ];
+
+        for state in states {
+            let kv_backend = Arc::new(MemoryKvBackend::new());
+            let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+            let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
+            runtime_switch_manager.set_maintenance_mode().await.unwrap();
+            let mailbox_sequence =
+                SequenceBuilder::new("test_batch_gc_maintenance_gate", kv_backend).build();
+            let mut mailbox = MailboxContext::new(mailbox_sequence);
+            let (tx, mut rx) = mpsc::channel(1);
+            mailbox
+                .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
+                .await;
+            let mut procedure = BatchGcProcedure::new(
+                mailbox.mailbox().clone(),
+                table_metadata_manager,
+                runtime_switch_manager,
+                "localhost".to_string(),
+                vec![RegionId::new(1024, 1)],
+                true,
+                Duration::from_secs(10),
+                HashMap::new(),
+            );
+            procedure.data.state = state.clone();
+            let dump_before = procedure.dump().unwrap();
+
+            let ctx = ProcedureContext {
+                procedure_id: common_procedure::ProcedureId::random(),
+                provider: Arc::new(MockContextProvider::default()),
+                event_context: None,
+            };
+            let err = procedure.execute(&ctx).await.unwrap_err();
+
+            assert!(err.is_retry_later());
+            assert_eq!(procedure.data.state, state);
+            assert_eq!(procedure.dump().unwrap(), dump_before);
+            if matches!(state, State::Acquiring | State::Gcing) {
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_mode_read_error_retries_without_advancing_state() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing_once_calls = calls.clone();
+        let kv_backend = Arc::new(
+            MockKvBackendBuilder::default()
+                .range_fn(Arc::new(move |_| {
+                    if failing_once_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        common_meta::error::UnexpectedSnafu {
+                            err_msg: "maintenance read failed",
+                        }
+                        .fail()
+                    } else {
+                        Ok(common_meta::rpc::store::RangeResponse {
+                            kvs: vec![],
+                            more: false,
+                        })
+                    }
+                }))
+                .build()
+                .unwrap(),
+        );
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
+        let mailbox_sequence =
+            SequenceBuilder::new("test_batch_gc_maintenance_read_error", kv_backend).build();
+        let mailbox = MailboxContext::new(mailbox_sequence);
+        let mut procedure = BatchGcProcedure::new(
+            mailbox.mailbox().clone(),
+            table_metadata_manager,
+            runtime_switch_manager,
+            "localhost".to_string(),
+            vec![RegionId::new(1024, 1)],
+            true,
+            Duration::from_secs(10),
+            HashMap::new(),
+        );
+        let ctx = ProcedureContext {
+            procedure_id: common_procedure::ProcedureId::random(),
+            provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
+        };
+        let dump_before = procedure.dump().unwrap();
+
+        assert!(procedure.execute(&ctx).await.unwrap_err().is_retry_later());
+        assert_eq!(procedure.data.state, State::Start);
+        assert_eq!(procedure.dump().unwrap(), dump_before);
+
+        assert!(matches!(
+            procedure.execute(&ctx).await.unwrap(),
+            Status::Executing { .. }
+        ));
+        assert_eq!(procedure.data.state, State::Acquiring);
     }
 }
