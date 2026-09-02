@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use datafusion_expr::{Expr, col, lit};
+use datafusion_expr::{col, lit};
 use datatypes::arrow::array::{Int64Array, UInt32Array, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
 use futures::TryStreamExt;
@@ -48,7 +48,9 @@ impl SstRangeIndexSearcher {
     /// `series` is one batch emitted by a
     /// [`MetricSeriesIdStream`](crate::series_index::MetricSeriesIdStream). The
     /// returned half-open ranges are relative to the start of `row_group_id`,
-    /// sorted, non-overlapping, and coalesced when adjacent.
+    /// sorted, non-overlapping, and coalesced when adjacent. The number of
+    /// returned ranges may be less than the number of input series if some
+    /// series don't exist in the row group.
     pub async fn search(
         &self,
         row_group_id: u32,
@@ -96,39 +98,23 @@ fn validate_sorted_series(series: &[MetricSeriesId]) -> Result<()> {
 }
 
 fn search_predicate(row_group_id: u32, series: &[MetricSeriesId]) -> Result<Predicate> {
-    let mut table_exprs = Vec::new();
-    let mut table_start = 0;
-    while table_start < series.len() {
-        let table_id = series[table_start].table_id;
-        let mut table_end = table_start;
-        let mut last_tsid = None;
-        let mut tsids = Vec::new();
-        while table_end < series.len() && series[table_end].table_id == table_id {
-            let tsid = series[table_end].tsid;
-            if last_tsid != Some(tsid) {
-                tsids.push(lit(tsid));
-                last_tsid = Some(tsid);
-            }
-            table_end += 1;
-        }
-        table_exprs.push(
-            col(TABLE_ID_COLUMN)
-                .eq(lit(table_id))
-                .and(col(TSID_COLUMN).in_list(tsids, false)),
-        );
-        table_start = table_end;
-    }
-
-    let series_expr = table_exprs
-        .into_iter()
-        .reduce(Expr::or)
+    let min_table_id = series
+        .first()
         .context(UnexpectedSnafu {
             reason: "cannot build a range-index predicate for an empty series set",
-        })?;
+        })?
+        .table_id;
+    let max_table_id = series
+        .last()
+        .context(UnexpectedSnafu {
+            reason: "cannot build a range-index predicate for an empty series set",
+        })?
+        .table_id;
 
     Ok(Predicate::new(vec![
         col(ROW_GROUP_ID_COLUMN).eq(lit(row_group_id)),
-        series_expr,
+        col(TABLE_ID_COLUMN).gt_eq(lit(min_table_id)),
+        col(TABLE_ID_COLUMN).lt_eq(lit(max_table_id)),
     ]))
 }
 
@@ -160,10 +146,15 @@ fn validate_index_schema(schema: &SchemaRef) -> Result<()> {
 }
 
 struct RangeMergeState<'a> {
+    /// Source SST row group whose ranges are being searched.
     row_group_id: u32,
+    /// Sorted metric series to match against the range index.
     series: &'a [MetricSeriesId],
+    /// Cursor to the next series to match.
     series_index: usize,
+    /// Last range-index key read, used to validate ordering across batches.
     last_index_key: Option<(u32, MetricSeriesId)>,
+    /// Matching row ranges, sorted and coalesced when adjacent.
     ranges: Vec<Range<usize>>,
 }
 
@@ -433,14 +424,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pruning_uses_the_source_row_group_and_series_pairs() {
+    async fn pruning_uses_the_source_row_group_and_table_id_range() {
         let store = object_store();
         let path = "range-pruning.parquet";
         write_index(&store, path).await;
         let reader = ParquetIndexReader::open(store, path).await.unwrap();
-        let predicate = search_predicate(1, &[series(2, 20)]).unwrap();
+        let predicate = search_predicate(0, &[series(1, 999), series(2, 999)]).unwrap();
 
-        assert_eq!(reader.row_groups_to_read(&predicate), vec![2]);
+        assert_eq!(reader.row_groups_to_read(&predicate), vec![0, 1]);
     }
 
     #[test]
