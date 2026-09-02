@@ -905,6 +905,7 @@ mod tests {
                 "resource_attributes.service.instance.id",
                 "resource_attributes.k8s.pod.uid",
                 "resource_attributes.k8s.pod.name",
+                "resource_attributes.k8s.node.name",
             ],
             &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
         );
@@ -913,20 +914,27 @@ mod tests {
             .iter()
             .map(|d| d.entity_type.as_str())
             .collect();
-        assert_eq!(types, vec!["k8s.pod", "service", "service.instance"]);
+        assert_eq!(
+            types,
+            vec!["k8s.node", "k8s.pod", "service", "service.instance"]
+        );
         assert_eq!(
             declarations[0].id_columns,
+            vec!["resource_attributes.k8s.node.name"]
+        );
+        assert_eq!(
+            declarations[1].id_columns,
             vec!["resource_attributes.k8s.pod.uid"]
         );
         assert_eq!(
-            declarations[0].descriptive_columns,
+            declarations[1].descriptive_columns,
             vec!["resource_attributes.k8s.pod.name"]
         );
         assert_eq!(
-            declarations[2].id_columns,
+            declarations[3].id_columns,
             vec!["service_name", "resource_attributes.service.instance.id"]
         );
-        assert_eq!(declarations[1].id_qualifier, None);
+        assert_eq!(declarations[2].id_qualifier, None);
 
         let namespaced = table_info(
             &[
@@ -1113,6 +1121,7 @@ mod tests {
                 "k8s.pod.name",
                 "k8s.container.name",
                 "k8s.namespace.name",
+                "k8s.node.name",
             ],
             OTEL_STAMPS,
         );
@@ -1127,6 +1136,7 @@ mod tests {
                 "container",
                 "host",
                 "k8s.container",
+                "k8s.node",
                 "k8s.pod",
                 "service",
                 "service.instance"
@@ -1145,13 +1155,14 @@ mod tests {
         );
         assert_eq!(declarations[1].id_columns, vec!["host.id"]);
         assert_eq!(declarations[1].descriptive_columns, vec!["host.name"]);
-        assert_eq!(declarations[4].id_columns, vec!["job"]);
+        assert_eq!(declarations[3].id_columns, vec!["k8s.node.name"]);
+        assert_eq!(declarations[5].id_columns, vec!["job"]);
         assert_eq!(
-            declarations[4].descriptive_columns,
+            declarations[5].descriptive_columns,
             vec!["service.name", "service.namespace"]
         );
-        assert_eq!(declarations[5].id_columns, vec!["job", "instance"]);
-        assert!(declarations[5].descriptive_columns.is_empty());
+        assert_eq!(declarations[6].id_columns, vec!["job", "instance"]);
+        assert!(declarations[6].descriptive_columns.is_empty());
 
         // Nothing here can produce a k8s.container, so the generic one must
         // stand or the container disappears instead of changing type.

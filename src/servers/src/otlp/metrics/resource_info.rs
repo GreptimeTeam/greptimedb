@@ -37,7 +37,7 @@ use crate::otlp::metrics::{
 };
 use crate::otlp::trace::{
     KEY_CONTAINER_ID, KEY_CONTAINER_NAME, KEY_HOST_ID, KEY_HOST_NAME, KEY_K8S_CONTAINER_NAME,
-    KEY_K8S_NAMESPACE_NAME, KEY_K8S_POD_NAME, KEY_K8S_POD_UID, KEY_SERVICE_NAME,
+    KEY_K8S_NAMESPACE_NAME, KEY_K8S_NODE_NAME, KEY_K8S_POD_NAME, KEY_K8S_POD_UID, KEY_SERVICE_NAME,
     KEY_SERVICE_NAMESPACE,
 };
 use crate::row_writer::{self, MultiTableData};
@@ -64,12 +64,13 @@ fn is_projected_attr(key: &str) -> bool {
             | KEY_K8S_POD_NAME
             | KEY_K8S_CONTAINER_NAME
             | KEY_K8S_NAMESPACE_NAME
+            | KEY_K8S_NODE_NAME
     )
 }
 
 /// Upper bound of [`is_projected_attr`] plus the derived `job`/`instance`,
 /// used to size the per-row buffers.
-const MAX_PROJECTED_TAGS: usize = 12;
+const MAX_PROJECTED_TAGS: usize = 13;
 
 /// Projected attributes (sorted `(name, value)` pairs) -> graph window ->
 /// the newest data-point time seen in that window, which is what the row for
@@ -264,6 +265,7 @@ mod tests {
             kv("service.namespace", "shop"),
             kv("service.instance.id", "inst-1"),
             kv("host.id", "h-1"),
+            kv("k8s.node.name", "node-a"),
             kv("os.type", "linux"),
         ];
         data.observe(&attrs, &gauge_at(&[100, 50]), &OtlpMetricCtx::default());
@@ -273,6 +275,7 @@ mod tests {
         assert!(tags.contains(&("job".to_string(), "shop/api".to_string())));
         assert!(tags.contains(&("instance".to_string(), "inst-1".to_string())));
         assert!(tags.contains(&("service.name".to_string(), "api".to_string())));
+        assert!(tags.contains(&("k8s.node.name".to_string(), "node-a".to_string())));
         assert!(
             tags.iter()
                 .all(|(k, _)| k != "os.type" && k != "service.instance.id")
