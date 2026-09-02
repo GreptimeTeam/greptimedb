@@ -321,8 +321,9 @@ pub(crate) fn collect_partition_range_row_groups(
 
 /// Returns the timestamp range where all time-only predicates are guaranteed true.
 ///
-/// Returns `Some(min_to_max)` for empty input (vacuously true everywhere).
-/// Returns `None` if any expression contains an unsupported shape: `OR`, `NOT`,
+/// Returns `None` for empty input because there is no time-filter implication
+/// that cache-key normalization or prefilter postponement can use. It also
+/// returns `None` if any expression contains an unsupported shape: `OR`, `NOT`,
 /// `IN`, non-literal RHS, unsupported operator, column-name mismatch, an `=`
 /// literal that cannot be represented exactly in the column unit, or overflow
 /// during bound adjustment.
@@ -340,6 +341,10 @@ pub(crate) fn implied_time_range_from_exprs(
     ts_col_unit: TimeUnit,
     exprs: &[&Expr],
 ) -> Option<TimestampRange> {
+    if exprs.is_empty() {
+        return None;
+    }
+
     let mut acc = TimestampRange::min_to_max();
     for expr in exprs {
         let r = implied_time_range_from_expr(ts_col_name, ts_col_unit, expr)?;
@@ -551,9 +556,10 @@ fn build_range_cache_key_inner(
 
     // If the implied range covers this partition's `FileTimeRange`, drop
     // time-only predicates from the cache key so that queries with different
-    // but equally-covering time bounds share an entry. `None` means some
-    // time-only predicate had an unsupported shape (e.g. `OR`), so we keep
-    // them in the key.
+    // but equally-covering time bounds share an entry. `None` means there is no
+    // analyzable time-only predicate or some predicate had an unsupported shape
+    // (e.g. `OR`), so we keep the fingerprint unchanged. When `time_filters` is
+    // already empty, cloning the fingerprint is equivalent to stripping them.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let (file_min, file_max) = range_meta.time_range;
     let covers = match stream_ctx.input.implied_time_range() {
@@ -1368,7 +1374,7 @@ mod tests {
 
         assert_eq!(
             implied_time_range_from_exprs("ts", TimeUnit::Millisecond, &[]),
-            Some(TimestampRange::min_to_max())
+            None
         );
     }
 

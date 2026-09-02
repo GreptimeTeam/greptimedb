@@ -1005,8 +1005,9 @@ struct ScanAnalysis {
     fingerprint: Option<ScanRequestFingerprint>,
     /// `Some(r)` = all time-only predicates are guaranteed true on `r` (in the
     /// column's `TimeUnit`).
-    /// `None`    = at least one time-only predicate could not be proven (e.g.
-    /// `OR`), so the time-filter optimization is disabled for this scan.
+    /// `None`    = there is no analyzable time-only predicate or at least one
+    /// predicate could not be proven (e.g. `OR`), so the time-filter
+    /// optimization is disabled for this scan.
     implied_time_range: Option<TimestampRange>,
 }
 
