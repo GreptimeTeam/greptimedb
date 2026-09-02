@@ -207,6 +207,10 @@ async fn test_find_compaction_options_db_level() {
     schema_value
         .extra_options
         .insert("compaction.twcs.time_window".to_string(), "2h".to_string());
+    schema_value.extra_options.insert(
+        "compaction.twcs.active_window.l1_merge_trigger".to_string(),
+        "12".to_string(),
+    );
     schema_metadata_manager
         .register_region_table_info(
             table_id,
@@ -226,6 +230,7 @@ async fn test_find_compaction_options_db_level() {
     match opts {
         crate::region::options::CompactionOptions::Twcs(t) => {
             assert_eq!(t.time_window_seconds(), Some(2 * 3600));
+            assert_eq!(t.active_window_l1_merge_trigger, 12);
         }
     }
 }

@@ -172,6 +172,13 @@ impl RegionOptions {
                 }
             );
         }
+        let CompactionOptions::Twcs(options) = &self.compaction;
+        ensure!(
+            options.active_window_l1_merge_trigger >= 2,
+            InvalidRegionOptionsSnafu {
+                reason: "active_window.l1_merge_trigger must be at least 2",
+            }
+        );
         Ok(())
     }
 
@@ -376,6 +383,10 @@ pub struct TwcsOptions {
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "active_window.trigger_file_num", alias = "trigger_file_num")]
     pub trigger_file_num: usize,
+    /// Minimum L1 file num in the active window to allow a safety compaction.
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "active_window.l1_merge_trigger")]
+    pub active_window_l1_merge_trigger: usize,
     /// Minimum file num in an inactive time window to trigger a compaction.
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "inactive_window.trigger_file_num")]
@@ -413,6 +424,7 @@ impl Default for TwcsOptions {
     fn default() -> Self {
         Self {
             trigger_file_num: 4,
+            active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
             time_window: None,
             max_output_file_size: Some(ReadableSize::mb(512)),
@@ -709,6 +721,7 @@ mod tests {
     fn test_with_compaction_type() {
         let map = make_map(&[
             ("compaction.twcs.active_window.trigger_file_num", "8"),
+            ("compaction.twcs.active_window.l1_merge_trigger", "16"),
             ("compaction.twcs.inactive_window.trigger_file_num", "2"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
@@ -717,6 +730,7 @@ mod tests {
         let expect = RegionOptions {
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
+                active_window_l1_merge_trigger: 16,
                 inactive_window_trigger_file_num: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
@@ -746,6 +760,17 @@ mod tests {
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let CompactionOptions::Twcs(twcs) = &options.compaction;
         assert_eq!(1, twcs.inactive_window_trigger_file_num);
+    }
+
+    #[test]
+    fn test_active_window_l1_merge_trigger_below_two_is_rejected() {
+        let map = make_map(&[
+            ("compaction.twcs.active_window.l1_merge_trigger", "1"),
+            ("compaction.type", "twcs"),
+        ]);
+
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
@@ -1012,6 +1037,7 @@ mod tests {
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
+                active_window_l1_merge_trigger: 8,
                 inactive_window_trigger_file_num: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: Some(ReadableSize::gb(1)),
@@ -1073,6 +1099,7 @@ mod tests {
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
+                active_window_l1_merge_trigger: 8,
                 inactive_window_trigger_file_num: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: None,
@@ -1108,6 +1135,8 @@ mod tests {
         let got: RegionOptions = serde_json::from_str(old_region_options_json_str).unwrap();
         assert_eq!(None, got.write_buffer_size);
         assert!(!got.preserve_row_sequence);
+        let CompactionOptions::Twcs(twcs) = got.compaction;
+        assert_eq!(8, twcs.active_window_l1_merge_trigger);
 
         let default_json = serde_json::to_value(RegionOptions::default()).unwrap();
         assert!(default_json.get(WRITE_BUFFER_SIZE_KEY).is_none());
@@ -1145,6 +1174,7 @@ mod tests {
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
+                active_window_l1_merge_trigger: 8,
                 inactive_window_trigger_file_num: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: Some(ReadableSize::mb(7)),
