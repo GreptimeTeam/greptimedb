@@ -20,7 +20,6 @@ use std::time::Instant;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RegionQueryStatCounters;
-use common_recordbatch::filter::batch_filter;
 use common_recordbatch::{
     DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
     RecordBatch, SendableRecordBatchStream,
@@ -30,6 +29,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
+use datafusion::logical_expr::ColumnarValue;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::filter_pushdown::{
     ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
@@ -39,12 +39,15 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     RecordBatchStream as DfRecordBatchStream,
 };
+use datafusion_common::cast::as_boolean_array;
 use datafusion_common::stats::Precision;
-use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
+use datafusion_common::{ColumnStatistics, DataFusionError, ScalarValue, Statistics, internal_err};
 use datafusion_physical_expr::expressions::{Column, DynamicFilterPhysicalExpr};
 use datafusion_physical_expr::{
     EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr, conjunction,
 };
+use datatypes::arrow::array::{Array, BooleanArray};
+use datatypes::arrow::compute::filter_record_batch;
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
@@ -533,11 +536,7 @@ impl ExecutionPlan for RegionScanExec {
 
         // Do not hold the exact-filter lock while calling into the scanner. Scanner
         // implementations may do arbitrary work while installing pruning predicates.
-        let scanner_supported = if scanner_filters.is_empty() {
-            vec![]
-        } else {
-            self.add_dyn_filters_to_predicate(scanner_filters)
-        };
+        let scanner_supported = self.add_dyn_filters_to_predicate(scanner_filters);
         for (index, is_supported) in scanner_filter_indices.into_iter().zip(scanner_supported) {
             if parent_filters[index]
                 .as_any()
@@ -580,6 +579,49 @@ pub struct StreamWithMetricWrapper {
     dyn_filter: Option<Arc<dyn PhysicalExpr>>,
 }
 
+/// Applies a dynamic predicate conservatively: only rows whose result is definitely false
+/// are removed. Unlike a SQL WHERE filter, NULL results must remain in the scan output because
+/// the predicate is an optimization filter and may be updated while the stream is running.
+fn conservative_dynamic_filter(
+    batch: &DfRecordBatch,
+    predicate: &Arc<dyn PhysicalExpr>,
+) -> DfResult<Option<DfRecordBatch>> {
+    match predicate.evaluate(batch)? {
+        ColumnarValue::Scalar(ScalarValue::Boolean(Some(true)))
+        | ColumnarValue::Scalar(ScalarValue::Boolean(None))
+        | ColumnarValue::Scalar(ScalarValue::Null) => Ok(None),
+        ColumnarValue::Scalar(ScalarValue::Boolean(Some(false))) => Ok(Some(batch.slice(0, 0))),
+        ColumnarValue::Scalar(_) => {
+            internal_err!("Cannot create filter_array from non-boolean predicates")
+        }
+        ColumnarValue::Array(array) => {
+            let boolean_array = match as_boolean_array(&array) {
+                Ok(boolean_array) => boolean_array,
+                Err(_) if array.data_type() == &datatypes::arrow::datatypes::DataType::Null => {
+                    return Ok(None);
+                }
+                Err(_) => {
+                    return internal_err!("Cannot create filter_array from non-boolean predicates");
+                }
+            };
+
+            // Avoid constructing a mask and copying the batch when there is no definite FALSE.
+            if (0..boolean_array.len())
+                .all(|index| boolean_array.is_null(index) || boolean_array.value(index))
+            {
+                return Ok(None);
+            }
+
+            let mask = BooleanArray::from(
+                (0..boolean_array.len())
+                    .map(|index| boolean_array.is_null(index) || boolean_array.value(index))
+                    .collect::<Vec<_>>(),
+            );
+            Ok(Some(filter_record_batch(batch, &mask)?))
+        }
+    }
+}
+
 impl Stream for StreamWithMetricWrapper {
     type Item = DfResult<DfRecordBatch>;
 
@@ -602,12 +644,14 @@ impl Stream for StreamWithMetricWrapper {
                         // since it's calling storage api involving I/O ops
                         let record_batch = if let Some(predicate) = &this.dyn_filter {
                             let schema = record_batch.schema.clone();
-                            let batch =
-                                match batch_filter(record_batch.df_record_batch(), predicate) {
-                                    Ok(batch) => batch,
-                                    Err(error) => return Poll::Ready(Some(Err(error))),
-                                };
-                            RecordBatch::from_df_record_batch(schema, batch)
+                            match conservative_dynamic_filter(
+                                record_batch.df_record_batch(),
+                                predicate,
+                            ) {
+                                Ok(Some(batch)) => RecordBatch::from_df_record_batch(schema, batch),
+                                Ok(None) => record_batch,
+                                Err(error) => return Poll::Ready(Some(Err(error))),
+                            }
                         } else {
                             record_batch
                         };
@@ -648,9 +692,11 @@ mod test {
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
     use datafusion::physical_plan::metrics::MetricValue;
     use datafusion::prelude::SessionContext;
+    use datatypes::arrow::array::{BooleanArray, Int32Array, NullArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema as DfSchema};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
     use futures::TryStreamExt;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_engine::SinglePartitionScanner;
@@ -658,19 +704,96 @@ mod test {
 
     use super::*;
 
+    #[test]
+    fn test_conservative_dynamic_filter_branch_discrimination() {
+        let schema = Arc::new(DfSchema::new(vec![
+            Field::new("predicate", DataType::Boolean, true),
+            Field::new("nulls", DataType::Null, true),
+            Field::new("integer", DataType::Int32, false),
+        ]));
+        let batch = DfRecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(BooleanArray::from(vec![Some(true), None])),
+                Arc::new(NullArray::new(2)),
+                Arc::new(Int32Array::from(vec![1, 2])),
+            ],
+        )
+        .unwrap();
+
+        for predicate in [
+            lit(true),
+            lit(ScalarValue::Boolean(None)),
+            lit(ScalarValue::Null),
+        ] {
+            assert!(
+                conservative_dynamic_filter(&batch, &predicate)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(matches!(
+            conservative_dynamic_filter(&batch, &lit(false)).unwrap(),
+            Some(batch) if batch.num_rows() == 0
+        ));
+        let predicate: Arc<dyn PhysicalExpr> = Arc::new(Column::new("predicate", 0));
+        assert!(
+            conservative_dynamic_filter(&batch, &predicate)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            conservative_dynamic_filter(
+                &batch,
+                &conjunction(vec![lit(true), lit(ScalarValue::Boolean(None))]),
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(matches!(
+            conservative_dynamic_filter(
+                &batch,
+                &conjunction(vec![lit(false), lit(ScalarValue::Boolean(None))]),
+            )
+            .unwrap(),
+            Some(batch) if batch.num_rows() == 0
+        ));
+        let nulls: Arc<dyn PhysicalExpr> = Arc::new(Column::new("nulls", 1));
+        assert!(
+            conservative_dynamic_filter(&batch, &nulls)
+                .unwrap()
+                .is_none()
+        );
+        assert!(conservative_dynamic_filter(&batch, &lit(1_i32)).is_err());
+        let integer: Arc<dyn PhysicalExpr> = Arc::new(Column::new("integer", 2));
+        assert!(conservative_dynamic_filter(&batch, &integer).is_err());
+    }
+
     fn dynamic_filter_fixture(region_number: u32) -> (SchemaRef, RegionScanExec) {
+        dynamic_filter_fixture_with_nulls(region_number, false)
+    }
+
+    fn dynamic_filter_fixture_with_nulls(
+        region_number: u32,
+        nullable: bool,
+    ) -> (SchemaRef, RegionScanExec) {
         let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), nullable),
             ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             ),
         ]));
+        let a: VectorRef = if nullable {
+            Arc::new(Int32Vector::from(vec![Some(1), None, Some(3), Some(4)]))
+        } else {
+            Arc::new(Int32Vector::from_slice([1, 2, 3, 4]))
+        };
         let batch = RecordBatch::new(
             schema.clone(),
             vec![
-                Arc::new(Int32Vector::from_slice([1, 2, 3, 4])) as _,
+                a,
                 Arc::new(TimestampMillisecondVector::from_slice([1, 2, 3, 4])) as _,
             ],
         )
@@ -679,7 +802,7 @@ mod test {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, region_number));
         builder
             .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+                column_schema: ColumnSchema::new("a", ConcreteDataType::int32_datatype(), nullable),
                 semantic_type: SemanticType::Field,
                 column_id: 1,
             })
@@ -795,6 +918,86 @@ mod test {
                     .logical_slice_memory_size(),
             )
         );
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_filter_keeps_null_rows() {
+        let ctx = SessionContext::new();
+        let (_, plan) = dynamic_filter_fixture_with_nulls(5681, true);
+        let filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("a", 0))],
+            lit(true),
+        ));
+        plan.handle_child_pushdown_result(
+            FilterPushdownPhase::Post,
+            ChildPushdownResult {
+                parent_filters: vec![ChildFilterPushdownResult {
+                    filter: filter.clone(),
+                    child_results: vec![PushedDown::No],
+                }],
+                self_filters: vec![],
+            },
+            &datafusion::config::ConfigOptions::default(),
+        )
+        .unwrap();
+        filter
+            .update(Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("a", 0)),
+                Operator::Gt,
+                lit(2_i32),
+            )))
+            .unwrap();
+
+        let batches = plan
+            .execute(0, ctx.task_ctx())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::Int32Array>()
+            .unwrap();
+        assert_eq!(values.len(), 3);
+        assert!(values.is_null(0));
+        assert_eq!(values.value(1), 3);
+        assert_eq!(values.value(2), 4);
+    }
+
+    #[tokio::test]
+    async fn test_scalar_dynamic_filter_fast_paths() {
+        for (value, expected_rows) in [(true, 4), (false, 0)] {
+            let ctx = SessionContext::new();
+            let (_, plan) = dynamic_filter_fixture(5682 + expected_rows as u32);
+            let filter = Arc::new(DynamicFilterPhysicalExpr::new(
+                vec![Arc::new(Column::new("a", 0))],
+                lit(true),
+            ));
+            plan.handle_child_pushdown_result(
+                FilterPushdownPhase::Post,
+                ChildPushdownResult {
+                    parent_filters: vec![ChildFilterPushdownResult {
+                        filter: filter.clone(),
+                        child_results: vec![PushedDown::No],
+                    }],
+                    self_filters: vec![],
+                },
+                &datafusion::config::ConfigOptions::default(),
+            )
+            .unwrap();
+            filter.update(lit(value)).unwrap();
+
+            let batches = plan
+                .execute(0, ctx.task_ctx())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].num_rows(), expected_rows);
+        }
     }
 
     #[tokio::test]
