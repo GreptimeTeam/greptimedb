@@ -387,6 +387,17 @@ impl FrontendClient {
         }
     }
 
+    /// Execute row inserts on the frontend.
+    pub async fn row_inserts(
+        &self,
+        catalog: &str,
+        schema: &str,
+        requests: api::v1::RowInsertRequests,
+    ) -> Result<u32, Error> {
+        self.handle(Request::RowInserts(requests), catalog, schema, &mut None)
+            .await
+    }
+
     /// Execute a flow query and return terminal metrics. `snapshot_seqs` are
     /// optional read upper bounds used only by snapshot-fenced repair chunks.
     pub(crate) async fn query_with_terminal_metrics(
