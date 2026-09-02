@@ -238,6 +238,11 @@ jobs:
             free -h
             df -h / /home/runner
           } >> "${log}"
+          {
+            printf '## Disk (start)\n\n```\n'
+            df -hP / /home/runner
+            printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
           nohup bash -c "
             while true; do
               {
@@ -821,6 +826,21 @@ jobs:
           df -P "${report_root}"
           df -hP "${report_root}"
           df -Pi "${report_root}"
+          {
+            printf '## Disk (end)\n\n```\n'
+            df -hP / /home/runner "${report_root}"
+            printf '\n'
+            du -sh -- \
+              /home/runner/.cargo \
+              /home/runner/.cargo/registry \
+              /home/runner/.cargo/git \
+              /opt/rustup \
+              /home/runner/query-regression-target \
+              /home/runner/query-regression-cache-meta \
+              /home/runner/.cache/sccache \
+              2>/dev/null || true
+            printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || printf 'Unable to show sccache statistics (report only)\n' >&2
           else
