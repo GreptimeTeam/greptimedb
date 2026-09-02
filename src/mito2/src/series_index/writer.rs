@@ -519,6 +519,12 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
     column_id == ReservedColumnId::table_id() || column_id == ReservedColumnId::tsid()
 }
 
+/// Extracts raw i64 timestamp values for the `__series_min_ts`/`__series_max_ts`
+/// columns. NOTE: the unit is dropped; the values must always be interpreted in
+/// the unit of the region metadata the index is written with. Once this index
+/// is wired into scans, files written before/after a time index unit widening
+/// would carry mixed units — the index schema or the searcher must record the
+/// unit per file, or the index must be rebuilt on such an alter.
 fn timestamp_values(array: &ArrayRef) -> Result<Int64Array> {
     let timestamps = if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
         array.clone()

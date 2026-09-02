@@ -24,7 +24,7 @@ use api::v1::SemanticType;
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
-use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_recordbatch::filter::{SimpleFilterEvaluator, TimestampUnitCast};
 use common_telemetry::{debug, error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -2139,19 +2139,29 @@ impl SimpleFilterContext {
                 match sst_meta.column_by_id(column.column_id) {
                     Some(sst_column) => {
                         debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
-                        // Schema evolution can make field columns with the same id have
-                        // different concrete data types across SSTs. In that case,
-                        // evaluating this simple filter against current SST column may
-                        // raise an invalid cross-type comparison error (e.g. Float64 == Utf8).
                         let maybe_filter = if sst_column.column_schema.data_type
                             == column.column_schema.data_type
                         {
                             MaybeFilter::Filter(filter)
                         } else {
-                            // Altering tag or timestamp column types is not allowed,
-                            // so only field columns can reach this branch.
-                            debug_assert_eq!(column.semantic_type, SemanticType::Field);
-                            return None;
+                            // Schema evolution (altered field columns, or a
+                            // widened time index unit) can make columns with
+                            // the same id have different types across SSTs;
+                            // evaluating the original filter may raise an
+                            // invalid cross-type comparison. Timestamp
+                            // predicates are not re-applied above this scan,
+                            // so cast them into the file's unit instead of
+                            // dropping them; other mismatches keep the
+                            // conservative skip (the query layer re-applies
+                            // those predicates).
+                            match filter.cast_timestamp_unit(&sst_column.column_schema.data_type) {
+                                Some(TimestampUnitCast::Filter(filter)) => {
+                                    MaybeFilter::Filter(filter)
+                                }
+                                Some(TimestampUnitCast::Pruned) => MaybeFilter::Pruned,
+                                Some(TimestampUnitCast::Matched) => MaybeFilter::Matched,
+                                None => return None,
+                            }
                         };
                         (column, maybe_filter)
                     }
@@ -2243,6 +2253,15 @@ impl PhysicalFilterContext {
                 let sst_column = sst_meta.column_by_id(column.column_id)?;
                 // Physical expr requires the column name to match the SST column name.
                 if sst_column.column_schema.name != column_name {
+                    return None;
+                }
+                // Schema evolution (an altered field column, or a widened time
+                // index unit) can make the column's file type differ from the
+                // expected type; evaluating the original expr against the
+                // file's column would raise a cross-type comparison error
+                // (e.g. Timestamp(ms) >= Timestamp(µs)). Drop the prefilter;
+                // the query layer re-applies the predicate above the scan.
+                if sst_column.column_schema.data_type != column.column_schema.data_type {
                     return None;
                 }
                 column
@@ -2589,6 +2608,47 @@ mod tests {
         assert!(new_filter(between_nested).is_none());
 
         Ok(())
+    }
+
+    /// A physical prefilter expr must be dropped when the column's file type
+    /// differs from the expected type (e.g. an old-unit SST after the time
+    /// index unit was widened): evaluating the expected-unit literals against
+    /// the file's column raises a cross-unit comparison error.
+    #[test]
+    fn test_physical_filter_dropped_on_file_type_mismatch() {
+        let file_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        // The region metadata after widening the `ts` unit to microsecond.
+        let mut expected = (*file_metadata).clone();
+        for column in expected.column_metadatas.iter_mut() {
+            if column.column_schema.name == "ts" {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let expected = Arc::new(expected);
+
+        let format = FlatReadFormat::new(
+            file_metadata.clone(),
+            ReadColumns::new(file_metadata.column_metadatas.iter().map(|c| c.column_id)),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let between = col("ts").between(
+            lit(ScalarValue::TimestampMicrosecond(Some(1_000_000), None)),
+            lit(ScalarValue::TimestampMicrosecond(Some(2_000_000), None)),
+        );
+        // Same type: the prefilter is kept.
+        assert!(
+            PhysicalFilterContext::new_opt(&file_metadata, Some(&file_metadata), &format, &between)
+                .is_some()
+        );
+        // Widened unit: the prefilter is dropped.
+        assert!(
+            PhysicalFilterContext::new_opt(&file_metadata, Some(&expected), &format, &between)
+                .is_none()
+        );
     }
 
     #[tokio::test]

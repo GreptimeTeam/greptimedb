@@ -20,7 +20,7 @@ Error: 1004(InvalidArguments), Invalid alter table(test) request: Not allowed to
 
 ALTER TABLE test MODIFY COLUMN j STRING;
 
-Error: 1004(InvalidArguments), Invalid alter table(test) request: Not allowed to change timestamp index column 'j' datatype
+Error: 1004(InvalidArguments), Invalid alter table(test) request: time index column 'j' only supports widening its timestamp unit, cannot change type from 'TimestampMillisecond' to 'String'
 
 ALTER TABLE test MODIFY COLUMN I STRING;
 
@@ -88,6 +88,299 @@ DESCRIBE test;
 +--------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE test;
+
+Affected Rows: 0
+
+CREATE TABLE ts_widen (host STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO ts_widen VALUES ("a", "2024-01-01 00:00:01");
+
+Affected Rows: 1
+
+-- widen the time index unit: millisecond -> microsecond
+ALTER TABLE ts_widen MODIFY COLUMN ts TIMESTAMP_US;
+
+Affected Rows: 0
+
+DESCRIBE ts_widen;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| host   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMicrosecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+-- historical data is interpreted in the new unit
+SELECT * FROM ts_widen ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-01-01T00:00:01 |
++------+---------------------+
+
+-- predicate on the widened time index reads old-unit SST data correctly
+SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:01' ORDER BY ts;
+
+++
+++
+
+SELECT * FROM ts_widen WHERE ts < '2024-01-01 00:00:01.000300' ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-01-01T00:00:01 |
++------+---------------------+
+
+-- new writes can use sub-millisecond precision
+INSERT INTO ts_widen VALUES ("b", "2024-01-01 00:00:01.000500");
+
+Affected Rows: 1
+
+-- filters see both the old-unit SST row and the new-unit memtable row correctly
+SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:01.000001' ORDER BY ts;
+
++------+----------------------------+
+| host | ts                         |
++------+----------------------------+
+| b    | 2024-01-01T00:00:01.000500 |
++------+----------------------------+
+
+SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:00.999999' ORDER BY ts;
+
++------+----------------------------+
+| host | ts                         |
++------+----------------------------+
+| a    | 2024-01-01T00:00:01        |
+| b    | 2024-01-01T00:00:01.000500 |
++------+----------------------------+
+
+-- narrowing the time index unit is rejected
+ALTER TABLE ts_widen MODIFY COLUMN ts TIMESTAMP;
+
+Error: 1004(InvalidArguments), Invalid alter table(ts_widen) request: time index column 'ts' only supports widening its timestamp unit, cannot change type from 'TimestampMicrosecond' to 'TimestampMillisecond'
+
+-- changing the time index to a non-timestamp type is rejected
+ALTER TABLE ts_widen MODIFY COLUMN ts STRING;
+
+Error: 1004(InvalidArguments), Invalid alter table(ts_widen) request: time index column 'ts' only supports widening its timestamp unit, cannot change type from 'TimestampMicrosecond' to 'String'
+
+DROP TABLE ts_widen;
+
+Affected Rows: 0
+
+-- Regression: predicates must filter old-unit SST rows exactly after the
+-- widen; a dropped filter would return whole row groups.
+CREATE TABLE ts_widen_multi (host STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO ts_widen_multi VALUES
+  ("a", "2024-01-01 00:00:00"), ("b", "2024-01-01 00:00:01"),
+  ("c", "2024-01-01 00:00:02"), ("d", "2024-01-01 00:00:03"),
+  ("e", "2024-01-01 00:00:04"), ("f", "2024-01-01 00:00:05"),
+  ("g", "2024-01-01 00:00:06"), ("h", "2024-01-01 00:00:07"),
+  ("i", "2024-01-01 00:00:08"), ("j", "2024-01-01 00:00:09");
+
+Affected Rows: 10
+
+-- force the rows into an SST written in the old (millisecond) unit
+ADMIN FLUSH_TABLE('ts_widen_multi');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('ts_widen_multi') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+ALTER TABLE ts_widen_multi MODIFY COLUMN ts TIMESTAMP_US;
+
+Affected Rows: 0
+
+-- equality on the widened time index returns exactly one old-unit row
+SELECT * FROM ts_widen_multi WHERE ts = '2024-01-01 00:00:07' ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| h    | 2024-01-01T00:00:07 |
++------+---------------------+
+
+SELECT * FROM ts_widen_multi WHERE ts != '2024-01-01 00:00:07' ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-01-01T00:00:00 |
+| b    | 2024-01-01T00:00:01 |
+| c    | 2024-01-01T00:00:02 |
+| d    | 2024-01-01T00:00:03 |
+| e    | 2024-01-01T00:00:04 |
+| f    | 2024-01-01T00:00:05 |
+| g    | 2024-01-01T00:00:06 |
+| i    | 2024-01-01T00:00:08 |
+| j    | 2024-01-01T00:00:09 |
++------+---------------------+
+
+-- boundaries strictly between the stored seconds
+SELECT * FROM ts_widen_multi WHERE ts > '2024-01-01 00:00:06.5' ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| h    | 2024-01-01T00:00:07 |
+| i    | 2024-01-01T00:00:08 |
+| j    | 2024-01-01T00:00:09 |
++------+---------------------+
+
+SELECT * FROM ts_widen_multi WHERE ts <= '2024-01-01 00:00:05.0005' ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-01-01T00:00:00 |
+| b    | 2024-01-01T00:00:01 |
+| c    | 2024-01-01T00:00:02 |
+| d    | 2024-01-01T00:00:03 |
+| e    | 2024-01-01T00:00:04 |
+| f    | 2024-01-01T00:00:05 |
++------+---------------------+
+
+-- BETWEEN must not fail or misfilter on old-unit rows
+SELECT * FROM ts_widen_multi WHERE ts BETWEEN '2024-01-01 00:00:03' AND '2024-01-01 00:00:06.5' ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| d    | 2024-01-01T00:00:03 |
+| e    | 2024-01-01T00:00:04 |
+| f    | 2024-01-01T00:00:05 |
+| g    | 2024-01-01T00:00:06 |
++------+---------------------+
+
+-- a large IN-list is not rewritten to OR; it must still filter exactly
+SELECT * FROM ts_widen_multi WHERE ts IN (
+  '2024-01-01 00:00:00', '2024-01-01 00:00:01', '2024-01-01 00:00:02',
+  '2024-01-01 00:00:03', '2024-01-01 00:00:04', '2024-01-01 00:00:05',
+  '2024-01-01 00:00:06', '2024-01-01 00:00:07', '2024-01-01 00:00:08',
+  '2024-01-01 00:00:09', '2024-01-01 00:00:02.5'
+) ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-01-01T00:00:00 |
+| b    | 2024-01-01T00:00:01 |
+| c    | 2024-01-01T00:00:02 |
+| d    | 2024-01-01T00:00:03 |
+| e    | 2024-01-01T00:00:04 |
+| f    | 2024-01-01T00:00:05 |
+| g    | 2024-01-01T00:00:06 |
+| h    | 2024-01-01T00:00:07 |
+| i    | 2024-01-01T00:00:08 |
+| j    | 2024-01-01T00:00:09 |
++------+---------------------+
+
+-- an IN-list literal that no millisecond row can equal matches nothing
+SELECT * FROM ts_widen_multi WHERE ts IN ('2024-01-01 00:00:02', '2024-01-01 00:00:05.5', '2024-01-01 00:00:08') ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| c    | 2024-01-01T00:00:02 |
+| i    | 2024-01-01T00:00:08 |
++------+---------------------+
+
+DROP TABLE ts_widen_multi;
+
+Affected Rows: 0
+
+CREATE TABLE ts_widen_part (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (ts) (
+  ts < '2024-01-02 00:00:00',
+  ts >= '2024-01-02 00:00:00'
+);
+
+Affected Rows: 0
+
+INSERT INTO ts_widen_part VALUES ("a", 1, "2024-01-01 23:59:59.5");
+
+Affected Rows: 1
+
+-- widen the time index unit of a table partitioned on the time index
+ALTER TABLE ts_widen_part MODIFY COLUMN ts TIMESTAMP_US;
+
+Affected Rows: 0
+
+-- historical data still routes/joins correctly
+SELECT * FROM ts_widen_part ORDER BY ts;
+
++------+-----+-------------------------+
+| host | val | ts                      |
++------+-----+-------------------------+
+| a    | 1.0 | 2024-01-01T23:59:59.500 |
++------+-----+-------------------------+
+
+-- new writes land in the right partition
+INSERT INTO ts_widen_part VALUES ("b", 2, "2024-01-02 00:00:00.000250");
+
+Affected Rows: 1
+
+SELECT * FROM ts_widen_part ORDER BY ts;
+
++------+-----+----------------------------+
+| host | val | ts                         |
++------+-----+----------------------------+
+| a    | 1.0 | 2024-01-01T23:59:59.500    |
+| b    | 2.0 | 2024-01-02T00:00:00.000250 |
++------+-----+----------------------------+
+
+DROP TABLE ts_widen_part;
+
+Affected Rows: 0
+
+CREATE TABLE ts_overflow (host STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+-- 3000-01-01 fits milliseconds but overflows nanoseconds (max ~2262-04-11).
+INSERT INTO ts_overflow VALUES ("a", "3000-01-01 00:00:00");
+
+Affected Rows: 1
+
+-- widening to microseconds fits the data
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_US;
+
+Affected Rows: 0
+
+DESCRIBE ts_overflow;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| host   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMicrosecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+-- widening to nanoseconds would overflow the data: allowed, only logged
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
+
+Affected Rows: 0
+
+DESCRIBE ts_overflow;
+
++--------+---------------------+-----+------+---------+---------------+
+| Column | Type                | Key | Null | Default | Semantic Type |
++--------+---------------------+-----+------+---------+---------------+
+| host   | String              |     | YES  |         | FIELD         |
+| ts     | TimestampNanosecond | PRI | NO   |         | TIMESTAMP     |
++--------+---------------------+-----+------+---------+---------------+
+
+DROP TABLE ts_overflow;
 
 Affected Rows: 0
 

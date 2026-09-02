@@ -548,18 +548,13 @@ fn build_range_cache_key_inner(
     let (file_min, file_max) = range_meta.time_range;
     let covers = match &stream_ctx.scan_implied_time_range {
         // An empty implied range can never cover a non-empty file range, so
-        // short-circuit. We also skip the unit asserts because
-        // `TimestampRange::empty()` uses `Timestamp::default()` (millisecond),
-        // which would falsely trip the asserts for non-ms time index columns.
+        // short-circuit.
         Some(implied) if !implied.is_empty() => {
-            // The `contains` check is sound only when `file_min`/`file_max`
-            // share the implied range's unit (the time index column's unit).
-            // Mito stores time index values in that unit; assert to catch any
-            // future drift.
-            if let Some(ts) = implied.start().as_ref().or(implied.end().as_ref()) {
-                assert_eq!(file_min.unit(), ts.unit());
-                assert_eq!(file_max.unit(), ts.unit());
-            }
+            // `file_min`/`file_max` may use a different unit than the implied
+            // range: after the time index unit was widened, pre-alter files
+            // still carry the old unit while the implied range uses the
+            // current column unit. `Timestamp` comparisons normalize units,
+            // so `contains` compares instants and stays sound across units.
             implied.contains(&file_min) && implied.contains(&file_max)
         }
         _ => false,
@@ -1248,6 +1243,57 @@ mod tests {
 
         let key = build_range_cache_key(&ctx, &part_range).unwrap();
         // Empty implied range cannot cover, so time filters stay in the key.
+        assert!(!key.scan.time_filters().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_unit_file_range_is_compared_by_instant() {
+        // After the time index unit was widened, pre-alter files keep the old
+        // unit while `scan_implied_time_range` uses the current column unit.
+        // The coverage decision must compare instants across units instead of
+        // asserting unit equality (which panicked here for widened regions).
+        let partition = (
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+
+        // Covering: the implied range [0, 3000)ms contains the file range
+        // [1s, 2s] expressed in microseconds; time filters are dropped from
+        // the key.
+        let (mut ctx, part_range) = new_stream_context(
+            vec![
+                col("ts").gt_eq(ts_lit(0)),
+                col("ts").lt(ts_lit(3000)),
+                col("k0").eq(lit("foo")),
+            ],
+            TimestampRange::with_unit(0, 3000, TimeUnit::Millisecond),
+            partition,
+        )
+        .await;
+        ctx.ranges[0].time_range = (
+            Timestamp::new_microsecond(1_000_000),
+            Timestamp::new_microsecond(2_000_000),
+        );
+        let key = build_range_cache_key(&ctx, &part_range).unwrap();
+        assert!(key.scan.time_filters().is_empty());
+
+        // Not covering: the implied range [1500, 3000)ms excludes the file's
+        // 1s lower bound; time filters stay in the key.
+        let (mut ctx, part_range) = new_stream_context(
+            vec![
+                col("ts").gt_eq(ts_lit(1500)),
+                col("ts").lt(ts_lit(3000)),
+                col("k0").eq(lit("foo")),
+            ],
+            TimestampRange::with_unit(1500, 3000, TimeUnit::Millisecond),
+            partition,
+        )
+        .await;
+        ctx.ranges[0].time_range = (
+            Timestamp::new_microsecond(1_000_000),
+            Timestamp::new_microsecond(2_000_000),
+        );
+        let key = build_range_cache_key(&ctx, &part_range).unwrap();
         assert!(!key.scan.time_filters().is_empty());
     }
 
