@@ -400,10 +400,30 @@ mod tests {
         assert_eq!(ranges, vec![0..3]);
 
         let ranges = searcher
+            .search(0, &[series(1, 15), series(2, 20)])
+            .await
+            .unwrap();
+        assert_eq!(ranges, vec![4..6]);
+
+        let ranges = searcher
+            .search(0, &[series(1, 10), series(2, 30)])
+            .await
+            .unwrap();
+        assert_eq!(ranges, vec![0..2]);
+
+        let ranges = searcher
             .search(1, &[series(2, 20), series(2, 20)])
             .await
             .unwrap();
         assert_eq!(ranges, vec![0..2]);
+
+        assert!(
+            searcher
+                .search(1, &[series(1, 10)])
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         assert!(searcher.search(0, &[]).await.unwrap().is_empty());
 
