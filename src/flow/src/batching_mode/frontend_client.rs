@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::{CreateTableExpr, QueryRequest};
+use api::v1::{CreateTableExpr, QueryRequest, RowInsertRequests};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputWithMetrics};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
@@ -392,10 +392,68 @@ impl FrontendClient {
         &self,
         catalog: &str,
         schema: &str,
-        requests: api::v1::RowInsertRequests,
+        requests: RowInsertRequests,
+        hints: &[(&str, &str)],
     ) -> Result<u32, Error> {
-        self.handle(Request::RowInserts(requests), catalog, schema, &mut None)
-            .await
+        match self {
+            FrontendClient::Distributed { .. } => {
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+                db.database
+                    .row_inserts_with_hints(requests, hints)
+                    .await
+                    .with_context(|_| InvalidRequestSnafu {
+                        context: format!("Failed to handle row inserts at {:?}", db.peer),
+                    })
+            }
+            FrontendClient::Standalone {
+                database_client, ..
+            } => {
+                let extensions = HashMap::from_iter(
+                    hints
+                        .iter()
+                        .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+                );
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .extensions(extensions)
+                    .build();
+                let ctx = Arc::new(ctx);
+                {
+                    let database_client = {
+                        database_client
+                            .handler
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .context(UnexpectedSnafu {
+                                reason: "Standalone's frontend instance is not set",
+                            })?
+                            .upgrade()
+                            .context(UnexpectedSnafu {
+                                reason: "Failed to upgrade database client",
+                            })?
+                    };
+                    let resp: common_query::Output = database_client
+                        .do_query(Request::RowInserts(requests), ctx)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                    match resp.data {
+                        OutputData::AffectedRows(rows) => Ok(rows.try_into().map_err(|_| {
+                            UnexpectedSnafu {
+                                reason: format!("Failed to convert rows to u32: {}", rows),
+                            }
+                            .build()
+                        })?),
+                        _ => UnexpectedSnafu {
+                            reason: "Unexpected output data",
+                        }
+                        .fail(),
+                    }
+                }
+            }
+        }
     }
 
     /// Execute a flow query and return terminal metrics. `snapshot_seqs` are
@@ -550,14 +608,12 @@ impl FrontendClient {
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
                     match resp.data {
-                        common_query::OutputData::AffectedRows(rows) => {
-                            Ok(rows.try_into().map_err(|_| {
-                                UnexpectedSnafu {
-                                    reason: format!("Failed to convert rows to u32: {}", rows),
-                                }
-                                .build()
-                            })?)
-                        }
+                        OutputData::AffectedRows(rows) => Ok(rows.try_into().map_err(|_| {
+                            UnexpectedSnafu {
+                                reason: format!("Failed to convert rows to u32: {}", rows),
+                            }
+                            .build()
+                        })?),
                         _ => UnexpectedSnafu {
                             reason: "Unexpected output data",
                         }
