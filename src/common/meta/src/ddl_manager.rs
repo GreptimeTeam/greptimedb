@@ -110,6 +110,8 @@ pub struct DdlManager {
     repartition_procedure_factory: RepartitionProcedureFactoryRef,
     #[cfg(feature = "enterprise")]
     trigger_ddl_manager: Option<TriggerDdlManagerRef>,
+    #[cfg(feature = "enterprise")]
+    create_flow_handler: Option<CreateFlowHandlerRef>,
 }
 
 /// This trait is responsible for handling DDL tasks about triggers. e.g.,
@@ -140,6 +142,23 @@ pub trait TriggerDdlManager: Send + Sync {
 
 #[cfg(feature = "enterprise")]
 pub type TriggerDdlManagerRef = Arc<dyn TriggerDdlManager>;
+
+/// This trait is responsible for handling enterprise CREATE FLOW tasks.
+#[cfg(feature = "enterprise")]
+#[async_trait::async_trait]
+pub trait CreateFlowHandler: Send + Sync {
+    async fn create_flow(
+        &self,
+        create_flow_task: CreateFlowTask,
+        procedure_manager: ProcedureManagerRef,
+        ddl_context: DdlContext,
+        query_context: QueryContext,
+        procedure_context: ProcedureContext,
+    ) -> Result<SubmitDdlTaskResponse>;
+}
+
+#[cfg(feature = "enterprise")]
+pub type CreateFlowHandlerRef = Arc<dyn CreateFlowHandler>;
 
 macro_rules! procedure_loader_entry {
     ($procedure:ident) => {
@@ -235,12 +254,20 @@ impl DdlManager {
             repartition_procedure_factory,
             #[cfg(feature = "enterprise")]
             trigger_ddl_manager: None,
+            #[cfg(feature = "enterprise")]
+            create_flow_handler: None,
         }
     }
 
     #[cfg(feature = "enterprise")]
     pub fn with_trigger_ddl_manager(mut self, trigger_ddl_manager: TriggerDdlManagerRef) -> Self {
         self.trigger_ddl_manager = Some(trigger_ddl_manager);
+        self
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_create_flow_handler(mut self, create_flow_handler: CreateFlowHandlerRef) -> Self {
+        self.create_flow_handler = Some(create_flow_handler);
         self
     }
 
@@ -1365,6 +1392,19 @@ async fn handle_create_flow_task(
     query_context: QueryContext,
     procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
+    #[cfg(feature = "enterprise")]
+    if let Some(handler) = ddl_manager.create_flow_handler.as_ref() {
+        return handler
+            .create_flow(
+                create_flow_task,
+                ddl_manager.procedure_manager.clone(),
+                ddl_manager.ddl_context.clone(),
+                query_context,
+                procedure_context,
+            )
+            .await;
+    }
+
     let (id, output) = ddl_manager
         .submit_create_flow_task(create_flow_task.clone(), query_context, procedure_context)
         .await?;
@@ -1538,6 +1578,7 @@ mod tests {
     use crate::ddl::create_database::{
         AtomicCreateOutcome, CreateDatabaseMetadataCommitter, CreateDatabaseProcedure,
     };
+    use crate::ddl::create_flow::CreateFlowProcedure;
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::flow_meta::FlowMetadataAllocator;
@@ -1555,11 +1596,13 @@ mod tests {
     use crate::region_registry::LeaderRegionRegistry;
     #[cfg(feature = "enterprise")]
     use crate::rpc::ddl::trigger::{CreateTriggerTask, DropTriggerTask};
+    #[cfg(feature = "enterprise")]
+    use crate::rpc::ddl::{
+        CreateFlowTask, DdlTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
+    };
     use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
     #[cfg(not(feature = "enterprise"))]
     use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
-    #[cfg(feature = "enterprise")]
-    use crate::rpc::ddl::{DdlTask, QueryContext, SubmitDdlTaskRequest};
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -1630,6 +1673,59 @@ mod tests {
     #[derive(Default)]
     struct RecordingTriggerDdlManager {
         procedure_contexts: Mutex<Vec<ProcedureContext>>,
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[derive(Default)]
+    struct RecordingCreateFlowHandler {
+        tasks: Mutex<Vec<CreateFlowTask>>,
+        contexts: Mutex<Vec<(QueryContext, ProcedureContext)>>,
+        response: Mutex<Option<SubmitDdlTaskResponse>>,
+        fail: bool,
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[async_trait::async_trait]
+    impl super::CreateFlowHandler for RecordingCreateFlowHandler {
+        async fn create_flow(
+            &self,
+            create_flow_task: CreateFlowTask,
+            _procedure_manager: ProcedureManagerRef,
+            _ddl_context: DdlContext,
+            query_context: QueryContext,
+            procedure_context: ProcedureContext,
+        ) -> crate::error::Result<SubmitDdlTaskResponse> {
+            self.tasks.lock().unwrap().push(create_flow_task);
+            self.contexts
+                .lock()
+                .unwrap()
+                .push((query_context, procedure_context));
+            if self.fail {
+                return crate::error::UnsupportedSnafu {
+                    operation: "test create flow handler",
+                }
+                .fail();
+            }
+            Ok(self.response.lock().unwrap().take().unwrap_or_default())
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn test_create_flow_task() -> CreateFlowTask {
+        CreateFlowTask {
+            catalog_name: "greptime".to_string(),
+            flow_name: "test_flow".to_string(),
+            source_table_names: vec![],
+            sink_table_name: TableName::new("greptime", "public", "sink"),
+            or_replace: false,
+            create_if_not_exists: false,
+            expire_after: None,
+            eval_interval_secs: None,
+            comment: String::new(),
+            sql: "select 1".to_string(),
+            flow_options: Default::default(),
+            eval_schedule: None,
+        }
     }
 
     #[cfg(feature = "enterprise")]
@@ -1803,6 +1899,101 @@ mod tests {
             procedure_manager,
             Arc::new(DummyRepartitionProcedureFactory),
         )
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_handler_dispatches_without_procedure() {
+        let response = SubmitDdlTaskResponse {
+            key: b"enterprise".to_vec(),
+            ..Default::default()
+        };
+        let handler = Arc::new(RecordingCreateFlowHandler {
+            response: Mutex::new(Some(response)),
+            ..Default::default()
+        });
+        let ddl_manager =
+            build_soft_drop_test_ddl_manager().with_create_flow_handler(handler.clone());
+        let procedure_context = ProcedureContext {
+            actor: Some("test-user".to_string()),
+            event_context: Some(
+                PersistentEventContext::new(TriggerReason::Manual).with_protocol("mysql"),
+            ),
+        };
+        let query_context = QueryContext {
+            channel: Channel::Mysql as u8,
+            ..Default::default()
+        };
+        let actual = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(query_context.clone()),
+                    actor: procedure_context.actor.clone(),
+                    event_input: Some(ProcedureEventInput::new(TriggerReason::Manual)),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(test_create_flow_task())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(actual.key, b"enterprise");
+        assert_eq!(handler.tasks.lock().unwrap().len(), 1);
+        assert_eq!(
+            handler.contexts.lock().unwrap().as_slice(),
+            &[(query_context, procedure_context)]
+        );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_handler_error_does_not_fallback() {
+        let handler = Arc::new(RecordingCreateFlowHandler {
+            fail: true,
+            ..Default::default()
+        });
+        let ddl_manager =
+            build_soft_drop_test_ddl_manager().with_create_flow_handler(handler.clone());
+        let err = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(test_create_flow_task())),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("test create flow handler"));
+        assert_eq!(handler.tasks.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_without_handler_uses_ordinary_procedure() {
+        let ddl_manager = build_soft_drop_test_ddl_manager();
+        ddl_manager.procedure_manager.start().await.unwrap();
+        let err = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(test_create_flow_task())),
+            )
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains("test create flow handler"));
+        assert_eq!(
+            ddl_manager
+                .procedure_manager
+                .list_procedures()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|procedure| procedure.type_name == CreateFlowProcedure::TYPE_NAME)
+                .count(),
+            1
+        );
     }
 
     #[cfg(feature = "enterprise")]
