@@ -2,8 +2,7 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
-## The default column prefix for auto-created time index, value, and native histogram columns,
-## and the reserved raw-delta temporality label (`__<prefix>_temporality__`).
+## The default column prefix for auto-created time index, value, and native histogram columns.
 ## Legacy OTLP summary columns keep their historical `greptime_` prefix.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"

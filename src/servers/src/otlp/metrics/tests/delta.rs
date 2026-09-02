@@ -37,7 +37,10 @@ fn column_index(rows: &api::v1::Rows, column: &str) -> usize {
 #[test]
 fn test_raw_delta_sum_identity_and_stale_marker() {
     set_default_prefix(Some("custom")).unwrap();
-    assert_eq!(greptime_temporality_label(), "__custom_temporality__");
+    assert_eq!(
+        OTLP_AGGREGATION_TEMPORALITY_LABEL,
+        "otlp_aggregation_temporality"
+    );
 
     let points = vec![
         NumberDataPoint {
@@ -77,7 +80,7 @@ fn test_raw_delta_sum_identity_and_stale_marker() {
     assert_eq!(0, conversion.outcome.rejected_data_points);
     let rows = table_rows(&conversion.requests, "requests_total");
     let value = column_index(rows, greptime_value());
-    let temporality = column_index(rows, greptime_temporality_label());
+    let temporality = column_index(rows, OTLP_AGGREGATION_TEMPORALITY_LABEL);
     let host = column_index(rows, "host");
     let values = rows
         .rows
@@ -126,7 +129,7 @@ fn test_raw_delta_sum_identity_and_stale_marker() {
                 .unwrap()
                 .schema
                 .iter()
-                .all(|column| column.column_name != greptime_temporality_label())
+                .all(|column| column.column_name != OTLP_AGGREGATION_TEMPORALITY_LABEL)
         );
     }
 }
@@ -182,7 +185,7 @@ fn test_delta_histogram_partial_rejection_and_inline_tombstone() {
     assert_eq!(6, buckets.rows.len());
     let value = column_index(buckets, greptime_value());
     let le = column_index(buckets, HISTOGRAM_LE_COLUMN);
-    let temporality = column_index(buckets, greptime_temporality_label());
+    let temporality = column_index(buckets, OTLP_AGGREGATION_TEMPORALITY_LABEL);
     let ordinary = buckets.rows[..3]
         .iter()
         .map(|row| row.values[value].value_data.clone())
@@ -319,7 +322,7 @@ fn test_reserved_temporality_label_uses_final_persisted_key() {
     };
     let error = to_grpc_insert_requests(
         metrics_request(vec![gauge(vec![keyvalue(
-            greptime_temporality_label(),
+            OTLP_AGGREGATION_TEMPORALITY_LABEL,
             "user",
         )])]),
         &mut OtlpMetricCtx::default(),
@@ -329,7 +332,7 @@ fn test_reserved_temporality_label_uses_final_persisted_key() {
 
     let mut request = metrics_request(vec![gauge(vec![])]);
     request.resource_metrics[0].scope_metrics[0].scope = Some(InstrumentationScope {
-        attributes: vec![keyvalue(greptime_temporality_label(), "safe")],
+        attributes: vec![keyvalue(OTLP_AGGREGATION_TEMPORALITY_LABEL, "safe")],
         ..Default::default()
     });
     let mut ctx = OtlpMetricCtx {
@@ -338,8 +341,10 @@ fn test_reserved_temporality_label_uses_final_persisted_key() {
     };
     let conversion = to_grpc_insert_requests(request, &mut ctx).unwrap();
     assert!(
-        column_names(&conversion.requests, "gauge")
-            .contains(&format!("otel_scope_{}", greptime_temporality_label()))
+        column_names(&conversion.requests, "gauge").contains(&format!(
+            "otel_scope_{}",
+            OTLP_AGGREGATION_TEMPORALITY_LABEL
+        ))
     );
 }
 

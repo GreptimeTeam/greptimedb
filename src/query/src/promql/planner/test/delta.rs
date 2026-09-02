@@ -28,7 +28,7 @@ fn delta_temporality_table_provider() -> (DfTableSourceProvider, QueryEngineStat
             false,
         ),
         ColumnSchema::new(
-            greptime_temporality_label().to_string(),
+            OTLP_AGGREGATION_TEMPORALITY_LABEL.to_string(),
             ConcreteDataType::string_datatype(),
             true,
         ),
@@ -147,7 +147,10 @@ fn delta_temporality_table_provider() -> (DfTableSourceProvider, QueryEngineStat
 #[tokio::test]
 async fn rate_and_increase_select_raw_delta_math_per_series() {
     set_default_prefix(Some("custom")).unwrap();
-    assert_eq!(greptime_temporality_label(), "__custom_temporality__");
+    assert_eq!(
+        OTLP_AGGREGATION_TEMPORALITY_LABEL,
+        "otlp_aggregation_temporality"
+    );
 
     let eval_time = UNIX_EPOCH.checked_add(Duration::from_secs(180)).unwrap();
     for (function, expected_delta, expected_single) in
@@ -166,7 +169,7 @@ async fn rate_and_increase_select_raw_delta_math_per_series() {
             .unwrap();
         let plan = raw.display_indent_schema().to_string();
         assert!(plan.contains("prom_sum_over_time"), "{plan}");
-        assert!(plan.contains(greptime_temporality_label()), "{plan}");
+        assert!(plan.contains(OTLP_AGGREGATION_TEMPORALITY_LABEL), "{plan}");
         let value_field = raw
             .schema()
             .fields()
@@ -212,7 +215,7 @@ async fn rate_and_increase_select_raw_delta_math_per_series() {
                 .downcast_ref::<StringArray>()
                 .unwrap();
             let temporality = batch
-                .column_by_name(greptime_temporality_label())
+                .column_by_name(OTLP_AGGREGATION_TEMPORALITY_LABEL)
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -258,7 +261,7 @@ async fn rate_and_increase_select_raw_delta_math_per_series() {
 #[tokio::test]
 async fn empty_metric_broadcasts_over_temporality_marker() {
     let eval_time = UNIX_EPOCH.checked_add(Duration::from_secs(180)).unwrap();
-    let marker = greptime_temporality_label();
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
     for query in [
         "vector(2) * delta_metric".to_string(),
         format!("vector(2) * ignoring({marker}) delta_metric"),
@@ -370,12 +373,12 @@ async fn mixed_range_rate_selects_delta_math_only_for_float_samples() {
     assert!(plan.contains("prom_sum_over_time"), "{plan}");
     assert!(plan.contains("prom_mixed_range_float"), "{plan}");
     assert!(plan.contains("prom_mixed_range_histogram"), "{plan}");
-    assert!(plan.contains(greptime_temporality_label()), "{plan}");
+    assert!(plan.contains(OTLP_AGGREGATION_TEMPORALITY_LABEL), "{plan}");
 }
 
 #[tokio::test]
 async fn temporality_matchers_treat_null_as_absent() {
-    let marker = greptime_temporality_label();
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
     let schema = Arc::new(ArrowSchema::new(vec![Field::new(
         marker,
         ArrowDataType::Utf8,
@@ -475,7 +478,7 @@ async fn temporality_matchers_treat_null_as_absent() {
 
 #[tokio::test]
 async fn binary_joins_align_only_the_temporality_marker() {
-    let marker = greptime_temporality_label();
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
     for (left_marker, expected_rows) in [(Some(GREPTIME_TEMPORALITY_DELTA), 0), (None, 1)] {
         let left = source(
             "lhs",

@@ -2,8 +2,8 @@ CREATE TABLE delta_temporality (
     ts TIMESTAMP TIME INDEX,
     greptime_value DOUBLE,
     series STRING,
-    __greptime_temporality__ STRING,
-    PRIMARY KEY (series, __greptime_temporality__)
+    otlp_aggregation_temporality STRING,
+    PRIMARY KEY (series, otlp_aggregation_temporality)
 );
 
 Affected Rows: 0
@@ -23,24 +23,24 @@ Affected Rows: 7
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') increase(delta_temporality[3m]);
 
-+---------------------+---------------------------------------------------------+------------+--------------------------+
-| ts                  | prom_increase(ts_range,greptime_value,ts,Int64(180000)) | series     | __greptime_temporality__ |
-+---------------------+---------------------------------------------------------+------------+--------------------------+
-| 1970-01-01T00:03:00 | 30.0                                                    | cumulative |                          |
-| 1970-01-01T00:03:00 | 45.0                                                    | delta      | delta                    |
-| 1970-01-01T00:03:00 | 7.0                                                     | single     | delta                    |
-+---------------------+---------------------------------------------------------+------------+--------------------------+
++---------------------+---------------------------------------------------------+------------+------------------------------+
+| ts                  | prom_increase(ts_range,greptime_value,ts,Int64(180000)) | series     | otlp_aggregation_temporality |
++---------------------+---------------------------------------------------------+------------+------------------------------+
+| 1970-01-01T00:03:00 | 30.0                                                    | cumulative |                              |
+| 1970-01-01T00:03:00 | 45.0                                                    | delta      | delta                        |
+| 1970-01-01T00:03:00 | 7.0                                                     | single     | delta                        |
++---------------------+---------------------------------------------------------+------------+------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
 
-+---------------------+-----------------------------------------------------+------------+--------------------------+
-| ts                  | prom_rate(ts_range,greptime_value,ts,Int64(180000)) | series     | __greptime_temporality__ |
-+---------------------+-----------------------------------------------------+------------+--------------------------+
-| 1970-01-01T00:03:00 | 0.03888888888888889                                 | single     | delta                    |
-| 1970-01-01T00:03:00 | 0.16666666666666666                                 | cumulative |                          |
-| 1970-01-01T00:03:00 | 0.25                                                | delta      | delta                    |
-+---------------------+-----------------------------------------------------+------------+--------------------------+
++---------------------+-----------------------------------------------------+------------+------------------------------+
+| ts                  | prom_rate(ts_range,greptime_value,ts,Int64(180000)) | series     | otlp_aggregation_temporality |
++---------------------+-----------------------------------------------------+------------+------------------------------+
+| 1970-01-01T00:03:00 | 0.03888888888888889                                 | single     | delta                        |
+| 1970-01-01T00:03:00 | 0.16666666666666666                                 | cumulative |                              |
+| 1970-01-01T00:03:00 | 0.25                                                | delta      | delta                        |
++---------------------+-----------------------------------------------------+------------+------------------------------+
 
 -- The physical plan selects raw-delta math per series while retaining cumulative rate.
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -62,10 +62,10 @@ TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-|_|_|_ProjectionExec: expr=[ts@0 as ts, CASE WHEN __greptime_temporality__@3 = delta THEN prom_sum_over_time(ts_range@4, greptime_value@1) / 180 ELSE prom_rate(ts_range@4, greptime_value@1, ts@0, 180000) END as RATE_RESULT, series@2 as series, __greptime_temporality__@3 as __greptime_temporality__] REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, CASE WHEN otlp_aggregation_temporality@3 = delta THEN prom_sum_over_time(ts_range@4, greptime_value@1) / 180 ELSE prom_rate(ts_range@4, greptime_value@1, ts@0, 180000) END as RATE_RESULT, series@2 as series, otlp_aggregation_temporality@3 as otlp_aggregation_temporality] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[180000..180000], interval=[60000], eval range=[180000], time index=[ts] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["series", "__greptime_temporality__"] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["series", "otlp_aggregation_temporality"] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
@@ -73,78 +73,78 @@ TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 +-+-+-+
 
 -- The reserved temporality marker treats NULL as the absent cumulative state.
-TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__=""};
+TQL EVAL (180, 180, '1m') delta_temporality{otlp_aggregation_temporality=""};
 
-+---------------------+----------------+------------+--------------------------+
-| ts                  | greptime_value | series     | __greptime_temporality__ |
-+---------------------+----------------+------------+--------------------------+
-| 1970-01-01T00:03:00 | 30.0           | cumulative |                          |
-+---------------------+----------------+------------+--------------------------+
++---------------------+----------------+------------+------------------------------+
+| ts                  | greptime_value | series     | otlp_aggregation_temporality |
++---------------------+----------------+------------+------------------------------+
+| 1970-01-01T00:03:00 | 30.0           | cumulative |                              |
++---------------------+----------------+------------+------------------------------+
 
-TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__!="delta"};
+TQL EVAL (180, 180, '1m') delta_temporality{otlp_aggregation_temporality!="delta"};
 
-+---------------------+----------------+------------+--------------------------+
-| ts                  | greptime_value | series     | __greptime_temporality__ |
-+---------------------+----------------+------------+--------------------------+
-| 1970-01-01T00:03:00 | 30.0           | cumulative |                          |
-+---------------------+----------------+------------+--------------------------+
++---------------------+----------------+------------+------------------------------+
+| ts                  | greptime_value | series     | otlp_aggregation_temporality |
++---------------------+----------------+------------+------------------------------+
+| 1970-01-01T00:03:00 | 30.0           | cumulative |                              |
++---------------------+----------------+------------+------------------------------+
 
 -- Generated vector plans retain timestamp broadcast across the temporality marker.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') vector(2) * delta_temporality;
 
-+------------+--------------------------+---------------------+----------------------------------------------------+
-| series     | __greptime_temporality__ | ts                  | .greptime_value * delta_temporality.greptime_value |
-+------------+--------------------------+---------------------+----------------------------------------------------+
-| cumulative |                          | 1970-01-01T00:03:00 | 60.0                                               |
-| delta      | delta                    | 1970-01-01T00:03:00 | 30.0                                               |
-| single     | delta                    | 1970-01-01T00:03:00 | 14.0                                               |
-+------------+--------------------------+---------------------+----------------------------------------------------+
++------------+------------------------------+---------------------+----------------------------------------------------+
+| series     | otlp_aggregation_temporality | ts                  | .greptime_value * delta_temporality.greptime_value |
++------------+------------------------------+---------------------+----------------------------------------------------+
+| cumulative |                              | 1970-01-01T00:03:00 | 60.0                                               |
+| delta      | delta                        | 1970-01-01T00:03:00 | 30.0                                               |
+| single     | delta                        | 1970-01-01T00:03:00 | 14.0                                               |
++------------+------------------------------+---------------------+----------------------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (180, 180, '1m') vector(2) * ignoring(__greptime_temporality__) delta_temporality;
+TQL EVAL (180, 180, '1m') vector(2) * ignoring(otlp_aggregation_temporality) delta_temporality;
 
-+------------+--------------------------+---------------------+----------------------------------------------------+
-| series     | __greptime_temporality__ | ts                  | .greptime_value * delta_temporality.greptime_value |
-+------------+--------------------------+---------------------+----------------------------------------------------+
-| cumulative |                          | 1970-01-01T00:03:00 | 60.0                                               |
-| delta      | delta                    | 1970-01-01T00:03:00 | 30.0                                               |
-| single     | delta                    | 1970-01-01T00:03:00 | 14.0                                               |
-+------------+--------------------------+---------------------+----------------------------------------------------+
++------------+------------------------------+---------------------+----------------------------------------------------+
+| series     | otlp_aggregation_temporality | ts                  | .greptime_value * delta_temporality.greptime_value |
++------------+------------------------------+---------------------+----------------------------------------------------+
+| cumulative |                              | 1970-01-01T00:03:00 | 60.0                                               |
+| delta      | delta                        | 1970-01-01T00:03:00 | 30.0                                               |
+| single     | delta                        | 1970-01-01T00:03:00 | 14.0                                               |
++------------+------------------------------+---------------------+----------------------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') delta_temporality * vector(2);
 
-+------------+--------------------------+---------------------+----------------------------------------------------+
-| series     | __greptime_temporality__ | ts                  | delta_temporality.greptime_value * .greptime_value |
-+------------+--------------------------+---------------------+----------------------------------------------------+
-| cumulative |                          | 1970-01-01T00:03:00 | 60.0                                               |
-| delta      | delta                    | 1970-01-01T00:03:00 | 30.0                                               |
-| single     | delta                    | 1970-01-01T00:03:00 | 14.0                                               |
-+------------+--------------------------+---------------------+----------------------------------------------------+
++------------+------------------------------+---------------------+----------------------------------------------------+
+| series     | otlp_aggregation_temporality | ts                  | delta_temporality.greptime_value * .greptime_value |
++------------+------------------------------+---------------------+----------------------------------------------------+
+| cumulative |                              | 1970-01-01T00:03:00 | 60.0                                               |
+| delta      | delta                        | 1970-01-01T00:03:00 | 30.0                                               |
+| single     | delta                        | 1970-01-01T00:03:00 | 14.0                                               |
++------------+------------------------------+---------------------+----------------------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (180, 180, '1m') delta_temporality * ignoring(__greptime_temporality__) vector(2);
+TQL EVAL (180, 180, '1m') delta_temporality * ignoring(otlp_aggregation_temporality) vector(2);
 
-+------------+--------------------------+---------------------+----------------------------------------------------+
-| series     | __greptime_temporality__ | ts                  | delta_temporality.greptime_value * .greptime_value |
-+------------+--------------------------+---------------------+----------------------------------------------------+
-| cumulative |                          | 1970-01-01T00:03:00 | 60.0                                               |
-| delta      | delta                    | 1970-01-01T00:03:00 | 30.0                                               |
-| single     | delta                    | 1970-01-01T00:03:00 | 14.0                                               |
-+------------+--------------------------+---------------------+----------------------------------------------------+
++------------+------------------------------+---------------------+----------------------------------------------------+
+| series     | otlp_aggregation_temporality | ts                  | delta_temporality.greptime_value * .greptime_value |
++------------+------------------------------+---------------------+----------------------------------------------------+
+| cumulative |                              | 1970-01-01T00:03:00 | 60.0                                               |
+| delta      | delta                        | 1970-01-01T00:03:00 | 30.0                                               |
+| single     | delta                        | 1970-01-01T00:03:00 | 14.0                                               |
++------------+------------------------------+---------------------+----------------------------------------------------+
 
 -- Aggregation preserves or deliberately removes the visible stored marker.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (180, 180, '1m') sum by (series, __greptime_temporality__) (rate(delta_temporality[3m]));
+TQL EVAL (180, 180, '1m') sum by (series, otlp_aggregation_temporality) (rate(delta_temporality[3m]));
 
-+------------+--------------------------+---------------------+----------------------------------------------------------+
-| series     | __greptime_temporality__ | ts                  | sum(prom_rate(ts_range,greptime_value,ts,Int64(180000))) |
-+------------+--------------------------+---------------------+----------------------------------------------------------+
-| cumulative |                          | 1970-01-01T00:03:00 | 0.16666666666666666                                      |
-| delta      | delta                    | 1970-01-01T00:03:00 | 0.25                                                     |
-| single     | delta                    | 1970-01-01T00:03:00 | 0.03888888888888889                                      |
-+------------+--------------------------+---------------------+----------------------------------------------------------+
++------------+------------------------------+---------------------+----------------------------------------------------------+
+| series     | otlp_aggregation_temporality | ts                  | sum(prom_rate(ts_range,greptime_value,ts,Int64(180000))) |
++------------+------------------------------+---------------------+----------------------------------------------------------+
+| cumulative |                              | 1970-01-01T00:03:00 | 0.16666666666666666                                      |
+| delta      | delta                        | 1970-01-01T00:03:00 | 0.25                                                     |
+| single     | delta                        | 1970-01-01T00:03:00 | 0.03888888888888889                                      |
++------------+------------------------------+---------------------+----------------------------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') sum by (series) (rate(delta_temporality[3m]));
@@ -168,7 +168,7 @@ TQL EVAL (180, 180, '1m') round(sum(rate(delta_temporality[3m])), 0.000001);
 CREATE TABLE delta_marker_only (
     ts TIMESTAMP TIME INDEX,
     greptime_value DOUBLE,
-    __greptime_temporality__ STRING PRIMARY KEY
+    otlp_aggregation_temporality STRING PRIMARY KEY
 );
 
 Affected Rows: 0
@@ -201,11 +201,11 @@ TQL EVAL (180, 180, '1m') delta_marker_only + delta_tagless;
 
 TQL EVAL (180, 180, '1m') delta_marker_only AND delta_tagless;
 
-+---------------------+----------------+--------------------------+
-| ts                  | greptime_value | __greptime_temporality__ |
-+---------------------+----------------+--------------------------+
-| 1970-01-01T00:03:00 | 2.0            |                          |
-+---------------------+----------------+--------------------------+
++---------------------+----------------+------------------------------+
+| ts                  | greptime_value | otlp_aggregation_temporality |
++---------------------+----------------+------------------------------+
+| 1970-01-01T00:03:00 | 2.0            |                              |
++---------------------+----------------+------------------------------+
 
 DROP TABLE delta_tagless;
 

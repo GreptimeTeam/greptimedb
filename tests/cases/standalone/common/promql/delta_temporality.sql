@@ -2,8 +2,8 @@ CREATE TABLE delta_temporality (
     ts TIMESTAMP TIME INDEX,
     greptime_value DOUBLE,
     series STRING,
-    __greptime_temporality__ STRING,
-    PRIMARY KEY (series, __greptime_temporality__)
+    otlp_aggregation_temporality STRING,
+    PRIMARY KEY (series, otlp_aggregation_temporality)
 );
 
 INSERT INTO delta_temporality VALUES
@@ -37,22 +37,22 @@ TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
 TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 
 -- The reserved temporality marker treats NULL as the absent cumulative state.
-TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__=""};
-TQL EVAL (180, 180, '1m') delta_temporality{__greptime_temporality__!="delta"};
+TQL EVAL (180, 180, '1m') delta_temporality{otlp_aggregation_temporality=""};
+TQL EVAL (180, 180, '1m') delta_temporality{otlp_aggregation_temporality!="delta"};
 
 -- Generated vector plans retain timestamp broadcast across the temporality marker.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') vector(2) * delta_temporality;
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (180, 180, '1m') vector(2) * ignoring(__greptime_temporality__) delta_temporality;
+TQL EVAL (180, 180, '1m') vector(2) * ignoring(otlp_aggregation_temporality) delta_temporality;
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') delta_temporality * vector(2);
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (180, 180, '1m') delta_temporality * ignoring(__greptime_temporality__) vector(2);
+TQL EVAL (180, 180, '1m') delta_temporality * ignoring(otlp_aggregation_temporality) vector(2);
 
 -- Aggregation preserves or deliberately removes the visible stored marker.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (180, 180, '1m') sum by (series, __greptime_temporality__) (rate(delta_temporality[3m]));
+TQL EVAL (180, 180, '1m') sum by (series, otlp_aggregation_temporality) (rate(delta_temporality[3m]));
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') sum by (series) (rate(delta_temporality[3m]));
 TQL EVAL (180, 180, '1m') round(sum(rate(delta_temporality[3m])), 0.000001);
@@ -60,7 +60,7 @@ TQL EVAL (180, 180, '1m') round(sum(rate(delta_temporality[3m])), 0.000001);
 CREATE TABLE delta_marker_only (
     ts TIMESTAMP TIME INDEX,
     greptime_value DOUBLE,
-    __greptime_temporality__ STRING PRIMARY KEY
+    otlp_aggregation_temporality STRING PRIMARY KEY
 );
 
 INSERT INTO delta_marker_only VALUES

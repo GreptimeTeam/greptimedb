@@ -751,7 +751,7 @@ fn gauge_arrow_batch(batch_id: i64, reserved_attr: bool) -> BatchArrowRecords {
             ),
             (
                 arrow_consts::ATTRIBUTE_KEY,
-                Arc::new(StringArray::from(vec!["__greptime_temporality__"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["otlp_aggregation_temporality"])) as ArrayRef,
             ),
             (
                 arrow_consts::ATTRIBUTE_TYPE,

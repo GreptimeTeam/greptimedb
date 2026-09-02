@@ -81,7 +81,7 @@ mod test {
             )
             .await
             .unwrap_err();
-        assert!(format!("{error:?}").contains("__greptime_temporality__"));
+        assert!(format!("{error:?}").contains("otlp_aggregation_temporality"));
 
         let mut output = instance
             .do_query("SELECT COUNT(*) FROM fixed_delta_total", ctx)
@@ -151,9 +151,9 @@ mod test {
             let mut output = instance
                 .do_query(
                     &format!(
-                        "SELECT COALESCE(__greptime_temporality__, '') AS temporality, \
+                        "SELECT COALESCE(otlp_aggregation_temporality, '') AS temporality, \
                          COUNT(*) AS samples, SUM(greptime_value) AS total \
-                         FROM {table} GROUP BY __greptime_temporality__ ORDER BY temporality"
+                         FROM {table} GROUP BY otlp_aggregation_temporality ORDER BY temporality"
                     ),
                     ctx.clone(),
                 )
@@ -206,8 +206,8 @@ mod test {
             assert!(instance.metrics(stale, ctx.clone()).await.is_ok());
 
             for (matcher, expected_rows) in [
-                ("__greptime_temporality__=\"delta\"", 0),
-                ("__greptime_temporality__!=\"delta\"", 1),
+                ("otlp_aggregation_temporality=\"delta\"", 0),
+                ("otlp_aggregation_temporality!=\"delta\"", 1),
             ] {
                 let mut output = instance
                     .do_query(

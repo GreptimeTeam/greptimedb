@@ -24,8 +24,8 @@ use common_query::native_histogram::{
     encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
 };
 use common_query::prelude::{
-    GREPTIME_COUNT, GREPTIME_TEMPORALITY_DELTA, greptime_temporality_label, greptime_timestamp,
-    greptime_value,
+    GREPTIME_COUNT, GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL,
+    greptime_timestamp, greptime_value,
 };
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_telemetry::warn;
@@ -951,12 +951,11 @@ fn write_attributes(
             }
             AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
         };
-        if key == greptime_temporality_label() {
+        if key == OTLP_AGGREGATION_TEMPORALITY_LABEL {
             return Err(error::InvalidOtlpMetricInputSnafu {
                 reason: format!(
                     "OTLP attribute `{}` resolves to reserved label `{}`",
-                    attr.key,
-                    greptime_temporality_label()
+                    attr.key, OTLP_AGGREGATION_TEMPORALITY_LABEL
                 ),
             }
             .build());
@@ -1020,7 +1019,7 @@ fn write_temporality_tag(
     if is_delta {
         row_writer::write_tag(
             table,
-            greptime_temporality_label(),
+            OTLP_AGGREGATION_TEMPORALITY_LABEL,
             GREPTIME_TEMPORALITY_DELTA,
             row,
         )?;
@@ -1972,7 +1971,7 @@ mod tests {
                 "otel_scope_scope",
                 "host",
                 greptime_timestamp(),
-                greptime_temporality_label(),
+                OTLP_AGGREGATION_TEMPORALITY_LABEL,
                 "le",
                 greptime_value(),
             ]
@@ -1991,7 +1990,7 @@ mod tests {
                 "otel_scope_scope",
                 "host",
                 greptime_timestamp(),
-                greptime_temporality_label(),
+                OTLP_AGGREGATION_TEMPORALITY_LABEL,
                 greptime_value()
             ]
         );
@@ -2009,7 +2008,7 @@ mod tests {
                 "otel_scope_scope",
                 "host",
                 greptime_timestamp(),
-                greptime_temporality_label(),
+                OTLP_AGGREGATION_TEMPORALITY_LABEL,
                 greptime_value()
             ]
         );

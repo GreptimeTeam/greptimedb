@@ -94,17 +94,15 @@ Two design decisions worth pinning down up front, because they constrain everyth
 - **Update.** Semantic options are stamped at table creation. v1 does not specify an update path; promoting `metadata_quality` from `inferred` to `declared`, refreshing `resource.attributes_preserved`, or revising `trace.conventions` on later writes is deferred. If real usage shows update is needed, it lands as a separate RFC.
 
 OTLP delta sums and explicit histograms additionally store the query-visible
-String tag `__greptime_temporality__="delta"` by default on each generated row.
-The `greptime` segment follows `default_column_prefix`; for example, `custom`
-produces `__custom_temporality__`, while an empty prefix produces
-`__temporality__`. The tag is part of series identity and is authoritative for
-per-series float `rate()` and `increase()` behavior; the table option is never
-used as a row-level discriminator. Native histograms retain their native
-algorithms. Prometheus metadata reports `unknown` for counter, histogram, and
-up/down-counter tables whose catalog temporality is `delta` or `mixed`. A
-same-request conflict can create `mixed`; a later write does not update an
-existing table option, so the catalog value can also be stale while the row tag
-remains authoritative.
+String tag `otlp_aggregation_temporality="delta"` on each generated row. Its
+name is fixed and does not follow `default_column_prefix`. The tag is part of
+series identity and is authoritative for per-series float `rate()` and
+`increase()` behavior; the table option is never used as a row-level
+discriminator. Native histograms retain their native algorithms. Prometheus
+metadata reports `unknown` for counter, histogram, and up/down-counter tables
+whose catalog temporality is `delta` or `mixed`. A same-request conflict can
+create `mixed`; a later write does not update an existing table option, so the
+catalog value can also be stale while the row tag remains authoritative.
 
 The concrete mixed-temporality workload is a rolling production change from
 cumulative to delta for the same metric name. Old and new exporters can overlap
@@ -120,24 +118,23 @@ grouping. The supported states of this reserved label are absent/NULL
 (cumulative) and `delta`. Exact Metric Engine arithmetic and comparison matching
 reuses the existing `__tsid` key, so mixed-temporality support adds no projected
 matching columns on that path. When `__tsid` is unavailable and the marker
-participates in matching, the planner aligns only the configured temporality
-marker, projecting a nullable String on an input whose schema lacks it;
-unrelated nullable labels retain their existing matching behavior. Ignoring the
-marker adds no marker-related matching work.
+participates in matching, the planner aligns only
+`otlp_aggregation_temporality`, projecting a nullable String on an input whose
+schema lacks it; unrelated nullable labels retain their existing matching
+behavior. Ignoring the marker adds no marker-related matching work.
 
-Use the configured label in `ignoring(...)` when temporality should not
-participate in matching (for example, `ignoring(__greptime_temporality__)` with
-the default prefix or `ignoring(__custom_temporality__)` with `custom`). Apply
-`rate()` or `increase()` before an aggregation or subquery that drops the
-marker. `irate()` and `resets()` are not temporality-aware in v1; `delta()`,
-`idelta()`, and `changes()` retain their existing raw-sample semantics.
+Use `ignoring(otlp_aggregation_temporality)` when temporality should not
+participate in matching. Apply `rate()` or `increase()` before an aggregation
+or subquery that drops the marker. `irate()` and `resets()` are not
+temporality-aware in v1; `delta()`, `idelta()`, and `changes()` retain their
+existing raw-sample semantics.
 
-The configured temporality label is a reserved stored key for OTLP metric
+`otlp_aggregation_temporality` is a reserved stored key for OTLP metric
 attributes. Existing float tables that already contain that exact String tag
 and the value `delta` opt into this behavior after upgrade. Producers should
 rename such a user-defined label if that was not their intent. A non-OTLP writer
 may opt in deliberately, while a namespaced OTLP scope attribute cannot collide
-with the stored key. Keep `default_column_prefix` stable for existing tables.
+with the stored key.
 
 OTLP `NoRecordedValue` sums store the canonical Prometheus stale marker.
 Classic-histogram tombstones mark the point's supplied bounds, implicit `+Inf`,

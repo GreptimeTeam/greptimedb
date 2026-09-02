@@ -24,7 +24,7 @@ use common_error::status_code::StatusCode;
 use common_function::function::FunctionContext;
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::{
-    GREPTIME_TEMPORALITY_DELTA, greptime_native_histogram, greptime_temporality_label,
+    GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL, greptime_native_histogram,
     greptime_value,
 };
 use common_query::promql_annotations::PromqlAnnotationCollector;
@@ -1072,7 +1072,7 @@ impl PromPlanner {
                 .tag_columns
                 .iter()
                 .chain(&right_leaf.ctx.tag_columns)
-                .any(|tag| tag == greptime_temporality_label());
+                .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL);
         let (mut left_keys, mut right_keys, force_empty_join) = self.binary_join_key_columns(
             left.schema(),
             right_leaf.plan.schema(),
@@ -1609,7 +1609,7 @@ impl PromPlanner {
                                 .tag_columns
                                 .iter()
                                 .chain(&right_context.tag_columns)
-                                .any(|tag| tag == greptime_temporality_label())),
+                                .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)),
                     modifier,
                     &left_context,
                     &right_context,
@@ -2602,7 +2602,7 @@ impl PromPlanner {
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
-                    && column_name == greptime_temporality_label()
+                    && column_name == OTLP_AGGREGATION_TEMPORALITY_LABEL
                     && let Some(data_type) = field
                         .filter(|field| {
                             field.is_nullable()
@@ -4004,12 +4004,12 @@ impl PromPlanner {
             .ctx
             .tag_columns
             .iter()
-            .any(|tag| tag == greptime_temporality_label())
+            .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
         {
-            Self::field_column_type(input_schema, greptime_temporality_label())
+            Self::field_column_type(input_schema, OTLP_AGGREGATION_TEMPORALITY_LABEL)
                 .filter(|data_type| Self::string_value_data_type(data_type).is_some())
                 .map(|_| {
-                    DfExpr::Column(Column::from_name(greptime_temporality_label()))
+                    DfExpr::Column(Column::from_name(OTLP_AGGREGATION_TEMPORALITY_LABEL))
                         .eq(lit(GREPTIME_TEMPORALITY_DELTA))
                 })
         } else {
@@ -5961,7 +5961,7 @@ impl PromPlanner {
                 });
         matches!(
             (mismatches.next(), mismatches.next()),
-            (Some(label), None) if label == greptime_temporality_label()
+            (Some(label), None) if label == OTLP_AGGREGATION_TEMPORALITY_LABEL
         )
     }
 
@@ -5971,7 +5971,7 @@ impl PromPlanner {
         left_context: &mut PromPlannerContext,
         right_context: &mut PromPlannerContext,
     ) -> Result<(LogicalPlan, LogicalPlan, bool)> {
-        let marker = greptime_temporality_label();
+        let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
         let left_has_marker = left_context.tag_columns.iter().any(|tag| tag == marker);
         let (present, add_to_left) = if left_has_marker {
             (&left, false)
@@ -8101,7 +8101,7 @@ mod test {
         ];
         if temporality_marker {
             columns.push(ColumnSchema::new(
-                greptime_temporality_label().to_string(),
+                OTLP_AGGREGATION_TEMPORALITY_LABEL.to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
             ));
@@ -8235,7 +8235,7 @@ mod test {
         )];
         if temporality_marker {
             columns.push(ColumnSchema::new(
-                greptime_temporality_label().to_string(),
+                OTLP_AGGREGATION_TEMPORALITY_LABEL.to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
             ));
