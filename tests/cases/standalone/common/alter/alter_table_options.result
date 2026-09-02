@@ -238,7 +238,7 @@ ALTER TABLE ato SET 'compaction.twcs.trigger_file_num'='4';
 
 Affected Rows: 0
 
-ALTER TABLE ato SET 'compaction.twcs.active_window.trigger_file_num'='3';
+ALTER TABLE ato SET 'compaction.twcs.active_window.trigger_file_num'='1';
 
 Affected Rows: 0
 
@@ -246,7 +246,7 @@ ALTER TABLE ato SET 'compaction.twcs.active_window.l1_merge_trigger'='8';
 
 Affected Rows: 0
 
-ALTER TABLE ato SET 'compaction.twcs.inactive_window.trigger_file_num'='2';
+ALTER TABLE ato SET 'compaction.twcs.inactive_window.trigger_file_num'='1';
 
 Affected Rows: 0
 
@@ -265,8 +265,8 @@ SHOW CREATE TABLE ato;
 |       | ENGINE=mito                                                 |
 |       | WITH(                                                       |
 |       |   'compaction.twcs.active_window.l1_merge_trigger' = '8',   |
-|       |   'compaction.twcs.active_window.trigger_file_num' = '3',   |
-|       |   'compaction.twcs.inactive_window.trigger_file_num' = '2', |
+|       |   'compaction.twcs.active_window.trigger_file_num' = '1',   |
+|       |   'compaction.twcs.inactive_window.trigger_file_num' = '1', |
 |       |   'compaction.twcs.max_output_file_size' = '500MB',         |
 |       |   'compaction.type' = 'twcs',                               |
 |       |   ttl = '1s'                                                |
@@ -274,6 +274,29 @@ SHOW CREATE TABLE ato;
 +-------+-------------------------------------------------------------+
 
 -- SQLNESS ARG restart=true
+SHOW CREATE TABLE ato;
+
++-------+-------------------------------------------------------------+
+| Table | Create Table                                                |
++-------+-------------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                          |
+|       |   "i" INT NULL,                                             |
+|       |   "j" TIMESTAMP(3) NOT NULL,                                |
+|       |   TIME INDEX ("j"),                                         |
+|       |   PRIMARY KEY ("i")                                         |
+|       | )                                                           |
+|       |                                                             |
+|       | ENGINE=mito                                                 |
+|       | WITH(                                                       |
+|       |   'compaction.twcs.active_window.l1_merge_trigger' = '8',   |
+|       |   'compaction.twcs.active_window.trigger_file_num' = '1',   |
+|       |   'compaction.twcs.inactive_window.trigger_file_num' = '1', |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',         |
+|       |   'compaction.type' = 'twcs',                               |
+|       |   ttl = '1s'                                                |
+|       | )                                                           |
++-------+-------------------------------------------------------------+
+
 ALTER TABLE ato UNSET 'compaction.twcs.active_window.trigger_file_num';
 
 Affected Rows: 0
