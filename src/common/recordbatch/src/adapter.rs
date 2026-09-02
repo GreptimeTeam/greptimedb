@@ -327,7 +327,9 @@ impl RecordBatchStreamAdapter {
         query_load_region_id: Option<u64>,
     ) -> RecordBatchMetrics {
         if explain_verbose {
-            collect_full_metrics(df_plan, explain_verbose, query_load_region_id)
+            // Verbose in-progress snapshots have the same complete topology as
+            // the final snapshot, but use compact (Default) plan formatting.
+            collect_full_metrics(df_plan, false, query_load_region_id)
         } else {
             collect_lightweight_query_load_metrics(df_plan, query_load_region_id)
         }
@@ -479,13 +481,17 @@ impl RecordBatchStream for RecordBatchStreamAdapter {
         match &self.metrics_2 {
             Metrics::Unresolved(df_plan) => {
                 if self.explain_verbose {
-                    Some(self.collect_plan_metrics(df_plan))
+                    Some(Self::collect_partial_metrics(
+                        df_plan.as_ref(),
+                        true,
+                        self.query_load_region_id,
+                    ))
                 } else {
                     None
                 }
             }
             Metrics::PartialResolved(df_plan, metrics) => Some(if self.explain_verbose {
-                self.collect_plan_metrics(df_plan)
+                Self::collect_partial_metrics(df_plan.as_ref(), true, self.query_load_region_id)
             } else {
                 metrics.clone()
             }),
@@ -954,6 +960,7 @@ mod test {
     struct TestMetricsExec {
         properties: Arc<PlanProperties>,
         metrics: ExecutionPlanMetricsSet,
+        format_plan: bool,
     }
 
     impl TestMetricsExec {
@@ -961,7 +968,19 @@ mod test {
             Self::with_output_bytes(schema, &[24])
         }
 
+        fn new_without_plan_formatting(schema: DfSchemaRef) -> Self {
+            Self::with_output_bytes_and_formatting(schema, &[24], false)
+        }
+
         fn with_output_bytes(schema: DfSchemaRef, output_bytes_by_partition: &[usize]) -> Self {
+            Self::with_output_bytes_and_formatting(schema, output_bytes_by_partition, true)
+        }
+
+        fn with_output_bytes_and_formatting(
+            schema: DfSchemaRef,
+            output_bytes_by_partition: &[usize],
+            format_plan: bool,
+        ) -> Self {
             let metrics = ExecutionPlanMetricsSet::new();
             let elapsed_compute = MetricBuilder::new(&metrics).elapsed_compute(0);
             elapsed_compute.add_duration(Duration::from_nanos(42));
@@ -978,13 +997,22 @@ mod test {
                     Boundedness::Bounded,
                 )),
                 metrics,
+                format_plan,
             }
         }
     }
 
     impl DisplayAs for TestMetricsExec {
-        fn fmt_as(&self, _t: DisplayFormatType, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            panic!("non-verbose lightweight partial metrics must not format the plan")
+        fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            assert!(
+                self.format_plan,
+                "non-verbose lightweight partial metrics must not format the plan"
+            );
+            write!(f, "RegionScanExec")?;
+            if matches!(t, DisplayFormatType::Verbose) {
+                write!(f, ": files=[file-1.parquet]")?;
+            }
+            Ok(())
         }
     }
 
@@ -1070,7 +1098,9 @@ mod test {
                 futures::stream::iter(vec![Ok(batch1), Ok(batch2)]),
             ),
         );
-        let plan = Arc::new(TestMetricsExec::new(schema.arrow_schema().clone()));
+        let plan = Arc::new(TestMetricsExec::new_without_plan_formatting(
+            schema.arrow_schema().clone(),
+        ));
 
         let mut adapter = RecordBatchStreamAdapter::try_new(df_stream).unwrap();
         adapter.set_metrics2(plan);
@@ -1087,10 +1117,47 @@ mod test {
         assert_eq!(metrics.plan_metrics.len(), 1);
         assert_eq!(metrics.plan_metrics[0].plan, REGION_SCAN_EXEC_NAME);
         assert_eq!(metrics.plan_metrics[0].plan_name, REGION_SCAN_EXEC_NAME);
-        assert_eq!(
-            metrics.plan_metrics[0].metrics,
-            vec![("output_bytes".to_string(), 24)]
+        assert!(
+            metrics.plan_metrics[0]
+                .metrics
+                .iter()
+                .any(|(name, value)| name == "output_bytes" && *value == 24)
         );
+    }
+
+    #[tokio::test]
+    async fn test_record_batch_stream_adapter_uses_compact_partial_and_verbose_final_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1])) as _],
+        )
+        .unwrap()
+        .into_df_record_batch();
+        let df_stream = Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema.arrow_schema().clone(),
+                futures::stream::iter(vec![Ok(batch)]),
+            ),
+        );
+        let plan = Arc::new(TestMetricsExec::new(schema.arrow_schema().clone()));
+        let mut adapter = RecordBatchStreamAdapter::try_new(df_stream).unwrap();
+        adapter.set_metrics2(plan);
+        adapter.set_explain_verbose(true);
+
+        adapter.next().await.unwrap().unwrap();
+        let partial = adapter.metrics().unwrap();
+        assert_eq!(partial.plan_metrics.len(), 1);
+        assert_eq!(partial.plan_metrics[0].plan.trim_end(), "RegionScanExec");
+        assert!(!partial.plan_metrics[0].plan.contains("files"));
+
+        assert!(adapter.next().await.is_none());
+        let final_metrics = adapter.metrics().unwrap();
+        assert!(final_metrics.plan_metrics[0].plan.contains("files"));
     }
 
     #[test]

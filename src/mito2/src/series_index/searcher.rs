@@ -231,6 +231,11 @@ impl SeriesIndexSearcher {
     }
 }
 
+// Builds `__series_min_ts`/`__series_max_ts` predicates in the unit of the
+// given (region) metadata. NOTE: the searcher is constructed once per region
+// while the raw i64 bounds were written in each file's unit; files written
+// before/after a time index unit widening would need a per-file unit before
+// this comparison is safe. See the note on `timestamp_values` in the writer.
 fn time_range_filters(
     metadata: &RegionMetadataRef,
     time_range: Option<TimestampRange>,

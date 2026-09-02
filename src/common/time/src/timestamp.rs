@@ -587,8 +587,12 @@ impl fmt::Debug for Timestamp {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub enum TimeUnit {
+    // The declaration order (Second < Millisecond < Microsecond < Nanosecond) is
+    // the precision order; the derived ordering intentionally reflects it.
     Second,
     #[default]
     Millisecond,
@@ -604,6 +608,51 @@ impl From<&ArrowTimeUnit> for TimeUnit {
             ArrowTimeUnit::Microsecond => Self::Microsecond,
             ArrowTimeUnit::Nanosecond => Self::Nanosecond,
         }
+    }
+}
+
+impl From<TimeUnit> for ArrowTimeUnit {
+    fn from(unit: TimeUnit) -> Self {
+        match unit {
+            TimeUnit::Second => Self::Second,
+            TimeUnit::Millisecond => Self::Millisecond,
+            TimeUnit::Microsecond => Self::Microsecond,
+            TimeUnit::Nanosecond => Self::Nanosecond,
+        }
+    }
+}
+
+/// The exact division of a timestamp value into a different unit:
+/// `quotient * from_scale + remainder == value * to_scale` with
+/// `0 <= remainder < from_scale`. `quotient` is the value floored in
+/// `to_unit`; `remainder == 0` iff the value is representable in `to_unit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitQuotient {
+    pub quotient: i64,
+    pub remainder: i128,
+}
+
+/// Divides a `value` given in `from_unit` by `to_unit`, i.e. computes its
+/// value in `to_unit` exactly (floor division). Returns `None` if the
+/// quotient overflows `i64`.
+pub fn div_mod_units(value: i64, from_unit: TimeUnit, to_unit: TimeUnit) -> Option<UnitQuotient> {
+    let from_scale = timestamp_unit_scale(from_unit);
+    let to_scale = timestamp_unit_scale(to_unit);
+    let instant = i128::from(value) * to_scale;
+    let quotient = i64::try_from(instant.div_euclid(from_scale)).ok()?;
+    Some(UnitQuotient {
+        quotient,
+        remainder: instant.rem_euclid(from_scale),
+    })
+}
+
+/// Number of units in one second.
+fn timestamp_unit_scale(unit: TimeUnit) -> i128 {
+    match unit {
+        TimeUnit::Second => 1,
+        TimeUnit::Millisecond => 1_000,
+        TimeUnit::Microsecond => 1_000_000,
+        TimeUnit::Nanosecond => 1_000_000_000,
     }
 }
 
@@ -713,6 +762,22 @@ mod tests {
 
     use super::*;
     use crate::timezone::set_default_timezone;
+
+    #[test]
+    fn test_div_mod_units() {
+        // Representable: 7000ms in us.
+        let q = div_mod_units(7_000, TimeUnit::Millisecond, TimeUnit::Microsecond).unwrap();
+        assert_eq!((7_000_000, 0), (q.quotient, q.remainder));
+        // Not representable: 7_000_500us in ms floors to 7000ms, remainder set.
+        let q = div_mod_units(7_000_500, TimeUnit::Microsecond, TimeUnit::Millisecond).unwrap();
+        assert_eq!(7_000, q.quotient);
+        assert_ne!(0, q.remainder);
+        // Floor semantics for negative instants: -2_500_500us -> -2501ms.
+        let q = div_mod_units(-2_500_500, TimeUnit::Microsecond, TimeUnit::Millisecond).unwrap();
+        assert_eq!(-2_501, q.quotient);
+        // Quotient overflow beyond the target unit's i64 range.
+        assert!(div_mod_units(i64::MAX, TimeUnit::Millisecond, TimeUnit::Nanosecond).is_none());
+    }
 
     #[test]
     pub fn test_time_unit() {

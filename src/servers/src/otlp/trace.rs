@@ -54,7 +54,9 @@ pub const KEY_CONTAINER_ID: &str = "container.id";
 pub const KEY_CONTAINER_NAME: &str = "container.name";
 pub const KEY_K8S_POD_UID: &str = "k8s.pod.uid";
 pub const KEY_K8S_POD_NAME: &str = "k8s.pod.name";
+pub const KEY_K8S_CONTAINER_NAME: &str = "k8s.container.name";
 pub const KEY_K8S_NAMESPACE_NAME: &str = "k8s.namespace.name";
+pub const KEY_K8S_NODE_NAME: &str = "k8s.node.name";
 pub const KEY_SPAN_KIND: &str = "span.kind";
 
 // jaeger const keys, not sure if they are general

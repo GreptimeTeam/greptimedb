@@ -38,7 +38,17 @@ It's mainly an complement to the [Rust Style Guide](https://pingcap.github.io/st
 ## Error handling
 
 - Define a custom error type for the module if needed.
-- Prefer `with_context()` over `context()` when allocation is needed to construct an error.
+- Use `context()` for cheap context selectors. Its argument is evaluated even when the
+  operation succeeds.
+- Use `with_context()` when constructing the context requires work such as `format!`,
+  allocation, or cloning, so that work only happens on the error path. For example:
+
+```rust
+value.with_context(|| InvalidValueSnafu {
+    reason: format!("invalid value: {value}"),
+})?;
+```
+
 - Use `error!()` or `warn!()` macros in the `common_telemetry` crate to log errors. E.g.:
 
 ```rust

@@ -17,6 +17,8 @@ co_declared_edges:
   - { src: service.instance, dst: k8s.pod, rel: runs_on }
   - { src: service.instance, dst: container, rel: runs_on }
   - { src: container, dst: host, rel: runs_on }
+  - { src: service.instance, dst: k8s.container, rel: runs_on }
+  - { src: k8s.container, dst: host, rel: runs_on }
 
 # Applied only to trace sources; the endpoints are Greptime entity types
 # derived from GenAI semantic-convention attributes.
@@ -51,8 +53,21 @@ otlp_trace_entities:
     id: [resource_attributes.host.id]
     descriptive:
       - resource_attributes.host.name
+  # A container inside a pod is the k8s.container entity, under the identity
+  # kube-state-metrics gives it, so the two sources name one node. The generic
+  # container yields to it only on rows that produce it, or a container would
+  # vanish instead of merging, and keeps its runtime id descriptive.
+  #
+  # Nothing checks a supersession against the edge vocabulary: whatever edges
+  # the superseded type takes part in, the superseding type needs its own.
+  - entity: k8s.container
+    id: [resource_attributes.k8s.pod.uid, resource_attributes.k8s.container.name]
+    descriptive:
+      - resource_attributes.container.id
+      - resource_attributes.container.name
   - entity: container
     id: [resource_attributes.container.id]
+    superseded_by: k8s.container
     descriptive:
       - resource_attributes.container.name
   - entity: k8s.pod
@@ -60,6 +75,11 @@ otlp_trace_entities:
     descriptive:
       - resource_attributes.k8s.pod.name
       - resource_attributes.k8s.namespace.name
+  # Named, not k8s.node.uid: kube-state-metrics carries no node UID, so the
+  # name is the only identity both sources can agree on. Same-named nodes in
+  # different clusters therefore merge.
+  - entity: k8s.node
+    id: [resource_attributes.k8s.node.name]
 
 # Implicit declarations for Prometheus entity-descriptor metrics, keyed by
 # table name. Pod and service identities are the UIDs (names stay
@@ -152,8 +172,16 @@ otel_info_metrics:
       id: [host.id]
       descriptive:
         - host.name
+    - entity: k8s.container
+      id: [k8s.pod.uid, k8s.container.name]
+      descriptive:
+        - container.id
+        - container.name
+    # Yields to k8s.container, as on the trace side above. One descriptor table
+    # holds both pod rows and bare-runtime rows, so the test is per row.
     - entity: container
       id: [container.id]
+      superseded_by: k8s.container
       descriptive:
         - container.name
     - entity: k8s.pod
@@ -161,3 +189,6 @@ otel_info_metrics:
       descriptive:
         - k8s.pod.name
         - k8s.namespace.name
+    # Named for the same reason as on the trace side above.
+    - entity: k8s.node
+      id: [k8s.node.name]

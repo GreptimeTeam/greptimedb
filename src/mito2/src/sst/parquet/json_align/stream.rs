@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use datafusion_common::cast_column;
 use datafusion_common::format::DEFAULT_CAST_OPTIONS;
 use datatypes::arrow::array::{ArrayRef, new_null_array};
-use datatypes::arrow::datatypes::{DataType, FieldRef, SchemaRef};
+use datatypes::arrow::datatypes::{DataType, Field, FieldRef, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::{JsonMetadata, is_json2_extension_type};
+use datatypes::json::JsonSettings;
 use datatypes::vectors::json::array::JsonArray;
 use futures::Stream;
 use snafu::{ResultExt, ensure};
@@ -28,6 +30,13 @@ use snafu::{ResultExt, ensure};
 use crate::error::{
     CastColumnSnafu, DataTypeMismatchSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
+use crate::sst::parquet::Json2TargetLayout;
+
+#[derive(Debug)]
+struct Json2RewriteSettings {
+    logical_settings: JsonSettings,
+    target_layout: JsonSettings,
+}
 
 /// Aligns projected batches to the expected output schema for nested projections.
 ///
@@ -61,6 +70,8 @@ pub struct NestedSchemaAligner<S> {
     /// Whether all projected roots are present and the stream can pass batches
     /// through.
     all_roots_present: bool,
+    /// JSON2 columns that require semantic source-to-target layout rewriting.
+    json2_rewrite_targets: HashMap<String, Json2RewriteSettings>,
     /// The cache for whether incoming batches already match output schema.
     is_schema_matched: Option<bool>,
 }
@@ -96,8 +107,38 @@ where
             projected_root_presence,
             expected_input_col_num,
             all_roots_present,
+            json2_rewrite_targets: HashMap::new(),
             is_schema_matched: None,
         })
+    }
+
+    /// Sets JSON2 columns that must be rewritten into the output field layout.
+    pub(crate) fn with_json2_rewrite_targets(
+        mut self,
+        targets: &HashMap<String, Json2TargetLayout>,
+    ) -> Result<Self> {
+        self.json2_rewrite_targets = targets
+            .iter()
+            .map(|(name, layout)| {
+                let metadata = serde_json::from_str::<JsonMetadata>(&layout.extension_metadata)
+                    .map_err(|e| {
+                        UnexpectedSnafu {
+                            reason: format!(
+                                "invalid JSON2 extension metadata for column '{name}': {e}"
+                            ),
+                        }
+                        .build()
+                    })?;
+                Ok((
+                    name.clone(),
+                    Json2RewriteSettings {
+                        logical_settings: metadata.into_json_settings(),
+                        target_layout: layout.target_layout.clone(),
+                    },
+                ))
+            })
+            .collect::<Result<_>>()?;
+        Ok(self)
     }
 }
 
@@ -125,6 +166,7 @@ where
                         &this.output_schema,
                         &this.projected_root_presence,
                         this.expected_input_col_num,
+                        &this.json2_rewrite_targets,
                     )))
                 }
             }
@@ -140,6 +182,7 @@ fn align_projected_batch(
     output_schema: &SchemaRef,
     projected_root_presence: &[bool],
     expected_input_col_num: usize,
+    json2_rewrite_targets: &HashMap<String, Json2RewriteSettings>,
 ) -> Result<RecordBatch> {
     ensure!(
         rb.columns().len() == expected_input_col_num,
@@ -154,6 +197,7 @@ fn align_projected_batch(
 
     let mut cols = Vec::with_capacity(projected_root_presence.len());
     let mut idx = 0;
+    let input_schema = rb.schema_ref();
 
     for (field, present) in output_schema.fields().iter().zip(projected_root_presence) {
         if !present {
@@ -161,19 +205,39 @@ fn align_projected_batch(
             continue;
         }
 
-        cols.push(align_array(rb.column(idx), field)?);
+        cols.push(align_array(
+            rb.column(idx),
+            input_schema.field(idx),
+            field,
+            json2_rewrite_targets.get(field.name()),
+        )?);
         idx += 1;
     }
 
     RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)
 }
 
-fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
+fn align_array(
+    array: &ArrayRef,
+    source: &Field,
+    field: &FieldRef,
+    rewrite_settings: Option<&Json2RewriteSettings>,
+) -> Result<ArrayRef> {
+    if let Some(settings) = rewrite_settings {
+        return JsonArray::from(array)
+            .rewrite_to_v2(source, &settings.logical_settings, &settings.target_layout)
+            .context(DataTypeMismatchSnafu);
+    }
     if array.data_type() == field.data_type() {
         return Ok(array.clone());
     }
 
     if is_json2_extension_type(field) {
+        if is_json2_extension_type(source) {
+            return JsonArray::from(array)
+                .project_to_v2(source, field.data_type())
+                .context(DataTypeMismatchSnafu);
+        }
         return JsonArray::from(array)
             .project_to(field.data_type())
             .context(DataTypeMismatchSnafu);
@@ -188,6 +252,7 @@ fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use datatypes::arrow::array::{
@@ -199,6 +264,33 @@ mod tests {
     use futures::{StreamExt, stream};
 
     use super::*;
+
+    #[test]
+    fn test_aligner_resolves_json2_rewrite_settings()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let logical_settings = JsonSettings::default();
+        let target_layout = JsonSettings::try_new(vec![], Some(0))?;
+        let rewrite_targets = HashMap::from([(
+            "j".to_string(),
+            Json2TargetLayout {
+                extension_metadata: serde_json::to_string(&JsonMetadata::new(
+                    logical_settings.clone(),
+                ))?,
+                target_layout: target_layout.clone(),
+            },
+        )]);
+        let aligner = NestedSchemaAligner::new(
+            stream::empty::<Result<RecordBatch>>(),
+            vec![],
+            schema(Vec::<Field>::new()),
+        )?
+        .with_json2_rewrite_targets(&rewrite_targets)?;
+
+        let settings = &aligner.json2_rewrite_targets["j"];
+        assert_eq!(logical_settings, settings.logical_settings);
+        assert_eq!(target_layout, settings.target_layout);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_aligner_with_all_projected_roots_match() {

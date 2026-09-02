@@ -57,6 +57,12 @@ pub struct ImplicitEntity {
     /// Skipped when the column is absent or empty.
     #[serde(default)]
     pub qualified_by: Option<String>,
+    /// A more specific entity type declared next to this one, which takes over
+    /// on the rows carrying its full identity. Naming the type rather than a
+    /// trigger column is what keeps the entity replaceable but never
+    /// droppable: where the specific type is not derivable, this one stands.
+    #[serde(default)]
+    pub superseded_by: Option<String>,
     /// Descriptive label columns, filtered to those present (kube-state-metrics
     /// label sets vary across versions).
     #[serde(default)]
@@ -243,6 +249,27 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
                     implicit.entity
                 ));
             }
+            if let Some(superseding) = &implicit.superseded_by {
+                let superseding = entities
+                    .iter()
+                    .find(|other| &other.entity == superseding)
+                    .ok_or_else(|| {
+                        format!(
+                            "entity `{}` of info metric `{table}` is superseded by `{superseding}`, \
+                             which `{table}` does not declare",
+                            implicit.entity
+                        )
+                    })?;
+                // A chain would let the middle entity withdraw while its own
+                // replacement is absent.
+                if superseding.superseded_by.is_some() {
+                    return Err(format!(
+                        "entity `{}` of info metric `{table}` is superseded by `{}`, which is \
+                         itself superseded",
+                        implicit.entity, superseding.entity
+                    ));
+                }
+            }
             if implicit.qualified_by.as_ref().is_some_and(String::is_empty) {
                 return Err(format!(
                     "entity `{}` of info metric `{table}` has an empty qualified_by",
@@ -316,6 +343,16 @@ mod tests {
                 ""
             )
             .contains("descriptive_rest")
+        );
+        // Superseding a type the same table does not declare leaves the rule
+        // dead and the duplicate node back in the graph.
+        assert!(
+            err(
+                "",
+                "t: [{entity: container, id: [x], superseded_by: k8s.container}]",
+                ""
+            )
+            .contains("does not declare")
         );
         // the otel map runs through the same per-table validation
         assert!(err("", "", "t: [{entity: hosts, id: [x]}]").contains("unknown entity type"));

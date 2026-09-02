@@ -83,6 +83,7 @@ use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
+use crate::sst::parquet::Json2RewriteTargets;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -952,6 +953,8 @@ pub struct ScanInput {
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
+    /// Compaction-only JSON2 physical rewrite targets.
+    json2_rewrite_targets: Json2RewriteTargets,
     /// Counters that should receive query-load metrics.
     pub(crate) query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
@@ -992,6 +995,7 @@ impl ScanInput {
             explain_flat_format: false,
             snapshot_sequence: None,
             compaction: false,
+            json2_rewrite_targets: Arc::default(),
             query_stat_counters: None,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
@@ -1197,6 +1201,13 @@ impl ScanInput {
         self
     }
 
+    /// Sets compaction-only JSON2 physical rewrite targets.
+    #[must_use]
+    pub(crate) fn with_json2_rewrite_targets(mut self, targets: Json2RewriteTargets) -> Self {
+        self.json2_rewrite_targets = targets;
+        self
+    }
+
     /// Builds memtable ranges to scan by `index`.
     pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
         let memtable = &self.memtables[index.index];
@@ -1325,6 +1336,7 @@ impl ScanInput {
             .read_sst(file.clone())
             .predicate(predicate)
             .projection(Some(self.read_cols.clone()))
+            .json2_rewrite_targets(self.json2_rewrite_targets.clone())
             .cache(self.cache_strategy.clone())
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())

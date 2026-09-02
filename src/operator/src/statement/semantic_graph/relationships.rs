@@ -19,18 +19,19 @@
 //! expression helpers and the entity registry live in the parent module.
 
 use common_catalog::consts::{
-    CONFIDENCE_COLUMN, DST_ID_COLUMN, DST_TYPE_COLUMN, DURATION_COUNT_COLUMN, DURATION_NANO_COLUMN,
-    DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN, ENTITY_SCOPE_COLUMN, ERROR_COUNT_COLUMN,
-    FRESH_UNTIL_COLUMN, GENERATION_ID_COLUMN, OBSERVED_AT_COLUMN, PARENT_SPAN_ID_COLUMN,
-    PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
-    SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR, SRC_ID_COLUMN,
-    SRC_TYPE_COLUMN, TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN, VALID_FROM_COLUMN,
-    VALID_UNTIL_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
+    CONFIDENCE_COLUMN, DST_ID_COLUMN, DST_TYPE_COLUMN, DURATION_COUNT_COLUMN, DURATION_MAX_COLUMN,
+    DURATION_NANO_COLUMN, DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN, ENTITY_SCOPE_COLUMN,
+    ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, GENERATION_ID_COLUMN, OBSERVED_AT_COLUMN,
+    PARENT_SPAN_ID_COLUMN, PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN,
+    SPAN_ID_COLUMN, SPAN_KIND_CLIENT, SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN,
+    SPAN_STATUS_ERROR, SRC_ID_COLUMN, SRC_TYPE_COLUMN, TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
+    UNMATCHED_COUNT_COLUMN, VALID_FROM_COLUMN, VALID_UNTIL_COLUMN, WINDOW_END_COLUMN,
+    WINDOW_START_COLUMN,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::dataframe::DataFrame;
 use datafusion::functions::core as core_fns;
-use datafusion::functions_aggregate::expr_fn::{bool_or, count, min, sum};
+use datafusion::functions_aggregate::expr_fn::{bool_or, count, max, min, sum};
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion_common::{Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, cast, ident, lit, when};
@@ -41,8 +42,8 @@ use crate::statement::semantic_graph::conventions::{
 };
 use crate::statement::semantic_graph::{
     DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, bin_interval, bin_ms,
-    conventions, entity_id_expr, identifies, interval, null_json, parse_json_expr, qcol, union_all,
-    unnest_rows,
+    conventions, declaration_predicate, entity_id_expr, interval, null_json, parse_json_expr, qcol,
+    union_all, unnest_rows,
 };
 
 /// The embedded conventions, with a broken file surfaced as a plan error.
@@ -56,7 +57,7 @@ fn builtin() -> DfResult<&'static Conventions> {
 /// them over the union to enforce the contract. (The physical declared table
 /// additionally stores `valid_from`/`valid_until`, which feed the validity
 /// filter and the projected window columns.)
-const RELATIONSHIP_COLUMNS: [&str; 16] = [
+const RELATIONSHIP_COLUMNS: [&str; 18] = [
     OBSERVED_AT_COLUMN,
     WINDOW_START_COLUMN,
     WINDOW_END_COLUMN,
@@ -69,9 +70,11 @@ const RELATIONSHIP_COLUMNS: [&str; 16] = [
     PROVENANCE_COLUMN,
     CONFIDENCE_COLUMN,
     REQUEST_COUNT_COLUMN,
+    UNMATCHED_COUNT_COLUMN,
     ERROR_COUNT_COLUMN,
     DURATION_SUM_COLUMN,
     DURATION_COUNT_COLUMN,
+    DURATION_MAX_COLUMN,
     EDGE_ATTRIBUTES_COLUMN,
 ];
 
@@ -117,7 +120,7 @@ pub struct RelationshipSources {
 
 /// Builds the `semantic_relationships` plan: the service-calls, agent-calls,
 /// co-declared, and declared-edge branches unioned and re-projected to the
-/// 16-column contract. Returns `None` when no source can contribute edges, so
+/// 18-column contract. Returns `None` when no source can contribute edges, so
 /// the computed table streams empty.
 pub fn build_relationships_plan(
     sources: RelationshipSources,
@@ -188,11 +191,7 @@ fn co_declared_branch(
             .map(|(src, dst, rel_type, provenance)| {
                 // Both endpoints must identify something on the row for the
                 // row to witness the edge.
-                let valid = src
-                    .id_columns
-                    .iter()
-                    .chain(&dst.id_columns)
-                    .fold(lit(true), |predicate, id| predicate.and(identifies(id)));
+                let valid = declaration_predicate(src).and(declaration_predicate(dst));
                 vec![
                     valid,
                     bin.clone(),
@@ -208,8 +207,10 @@ fn co_declared_branch(
                     lit(1.0_f64),
                     null_i64(),
                     null_i64(),
+                    null_i64(),
                     lit(ScalarValue::Float64(None)),
                     null_i64(),
+                    lit(ScalarValue::Float64(None)),
                     null_json(),
                 ]
             })
@@ -300,9 +301,13 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
             tag_utf8(PROVENANCE_COLUMN),
             ident(CONFIDENCE_COLUMN),
             ident(REQUEST_COUNT_COLUMN),
+            // A hand-declared edge asserts a dependency, not an observation:
+            // it has no span population to leave unmatched or to time.
+            lit(ScalarValue::Int64(None)).alias(UNMATCHED_COUNT_COLUMN),
             ident(ERROR_COUNT_COLUMN),
             ident(DURATION_SUM_COLUMN),
             ident(DURATION_COUNT_COLUMN),
+            lit(ScalarValue::Float64(None)).alias(DURATION_MAX_COLUMN),
             ident(EDGE_ATTRIBUTES_COLUMN),
         ])
 }
@@ -327,7 +332,8 @@ const VIRTUAL_NODE_CONFIDENCE: f64 = 0.5;
 /// and `confidence < 1.0`. Real pairs win: when a window's edge key holds any
 /// pair, the edge reports only the pair population (the RFC pins RED metrics
 /// to observed span pairs) and the unmatched clients are suppressed, so one
-/// `(window, edge)` never yields two rows.
+/// `(window, edge)` never yields two rows. `unmatched_count` stays outside the
+/// rule and counts them on the same row.
 fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<Option<DataFrame>> {
     let mut clients: Option<DataFrame> = None;
     let mut servers: Option<DataFrame> = None;
@@ -406,10 +412,14 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
                     .filter(paired.clone())
                     .build()?
                     .alias("pair_duration_nano"),
+                max(ident("server_duration_nano"))
+                    .filter(paired.clone())
+                    .build()?
+                    .alias("pair_duration_max_nano"),
                 count(lit(1))
                     .filter(!paired.clone())
                     .build()?
-                    .alias("unmatched_count"),
+                    .alias(UNMATCHED_COUNT_COLUMN),
                 count(lit(1))
                     .filter(
                         (!paired.clone()).and(ident("client_status").eq(lit(SPAN_STATUS_ERROR))),
@@ -420,6 +430,10 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
                     .filter(!paired.clone())
                     .build()?
                     .alias("unmatched_duration_nano"),
+                max(ident("client_duration_nano"))
+                    .filter(!paired.clone())
+                    .build()?
+                    .alias("unmatched_duration_max_nano"),
                 bool_or(paired.clone()).alias("has_pair"),
                 // `min` makes a mixed-provenance virtual edge deterministic
                 // (`database` sorts before `virtual_node`).
@@ -441,7 +455,11 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
             lit(REL_TYPE_CALLS).alias(REL_TYPE_COLUMN),
             lit(PROVENANCE_TRACE).alias(PROVENANCE_COLUMN),
             real_wins(lit(1.0_f64), lit(VIRTUAL_NODE_CONFIDENCE))?.alias(CONFIDENCE_COLUMN),
-            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias(REQUEST_COUNT_COLUMN),
+            real_wins(ident("pair_count"), ident(UNMATCHED_COUNT_COLUMN))?
+                .alias(REQUEST_COUNT_COLUMN),
+            // Outside `real_wins`: reporting what the pair population
+            // swallowed is the point of the column.
+            ident(UNMATCHED_COUNT_COLUMN),
             real_wins(ident("pair_errors"), ident("unmatched_errors"))?.alias(ERROR_COUNT_COLUMN),
             // duration sums in nanoseconds; the contract column is seconds.
             (cast(
@@ -452,7 +470,19 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
                 DataType::Float64,
             ) / lit(1e9_f64))
             .alias(DURATION_SUM_COLUMN),
-            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias(DURATION_COUNT_COLUMN),
+            real_wins(ident("pair_count"), ident(UNMATCHED_COUNT_COLUMN))?
+                .alias(DURATION_COUNT_COLUMN),
+            // A pair is timed by the server span, an unmatched client by its
+            // own (network wait included), so mixing them would describe a
+            // different population than duration_sum/duration_count.
+            (cast(
+                real_wins(
+                    ident("pair_duration_max_nano"),
+                    ident("unmatched_duration_max_nano"),
+                )?,
+                DataType::Float64,
+            ) / lit(1e9_f64))
+            .alias(DURATION_MAX_COLUMN),
             real_wins(null_json(), virtual_attrs_expr()?)?.alias(EDGE_ATTRIBUTES_COLUMN),
         ])?;
     Ok(Some(df))
@@ -484,7 +514,7 @@ fn virtual_attrs_expr() -> DfResult<Expr> {
 /// side's timestamp and cannot prune this side's scan on their own).
 fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict: bool) -> Expr {
     let ts = ident(TRACE_TIMESTAMP_COLUMN);
-    let mut predicate = if strict {
+    let window_predicate = if strict {
         ts.clone()
             .gt_eq(window.source_start())
             .and(ts.lt(window.source_end()))
@@ -494,10 +524,7 @@ fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict
             .and(ts.lt(window.source_end() + interval(CHILD_SPAN_LATE_NANOS)))
     };
     // An absent identity component identifies nothing, on either endpoint.
-    for id in &service.id_columns {
-        predicate = predicate.and(identifies(id));
-    }
-    predicate
+    window_predicate.and(declaration_predicate(service))
 }
 
 /// One trace table's client spans, normalized to
@@ -685,6 +712,7 @@ fn agent_calls_branch(
                     .build()?
                     .alias(ERROR_COUNT_COLUMN),
                 sum(ident(DURATION_NANO_COLUMN)).alias("duration_nano_sum"),
+                max(ident(DURATION_NANO_COLUMN)).alias("duration_nano_max"),
             ],
         )?
         .select(vec![
@@ -700,10 +728,15 @@ fn agent_calls_branch(
             lit(PROVENANCE_TRACE).alias(PROVENANCE_COLUMN),
             lit(1.0_f64).alias(CONFIDENCE_COLUMN),
             ident(REQUEST_COUNT_COLUMN),
+            // The join is inner: an unanswered delegation leaves no row, so
+            // there is no unmatched population here.
+            lit(ScalarValue::Int64(None)).alias(UNMATCHED_COUNT_COLUMN),
             ident(ERROR_COUNT_COLUMN),
             (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
                 .alias(DURATION_SUM_COLUMN),
             ident(REQUEST_COUNT_COLUMN).alias(DURATION_COUNT_COLUMN),
+            (cast(ident("duration_nano_max"), DataType::Float64) / lit(1e9_f64))
+                .alias(DURATION_MAX_COLUMN),
             null_json().alias(EDGE_ATTRIBUTES_COLUMN),
         ])?;
     Ok(Some(df))
@@ -878,6 +911,7 @@ mod tests {
             entity_type: "service".to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             id_qualifier: None,
+            superseded_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -917,32 +951,11 @@ mod tests {
         assert_eq!(strings(batch, 8), vec!["calls"]);
         assert_eq!(strings(batch, 9), vec!["trace"]);
 
-        let request_count = batch
-            .column(11)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(request_count.value(0), 2);
-        let error_count = batch
-            .column(12)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(error_count.value(0), 1);
-        let duration_sum = batch
-            .column(13)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert!((duration_sum.value(0) - 2.0).abs() < 1e-9);
-        let duration_count = batch
-            .column(14)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(duration_count.value(0), 2);
+        assert_eq!(red_metrics(batch, 0), (2, 1, 2.0, 2));
+        // The slower of the two paired server spans.
+        assert_eq!(duration_max(batch, 0), 1.5);
         // Derived calls edges carry no attributes: a typed-JSON NULL.
-        assert!(json_texts(batch, 15)[0].is_none());
+        assert!(json_texts(batch, 17)[0].is_none());
     }
 
     /// RED columns of one output row: `(request_count, error_count,
@@ -957,12 +970,30 @@ mod tests {
                 .value(row)
         };
         let duration_sum = batch
-            .column(13)
+            .column(14)
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap()
             .value(row);
-        (i64_at(11), i64_at(12), duration_sum, i64_at(14))
+        (i64_at(11), i64_at(13), duration_sum, i64_at(15))
+    }
+
+    fn unmatched_count(batch: &RecordBatch, row: usize) -> i64 {
+        batch
+            .column(12)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(row)
+    }
+
+    fn duration_max(batch: &RecordBatch, row: usize) -> f64 {
+        batch
+            .column(16)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(row)
     }
 
     fn confidence(batch: &RecordBatch, row: usize) -> f64 {
@@ -1124,8 +1155,11 @@ mod tests {
         assert_eq!(strings(batch, 9), vec!["trace"]);
         assert_eq!(confidence(batch, 0), VIRTUAL_NODE_CONFIDENCE);
         assert_eq!(red_metrics(batch, 0), (1, 1, 0.25, 1));
+        // With no pair to prefer, both columns come from the client spans.
+        assert_eq!(duration_max(batch, 0), 0.25);
+        assert_eq!(unmatched_count(batch, 0), 1);
         assert_eq!(
-            json_texts(batch, 15),
+            json_texts(batch, 17),
             vec![Some(r#"{"connection_type":"virtual_node"}"#.to_string())]
         );
     }
@@ -1153,7 +1187,7 @@ mod tests {
         let batch = &batches[0];
         assert_eq!(strings(batch, 7), vec!["mysql"]);
         assert_eq!(
-            json_texts(batch, 15),
+            json_texts(batch, 17),
             vec![Some(r#"{"connection_type":"database"}"#.to_string())]
         );
     }
@@ -1231,6 +1265,9 @@ mod tests {
         assert_eq!(strings(batch, 9), vec!["trace"]);
         assert_eq!(confidence(batch, 0), 1.0);
         assert_eq!(red_metrics(batch, 0), (2, 1, 3.0, 2));
+        // The child spans carry the durations, so the max is real here.
+        assert_eq!(duration_max(batch, 0), 2.0);
+        assert!(batch.column(12).is_null(0));
     }
 
     #[tokio::test]
@@ -1331,6 +1368,7 @@ mod tests {
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             id_qualifier: None,
+            superseded_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -1377,7 +1415,7 @@ mod tests {
                 ));
                 assert_eq!(confidence(batch, i), 1.0);
                 // Co-declared edges carry no RED metrics or attributes.
-                for column in 11..=15 {
+                for column in 11..=17 {
                     assert!(batch.column(column).is_null(i));
                 }
             }
@@ -1527,8 +1565,17 @@ mod tests {
             )],
             &[
                 // A sampled-out server: the client names the same peer an
-                // actual pair witnesses in the same window.
-                (1_000, "t1", "c1", None, CLIENT, ERROR, "frontend", 999),
+                // actual pair witnesses in the same window, and outlasts it.
+                (
+                    1_000,
+                    "t1",
+                    "c1",
+                    None,
+                    CLIENT,
+                    ERROR,
+                    "frontend",
+                    9_000_000_000,
+                ),
                 (
                     2_010,
                     "t2",
@@ -1556,7 +1603,11 @@ mod tests {
         assert_eq!(strings(batch, 7), vec!["cart"]);
         assert_eq!(confidence(batch, 0), 1.0);
         assert_eq!(red_metrics(batch, 0), (1, 0, 0.5, 1));
-        assert!(json_texts(batch, 15)[0].is_none());
+        // The longer, client-timed span is excluded from the max but still
+        // counted.
+        assert_eq!(duration_max(batch, 0), 0.5);
+        assert_eq!(unmatched_count(batch, 0), 1);
+        assert!(json_texts(batch, 17)[0].is_none());
     }
 
     #[tokio::test]
@@ -1785,7 +1836,7 @@ mod tests {
             let fresh_until = ts_values(batch, 3);
             let src = strings(batch, 5);
             let provenance = strings(batch, 9);
-            let attributes = json_texts(batch, 15);
+            let attributes = json_texts(batch, 17);
             for i in 0..batch.num_rows() {
                 rows.push((
                     src[i].clone(),

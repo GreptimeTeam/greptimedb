@@ -46,13 +46,9 @@ const STAGE: &str = "stage";
 const NODE: &str = "node";
 const PLAN: &str = "plan";
 
-/// Returns the fixed output schema of [`DistAnalyzeExec`]:
-/// (`stage`: UInt32, `node`: UInt32, `plan`: Utf8).
-///
-/// Exposed so protocol-level `Describe` handlers can advertise the schema
-/// clients will actually receive (the physical plan is rewritten in
-/// `optimize_physical_plan` and its schema differs from the DataFusion
-/// `Analyze` logical plan schema).
+/// Fixed output schema of [`DistAnalyzeExec`], for `Describe` handlers:
+/// execution rewrites the plan in `optimize_physical_plan`, so this schema
+/// differs from the logical `Analyze` plan's.
 pub fn dist_analyze_output_schema() -> SchemaRef {
     SchemaRef::new(Schema::new(vec![
         Field::new(STAGE, DataType::UInt32, true),
@@ -336,6 +332,8 @@ struct JsonMetrics {
 
     // other metrics
     metrics: HashMap<String, usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_usage: Option<usize>,
     children: Vec<JsonMetrics>,
 }
 
@@ -343,12 +341,14 @@ impl JsonMetrics {
     fn from_record_batch_metrics(record_batch_metrics: RecordBatchMetrics) -> Self {
         let mut layers: HashMap<usize, Vec<Self>> = HashMap::default();
 
+        let memory_usage = record_batch_metrics.memory_usage;
         for plan_metrics in record_batch_metrics.plan_metrics.into_iter().rev() {
             let (level, mut metrics) = Self::from_plan_metrics(plan_metrics);
             if let Some(next_layer) = layers.remove(&(level + 1)) {
                 metrics.children = next_layer;
             }
             if level == 0 {
+                metrics.memory_usage = Some(memory_usage);
                 return metrics;
             }
             layers.entry(level).or_default().push(metrics);
@@ -386,6 +386,7 @@ impl JsonMetrics {
                 output_rows,
                 elapsed_compute,
                 metrics: other_metrics,
+                memory_usage: None,
                 children: vec![],
             },
         )
@@ -501,5 +502,33 @@ mod tests {
 
         assert_eq!(metrics.name, "FilterExec");
         assert_eq!(metrics.param, "predicate");
+    }
+
+    #[test]
+    fn qbs_analyze_json_includes_memory_usage_only_at_root() {
+        let metrics = JsonMetrics::from_record_batch_metrics(RecordBatchMetrics {
+            memory_usage: 42,
+            plan_metrics: vec![
+                PlanMetrics {
+                    plan: "RootExec".to_string(),
+                    plan_name: "RootExec".to_string(),
+                    level: 0,
+                    metrics: vec![("mem_used".to_string(), 24)],
+                },
+                PlanMetrics {
+                    plan: "ChildExec".to_string(),
+                    plan_name: "ChildExec".to_string(),
+                    level: 1,
+                    metrics: vec![("mem_used".to_string(), 18)],
+                },
+            ],
+            ..Default::default()
+        });
+        let value = serde_json::to_value(metrics).unwrap();
+
+        assert_eq!(value["memory_usage"], 42);
+        assert!(value["children"][0].get("memory_usage").is_none());
+        assert_eq!(value["metrics"]["mem_used"], 24);
+        assert_eq!(value["children"][0]["metrics"]["mem_used"], 18);
     }
 }

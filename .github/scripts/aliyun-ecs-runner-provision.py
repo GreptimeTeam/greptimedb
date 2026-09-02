@@ -80,6 +80,9 @@ POLL_INTERVAL_SECONDS = 5
 # to the cold build caches.
 SWAP_FILE = "/swapfile"
 SWAP_SIZE_GIB = 16
+# Image (~12G), 16G swap, checkout, base+candidate data homes, and cold
+# build caches. Deleted with the instance.
+SYSTEM_DISK_GIB = 50
 
 
 @dataclass(frozen=True)
@@ -367,10 +370,10 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         spot_strategy="NoSpot",
         internet_charge_type="PayByTraffic",
         internet_max_bandwidth_out=100,
-        # Holds the image (~12G), the 16G swapfile, the source checkout, the
-        # base+candidate cluster data homes, and cold build caches. Deleted
-        # with the instance.
-        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="40"),
+        system_disk=ecs_models.RunInstancesRequestSystemDisk(
+            category="cloud_essd",
+            size=str(SYSTEM_DISK_GIB),
+        ),
         user_data=user_data,
         tag=[
             ecs_models.RunInstancesRequestTag(key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE),

@@ -53,7 +53,7 @@ use store_api::storage::{ColumnId, NestedPath, SequenceNumber};
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
-use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
+use crate::read::read_columns::ReadColumns;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
@@ -615,14 +615,13 @@ impl FormatProjection {
         sst_column_num: usize,
         cols: ReadColumns,
     ) -> Self {
-        let json_target_types = cols.json_target_types().clone();
         let mut projected_columns: Vec<_> = cols
             .col_ids
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|col_id| {
                 id_to_index.get(&col_id).copied().map(|index_of_sst| {
-                    let nested_paths =
-                        json_target_nested_paths(metadata, &json_target_types, col_id);
+                    let nested_paths = json_target_nested_paths(metadata, &cols, col_id);
                     (col_id, index_of_sst, nested_paths)
                 })
             })
@@ -704,10 +703,10 @@ impl FormatProjection {
 
 fn json_target_nested_paths(
     metadata: &RegionMetadataRef,
-    json_target_types: &JsonTargetTypes,
+    read_columns: &ReadColumns,
     column_id: ColumnId,
 ) -> Vec<NestedPath> {
-    let Some(target_type) = json_target_types.get(&column_id) else {
+    let Some(target_type) = read_columns.json_target_type(column_id) else {
         return Vec::new();
     };
     let Some(column) = metadata.column_by_id(column_id) else {

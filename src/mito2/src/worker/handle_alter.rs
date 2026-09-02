@@ -18,8 +18,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_telemetry::{error, info};
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -162,6 +162,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Try to alter region {}, version.metadata: {:?}, version.options: {:?}, request: {:?}",
             region_id, version.metadata, version.options, request,
         );
+        log_time_index_widening_overflow(region.region_id, &version, &request);
         self.handle_alter_region_with_empty_memtable(region, version, request, new_options, sender);
     }
 
@@ -456,6 +457,51 @@ fn log_option_update<T: std::fmt::Debug>(
         "Update region {}: {}, previous: {:?}, new: {:?}",
         option_name, region_id, prev_value, cur_value
     );
+}
+
+/// Logs a time index unit widening whose rescaled values would overflow the
+/// target unit's `i64` range in existing data. Memtables are flushed before
+/// an alter, so each SST's time range bounds its values; overflowing values
+/// cast to NULL on read, which is deemed acceptable.
+fn log_time_index_widening_overflow(
+    region_id: RegionId,
+    version: &VersionRef,
+    request: &RegionAlterRequest,
+) {
+    let AlterKind::ModifyColumnTypes { columns } = &request.kind else {
+        return;
+    };
+    let time_index = version.metadata.time_index_column();
+    for column in columns {
+        if column.column_name != time_index.column_schema.name {
+            continue;
+        }
+        // Non-timestamp targets and narrowing changes are rejected by
+        // `RegionAlterRequest::validate` before the request reaches here.
+        let Some(target_unit) = column.target_type.as_timestamp().map(|t| t.unit()) else {
+            continue;
+        };
+        for level in version.ssts.levels() {
+            for file in level.files.values() {
+                let (start, end) = file.time_range();
+                if start.convert_to(target_unit).is_none() || end.convert_to(target_unit).is_none()
+                {
+                    error!(
+                        "Time index widening for region {} overflows file {}: widening column \
+                         '{}' to {:?}, but data spans [{}, {}] beyond the target unit's i64 \
+                         range; overflowing values read back as NULL",
+                        region_id,
+                        file.file_id(),
+                        column.column_name,
+                        target_unit,
+                        start.to_iso8601_string(),
+                        end.to_iso8601_string(),
+                    );
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Used to determine whether we can build index directly after schema change.

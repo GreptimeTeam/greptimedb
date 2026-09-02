@@ -47,7 +47,6 @@ impl RecordBatchStreamCursor {
         }
     }
 
-    /// Returns the schema of the underlying record batch stream.
     pub fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

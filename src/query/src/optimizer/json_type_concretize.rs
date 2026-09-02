@@ -124,6 +124,13 @@ fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeTyp
 
     plan.apply(|plan| {
         for expr in plan.expressions() {
+            // Optimizer-generated projections may keep the JSON root only so later json_get
+            // expressions can access another path. A same-name pass-through does not require the
+            // complete root by itself; any real whole-column consumer above it is visited
+            // separately, and a whole root in the final output is captured from the plan schema.
+            if matches!(plan, LogicalPlan::Projection(_)) && is_same_name_column_projection(&expr) {
+                continue;
+            }
             expr.apply(|expr| {
                 if let Some((column, json_type)) = deduce_json_type(expr)? {
                     json_types.entry(column).or_default().merge(&json_type);
@@ -136,6 +143,16 @@ fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeTyp
         Ok(TreeNodeRecursion::Continue)
     })?;
     Ok(json_types)
+}
+
+fn is_same_name_column_projection(expr: &Expr) -> bool {
+    match expr {
+        Expr::Column(_) => true,
+        Expr::Alias(alias) => {
+            matches!(alias.expr.as_ref(), Expr::Column(column) if column.name == alias.name)
+        }
+        _ => false,
+    }
 }
 
 fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {

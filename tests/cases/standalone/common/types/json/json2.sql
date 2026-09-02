@@ -105,3 +105,53 @@ from json2_variant_null
 order by ts;
 
 drop table json2_variant_null;
+
+create table json2_finite_paths (
+    ts timestamp time index,
+    j json2(
+        max_auto_expanded_paths = 1,
+        hint string
+    )
+)
+with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+show create table json2_finite_paths;
+
+insert into json2_finite_paths values
+    (1, '{"hint":"h1","alpha":1,"conflict":1}'),
+    (2, '{"hint":"h2","alpha":2,"conflict":"text"}');
+
+admin flush_table('json2_finite_paths');
+
+insert into json2_finite_paths values
+    (3, '{"hint":"h3","beta":3,"conflict":true}'),
+    (4, '{"hint":"h4","beta":4,"conflict":"other"}');
+
+admin flush_table('json2_finite_paths');
+
+select
+    ts,
+    j,
+    j.hint,
+    j.alpha::bigint as alpha,
+    j.beta::bigint as beta,
+    j.conflict
+from json2_finite_paths
+order by ts;
+
+admin compact_table('json2_finite_paths');
+
+select
+    ts,
+    j,
+    j.hint,
+    j.alpha::bigint as alpha,
+    j.beta::bigint as beta,
+    j.conflict
+from json2_finite_paths
+order by ts;
+
+drop table json2_finite_paths;

@@ -13,14 +13,19 @@
 // limitations under the License.
 
 //! Global runtimes
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::{Mutex, Once};
 
-use common_telemetry::info;
+use catio::{Scheduler, SchedulerStats, TaskClass};
+use common_telemetry::{info, warn};
 use once_cell::sync::Lazy;
 use paste::paste;
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Handle;
 
+use crate::metrics::register_workload_scheduler_metrics;
 use crate::runtime::{BuilderBuild, RuntimeTrait};
 use crate::{Builder, JoinHandle, Runtime};
 
@@ -30,6 +35,34 @@ const HB_WORKERS: usize = 2;
 /// The minimum number of worker threads for runtimes sized by CPU count.
 /// A single-threaded runtime can easily deadlock in async code.
 const MIN_RUNTIME_THREADS: usize = 2;
+pub(crate) const QUERY_TASK_CLASS: TaskClass = TaskClass::new(1);
+pub(crate) const WRITE_TASK_CLASS: TaskClass = TaskClass::new(2);
+
+/// Experimental options for sharing Tokio capacity between query and write
+/// workloads.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WorkloadSchedulerOptions {
+    /// Enables policy-controlled query and write task spawning.
+    pub enable: bool,
+    /// Relative share for query polls while writes are also backlogged.
+    pub query_weight: NonZeroU32,
+    /// Relative share for write polls while queries are also backlogged.
+    pub write_weight: NonZeroU32,
+    /// Number of polls between scheduler fairness samples.
+    pub sample_every_polls: NonZeroUsize,
+}
+
+impl Default for WorkloadSchedulerOptions {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            query_weight: NonZeroU32::new(2).unwrap(),
+            write_weight: NonZeroU32::new(8).unwrap(),
+            sample_every_polls: NonZeroUsize::new(16).unwrap(),
+        }
+    }
+}
 
 /// The options for the global runtimes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -45,6 +78,8 @@ pub struct RuntimeOptions {
     pub query_rt_size: usize,
     /// The number of threads to execute datanode ingestion operations.
     pub ingest_rt_size: usize,
+    /// Experimental weighted scheduler for query and write workloads.
+    pub experimental_workload_scheduler: WorkloadSchedulerOptions,
 }
 
 impl RuntimeOptions {
@@ -56,6 +91,7 @@ impl RuntimeOptions {
             compact_rt_max_blocking_threads: usize::max(cpus / 2, MIN_RUNTIME_THREADS),
             query_rt_size: usize::max(cpus.saturating_sub(1), MIN_RUNTIME_THREADS),
             ingest_rt_size: cpus,
+            experimental_workload_scheduler: WorkloadSchedulerOptions::default(),
         }
     }
 }
@@ -103,6 +139,9 @@ struct GlobalRuntimes {
     hb_runtime: Runtime,
     query_runtime: Runtime,
     ingest_runtime: Runtime,
+    query_handle: Handle,
+    ingest_handle: Handle,
+    workload_scheduler: Option<Scheduler>,
 }
 
 macro_rules! define_spawn {
@@ -132,12 +171,45 @@ macro_rules! define_spawn {
     };
 }
 
+macro_rules! define_scheduled_spawn {
+    ($type: ident, $class: ident) => {
+        paste! {
+            fn [<spawn_ $type>]<F>(&self, future: F) -> JoinHandle<F::Output>
+            where
+                F: Future + Send + 'static,
+                F::Output: Send + 'static,
+            {
+                match &self.workload_scheduler {
+                    Some(scheduler) => scheduler.spawn_in_on(
+                        &self.[<$type _handle>],
+                        $class,
+                        future,
+                    ),
+                    None => self.[<$type _runtime>].spawn(future),
+                }
+            }
+
+            fn [<spawn_blocking_ $type>]<F, R>(&self, future: F) -> JoinHandle<R>
+            where
+                F: FnOnce() -> R + Send + 'static,
+                R: Send + 'static,
+            {
+                self.[<$type _runtime>].spawn_blocking(future)
+            }
+
+            fn [<block_on_ $type>]<F: Future>(&self, future: F) -> F::Output {
+                self.[<$type _runtime>].block_on(future)
+            }
+        }
+    };
+}
+
 impl GlobalRuntimes {
     define_spawn!(global);
     define_spawn!(compact);
     define_spawn!(hb);
-    define_spawn!(query);
-    define_spawn!(ingest);
+    define_scheduled_spawn!(query, QUERY_TASK_CLASS);
+    define_scheduled_spawn!(ingest, WRITE_TASK_CLASS);
 
     fn new(
         global: Option<Runtime>,
@@ -145,12 +217,14 @@ impl GlobalRuntimes {
         heartbeat: Option<Runtime>,
         query: Option<Runtime>,
         ingest: Option<Runtime>,
+        workload_scheduler: Option<Scheduler>,
     ) -> Self {
         let global_runtime =
             global.unwrap_or_else(|| create_runtime("global", "global-worker", GLOBAL_WORKERS));
         let query_runtime = query.unwrap_or_else(|| global_runtime.clone());
         let ingest_runtime = ingest.unwrap_or_else(|| global_runtime.clone());
-
+        let query_handle = query_runtime.handle();
+        let ingest_handle = ingest_runtime.handle();
         Self {
             global_runtime,
             compact_runtime: compact.unwrap_or_else(|| {
@@ -167,6 +241,9 @@ impl GlobalRuntimes {
                 .unwrap_or_else(|| create_runtime("heartbeat", "hb-worker", HB_WORKERS)),
             query_runtime,
             ingest_runtime,
+            query_handle,
+            ingest_handle,
+            workload_scheduler,
         }
     }
 }
@@ -178,6 +255,7 @@ struct ConfigRuntimes {
     hb_runtime: Option<Runtime>,
     query_runtime: Option<Runtime>,
     ingest_runtime: Option<Runtime>,
+    workload_scheduler: Option<Scheduler>,
     already_init: bool,
 }
 
@@ -188,49 +266,70 @@ static GLOBAL_RUNTIMES: Lazy<GlobalRuntimes> = Lazy::new(|| {
     let heartbeat = c.hb_runtime.take();
     let query = c.query_runtime.take();
     let ingest = c.ingest_runtime.take();
+    let workload_scheduler = c.workload_scheduler.take();
     c.already_init = true;
 
-    GlobalRuntimes::new(global, compact, heartbeat, query, ingest)
+    GlobalRuntimes::new(
+        global,
+        compact,
+        heartbeat,
+        query,
+        ingest,
+        workload_scheduler,
+    )
 });
 
 static CONFIG_RUNTIMES: Lazy<Mutex<ConfigRuntimes>> =
     Lazy::new(|| Mutex::new(ConfigRuntimes::default()));
+static START: Once = Once::new();
 
-/// Initialize the global runtimes
+/// Initialize runtimes for frontend, metasrv, and flownode processes.
 ///
-/// # Panics
-/// Panics when the global runtimes are already initialized.
-/// You should call this function before using any runtime functions.
+/// Query and ingest work share the global runtime and no workload scheduler is
+/// constructed for these process roles.
 pub fn init_global_runtimes(options: &RuntimeOptions) {
-    static START: Once = Once::new();
-    START.call_once(move || {
+    START.call_once(|| {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
         assert!(!c.already_init, "Global runtimes already initialized");
-        c.global_runtime = Some(create_runtime(
-            "global",
-            "global-worker",
-            options.global_rt_size,
-        ));
-        c.compact_runtime = Some(create_compact_runtime(
-            "compact",
-            "compact-worker",
-            options.compact_rt_size,
-            options.compact_rt_max_blocking_threads,
-        ));
-        c.hb_runtime = Some(create_runtime("heartbeat", "hb-worker", HB_WORKERS));
+        init_common_runtimes(&mut c, options);
+        c.already_init = true;
     });
 }
 
-/// Initialize the datanode-specific global runtimes.
+/// Initialize runtimes for a standalone process.
 ///
-/// # Panics
-/// Panics when the global runtimes are already initialized.
-/// You should call this function before using any runtime functions.
-pub fn init_datanode_runtimes(options: &RuntimeOptions) {
-    static START: Once = Once::new();
-    START.call_once(move || {
+/// Query and ingest work share the global runtime. The scheduler is always
+/// constructed, with the global runtime size as its internal bound, and starts
+/// enabled according to configuration.
+pub fn init_standalone_runtimes(options: &RuntimeOptions) {
+    START.call_once(|| {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
         assert!(!c.already_init, "Global runtimes already initialized");
+        init_common_runtimes(&mut c, options);
+        c.workload_scheduler = Some(create_workload_scheduler(options, options.global_rt_size));
+        c.already_init = true;
+    });
+}
+
+/// Initialize runtimes for a datanode process.
+///
+/// Query and ingest use dedicated runtimes. The scheduler is always
+/// constructed with their checked combined size as its internal bound, and
+/// starts enabled according to configuration.
+///
+/// # Panics
+///
+/// Panics if the configured query and ingest runtime sizes overflow `usize`
+/// when combined.
+pub fn init_datanode_runtimes(options: &RuntimeOptions) {
+    let capacity = options
+        .query_rt_size
+        .checked_add(options.ingest_rt_size)
+        .expect("datanode workload scheduler runtime capacity overflowed usize");
+    START.call_once(|| {
+        let mut c = CONFIG_RUNTIMES.lock().unwrap();
+        assert!(!c.already_init, "Global runtimes already initialized");
+        init_common_runtimes(&mut c, options);
         c.query_runtime = Some(create_runtime(
             "query",
             "query-worker",
@@ -241,7 +340,51 @@ pub fn init_datanode_runtimes(options: &RuntimeOptions) {
             "ingest-worker",
             options.ingest_rt_size,
         ));
+        c.workload_scheduler = Some(create_workload_scheduler(options, capacity));
+        c.already_init = true;
     });
+}
+
+fn init_common_runtimes(c: &mut ConfigRuntimes, options: &RuntimeOptions) {
+    c.global_runtime = Some(create_runtime(
+        "global",
+        "global-worker",
+        options.global_rt_size,
+    ));
+    c.compact_runtime = Some(create_compact_runtime(
+        "compact",
+        "compact-worker",
+        options.compact_rt_size,
+        options.compact_rt_max_blocking_threads,
+    ));
+    c.hb_runtime = Some(create_runtime("heartbeat", "hb-worker", HB_WORKERS));
+}
+
+fn create_workload_scheduler(options: &RuntimeOptions, capacity: usize) -> Scheduler {
+    assert!(
+        capacity > 0,
+        "experimental workload scheduler capacity must be greater than zero"
+    );
+    let scheduler_options = &options.experimental_workload_scheduler;
+    let scheduler = Scheduler::builder()
+        // This is deliberately an internal scheduler bound, not public config.
+        .max_concurrent_polls(capacity)
+        .sample_every_polls(scheduler_options.sample_every_polls.get())
+        .weight(QUERY_TASK_CLASS, scheduler_options.query_weight.get())
+        .weight(WRITE_TASK_CLASS, scheduler_options.write_weight.get())
+        .build();
+    scheduler.set_enabled(scheduler_options.enable);
+    register_workload_scheduler_metrics(scheduler.clone());
+    info!(
+        "Constructed the experimental workload scheduler: internal_capacity={}, \
+         query_weight={}, write_weight={}, sample_every_polls={}, enabled={}",
+        capacity,
+        scheduler_options.query_weight,
+        scheduler_options.write_weight,
+        scheduler_options.sample_every_polls,
+        scheduler_options.enable
+    );
+    scheduler
 }
 
 macro_rules! define_global_runtime_spawn {
@@ -284,14 +427,103 @@ define_global_runtime_spawn!(hb);
 define_global_runtime_spawn!(query);
 define_global_runtime_spawn!(ingest);
 
+/// Returns whether the experimental workload scheduler is currently enabled.
+/// Returns `false` when no scheduler was constructed at startup.
+pub fn workload_scheduler_enabled() -> bool {
+    GLOBAL_RUNTIMES
+        .workload_scheduler
+        .as_ref()
+        .is_some_and(Scheduler::is_enabled)
+}
+
+/// Enables or disables the experimental workload scheduler for new spawn
+/// submissions. Returns `false` when no scheduler was constructed at startup.
+pub fn set_workload_scheduler_enabled(enabled: bool) -> bool {
+    let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
+        warn!(
+            "The experimental workload scheduler was not constructed at startup; ignoring enabled={enabled}"
+        );
+        return false;
+    };
+
+    scheduler.set_enabled(enabled);
+    info!("Experimental workload scheduler enabled={enabled}");
+    true
+}
+
+/// Sets the query and write weights atomically. Returns `false` when no
+/// scheduler was constructed at startup.
+pub fn set_workload_scheduler_weights(query: NonZeroU32, write: NonZeroU32) -> bool {
+    let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
+        warn!(
+            "The experimental workload scheduler was not constructed at startup; ignoring query_weight={query}, write_weight={write}"
+        );
+        return false;
+    };
+
+    let weights = BTreeMap::from([(QUERY_TASK_CLASS, query), (WRITE_TASK_CLASS, write)]);
+    scheduler.set_weights(&weights);
+    info!("Experimental workload scheduler weights query={query}, write={write}");
+    true
+}
+
+/// Returns scheduler counters when the experimental workload scheduler was
+/// constructed at startup, including while it is dynamically disabled.
+pub fn workload_scheduler_stats() -> Option<SchedulerStats> {
+    GLOBAL_RUNTIMES
+        .workload_scheduler
+        .as_ref()
+        .map(Scheduler::stats)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::task::{Context, Poll};
+    use std::time::{Duration, Instant};
 
     use tokio_test::assert_ok;
 
     use super::*;
+
+    struct CooperativePolls {
+        stop: Arc<AtomicBool>,
+    }
+
+    impl Future for CooperativePolls {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let deadline = Instant::now() + Duration::from_micros(100);
+            while Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+
+            if self.stop.load(Ordering::Relaxed) {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    fn wait_until<F>(description: &str, condition: F)
+    where
+        F: Fn() -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     #[test]
     fn test_datanode_runtime_options_default() {
@@ -312,6 +544,10 @@ mod tests {
             options.query_rt_size
         );
         assert_eq!(cpus, options.ingest_rt_size);
+        assert_eq!(
+            WorkloadSchedulerOptions::default(),
+            options.experimental_workload_scheduler
+        );
     }
 
     #[test]
@@ -350,6 +586,7 @@ mod tests {
     fn test_datanode_runtimes_fallback_to_global_runtime() {
         let runtimes = GlobalRuntimes::new(
             Some(create_runtime("test-global", "test-global-worker", 1)),
+            None,
             None,
             None,
             None,
@@ -397,6 +634,141 @@ mod tests {
         runtime.block_on(async {
             first.await.unwrap();
             second.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_workload_scheduler_builds_with_initial_enabled_state() {
+        let mut options = RuntimeOptions::default();
+        options.experimental_workload_scheduler.enable = false;
+        options.experimental_workload_scheduler.sample_every_polls = NonZeroUsize::new(7).unwrap();
+        let scheduler = create_workload_scheduler(&options, options.global_rt_size);
+        assert_eq!(7, scheduler.stats().sample_every_polls);
+        assert!(!scheduler.is_enabled());
+
+        scheduler.set_enabled(true);
+        assert!(scheduler.is_enabled());
+    }
+
+    #[test]
+    fn test_workload_scheduler_bypasses_disabled_query_and_write_spawns() {
+        let runtime = create_runtime("test-workload-bypass", "test-workload-bypass-worker", 2);
+        let scheduler = Scheduler::builder()
+            .max_concurrent_polls(2)
+            .weight(QUERY_TASK_CLASS, 2)
+            .weight(WRITE_TASK_CLASS, 8)
+            .build();
+        scheduler.set_enabled(false);
+        let runtimes = GlobalRuntimes::new(
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(scheduler.clone()),
+        );
+
+        let query = runtimes.spawn_query(async { "query" });
+        let write = runtimes.spawn_ingest(async { "write" });
+        let (query, write) =
+            runtime.block_on(async { (query.await.unwrap(), write.await.unwrap()) });
+
+        assert_eq!("query", query);
+        assert_eq!("write", write);
+        let stats = scheduler.stats();
+        for class in [QUERY_TASK_CLASS, WRITE_TASK_CLASS] {
+            let class_stats = &stats.classes[&class];
+            assert_eq!(0, class_stats.tasks);
+            assert_eq!(0, class_stats.admitted);
+            assert_eq!(0, class_stats.polls);
+        }
+    }
+
+    #[test]
+    fn test_workload_scheduler_wraps_query_and_write_spawns() {
+        let runtime = create_runtime("test-workload", "test-workload-worker", 2);
+        let scheduler = Scheduler::builder()
+            .max_concurrent_polls(2)
+            .weight(QUERY_TASK_CLASS, 2)
+            .weight(WRITE_TASK_CLASS, 8)
+            .build();
+        let runtimes = GlobalRuntimes::new(
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(runtime.clone()),
+            Some(scheduler.clone()),
+        );
+
+        let query = runtimes.spawn_query(async { "query" });
+        let write = runtimes.spawn_ingest(async { "write" });
+        let (query, write) =
+            runtime.block_on(async { (query.await.unwrap(), write.await.unwrap()) });
+
+        assert_eq!("query", query);
+        assert_eq!("write", write);
+        let stats = scheduler.stats();
+        assert_eq!(1, stats.classes[&QUERY_TASK_CLASS].polls);
+        assert_eq!(1, stats.classes[&WRITE_TASK_CLASS].polls);
+    }
+
+    #[test]
+    fn test_datanode_query_backlog_does_not_starve_ingest() {
+        let query_runtime = create_runtime("test-datanode-query", "test-query-worker", 1);
+        let ingest_runtime = create_runtime("test-datanode-ingest", "test-ingest-worker", 1);
+        let scheduler = Scheduler::builder()
+            .max_concurrent_polls(2)
+            .sample_every_polls(16)
+            .weight(QUERY_TASK_CLASS, 2)
+            .weight(WRITE_TASK_CLASS, 8)
+            .build();
+        let runtimes = GlobalRuntimes::new(
+            Some(query_runtime.clone()),
+            Some(query_runtime.clone()),
+            Some(query_runtime.clone()),
+            Some(query_runtime),
+            Some(ingest_runtime),
+            Some(scheduler.clone()),
+        );
+
+        let stop_queries = Arc::new(AtomicBool::new(false));
+        let query_tasks = (0..3)
+            .map(|_| {
+                runtimes.spawn_query(CooperativePolls {
+                    stop: stop_queries.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Establish the actual datanode topology: two query polls occupy the
+        // scheduler's capacity while the third self-waking query is queued.
+        wait_until("two active query polls and a queued query", || {
+            let stats = scheduler.stats();
+            stats.active_polls == 2
+                && stats
+                    .classes
+                    .get(&QUERY_TASK_CLASS)
+                    .is_some_and(|class| class.tasks == 3 && class.queued >= 1)
+        });
+
+        let write = runtimes.spawn_ingest(async {});
+        wait_until("write body", || write.is_finished());
+
+        stop_queries.store(true, Ordering::Relaxed);
+        for query in &query_tasks {
+            query.abort();
+        }
+        runtimes.block_on_query(async {
+            for query in query_tasks {
+                let _ = query.await;
+            }
+        });
+        runtimes.block_on_ingest(async {
+            write.await.unwrap();
+        });
+        wait_until("scheduler polls to drain", || {
+            scheduler.stats().active_polls == 0
         });
     }
 

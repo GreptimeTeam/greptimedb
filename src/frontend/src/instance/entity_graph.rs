@@ -32,7 +32,9 @@ use auth::{
     PermissionTableTargets, SEMANTIC_GRAPH_QUERY,
 };
 use catalog::CatalogManager;
-use catalog::system_schema::semantic_graph::EntityGraphProvider;
+use catalog::system_schema::semantic_graph::{
+    DeclarationOrigin, EntityGraphProvider, TableEntityDeclaration,
+};
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, OBSERVED_AT_COLUMN,
     PG_CATALOG_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
@@ -127,15 +129,6 @@ impl EntityGraphProviderImpl {
     /// Parses `greptime.semantic.entity.<type>.{id|descriptive|scope}` options of
     /// one table into per-type declarations. A type with no `id` columns is skipped.
     fn parse_declarations(table_info: &TableInfo) -> Vec<EntityDeclaration> {
-        let Some(time_index) = table_info
-            .meta
-            .schema
-            .timestamp_column()
-            .map(|c| c.name.clone())
-        else {
-            return vec![];
-        };
-
         // entity_type -> (id_columns, descriptive_columns, scope_columns)
         type RoleColumns = (Vec<String>, Vec<String>, Vec<String>);
         let mut by_type: HashMap<String, RoleColumns> = HashMap::new();
@@ -151,6 +144,17 @@ impl EntityGraphProviderImpl {
                 EntityRole::Scope => entry.2 = cols,
             }
         }
+        if by_type.is_empty() {
+            return vec![];
+        }
+        let Some(time_index) = table_info
+            .meta
+            .schema
+            .timestamp_column()
+            .map(|c| c.name.clone())
+        else {
+            return vec![];
+        };
 
         by_type
             .into_iter()
@@ -179,6 +183,7 @@ impl EntityGraphProviderImpl {
                         entity_type,
                         id_columns,
                         id_qualifier: None,
+                        superseded_by_columns: vec![],
                         descriptive_columns,
                         scope_columns,
                     })
@@ -200,11 +205,13 @@ impl EntityGraphProviderImpl {
         conventions: &Conventions,
     ) -> Vec<EntityDeclaration> {
         let mut declarations = Self::parse_declarations(table_info);
+        let mut supersessions = Vec::new();
         if is_trace_v1_table(table_info) {
             Self::extend_with_implicit_entities(
                 table_info,
                 &conventions.otlp_trace_entities,
                 &mut declarations,
+                &mut supersessions,
             );
         }
         Self::extend_with_info_metric_conventions(
@@ -213,6 +220,7 @@ impl EntityGraphProviderImpl {
             SOURCE_PROMETHEUS,
             None,
             &mut declarations,
+            &mut supersessions,
         );
         Self::extend_with_info_metric_conventions(
             table_info,
@@ -220,8 +228,28 @@ impl EntityGraphProviderImpl {
             SOURCE_OPENTELEMETRY,
             Some(servers::semantic::METRIC_TYPE_INFO),
             &mut declarations,
+            &mut supersessions,
         );
+        Self::resolve_supersessions(&mut declarations, supersessions);
         declarations
+    }
+
+    /// Binds each `superseded_by` to the identity the superseding type has on
+    /// this table, once every declaration is known. A type nothing declares
+    /// here leaves the guard empty, so the superseded entity stands instead of
+    /// yielding to a node that will never be derived.
+    fn resolve_supersessions(
+        declarations: &mut [EntityDeclaration],
+        supersessions: Vec<(usize, String)>,
+    ) {
+        for (index, entity_type) in supersessions {
+            let identity = declarations
+                .iter()
+                .find(|declaration| declaration.entity_type == entity_type)
+                .map(|declaration| declaration.id_columns.clone())
+                .unwrap_or_default();
+            declarations[index].superseded_by_columns = identity;
+        }
     }
 
     /// Whether the table carries an explicit `entity.<type>.id` option.
@@ -245,6 +273,7 @@ impl EntityGraphProviderImpl {
         expected_source: &str,
         expected_metric_type: Option<&str>,
         declarations: &mut Vec<EntityDeclaration>,
+        supersessions: &mut Vec<(usize, String)>,
     ) {
         let Some(implicit_entities) = whitelist.get(&table_info.name) else {
             return;
@@ -264,7 +293,12 @@ impl EntityGraphProviderImpl {
             );
             return;
         }
-        Self::extend_with_implicit_entities(table_info, implicit_entities, declarations);
+        Self::extend_with_implicit_entities(
+            table_info,
+            implicit_entities,
+            declarations,
+            supersessions,
+        );
     }
 
     /// Synthesizes the applicable subset of `entities` on `table_info`:
@@ -274,6 +308,7 @@ impl EntityGraphProviderImpl {
         table_info: &TableInfo,
         entities: &[ImplicitEntity],
         declarations: &mut Vec<EntityDeclaration>,
+        supersessions: &mut Vec<(usize, String)>,
     ) {
         let schema = &table_info.meta.schema;
         let Some(time_index) = schema.timestamp_column().map(|c| c.name.clone()) else {
@@ -323,6 +358,9 @@ impl EntityGraphProviderImpl {
                 .qualified_by
                 .clone()
                 .filter(|c| schema.column_schema_by_name(c).is_some());
+            if let Some(entity_type) = &implicit.superseded_by {
+                supersessions.push((declarations.len(), entity_type.clone()));
+            }
             declarations.push(EntityDeclaration {
                 schema: table_info.schema_name.clone(),
                 table: table_info.name.clone(),
@@ -330,6 +368,7 @@ impl EntityGraphProviderImpl {
                 entity_type: implicit.entity.clone(),
                 id_columns: implicit.id.clone(),
                 id_qualifier,
+                superseded_by_columns: vec![],
                 descriptive_columns,
                 scope_columns: vec![],
             });
@@ -650,6 +689,33 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         };
         self.execute_plan(catalog, plan, query_ctx).await
     }
+
+    fn table_declarations(&self, table_info: &TableInfo) -> Vec<TableEntityDeclaration> {
+        // A broken embedded file still leaves the explicit half reportable;
+        // the scan paths surface the error itself.
+        let derived = match conventions() {
+            Ok(conventions) => Self::declarations_for(table_info, conventions),
+            Err(_) => Self::parse_declarations(table_info),
+        };
+        let mut declarations = derived
+            .into_iter()
+            .map(|declaration| TableEntityDeclaration {
+                origin: if Self::explicitly_declares(table_info, &declaration.entity_type) {
+                    DeclarationOrigin::Declared
+                } else {
+                    DeclarationOrigin::Convention
+                },
+                entity_type: declaration.entity_type,
+                id_columns: declaration.id_columns,
+                id_qualifier: declaration.id_qualifier,
+                superseded_by_columns: declaration.superseded_by_columns,
+                descriptive_columns: declaration.descriptive_columns,
+                scope_columns: declaration.scope_columns,
+            })
+            .collect::<Vec<_>>();
+        declarations.sort_by(|a, b| a.entity_type.cmp(&b.entity_type));
+        declarations
+    }
 }
 
 #[cfg(test)]
@@ -839,6 +905,7 @@ mod tests {
                 "resource_attributes.service.instance.id",
                 "resource_attributes.k8s.pod.uid",
                 "resource_attributes.k8s.pod.name",
+                "resource_attributes.k8s.node.name",
             ],
             &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
         );
@@ -847,20 +914,27 @@ mod tests {
             .iter()
             .map(|d| d.entity_type.as_str())
             .collect();
-        assert_eq!(types, vec!["k8s.pod", "service", "service.instance"]);
+        assert_eq!(
+            types,
+            vec!["k8s.node", "k8s.pod", "service", "service.instance"]
+        );
         assert_eq!(
             declarations[0].id_columns,
+            vec!["resource_attributes.k8s.node.name"]
+        );
+        assert_eq!(
+            declarations[1].id_columns,
             vec!["resource_attributes.k8s.pod.uid"]
         );
         assert_eq!(
-            declarations[0].descriptive_columns,
+            declarations[1].descriptive_columns,
             vec!["resource_attributes.k8s.pod.name"]
         );
         assert_eq!(
-            declarations[2].id_columns,
+            declarations[3].id_columns,
             vec!["service_name", "resource_attributes.service.instance.id"]
         );
-        assert_eq!(declarations[1].id_qualifier, None);
+        assert_eq!(declarations[2].id_qualifier, None);
 
         let namespaced = table_info(
             &[
@@ -926,6 +1000,43 @@ mod tests {
         assert_eq!(
             declarations[1].descriptive_columns,
             vec!["resource_attributes.host.name"]
+        );
+
+        // A wrong `resource_attributes.` prefix would leave the generic
+        // container standing beside the k8s one, which the descriptor-table
+        // case cannot catch.
+        let pod_container = table_info(
+            &[
+                "service_name",
+                "resource_attributes.container.id",
+                "resource_attributes.container.name",
+                "resource_attributes.k8s.pod.uid",
+                "resource_attributes.k8s.container.name",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let declarations = sorted_declarations(&pod_container);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["container", "k8s.container", "k8s.pod", "service"]
+        );
+        assert_eq!(
+            declarations[0].superseded_by_columns,
+            vec![
+                "resource_attributes.k8s.pod.uid",
+                "resource_attributes.k8s.container.name"
+            ]
+        );
+        assert_eq!(
+            declarations[1].descriptive_columns,
+            vec![
+                "resource_attributes.container.id",
+                "resource_attributes.container.name"
+            ]
         );
 
         let names_only = table_info(
@@ -1008,7 +1119,9 @@ mod tests {
                 "container.name",
                 "k8s.pod.uid",
                 "k8s.pod.name",
+                "k8s.container.name",
                 "k8s.namespace.name",
+                "k8s.node.name",
             ],
             OTEL_STAMPS,
         );
@@ -1022,20 +1135,62 @@ mod tests {
             vec![
                 "container",
                 "host",
+                "k8s.container",
+                "k8s.node",
                 "k8s.pod",
                 "service",
                 "service.instance"
             ]
         );
+        // A pod's container is the k8s.container, under the identity
+        // kube-state-metrics gives it; the generic type yields to it.
+        assert_eq!(
+            declarations[2].id_columns,
+            vec!["k8s.pod.uid", "k8s.container.name"]
+        );
+        assert_eq!(
+            declarations[0].superseded_by_columns,
+            vec!["k8s.pod.uid", "k8s.container.name"],
+            "the generic container must yield to the k8s.container identity itself"
+        );
         assert_eq!(declarations[1].id_columns, vec!["host.id"]);
         assert_eq!(declarations[1].descriptive_columns, vec!["host.name"]);
-        assert_eq!(declarations[3].id_columns, vec!["job"]);
+        assert_eq!(declarations[3].id_columns, vec!["k8s.node.name"]);
+        assert_eq!(declarations[5].id_columns, vec!["job"]);
         assert_eq!(
-            declarations[3].descriptive_columns,
+            declarations[5].descriptive_columns,
             vec!["service.name", "service.namespace"]
         );
-        assert_eq!(declarations[4].id_columns, vec!["job", "instance"]);
-        assert!(declarations[4].descriptive_columns.is_empty());
+        assert_eq!(declarations[6].id_columns, vec!["job", "instance"]);
+        assert!(declarations[6].descriptive_columns.is_empty());
+
+        // Nothing here can produce a k8s.container, so the generic one must
+        // stand or the container disappears instead of changing type.
+        let no_k8s = prom_table_info(
+            "greptime_otel_resource_info",
+            &["job", "container.id", "k8s.pod.uid"],
+            OTEL_STAMPS,
+        );
+        let declarations = sorted_declarations(&no_k8s);
+        assert_eq!(declarations[0].entity_type, "container");
+        assert!(declarations[0].superseded_by_columns.is_empty());
+
+        // Same rule when a skipped explicit declaration blocks the implicit
+        // one: nothing declares the type, so nothing may yield to it.
+        let mut stamps = OTEL_STAMPS.to_vec();
+        stamps.push(("greptime.semantic.entity.k8s.container.id", "gone"));
+        let broken_explicit = prom_table_info(
+            "greptime_otel_resource_info",
+            &["job", "container.id", "k8s.pod.uid", "k8s.container.name"],
+            &stamps,
+        );
+        let declarations = sorted_declarations(&broken_explicit);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(types, vec!["container", "k8s.pod", "service"]);
+        assert!(declarations[0].superseded_by_columns.is_empty());
 
         let partial = prom_table_info(
             "greptime_otel_resource_info",

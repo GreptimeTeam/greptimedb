@@ -26,13 +26,17 @@
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
+| `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.<br/>The weights set their relative runtime shares while both are backlogged. Disabled by default. |
+| `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
+| `runtime.experimental_workload_scheduler.write_weight` | Integer | `8` | Relative write share while both query and write workloads are backlogged. |
+| `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
-| `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
 | `grpc` | -- | -- | The gRPC server options. |
@@ -125,6 +129,11 @@
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
+| `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
+| `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
+| `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
+| `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.copy_root` | String | `./greptimedb_data/copy` | Root directory for standalone SQL access to local files.<br/>Relative SQL paths are resolved below this directory. Absolute paths are accepted only when<br/>they are inside this directory. Defaults to `<data_home>/copy`.<br/>Distributed deployments always reject SQL access to local files.<br/>Upgrade note: COPY commands and existing external tables that reference paths outside this<br/>directory will fail. Move those files below the copy root, set this option to a dedicated<br/>directory containing them, or migrate the files to object storage before upgrading. |
@@ -264,7 +273,6 @@
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
-| `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
 | `grpc` | -- | -- | The gRPC server options. |
@@ -345,6 +353,11 @@
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.allow_query_fallback` | Bool | `false` | Whether to allow query fallback when push down optimize fails.<br/>Default to false, meaning when push down optimize failed, return error msg |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans (only applies to datanodes). |
+| `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
+| `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
+| `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
+| `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
+| `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
 | `datanode.client.connect_timeout` | String | `10s` | -- |
@@ -516,6 +529,11 @@
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `runtime.query_rt_size` | Integer | `7` | The number of threads to execute datanode query operations.<br/>Defaults to max(num_cpus - 1, 2). |
 | `runtime.ingest_rt_size` | Integer | `8` | The number of threads to execute datanode ingestion operations. |
+| `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
+| `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.<br/>The weights set their relative runtime shares while both are backlogged. Disabled by default. |
+| `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
+| `runtime.experimental_workload_scheduler.write_weight` | Integer | `8` | Relative write share while both query and write workloads are backlogged. |
+| `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
@@ -548,6 +566,11 @@
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
+| `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
+| `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
+| `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
+| `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
@@ -721,5 +744,10 @@
 | `query` | -- | -- | -- |
 | `query.parallelism` | Integer | `1` | Parallelism of the query engine for query sent by flownode.<br/>Default to 1, so it won't use too much cpu or memory |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
+| `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
+| `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
+| `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
+| `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |

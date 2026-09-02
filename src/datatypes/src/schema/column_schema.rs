@@ -28,10 +28,12 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{
     self, ArrowMetadataSnafu, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result,
 };
+use crate::extension::json::Json2ExtensionType;
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::value::Value;
-use crate::vectors::VectorRef;
+use crate::vectors::json::builder::JsonVectorBuilder;
+use crate::vectors::{MutableVector, VectorRef};
 
 pub type Metadata = HashMap<String, String>;
 
@@ -125,6 +127,21 @@ impl ColumnSchema {
             is_time_index: false,
             default_constraint: None,
             metadata: Metadata::new(),
+        }
+    }
+
+    /// Creates a mutable vector using this column's extension metadata.
+    pub fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+        if self.data_type.is_json2()
+            && let Some(extension) = self.extension_type::<Json2ExtensionType>().ok().flatten()
+            && extension.metadata().is_version_2()
+        {
+            Box::new(JsonVectorBuilder::with_settings(
+                extension.metadata().json_settings(),
+                capacity,
+            ))
+        } else {
+            self.data_type.create_mutable_vector(capacity)
         }
     }
 

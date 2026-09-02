@@ -56,13 +56,13 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId, SequenceNumber, SequenceRange};
 
+use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
 use crate::error::{
     self, ColumnNotFoundSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DataTypeMismatchSnafu,
     EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
     NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
-use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
@@ -442,7 +442,7 @@ impl UnorderedPart {
 
     /// Concatenates and sorts all parts into a single RecordBatch.
     /// Returns None if the collection is empty.
-    pub fn concat_and_sort(&self) -> Result<Option<RecordBatch>> {
+    pub fn concat_and_sort(&self, metadata: &RegionMetadataRef) -> Result<Option<RecordBatch>> {
         if self.parts.is_empty() {
             return Ok(None);
         }
@@ -452,17 +452,28 @@ impl UnorderedPart {
             return Ok(Some(self.parts[0].batch.clone()));
         }
 
-        // Get the schema from the first part
-        let schema = self.parts[0].batch.schema();
-        let concatenated = if schema.fields().iter().any(is_json2_extension_type) {
-            let aligner = Json2Aligner::try_new(self.parts.iter().map(|part| part.batch.schema()))?;
-            let aligned_batches =
-                aligner.align_batches(self.parts.iter().map(|part| part.batch.clone()))?;
-            concat_batches(aligner.schema(), &aligned_batches).context(ComputeArrowSnafu)?
-        } else {
-            concat_batches(&schema, self.parts.iter().map(|x| &x.batch))
-                .context(ComputeArrowSnafu)?
-        };
+        let schemas = self
+            .parts
+            .iter()
+            .map(|x| (x.batch.schema(), x.num_rows() as u64))
+            .collect::<Vec<_>>();
+        let plans = collect_json2_rewrite_plans(metadata, &schemas)?;
+
+        debug_assert!(self.parts.windows(2).all(|w| rewrite_json2_schema(
+            &w[0].batch.schema(),
+            &plans
+        ) == rewrite_json2_schema(
+            &w[1].batch.schema(),
+            &plans
+        )));
+        let schema = rewrite_json2_schema(&self.parts[0].batch.schema(), &plans);
+
+        let batches = self
+            .parts
+            .iter()
+            .map(|x| rewrite_json2_batch(x.batch.clone(), &plans))
+            .collect::<Result<Vec<_>>>()?;
+        let concatenated = concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
 
         // Sort the concatenated batch
         let sorted_batch = sort_primary_key_record_batch(&concatenated)?;
@@ -472,8 +483,8 @@ impl UnorderedPart {
 
     /// Converts all parts into a single sorted BulkPart.
     /// Returns None if the collection is empty.
-    pub fn to_bulk_part(&self) -> Result<Option<BulkPart>> {
-        let Some(sorted_batch) = self.concat_and_sort()? else {
+    pub fn to_bulk_part(&self, metadata: &RegionMetadataRef) -> Result<Option<BulkPart>> {
+        let Some(sorted_batch) = self.concat_and_sort(metadata)? else {
             return Ok(None);
         };
 

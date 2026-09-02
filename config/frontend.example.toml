@@ -65,8 +65,6 @@ enable_cors = true
 ## Customize allowed origins for HTTP CORS.
 ## @toml2docs:none-default
 cors_allowed_origins = ["https://example.com"]
-## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
-experimental_enable_explain_analyze_stream = true
 
 ## Whether to start the dedicated public HTTP **API** server. This server serves
 ## only the `v1` interfaces plus the dashboard, and shares every other `[http]`
@@ -314,6 +312,30 @@ allow_query_fallback = false
 ## When this limit is reached, queries will fail with ResourceExhausted error.
 ## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
 memory_pool_size = "50%"
+
+## Experimental memory pool allocation policy:
+## - "greedy" (default): first-come-first-served allocation; preserves current behavior.
+## - "fair": divides available memory among spillable operators and may spill earlier.
+## Only effective when `memory_pool_size` is bounded (>0).
+#+ experimental_memory_pool_policy = "greedy"
+
+# --- Experimental: DataFusion spill-to-disk controls ---
+## Spill mode:
+## - "default": preserve DataFusion built-in OS temp directory (default).
+## - "custom": explicitly configure spill path, quota, and compression.
+## - "disabled": explicitly disable disk spilling.
+## Set this to "custom" before using the path/quota/compression keys below.
+#+ experimental_spill_mode = "default"
+## Spill directory path. Ignored unless mode is "custom".
+## @toml2docs:none-default
+#+ experimental_spill_path = "/path/to/spill"
+## Maximum total size of spill directory (default: "1GiB").
+## Ignored unless mode is "custom".
+#+ experimental_spill_max_temp_directory_size = "1GiB"
+## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
+## Ignored unless mode is "custom".
+#+ experimental_spill_compression = "uncompressed"
+# --- End spill-to-disk ---
 
 ## Datanode options.
 [datanode]

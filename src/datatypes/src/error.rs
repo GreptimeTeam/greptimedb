@@ -19,6 +19,21 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
+use crate::data_type::ConcreteDataType;
+
+/// Shared error message for rejecting a time index type change that is not a
+/// widening timestamp unit change; used by both the region and table layer.
+pub fn time_index_not_widening_error(
+    column_name: &str,
+    from_type: &ConcreteDataType,
+    to_type: &ConcreteDataType,
+) -> String {
+    format!(
+        "time index column '{column_name}' only supports widening its timestamp \
+         unit, cannot change type from '{from_type}' to '{to_type}'"
+    )
+}
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -210,6 +225,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid JSON2 settings: {reason}"))]
+    InvalidJson2Settings {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid Vector: {}", msg))]
     InvalidVector {
         msg: String,
@@ -334,6 +356,7 @@ impl ErrorExt for Error {
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
             | InvalidJson2Layout { .. }
+            | InvalidJson2Settings { .. }
             | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
