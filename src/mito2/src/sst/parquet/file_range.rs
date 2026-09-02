@@ -206,8 +206,11 @@ impl FileRange {
             .map(|s| s == TimeSeriesRowSelector::LastRow)
             .unwrap_or(false)
         {
-            // Only use LastRowReader if row group does not contain DELETE
-            // and all rows are selected.
+            // Only use LastRowReader if row group does not contain DELETE, all
+            // rows are selected, and filters that still run after this reader
+            // cannot change which row is last. Tag filters are safe because a
+            // tag is constant within a series. Timestamp and field filters are
+            // not safe for this shortcut.
             let put_only = !self
                 .context
                 .contains_delete(self.row_group_idx)
@@ -215,7 +218,7 @@ impl FileRange {
                     error!(e; "Failed to decode min value of op_type, fallback to FlatRowGroupReader");
                 })
                 .unwrap_or(true);
-            put_only && self.select_all()
+            put_only && self.select_all() && self.context.remaining_filters_preserve_last_row()
         } else {
             false
         };
@@ -223,7 +226,7 @@ impl FileRange {
         let flat_prune_reader = if use_last_row_reader {
             let flat_row_group_reader =
                 FlatRowGroupReader::new(self.context.clone(), parquet_reader);
-            // Flat PK prefilter makes the input stream predicate-dependent, so cached
+            // Predicate prefiltering makes the input stream predicate-dependent, so cached
             // selector results are not reusable across queries with different filters.
             let cache_strategy = if self.context.reader_builder.has_predicate_prefilter() {
                 CacheStrategy::Disabled
@@ -411,6 +414,16 @@ impl FileRangeContext {
     /// Returns true if a partition filter is configured.
     pub(crate) fn has_partition_filter(&self) -> bool {
         self.base.partition_filter.is_some()
+    }
+
+    /// Returns true if applying the remaining precise filters after selecting
+    /// the last row cannot change which row is selected for a series.
+    fn remaining_filters_preserve_last_row(&self) -> bool {
+        !self.has_partition_filter()
+            && self
+                .filters()
+                .iter()
+                .all(|filter| filter.semantic_type() == SemanticType::Tag)
     }
 
     /// Returns the format helper.
