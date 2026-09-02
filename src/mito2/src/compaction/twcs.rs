@@ -707,8 +707,14 @@ impl Picker for TwcsPicker {
                         inferred
                     });
 
-                let active_window =
-                    find_latest_window_in_seconds(levels[0].files(), time_window_size);
+                // Prefer the max-sequence file across all levels so the active
+                // window survives L0 compaction; fall back to the L0-based rule
+                // for legacy files that carry no sequence.
+                let active_window = find_active_window_by_sequence(
+                    levels.iter().flat_map(LevelMeta::files),
+                    time_window_size,
+                )
+                .or_else(|| find_latest_window_in_seconds(levels[0].files(), time_window_size));
                 let windows = assign_to_windows(
                     levels
                         .iter()
@@ -885,6 +891,31 @@ fn find_latest_window_in_seconds<'a>(
         .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
 }
 
+/// Finds the active window from the file with the highest sequence number.
+///
+/// Flush and compaction outputs inherit the max input sequence, so the
+/// max-sequence file always tracks the most recent write: the active window
+/// survives the transient state where level 0 is empty right after its files
+/// were compacted away. Returns `None` when no file carries a sequence.
+///
+/// The window key follows the same convention as [`assign_to_windows`]
+/// (truncate to seconds, then align up), since it is compared against the
+/// window keys produced there.
+fn find_active_window_by_sequence<'a>(
+    files: impl Iterator<Item = &'a FileHandle>,
+    time_window_size: i64,
+) -> Option<i64> {
+    files
+        .filter(|f| f.meta_ref().sequence.is_some())
+        .max_by_key(|f| f.meta_ref().sequence)
+        .and_then(|f| {
+            f.time_range()
+                .1
+                .convert_to(TimeUnit::Second)
+                .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -981,6 +1012,120 @@ mod tests {
         assert!(output.outputs.is_empty());
         assert!(!output.expired_ssts.is_empty());
         assert!(output.expired_ssts.iter().all(|file| !file.compacting()));
+    }
+
+    #[tokio::test]
+    async fn test_active_window_survives_l0_consumption() {
+        // Simulates the transient state right after an L0 compaction: level 0 is
+        // empty and only L1 files remain. The active window must still be the
+        // window of the most recent write (tracked by the max-sequence file), so
+        // the window is NOT compacted under the inactive rules.
+        let env = SchedulerEnv::new().await;
+        let metadata = metadata_for_test();
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let mut ssts = SstVersion::new();
+        ssts.add_files(
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+            [100, 101].into_iter().map(|sequence| FileMeta {
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_millisecond(0),
+                    Timestamp::new_millisecond(10),
+                ),
+                level: 1,
+                sequence: NonZeroU64::new(sequence),
+                ..Default::default()
+            }),
+        );
+        let compaction_region = CompactionRegion {
+            region_id: metadata.region_id,
+            region_options: RegionOptions::default(),
+            engine_config: Arc::new(MitoConfig::default()),
+            region_metadata: metadata.clone(),
+            cache_manager: Arc::new(CacheManager::default()),
+            access_layer: env.access_layer,
+            manifest_ctx,
+            current_version: CompactionVersion {
+                metadata,
+                options: RegionOptions::default(),
+                ssts: Arc::new(ssts),
+                compaction_time_window: None,
+            },
+            file_purger: None,
+            ttl: None,
+            max_parallelism: 1,
+            plugins: Plugins::new(),
+        };
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            inactive_window_trigger_file_num: 2,
+            time_window_seconds: Some(3600),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        assert!(picker.pick(&compaction_region).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_find_active_window_by_sequence() {
+        // The max-sequence file tracks the most recent write regardless of
+        // level: here a compacted L1 file ending at 2999ms (window key 2) is
+        // newer than the L0 file ending at 999ms (window key 0). Window keys
+        // follow the assign_to_windows convention (truncate to seconds).
+        let files = [
+            new_file_handle_with_sequence(FileId::random(), 0, 999, 0, 1),
+            new_file_handle_with_sequence(FileId::random(), 2000, 2999, 1, 10),
+        ];
+        assert_eq!(Some(2), find_active_window_by_sequence(files.iter(), 1));
+
+        // Backfill: the newest write lands in an older window, and that window
+        // is the active one.
+        let files = [
+            new_file_handle_with_sequence(FileId::random(), 0, 999, 0, 10),
+            new_file_handle_with_sequence(FileId::random(), 2000, 2999, 0, 1),
+        ];
+        assert_eq!(Some(0), find_active_window_by_sequence(files.iter(), 1));
+
+        // Files without a sequence are skipped; if none have one, the caller
+        // falls back to the L0-based rule.
+        let files = [new_file_handle_with_sequence(
+            FileId::random(),
+            0,
+            999,
+            1,
+            0,
+        )];
+        assert_eq!(None, find_active_window_by_sequence(files.iter(), 1));
+        assert!(find_active_window_by_sequence(Vec::<FileHandle>::new().iter(), 1).is_none());
+    }
+
+    #[test]
+    fn test_active_window_falls_back_to_l0_rule_without_sequence() {
+        let active_window_of = |files: &[FileHandle]| {
+            find_active_window_by_sequence(files.iter(), 1).or_else(|| {
+                find_latest_window_in_seconds(files.iter().filter(|f| f.level() == 0), 1)
+            })
+        };
+
+        // Legacy files without sequence: the L0-based rule still applies.
+        let files = [
+            new_file_handle_with_sequence(FileId::random(), 0, 999, 1, 0),
+            new_file_handle_with_sequence(FileId::random(), 2000, 2999, 0, 0),
+        ];
+        assert_eq!(Some(3), active_window_of(&files));
+
+        // No sequence and no L0: None, exactly as before.
+        let files = [new_file_handle_with_sequence(
+            FileId::random(),
+            0,
+            999,
+            1,
+            0,
+        )];
+        assert_eq!(None, active_window_of(&files));
     }
 
     #[test]
