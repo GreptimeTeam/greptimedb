@@ -97,10 +97,12 @@ fn matching_wal_entry_reader(
         .and_then(|(reader_provider, reader)| (reader_provider == *provider).then_some(reader))
 }
 
-fn initial_pruned_entry_id(wal_options: &WalOptions) -> EntryId {
-    match wal_options {
-        WalOptions::Kafka(options) => options.initial_pruned_entry_id.unwrap_or(0),
-        WalOptions::RaftEngine | WalOptions::Noop => 0,
+fn initial_pruned_entry_id(provider: &Provider, wal_options: &WalOptions) -> EntryId {
+    match (provider, wal_options) {
+        (Provider::Kafka(_), WalOptions::Kafka(options)) => {
+            options.initial_pruned_entry_id.unwrap_or(0)
+        }
+        _ => 0,
     }
 }
 
@@ -382,10 +384,10 @@ impl RegionOpener {
             .and_then(|cm| cm.write_cache())
             .and_then(|wc| wc.manifest_cache());
         // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
-        // Kafka WAL allocation also carries the topic's pruned entry id as a create-time hint.
+        // A resolved Kafka provider also carries the topic's pruned entry id as a create-time hint.
         let flushed_entry_id = provider
             .initial_flushed_entry_id::<S>(wal.store())
-            .max(initial_pruned_entry_id(&options.wal_options));
+            .max(initial_pruned_entry_id(&provider, &options.wal_options));
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
             flushed_entry_id,
@@ -1582,20 +1584,33 @@ mod tests {
 
     #[test]
     fn test_initial_pruned_entry_id() {
-        assert_eq!(0, initial_pruned_entry_id(&WalOptions::RaftEngine));
-        assert_eq!(0, initial_pruned_entry_id(&WalOptions::Noop));
+        let kafka_provider = Provider::kafka_provider("test_topic".to_string());
         assert_eq!(
             0,
-            initial_pruned_entry_id(&WalOptions::Kafka(KafkaWalOptions::new(
-                "test_topic".to_string()
-            )))
+            initial_pruned_entry_id(&kafka_provider, &WalOptions::RaftEngine)
         );
         assert_eq!(
-            42,
-            initial_pruned_entry_id(&WalOptions::Kafka(KafkaWalOptions {
-                topic: "test_topic".to_string(),
-                initial_pruned_entry_id: Some(42),
-            }))
+            0,
+            initial_pruned_entry_id(&Provider::noop_provider(), &WalOptions::Noop)
+        );
+        assert_eq!(
+            0,
+            initial_pruned_entry_id(
+                &kafka_provider,
+                &WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string()))
+            )
+        );
+        let kafka_options = WalOptions::Kafka(KafkaWalOptions {
+            topic: "test_topic".to_string(),
+            initial_pruned_entry_id: Some(42),
+        });
+        assert_eq!(42, initial_pruned_entry_id(&kafka_provider, &kafka_options));
+        assert_eq!(
+            0,
+            initial_pruned_entry_id(
+                &Provider::external(ExternalProvider::remote("test-external", "namespace")),
+                &kafka_options,
+            )
         );
     }
 
