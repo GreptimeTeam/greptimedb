@@ -137,7 +137,7 @@ datafusion-functions = "=55.0.0"
 datafusion-functions-aggregate-common = "=55.0.0"
 datafusion-functions-window-common = "=55.0.0"
 datafusion-optimizer = "=55.0.0"
-datafusion-orc = "0.9"
+datafusion-orc = "0.10.0"
 datafusion-pg-catalog = "0.18.3"
 datafusion-physical-expr = "=55.0.0"
 datafusion-physical-plan = "=55.0.0"
@@ -368,10 +368,8 @@ datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.g
 datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "dec6af133d6a5e0063407c1f477d9a7b67649a29" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "dec6af133d6a5e0063407c1f477d9a7b67649a29" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "dec6af133d6a5e0063407c1f477d9a7b67649a29" }
-datafusion-orc = { git = "https://github.com/GreptimeTeam/datafusion-orc.git", rev = "a7b5967f03c3311075f56039ba11d50fe7faee8e" }
-orc-rust = { git = "https://github.com/GreptimeTeam/orc-rust.git", rev = "6fec9c206bdca5c16ce09be36a6bbbbbe9268d12" }
-datafusion-pg-catalog = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "9c961b7ab28e0a5e52dcd54fb7ddf2b7b5f9f1f7" }
-arrow-pg = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "9c961b7ab28e0a5e52dcd54fb7ddf2b7b5f9f1f7" }
+datafusion-pg-catalog = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "3c77e6c32b8db80635a0d2f4b318a36b31170bc3" }
+arrow-pg = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "3c77e6c32b8db80635a0d2f4b318a36b31170bc3" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
 
 [profile.release]

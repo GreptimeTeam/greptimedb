@@ -653,7 +653,7 @@ dependencies = [
 [[package]]
 name = "arrow-pg"
 version = "0.15.0"
-source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=9c961b7ab28e0a5e52dcd54fb7ddf2b7b5f9f1f7#9c961b7ab28e0a5e52dcd54fb7ddf2b7b5f9f1f7"
+source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=3c77e6c32b8db80635a0d2f4b318a36b31170bc3#3c77e6c32b8db80635a0d2f4b318a36b31170bc3"
 dependencies = [
  "arrow 59.2.0",
  "arrow-schema 59.2.0",
@@ -2272,7 +2272,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -4250,8 +4250,9 @@ dependencies = [
 
 [[package]]
 name = "datafusion-orc"
-version = "0.9.0"
-source = "git+https://github.com/GreptimeTeam/datafusion-orc.git?rev=a7b5967f03c3311075f56039ba11d50fe7faee8e#a7b5967f03c3311075f56039ba11d50fe7faee8e"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "637382f27aa0c7d6f30ca18a3e37d46bdf427aa83e1b0366083dc38e362dae99"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4265,7 +4266,7 @@ dependencies = [
 [[package]]
 name = "datafusion-pg-catalog"
 version = "0.18.3"
-source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=9c961b7ab28e0a5e52dcd54fb7ddf2b7b5f9f1f7#9c961b7ab28e0a5e52dcd54fb7ddf2b7b5f9f1f7"
+source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=3c77e6c32b8db80635a0d2f4b318a36b31170bc3#3c77e6c32b8db80635a0d2f4b318a36b31170bc3"
 dependencies = [
  "arrow-pg",
  "async-trait",
@@ -5190,7 +5191,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "778e2ac28f6c47af28e4907f13ffd1e1ddbd400980a9abd7c8df189bf578a5ad"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6734,7 +6735,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -7156,7 +7157,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
 dependencies = [
  "io-lifetimes 3.0.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7906,7 +7907,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.53.5",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -9202,7 +9203,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9406,7 +9407,7 @@ version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77e878c846a8abae00dd069496dbe8751b16ac1c3d6bd2a7283a938e8228f90d"
 dependencies = [
- "proc-macro-crate 3.3.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10080,8 +10081,9 @@ dependencies = [
 
 [[package]]
 name = "orc-rust"
-version = "0.8.0"
-source = "git+https://github.com/GreptimeTeam/orc-rust.git?rev=6fec9c206bdca5c16ce09be36a6bbbbbe9268d12#6fec9c206bdca5c16ce09be36a6bbbbbe9268d12"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e54c163f843c4f0fcfca65b9b73ca6f93c37c8e86736d5a1e578c6e843eed0a0"
 dependencies = [
  "arrow 59.2.0",
  "async-trait",
@@ -11392,7 +11394,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -11412,8 +11414,8 @@ version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
 dependencies = [
- "heck 0.5.0",
- "itertools 0.14.0",
+ "heck 0.4.1",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -13004,7 +13006,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13896,7 +13898,7 @@ version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1961e2ef424c1424204d3a5d6975f934f56b6d50ff5732382d84ebf460e147f7"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -14931,7 +14933,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.0.7",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -16727,7 +16729,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
