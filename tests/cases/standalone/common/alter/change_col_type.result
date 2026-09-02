@@ -125,8 +125,10 @@ SELECT * FROM ts_widen ORDER BY ts;
 -- predicate on the widened time index reads old-unit SST data correctly
 SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:01' ORDER BY ts;
 
-++
-++
++------+----+
+| host | ts |
++------+----+
++------+----+
 
 SELECT * FROM ts_widen WHERE ts < '2024-01-01 00:00:01.000300' ORDER BY ts;
 
