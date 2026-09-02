@@ -42,6 +42,7 @@ use common_catalog::consts::{
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_query::OutputData;
+use common_query::prelude::greptime_temporality_label;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, warn};
 use common_time::timestamp::TimeUnit;
@@ -342,6 +343,7 @@ impl EntityGraphProviderImpl {
                     .meta
                     .row_key_column_names()
                     .filter(|c| !implicit.id.contains(c))
+                    .filter(|c| c.as_str() != greptime_temporality_label())
                     .cloned()
                     .collect()
             } else {
@@ -1249,9 +1251,16 @@ mod tests {
 
     #[test]
     fn target_info_descriptive_rest_covers_remaining_tags() {
+        let marker = greptime_temporality_label();
         let info = prom_table_info(
             "target_info",
-            &["job", "instance", "k8s_cluster_name", "service_version"],
+            &[
+                "job",
+                "instance",
+                "k8s_cluster_name",
+                "service_version",
+                marker,
+            ],
             PROM_STAMPS,
         );
         let declarations = sorted_declarations(&info);

@@ -141,9 +141,12 @@ with the stored key. Keep `default_column_prefix` stable for existing tables.
 
 OTLP `NoRecordedValue` sums store the canonical Prometheus stale marker.
 Classic-histogram tombstones mark the point's supplied bounds, implicit `+Inf`,
-`_count`, and `_sum` when supplied. Bounds absent from or changed on the
-tombstone can remain visible until lookback expiry; complete marking would
-require retained per-stream bound history and is outside v1.
+`_count`, and `_sum` when supplied. If the optional `sum` is absent, no `_sum`
+stale marker is emitted, so a previously stored `_sum` sample can remain
+visible to instant selectors until lookback expiry while `_count` and the
+supplied bucket series are stale. Bounds absent from or changed on the
+tombstone can likewise remain visible; complete marking would require retained
+per-stream component and bound-layout history and is outside v1.
 
 ## `information_schema.table_semantics`
 
