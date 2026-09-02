@@ -60,6 +60,18 @@ max_concurrent_queries = 0
 ## Defaults to max(num_cpus / 2, 2).
 #+ compact_rt_max_blocking_threads = 4
 
+## Experimental weighted, work-conserving query/write task scheduler.
+#+ [runtime.experimental_workload_scheduler]
+## Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.
+## The weights set their relative runtime shares while both are backlogged. Disabled by default.
+#+ enable = false
+## Relative query share while both query and write workloads are backlogged.
+#+ query_weight = 2
+## Relative write share while both query and write workloads are backlogged.
+#+ write_weight = 8
+## Number of polls between scheduler fairness samples. Must be greater than zero.
+#+ sample_every_polls = 16
+
 ## The HTTP server options.
 [http]
 ## The address to bind the HTTP server.

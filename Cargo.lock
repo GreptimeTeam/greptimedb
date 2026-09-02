@@ -1713,6 +1713,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "catio"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/catio.git?rev=c75be64e7a58f620f6340c24b5b8d76f131af6aa#c75be64e7a58f620f6340c24b5b8d76f131af6aa"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2821,6 +2829,7 @@ name = "common-runtime"
 version = "1.3.0"
 dependencies = [
  "async-trait",
+ "catio",
  "clap",
  "common-error",
  "common-macro",
