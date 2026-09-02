@@ -139,6 +139,41 @@ ALTER DATABASE alter_database SET 'compaction.twcs.trigger_file_num'='8';
 
 Affected Rows: 0
 
+ALTER DATABASE alter_database SET 'compaction.twcs.active_window.trigger_file_num'='16';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+------------------------------------------------------------+
+| Database       | Create Database                                            |
++----------------+------------------------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database               |
+|                | WITH(                                                      |
+|                |   'compaction.twcs.active_window.trigger_file_num' = '16', |
+|                |   'compaction.twcs.time_window' = '2h',                    |
+|                |   'compaction.type' = 'twcs'                               |
+|                | )                                                          |
++----------------+------------------------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+------------------------------------------------------------+
+| Database       | Create Database                                            |
++----------------+------------------------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database               |
+|                | WITH(                                                      |
+|                |   'compaction.twcs.active_window.trigger_file_num' = '16', |
+|                |   'compaction.twcs.time_window' = '2h',                    |
+|                |   'compaction.type' = 'twcs'                               |
+|                | )                                                          |
++----------------+------------------------------------------------------------+
+
+ALTER DATABASE alter_database SET 'compaction.twcs.trigger_file_num'='8';
+
+Affected Rows: 0
+
 ALTER DATABASE alter_database SET 'compaction.twcs.max_output_file_size'='512MB';
 
 Affected Rows: 0
