@@ -407,9 +407,10 @@ to parse the first line of a PR comment and, for `/query-regression`,
 `query-regression-slash.yml` handles that event: it re-checks
 `QUERY_REGRESSION_COMMENT_ALLOWLIST` (comma/whitespace-separated GitHub logins)
 and repository `admin` permission, snapshots merge/head/base SHAs, and calls
-the reusable workflow. Dispatch requires `GH_PERSONAL_ACCESS_TOKEN` (`repo`
-scope); `GITHUB_TOKEN` cannot create `repository_dispatch` runs. The handler
-runs on the default branch, so it has secrets even for fork PRs. A later head
+the reusable workflow. Same-repo dispatch uses `github.token` with
+`contents: write`; GitHub starts the handler for `GITHUB_TOKEN`-created
+`repository_dispatch` events. The handler runs on the default branch, so it
+has secrets even for fork PRs. A later head
 change does not retarget an already queued run; comment `/query-regression`
 again after reviewing the new revision. To add another slash command, list it
 in the dispatcher and add a `repository_dispatch` handler.
