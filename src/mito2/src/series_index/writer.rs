@@ -39,7 +39,6 @@ use crate::error::{
 };
 use crate::series_index::{
     MAX_TS_COLUMN, MIN_TS_COLUMN, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN,
-    time_unit_metadata,
 };
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
@@ -431,10 +430,13 @@ impl SeriesIndexWriter {
 /// Returns the Arrow schema of a series index.
 pub fn series_index_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
     validate_metadata(metadata)?;
-    let ts_metadata = time_unit_metadata(time_index_unit(metadata)?);
+    // Native Timestamp columns carry the time index unit in their datatype,
+    // so each file is interpreted in the unit it was written with even after
+    // the region's time index unit has been widened.
+    let ts_type = DataType::Timestamp(time_index_unit(metadata)?.into(), None);
     let mut fields = vec![
-        Field::new(MIN_TS_COLUMN, DataType::Int64, false).with_metadata(ts_metadata.clone()),
-        Field::new(MAX_TS_COLUMN, DataType::Int64, false).with_metadata(ts_metadata),
+        Field::new(MIN_TS_COLUMN, ts_type.clone(), false),
+        Field::new(MAX_TS_COLUMN, ts_type, false),
         Field::new(ROW_COUNT_COLUMN, DataType::UInt64, false),
         Field::new(TABLE_ID_COLUMN, DataType::UInt32, false),
         Field::new(TSID_COLUMN, DataType::UInt64, false),
@@ -538,8 +540,8 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
 }
 
 /// Extracts raw i64 timestamp values for the `__series_min_ts`/`__series_max_ts`
-/// columns. NOTE: the unit is dropped; the values are interpreted in the unit
-/// recorded on the file schema by [`series_index_schema`].
+/// columns. NOTE: the unit is dropped; the values are written back as native
+/// Timestamp columns in the unit of [`series_index_schema`].
 fn timestamp_values(array: &ArrayRef) -> Result<Int64Array> {
     let timestamps = if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
         array.clone()
@@ -619,13 +621,29 @@ fn decode_primary_key(
 }
 
 fn rows_to_batch(schema: &SchemaRef, rows: &[SeriesIndexRow]) -> Result<RecordBatch> {
+    // The min/max ts columns are native Timestamp columns; the raw i64 series
+    // bounds are reinterpreted in that type's unit (arrow's Int64 -> Timestamp
+    // cast reinterprets rather than rescales).
+    let ts_type = schema
+        .field_with_name(MIN_TS_COLUMN)
+        .ok()
+        .map(|field| field.data_type().clone())
+        .context(InvalidRecordBatchSnafu {
+            reason: format!("series index schema is missing internal column {MIN_TS_COLUMN}"),
+        })?;
+    let ts_array = |values: Vec<i64>| {
+        datatypes::arrow::compute::cast(&Int64Array::from(values), &ts_type).map_err(|_| {
+            InvalidRecordBatchSnafu {
+                reason: format!(
+                    "series index min/max ts columns must be a Timestamp, got {ts_type:?}"
+                ),
+            }
+            .build()
+        })
+    };
     let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(Int64Array::from_iter_values(
-            rows.iter().map(|row| row.min_ts),
-        )),
-        Arc::new(Int64Array::from_iter_values(
-            rows.iter().map(|row| row.max_ts),
-        )),
+        ts_array(rows.iter().map(|row| row.min_ts).collect())?,
+        ts_array(rows.iter().map(|row| row.max_ts).collect())?,
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|row| row.row_count),
         )),
@@ -663,7 +681,6 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
-    use crate::series_index::TIME_UNIT_META_KEY;
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn object_store() -> ObjectStore {
@@ -753,22 +770,14 @@ mod tests {
         );
         assert!(!schema.field(4).is_nullable());
         assert!(schema.field(5).is_nullable());
-        // The min/max ts fields record the time index unit they are stored in.
+        // The min/max ts columns are native timestamps in the time index unit.
         assert_eq!(
-            Some(TimeUnit::Millisecond),
-            schema
-                .field(0)
-                .metadata()
-                .get(TIME_UNIT_META_KEY)
-                .and_then(|unit| unit.parse().ok())
+            &DataType::Timestamp(TimeUnit::Millisecond.into(), None),
+            schema.field(0).data_type()
         );
         assert_eq!(
-            Some(TimeUnit::Millisecond),
-            schema
-                .field(1)
-                .metadata()
-                .get(TIME_UNIT_META_KEY)
-                .and_then(|unit| unit.parse().ok())
+            &DataType::Timestamp(TimeUnit::Millisecond.into(), None),
+            schema.field(1).data_type()
         );
 
         let dense = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
@@ -898,17 +907,17 @@ mod tests {
             batch
                 .column(0)
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<TimestampMillisecondArray>()
                 .unwrap(),
-            &Int64Array::from(vec![70, 200])
+            &TimestampMillisecondArray::from(vec![70, 200])
         );
         assert_eq!(
             batch
                 .column(1)
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<TimestampMillisecondArray>()
                 .unwrap(),
-            &Int64Array::from(vec![130, 230])
+            &TimestampMillisecondArray::from(vec![130, 230])
         );
         assert_eq!(
             batch
