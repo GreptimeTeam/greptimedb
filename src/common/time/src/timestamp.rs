@@ -685,16 +685,17 @@ impl Display for TimeUnit {
     }
 }
 
-/// Parses a time unit from its [`Display`](TimeUnit) form, e.g. `"Millisecond"`.
+/// Parses a time unit from its [`Display`](TimeUnit) form, case-insensitively,
+/// e.g. `"Millisecond"` or `"millisecond"`.
 impl FromStr for TimeUnit {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "Second" => Ok(TimeUnit::Second),
-            "Millisecond" => Ok(TimeUnit::Millisecond),
-            "Microsecond" => Ok(TimeUnit::Microsecond),
-            "Nanosecond" => Ok(TimeUnit::Nanosecond),
+        match s.to_ascii_lowercase().as_str() {
+            "second" => Ok(TimeUnit::Second),
+            "millisecond" => Ok(TimeUnit::Millisecond),
+            "microsecond" => Ok(TimeUnit::Microsecond),
+            "nanosecond" => Ok(TimeUnit::Nanosecond),
             _ => UnsupportedTimeUnitSnafu {
                 unit: s.to_string(),
             }
@@ -1038,6 +1039,16 @@ mod tests {
             // The Display form round-trips through FromStr.
             assert_eq!(unit.to_string().parse::<TimeUnit>().unwrap(), unit);
         }
+
+        // Parsing is case-insensitive.
+        assert_eq!(
+            TimeUnit::Millisecond,
+            "MILLISECOND".parse::<TimeUnit>().unwrap()
+        );
+        assert_eq!(
+            TimeUnit::Microsecond,
+            "microsecond".parse::<TimeUnit>().unwrap()
+        );
 
         let err = "Femtosecond".parse::<TimeUnit>().unwrap_err();
         assert_eq!("Unsupported time unit: Femtosecond", err.to_string());
