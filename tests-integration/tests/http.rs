@@ -2997,7 +2997,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         "prometheus_remote_write_v2_native_histogram_rows",
         &client,
         "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
-        "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
+        "[[3000,{\"schema\":1,\"zero_threshold\":0.001,\"sum\":10.0,\"reset_hint\":2,\"start_timestamp\":1500,\"custom_values\":[],\"positive_span_offsets\":[0],\"positive_span_lengths\":[3],\"negative_span_offsets\":[-2],\"negative_span_lengths\":[1],\"count_i64\":8,\"zero_count_i64\":1,\"positive_buckets_i64\":[1,3,2],\"negative_buckets_i64\":[1],\"count_f64\":null,\"zero_count_f64\":null,\"positive_buckets_f64\":[],\"negative_buckets_f64\":[]},\"api\",\"localhost:9090\"],[4000,{\"schema\":2,\"zero_threshold\":0.002,\"sum\":20.0,\"reset_hint\":3,\"start_timestamp\":2500,\"custom_values\":[],\"positive_span_offsets\":[3],\"positive_span_lengths\":[2],\"negative_span_offsets\":[],\"negative_span_lengths\":[],\"count_i64\":null,\"zero_count_i64\":null,\"positive_buckets_i64\":[],\"negative_buckets_i64\":[],\"count_f64\":6.0,\"zero_count_f64\":0.5,\"positive_buckets_f64\":[2.0,3.5],\"negative_buckets_f64\":[]},\"api\",\"localhost:9090\"]]",
     )
     .await;
 
@@ -6963,7 +6963,7 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         "otlp_exponential_histogram_row",
         &client,
         "select greptime_timestamp, greptime_native_histogram from otlp_exponential_latency;",
-        "[[3000,{\"count_f64\":null,\"count_i64\":4,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,2],\"positive_span_lengths\":[2],\"positive_span_offsets\":[0],\"reset_hint\":0,\"schema\":0,\"start_timestamp\":1000,\"sum\":8.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.0}]]",
+        "[[3000,{\"schema\":0,\"zero_threshold\":0.0,\"sum\":8.0,\"reset_hint\":0,\"start_timestamp\":1000,\"custom_values\":[],\"positive_span_offsets\":[0],\"positive_span_lengths\":[2],\"negative_span_offsets\":[],\"negative_span_lengths\":[],\"count_i64\":4,\"zero_count_i64\":1,\"positive_buckets_i64\":[1,2],\"negative_buckets_i64\":[],\"count_f64\":null,\"zero_count_f64\":null,\"positive_buckets_f64\":[],\"negative_buckets_f64\":[]}]]",
     )
     .await;
     validate_data(

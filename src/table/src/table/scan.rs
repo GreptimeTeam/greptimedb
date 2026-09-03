@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -36,9 +35,10 @@ use datafusion::physical_plan::filter_pushdown::{
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    RecordBatchStream as DfRecordBatchStream,
+    RecordBatchStream as DfRecordBatchStream, apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{
@@ -381,10 +381,6 @@ impl RegionScanExec {
 }
 
 impl ExecutionPlan for RegionScanExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }
@@ -395,6 +391,17 @@ impl ExecutionPlan for RegionScanExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
+        self.output_ordering
+            .as_ref()
+            .map_or(Ok(TreeNodeRecursion::Continue), |ordering| {
+                apply_expression_roots(ordering.iter().map(|sort_expr| &sort_expr.expr), f)
+            })
     }
 
     fn with_new_children(
@@ -446,9 +453,9 @@ impl ExecutionPlan for RegionScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Arc<Statistics>> {
         if partition.is_some() {
-            return Ok(Statistics::new_unknown(self.schema().as_ref()));
+            return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
         }
 
         let statistics =
@@ -471,7 +478,7 @@ impl ExecutionPlan for RegionScanExec {
             } else {
                 Statistics::new_unknown(&self.arrow_schema)
             };
-        Ok(statistics)
+        Ok(Arc::new(statistics))
     }
 
     fn name(&self) -> &str {

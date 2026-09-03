@@ -875,8 +875,10 @@ async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
         Some(9),
         0,
         "\
-++
-++",
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+",
     )
     .await;
 }

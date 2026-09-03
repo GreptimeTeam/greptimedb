@@ -43,8 +43,10 @@ SHOW CREATE TABLE cnt_reqs;
 -- test if sink table is tql queryable
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", cnt_reqs);
 
-++
-++
++------------------------------------------+----+-------------+
+| count(cnt_reqs.count(http_requests.val)) | ts | status_code |
++------------------------------------------+----+-------------+
++------------------------------------------+----+-------------+
 
 INSERT INTO TABLE http_requests VALUES
     (now() - '17s'::interval, 'host1', 'idc1', 200),
@@ -187,8 +189,10 @@ SHOW CREATE TABLE cnt_reqs;
 -- test if sink table is tql queryable
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", cnt_reqs);
 
-++
-++
++------------------------------------------+----+-------------+
+| count(cnt_reqs.count(http_requests.val)) | ts | status_code |
++------------------------------------------+----+-------------+
++------------------------------------------+----+-------------+
 
 INSERT INTO TABLE http_requests VALUES
     (0::Timestamp, 'host1', 'idc1', 200),
@@ -278,8 +282,10 @@ SHOW CREATE TABLE rate_reqs;
 -- test if sink table is tql queryable
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", rate_reqs);
 
-++
-++
++-----------------------------------------------------------+----+-------------+
+| count(rate_reqs.prom_rate(ts_range,val,ts,Int64(300000))) | ts | status_code |
++-----------------------------------------------------------+----+-------------+
++-----------------------------------------------------------+----+-------------+
 
 INSERT INTO TABLE http_requests VALUES
     (now() - '1m'::interval, 0),
@@ -359,8 +365,10 @@ SHOW CREATE TABLE rate_reqs;
 -- test if sink table is tql queryable
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", rate_reqs);
 
-++
-++
++-----------------------------------------------------------+----+-------------+
+| count(rate_reqs.prom_rate(ts_range,byte,ts,Int64(60000))) | ts | status_code |
++-----------------------------------------------------------+----+-------------+
++-----------------------------------------------------------+----+-------------+
 
 INSERT INTO TABLE http_requests_total VALUES
     ('localhost', 'my_service', 'instance1', 100, now() - '1min'::interval),

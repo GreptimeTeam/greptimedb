@@ -1219,6 +1219,7 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
             if let Some(inverted) = value.get_mut("inverted").and_then(|v| v.as_object_mut()) {
                 inverted.insert("base_offset".to_string(), serde_json::Value::from(0));
             }
+            value.sort_all_objects();
             *meta_json = value.to_string();
         }
     }

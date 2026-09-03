@@ -163,9 +163,12 @@ fn retarget_assignment_cast(
     let expr = unalias_mut(expr);
     let Expr::Cast(Cast {
         expr: source,
-        data_type: DataType::Timestamp(unit, None),
+        field,
     }) = expr
     else {
+        return Ok(false);
+    };
+    let DataType::Timestamp(unit, None) = field.data_type() else {
         return Ok(false);
     };
     let unit = *unit;

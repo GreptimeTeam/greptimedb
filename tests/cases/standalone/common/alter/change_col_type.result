@@ -1,32 +1,32 @@
-CREATE TABLE test(`id` INTEGER PRIMARY KEY, i INTEGER NULL, j TIMESTAMP TIME INDEX, k BOOLEAN);
+CREATE TABLE change_col_type_test(`id` INTEGER PRIMARY KEY, i INTEGER NULL, j TIMESTAMP TIME INDEX, k BOOLEAN);
 
 Affected Rows: 0
 
-INSERT INTO test VALUES (1, 1, 1, false), (2, 2, 2, true);
+INSERT INTO change_col_type_test VALUES (1, 1, 1, false), (2, 2, 2, true);
 
 Affected Rows: 2
 
-ALTER TABLE test MODIFY COLUMN "I" STRING;
+ALTER TABLE change_col_type_test MODIFY COLUMN "I" STRING;
 
-Error: 4002(TableColumnNotFound), Column I not exists in table test
+Error: 4002(TableColumnNotFound), Column I not exists in table change_col_type_test
 
-ALTER TABLE test MODIFY COLUMN k DATE;
+ALTER TABLE change_col_type_test MODIFY COLUMN k DATE;
 
-Error: 1004(InvalidArguments), Invalid alter table(test) request: column 'k' cannot be cast automatically to type 'Date'
+Error: 1004(InvalidArguments), Invalid alter table(change_col_type_test) request: column 'k' cannot be cast automatically to type 'Date'
 
-ALTER TABLE test MODIFY COLUMN id STRING;
+ALTER TABLE change_col_type_test MODIFY COLUMN id STRING;
 
-Error: 1004(InvalidArguments), Invalid alter table(test) request: Not allowed to change primary key index column 'id'
+Error: 1004(InvalidArguments), Invalid alter table(change_col_type_test) request: Not allowed to change primary key index column 'id'
 
-ALTER TABLE test MODIFY COLUMN j STRING;
+ALTER TABLE change_col_type_test MODIFY COLUMN j STRING;
 
-Error: 1004(InvalidArguments), Invalid alter table(test) request: time index column 'j' only supports widening its timestamp unit, cannot change type from 'TimestampMillisecond' to 'String'
+Error: 1004(InvalidArguments), Invalid alter table(change_col_type_test) request: time index column 'j' only supports widening its timestamp unit, cannot change type from 'TimestampMillisecond' to 'String'
 
-ALTER TABLE test MODIFY COLUMN I STRING;
+ALTER TABLE change_col_type_test MODIFY COLUMN I STRING;
 
 Affected Rows: 0
 
-SELECT * FROM test;
+SELECT * FROM change_col_type_test;
 
 +----+---+-------------------------+-------+
 | id | i | j                       | k     |
@@ -35,12 +35,12 @@ SELECT * FROM test;
 | 2  | 2 | 1970-01-01T00:00:00.002 | true  |
 +----+---+-------------------------+-------+
 
-INSERT INTO test VALUES (3, "greptime", 3, true);
+INSERT INTO change_col_type_test VALUES (3, "greptime", 3, true);
 
 Affected Rows: 1
 
 -- SQLNESS SORT_RESULT 3 1
-SELECT * FROM test;
+SELECT * FROM change_col_type_test;
 
 +----+----------+-------------------------+-------+
 | id | i        | j                       | k     |
@@ -50,7 +50,7 @@ SELECT * FROM test;
 | 3  | greptime | 1970-01-01T00:00:00.003 | true  |
 +----+----------+-------------------------+-------+
 
-DESCRIBE test;
+DESCRIBE change_col_type_test;
 
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
@@ -61,12 +61,12 @@ DESCRIBE test;
 | k      | Boolean              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
-ALTER TABLE test MODIFY COLUMN I INTEGER;
+ALTER TABLE change_col_type_test MODIFY COLUMN I INTEGER;
 
 Affected Rows: 0
 
 -- SQLNESS SORT_RESULT 3 1
-SELECT * FROM test;
+SELECT * FROM change_col_type_test;
 
 +----+---+-------------------------+-------+
 | id | i | j                       | k     |
@@ -76,7 +76,7 @@ SELECT * FROM test;
 | 3  |   | 1970-01-01T00:00:00.003 | true  |
 +----+---+-------------------------+-------+
 
-DESCRIBE test;
+DESCRIBE change_col_type_test;
 
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
@@ -87,7 +87,7 @@ DESCRIBE test;
 | k      | Boolean              |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
-DROP TABLE test;
+DROP TABLE change_col_type_test;
 
 Affected Rows: 0
 
@@ -125,8 +125,10 @@ SELECT * FROM ts_widen ORDER BY ts;
 -- predicate on the widened time index reads old-unit SST data correctly
 SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:01' ORDER BY ts;
 
-++
-++
++------+----+
+| host | ts |
++------+----+
++------+----+
 
 SELECT * FROM ts_widen WHERE ts < '2024-01-01 00:00:01.000300' ORDER BY ts;
 

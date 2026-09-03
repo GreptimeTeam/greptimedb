@@ -59,8 +59,10 @@ SELECT flow_id, flow_name FROM information_schema.flow_statistics WHERE flow_nam
 -- the like filter matches against flow_name; no matching flow returns empty.
 SHOW FLOW STATUS LIKE 'no_such_flow';
 
-++
-++
++---------+-----------+------------+---------------------+----------------+------------+
+| flow_id | flow_name | start_time | last_execution_time | uptime_seconds | state_size |
++---------+-----------+------------+---------------------+----------------+------------+
++---------+-----------+------------+---------------------+----------------+------------+
 
 DROP FLOW test_flow_status;
 

@@ -374,7 +374,7 @@ impl PruningStatistics for SeriesIndexPruningStats<'_> {
         column_null_counts(self.row_groups, column_index)
     }
 
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         None
     }
 

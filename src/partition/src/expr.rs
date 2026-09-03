@@ -20,6 +20,7 @@ use api::v1::meta::Partition;
 use datafusion_common::{ScalarValue, ToDFSchema};
 use datafusion_expr::Expr;
 use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::value::{
@@ -391,8 +392,13 @@ impl PartitionExpr {
             .context(error::ToDFSchemaSnafu)?;
         let execution_props = &ExecutionProps::default();
         let expr = self.try_as_logical_expr()?;
-        create_physical_expr(&expr, &df_schema, execution_props)
-            .context(error::CreatePhysicalExprSnafu)
+        create_physical_expr(
+            &expr,
+            &df_schema,
+            execution_props,
+            &PhysicalPlanningContext::default(),
+        )
+        .context(error::CreatePhysicalExprSnafu)
     }
 
     pub fn and(self, rhs: PartitionExpr) -> PartitionExpr {

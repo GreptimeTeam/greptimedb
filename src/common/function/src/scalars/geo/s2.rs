@@ -34,7 +34,18 @@ static CELL_TYPES: LazyLock<Vec<DataType>> =
 static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
 
-static LEVEL_TYPES: &[DataType] = datafusion_expr::type_coercion::aggregates::INTEGERS;
+const INTEGER_TYPES: &[DataType] = &[
+    DataType::Int8,
+    DataType::Int16,
+    DataType::Int32,
+    DataType::Int64,
+    DataType::UInt8,
+    DataType::UInt16,
+    DataType::UInt32,
+    DataType::UInt64,
+];
+
+static LEVEL_TYPES: &[DataType] = INTEGER_TYPES;
 
 /// Function that returns [s2] encoding cellid for a given geospatial coordinate.
 ///

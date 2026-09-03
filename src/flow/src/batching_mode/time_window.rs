@@ -37,6 +37,7 @@ use datafusion_common::tree_node::{
     Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
 use datafusion_common::{DFSchema, TableReference};
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{ColumnarValue, LogicalPlan};
 use datafusion_physical_expr::PhysicalExprRef;
 use datatypes::prelude::{ConcreteDataType, DataType};
@@ -830,7 +831,15 @@ fn to_phy_expr(
     let phy_planner = DefaultPhysicalPlanner::default();
 
     let phy_expr: PhysicalExprRef = phy_planner
-        .create_physical_expr(expr, df_schema, session)
+        // Time-window expressions are standalone scalar expressions over the input
+        // time column, so they cannot contain scalar subqueries or lambda variables
+        // that would require a plan-level physical planning context.
+        .create_physical_expr(
+            expr,
+            df_schema,
+            session,
+            &PhysicalPlanningContext::default(),
+        )
         .with_context(|_e| DatafusionSnafu {
             context: format!(
                 "Failed to create physical expression from {expr:?} using {df_schema:?}"
@@ -993,7 +1002,7 @@ mod test {
                     Some(Timestamp::new(0, TimeUnit::Millisecond)),
                     Some(Timestamp::new(300000, TimeUnit::Millisecond)),
                 ),
-                "SELECT sum(numbers_with_ts.number), numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE ((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts <= CAST('1970-01-01 00:05:00' AS TIMESTAMP)))) GROUP BY numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts), bucket_name",
+                "SELECT sum(number), number, date_bin('5 minutes', ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE ((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts <= CAST('1970-01-01 00:05:00' AS TIMESTAMP)))) GROUP BY number, date_bin('5 minutes', ts), bucket_name",
             ),
             // complex subquery alias
             (

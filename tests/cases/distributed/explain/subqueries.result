@@ -122,16 +122,16 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 +---------------------+-----------------------------------------------------------------------------+
 | logical_plan        | Dml: op=[Insert Into] table=[other]                                         |
 |                     |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j           |
-|                     |     Inner Join: integers.i = __scalar_sq_1.max(integers.i)                  |
+|                     |     Filter: integers.i = (<subquery>)                                       |
+|                     |       Subquery:                                                             |
+|                     |         MergeScan [is_placeholder=false, remote_input=[                     |
+|                     | Projection: max(integers.i)                                                 |
+|                     |   Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]                         |
+|                     |     TableScan: integers                                                     |
+|                     | ]]                                                                          |
 |                     |       Projection: integers.i                                                |
 |                     |         MergeScan [is_placeholder=false, remote_input=[                     |
 |                     | TableScan: integers                                                         |
-|                     | ]]                                                                          |
-|                     |       MergeScan [is_placeholder=false, remote_input=[                       |
-|                     | SubqueryAlias: __scalar_sq_1                                                |
-|                     |   Projection: max(integers.i)                                               |
-|                     |     Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]                       |
-|                     |       TableScan: integers, partial_filters=[Boolean(true)]                  |
 |                     | ]]                                                                          |
 | physical_plan_error | This feature is not implemented: Insert into not implemented for this table |
 +---------------------+-----------------------------------------------------------------------------+
@@ -598,8 +598,8 @@ EXPLAIN SELECT x FROM (VALUES (2),(1)) v(x) ORDER BY x;
 |_|_SubqueryAlias: v_|
 |_|_Projection: column1 AS x_|
 |_|_Values: (Int64(2)), (Int64(1))_|
-| physical_plan | SortExec: expr=[x@0 ASC NULLS LAST], preserve_partitioning=[false] |
-|_|_ProjectionExec: expr=[column1@0 as x]_|
+| physical_plan | ProjectionExec: expr=[column1@0 as x]_|
+|_|_SortExec: expr=[column1@0 ASC NULLS LAST], preserve_partitioning=[false] |
 |_|_DataSourceExec: partitions=1, partition_sizes=[1]_|
 |_|_|
 +-+-+

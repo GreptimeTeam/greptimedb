@@ -1020,8 +1020,10 @@ async fn test_flush_empty_with_format(flat_format: bool) {
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
-++
-++";
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 

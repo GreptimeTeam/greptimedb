@@ -99,8 +99,10 @@ FROM
 
 SELECT number FROM distinct_basic;
 
-++
-++
++--------+
+| number |
++--------+
++--------+
 
 -- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
@@ -142,8 +144,10 @@ FROM
 
 SELECT number FROM distinct_basic;
 
-++
-++
++--------+
+| number |
++--------+
++--------+
 
 DROP FLOW test_distinct_basic;
 

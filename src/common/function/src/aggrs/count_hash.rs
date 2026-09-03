@@ -26,7 +26,7 @@ use std::sync::Arc;
 use ahash::RandomState;
 use datafusion_common::cast::as_list_array;
 use datafusion_common::error::Result;
-use datafusion_common::hash_utils::create_hashes;
+use datafusion_common::hash_utils::create_hashes_with_hasher;
 use datafusion_common::utils::SingleRowListArrayBuilder;
 use datafusion_common::{ScalarValue, internal_err, not_impl_err};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
@@ -74,10 +74,6 @@ pub struct CountHash {
 }
 
 impl AggregateUDFImpl for CountHash {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "count_hash"
     }
@@ -208,7 +204,7 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         let array = &values[0];
         self.batch_hashes.clear();
         self.batch_hashes.resize(array.len(), 0);
-        let hashes = create_hashes(
+        let hashes = create_hashes_with_hasher(
             &[ArrayRef::clone(array)],
             &self.random_state,
             &mut self.batch_hashes,
@@ -279,7 +275,6 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         &mut self,
         values: &[ArrayRef],
         group_indices: &[usize],
-        _opt_filter: Option<&BooleanArray>,
         total_num_groups: usize,
     ) -> Result<()> {
         assert_eq!(
@@ -364,10 +359,6 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         Ok(vec![Arc::new(list_array)])
     }
 
-    fn supports_convert_to_state(&self) -> bool {
-        true
-    }
-
     fn size(&self) -> usize {
         // Base size of the struct
         let mut size = size_of::<Self>();
@@ -423,13 +414,21 @@ impl Accumulator for CountHashAccumulator {
 
         self.batch_hashes.clear();
         self.batch_hashes.resize(arr.len(), 0);
-        let hashes = create_hashes(
+        let hashes = create_hashes_with_hasher(
             &[ArrayRef::clone(arr)],
             &self.random_state,
             &mut self.batch_hashes,
         )?;
-        for hash in hashes {
-            self.values.insert(*hash);
+        if let Some(nulls) = arr.logical_nulls() {
+            for (hash, is_valid) in hashes.iter().zip(nulls.iter()) {
+                if is_valid {
+                    self.values.insert(*hash);
+                }
+            }
+        } else {
+            for hash in hashes {
+                self.values.insert(*hash);
+            }
         }
         Ok(())
     }
@@ -503,7 +502,7 @@ mod tests {
         ])) as ArrayRef;
         acc.update_batch(&[array])?;
         let result = acc.evaluate()?;
-        assert_eq!(result, ScalarValue::Int64(Some(4)));
+        assert_eq!(result, ScalarValue::Int64(Some(3)));
 
         // Test with empty data
         let mut acc = create_test_accumulator();
@@ -517,7 +516,7 @@ mod tests {
         let array = Arc::new(Int32Array::from(vec![None, None, None])) as ArrayRef;
         acc.update_batch(&[array])?;
         let result = acc.evaluate()?;
-        assert_eq!(result, ScalarValue::Int64(Some(1)));
+        assert_eq!(result, ScalarValue::Int64(Some(0)));
 
         Ok(())
     }
@@ -622,7 +621,7 @@ mod tests {
         // We will merge acc1's group 0 into acc2's group 0
         // and acc1's group 1 into acc2's group 2
         let merge_group_indices = vec![0, 2];
-        acc2.merge_batch(&state1, &merge_group_indices, None, 3)?;
+        acc2.merge_batch(&state1, &merge_group_indices, 3)?;
 
         let result_array = acc2.evaluate(EmitTo::All)?;
         let result = result_array.as_any().downcast_ref::<Int64Array>().unwrap();

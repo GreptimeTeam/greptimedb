@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -25,6 +24,7 @@ use datafusion::arrow::compute::{SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
@@ -37,7 +37,8 @@ use datafusion::physical_plan::expressions::{Column as PhyColumn, TryCastExpr as
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, ExecutionPlanProperties,
-    Partitioning, PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
+    InputDistributionRequirements, Partitioning, PhysicalExpr, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream, StatisticsArgs,
 };
 use datafusion::prelude::{Column, Expr};
 use datafusion_expr::{EmptyRelation, col};
@@ -526,8 +527,14 @@ pub struct HistogramFoldExec {
 }
 
 impl ExecutionPlan for HistogramFoldExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        datafusion::physical_plan::apply_expression_roots(
+            self.tag_columns.iter().chain(self.partition_exprs.iter()),
+            f,
+        )
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -574,8 +581,10 @@ impl ExecutionPlan for HistogramFoldExec {
         vec![Some(OrderingRequirements::Hard(vec![requirement]))]
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::HashPartitioned(self.partition_exprs.clone())]
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        InputDistributionRequirements::new(vec![Distribution::KeyPartitioned(
+            self.partition_exprs.clone(),
+        )])
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -664,12 +673,16 @@ impl ExecutionPlan for HistogramFoldExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, _: Option<usize>) -> DataFusionResult<Statistics> {
-        Ok(Statistics {
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> DataFusionResult<Arc<Statistics>> {
+        Ok(Arc::new(Statistics {
             num_rows: Precision::Absent,
             total_byte_size: Precision::Absent,
             column_statistics: Statistics::unknown_column(&self.schema()),
-        })
+        }))
     }
 
     fn name(&self) -> &str {

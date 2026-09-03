@@ -70,8 +70,10 @@ async fn test_mito_engine() {
         .await
         .data;
     // Unflushed data should be lost.
-    let expected = r#"++
-++"#;
+    let expected = r#"+------+-----+--------+----+
+| host | cpu | memory | ts |
++------+-----+--------+----+
++------+-----+--------+----+"#;
     check_output_stream(output, expected).await;
 
     let output = execute_sql(

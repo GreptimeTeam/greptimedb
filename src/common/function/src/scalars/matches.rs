@@ -24,6 +24,7 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{self, ColumnarValue, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion_common::DataFusionError;
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
@@ -110,8 +111,12 @@ impl MatchesFunction {
         let input_schema = Self::input_schema();
         let session_state = SessionStateBuilder::new().with_default_features().build();
         let planner = DefaultPhysicalPlanner::default();
-        let physical_expr =
-            planner.create_physical_expr(&like_expr, &input_schema, &session_state)?;
+        let physical_expr = planner.create_physical_expr(
+            &like_expr,
+            &input_schema,
+            &session_state,
+            &PhysicalPlanningContext::default(),
+        )?;
 
         let arrow_schema = Arc::new(input_schema.as_arrow().clone());
         let input_record_batch = RecordBatch::try_new(arrow_schema, vec![data_array]).unwrap();
