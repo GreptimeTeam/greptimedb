@@ -84,6 +84,7 @@ jobs:
           path: query-regression-admission.json
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
       - name: Reply with admission result
         if: ${{ steps.admit.outputs.reply != '' }}
