@@ -38,8 +38,9 @@ use common_runtime::Runtime;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_test_util::find_workspace_path;
 use datatypes::arrow::array::{
-    Array, ArrayRef, Float64Array, Int32Array, ListBuilder, StringArray, StructArray,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array, UInt64Builder,
+    Array, ArrayRef, Float64Array, Float64Builder, Int32Array, ListBuilder, StringArray,
+    StructArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    UInt64Builder,
 };
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::arrow::ipc::writer::StreamWriter;
@@ -104,6 +105,7 @@ macro_rules! grpc_tests {
                 test_private_system_tables_auto_create_table_with_global_disabled,
                 test_private_system_tables_bypass_auto_create_hint,
                 test_otel_arrow_auth,
+                test_otel_arrow_delta_histogram,
                 test_otel_arrow_exponential_histogram,
                 test_insert_and_select,
                 test_dbname,
@@ -561,6 +563,268 @@ fn exponential_histogram_arrow_batch(batch_id: i64, scales: &[i32]) -> BatchArro
         ],
         headers: vec![],
     }
+}
+
+fn delta_histogram_arrow_batch(
+    batch_id: i64,
+    points: &[(u64, &[u64], &[f64])],
+) -> BatchArrowRecords {
+    let resource = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let scope = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let metrics = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+        ),
+        (arrow_consts::RESOURCE, Arc::new(resource) as ArrayRef),
+        (arrow_consts::SCOPE, Arc::new(scope) as ArrayRef),
+        (
+            arrow_consts::METRIC_TYPE,
+            Arc::new(UInt8Array::from(vec![ArrowMetricType::Histogram as u8])) as ArrayRef,
+        ),
+        (
+            arrow_consts::NAME,
+            Arc::new(StringArray::from(vec!["otel.arrow.delta.histogram"])) as ArrayRef,
+        ),
+        (
+            arrow_consts::AGGREGATION_TEMPORALITY,
+            Arc::new(Int32Array::from(vec![AggregationTemporality::Delta as i32])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+
+    let mut bucket_counts = ListBuilder::new(UInt64Builder::new());
+    let mut explicit_bounds = ListBuilder::new(Float64Builder::new());
+    for (_, counts, bounds) in points {
+        bucket_counts.values().append_slice(counts);
+        bucket_counts.append(true);
+        explicit_bounds.values().append_slice(bounds);
+        explicit_bounds.append(true);
+    }
+    let bucket_counts = bucket_counts.finish();
+    let explicit_bounds = explicit_bounds.finish();
+    let data_points = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt32Array::from_iter_values(
+                (0..points.len()).map(|id| u32::try_from(id).unwrap()),
+            )) as ArrayRef,
+        ),
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt16Array::from(vec![0_u16; points.len()])) as ArrayRef,
+        ),
+        (
+            arrow_consts::START_TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![
+                1_000_000_000;
+                points.len()
+            ])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from_iter_values(
+                (1..=points.len()).map(|second| i64::try_from(second).unwrap() * 1_000_000_000),
+            )) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_COUNT,
+            Arc::new(UInt64Array::from(
+                points
+                    .iter()
+                    .map(|(count, _, _)| *count)
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_SUM,
+            Arc::new(Float64Array::from(vec![1.0; points.len()])) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_BUCKET_COUNTS,
+            Arc::new(bucket_counts) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_EXPLICIT_BOUNDS,
+            Arc::new(explicit_bounds) as ArrayRef,
+        ),
+        (
+            arrow_consts::FLAGS,
+            Arc::new(UInt32Array::from(vec![0_u32; points.len()])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    BatchArrowRecords {
+        batch_id,
+        arrow_payloads: vec![
+            ArrowPayload {
+                schema_id: format!("metrics-{batch_id}"),
+                r#type: ArrowPayloadType::UnivariateMetrics as i32,
+                record: serialize_arrow_record_batch(&metrics),
+            },
+            ArrowPayload {
+                schema_id: format!("histogram-{batch_id}"),
+                r#type: ArrowPayloadType::HistogramDataPoints as i32,
+                record: serialize_arrow_record_batch(&data_points),
+            },
+        ],
+        headers: vec![],
+    }
+}
+
+fn gauge_arrow_batch(batch_id: i64, reserved_attr: bool) -> BatchArrowRecords {
+    let resource = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let scope = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let metrics = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+        ),
+        (arrow_consts::RESOURCE, Arc::new(resource) as ArrayRef),
+        (arrow_consts::SCOPE, Arc::new(scope) as ArrayRef),
+        (
+            arrow_consts::METRIC_TYPE,
+            Arc::new(UInt8Array::from(vec![ArrowMetricType::Gauge as u8])) as ArrayRef,
+        ),
+        (
+            arrow_consts::NAME,
+            Arc::new(StringArray::from(vec!["otel.arrow.gauge"])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let data_points = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+        ),
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+        ),
+        (
+            arrow_consts::START_TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![1_000_000_000])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![2_000_000_000])) as ArrayRef,
+        ),
+        (
+            arrow_consts::DOUBLE_VALUE,
+            Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+        ),
+        (
+            arrow_consts::FLAGS,
+            Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let mut arrow_payloads = vec![
+        ArrowPayload {
+            schema_id: format!("metrics-{batch_id}"),
+            r#type: ArrowPayloadType::UnivariateMetrics as i32,
+            record: serialize_arrow_record_batch(&metrics),
+        },
+        ArrowPayload {
+            schema_id: format!("number-{batch_id}"),
+            r#type: ArrowPayloadType::NumberDataPoints as i32,
+            record: serialize_arrow_record_batch(&data_points),
+        },
+    ];
+    if reserved_attr {
+        let attributes = ArrowRecordBatch::try_from_iter(vec![
+            (
+                arrow_consts::PARENT_ID,
+                Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+            ),
+            (
+                arrow_consts::ATTRIBUTE_KEY,
+                Arc::new(StringArray::from(vec!["otlp_aggregation_temporality"])) as ArrayRef,
+            ),
+            (
+                arrow_consts::ATTRIBUTE_TYPE,
+                Arc::new(UInt8Array::from(vec![1_u8])) as ArrayRef,
+            ),
+            (
+                arrow_consts::ATTRIBUTE_STR,
+                Arc::new(StringArray::from(vec!["user"])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        arrow_payloads.push(ArrowPayload {
+            schema_id: format!("number-attrs-{batch_id}"),
+            r#type: ArrowPayloadType::NumberDpAttrs as i32,
+            record: serialize_arrow_record_batch(&attributes),
+        });
+    }
+    BatchArrowRecords {
+        batch_id,
+        arrow_payloads,
+        headers: vec![],
+    }
+}
+
+pub async fn test_otel_arrow_delta_histogram(store_type: StorageType) {
+    let (_instance, server) =
+        setup_grpc_server(store_type, "test_otel_arrow_delta_histogram").await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let valid = (3, &[1, 2][..], &[1.0][..]);
+    let malformed = (1, &[1][..], &[1.0][..]);
+    let request = Request::new(futures::stream::iter([
+        delta_histogram_arrow_batch(10, &[valid, malformed]),
+        delta_histogram_arrow_batch(11, &[malformed]),
+        delta_histogram_arrow_batch(12, &[valid]),
+        gauge_arrow_batch(13, true),
+        gauge_arrow_batch(14, false),
+    ]));
+    let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+
+    let mixed = response.message().await.unwrap().unwrap();
+    assert_eq!(10, mixed.batch_id);
+    assert_eq!(ArrowStatusCode::Ok as i32, mixed.status_code);
+    assert!(mixed.status_message.contains("bucket_counts length"));
+
+    let rejected = response.message().await.unwrap().unwrap();
+    assert_eq!(11, rejected.batch_id);
+    assert_eq!(
+        ArrowStatusCode::InvalidArgument as i32,
+        rejected.status_code
+    );
+    assert!(rejected.status_message.contains("bucket_counts length"));
+
+    let later_valid = response.message().await.unwrap().unwrap();
+    assert_eq!(12, later_valid.batch_id);
+    assert_eq!(ArrowStatusCode::Ok as i32, later_valid.status_code);
+    assert!(later_valid.status_message.is_empty());
+
+    let collision = response.message().await.unwrap().unwrap();
+    assert_eq!(13, collision.batch_id);
+    assert_eq!(
+        ArrowStatusCode::InvalidArgument as i32,
+        collision.status_code
+    );
+    assert!(collision.status_message.contains("reserved label"));
+
+    let after_collision = response.message().await.unwrap().unwrap();
+    assert_eq!(14, after_collision.batch_id);
+    assert_eq!(ArrowStatusCode::Ok as i32, after_collision.status_code);
+    assert!(after_collision.status_message.is_empty());
+    let _ = server.shutdown().await;
 }
 
 pub async fn test_otel_arrow_exponential_histogram(store_type: StorageType) {

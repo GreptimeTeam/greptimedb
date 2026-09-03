@@ -336,6 +336,7 @@ mod tests {
                 max_row_group_row_count: None,
                 primary_key_encoding: None,
                 write_buffer_size: None,
+                preserve_row_sequence: false,
             },
             compaction_time_window: None,
         }

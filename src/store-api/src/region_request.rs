@@ -57,7 +57,7 @@ use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
+    MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
     TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
@@ -1494,6 +1494,7 @@ pub enum SetRegionOption {
     AutoFlushInterval(Option<Duration>),
     // Modifying the max number of rows in a parquet row group.
     MaxRowGroupRowCount(Option<usize>),
+    PreserveRowSequence(bool),
     // Stops writing new WAL entries. This operation is irreversible.
     SkipWal,
 }
@@ -1553,6 +1554,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::MaxRowGroupRowCount(Some(row_count)))
             }
+            PRESERVE_ROW_SEQUENCE => {
+                let preserve = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::PreserveRowSequence(preserve))
+            }
             SKIP_WAL_KEY if value == "true" => Ok(Self::SkipWal),
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -1574,6 +1581,7 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
             UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
             UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
+            UnsetRegionOption::PreserveRowSequence => SetRegionOption::PreserveRowSequence(false),
         }
     }
 }
@@ -1589,6 +1597,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
+            PRESERVE_ROW_SEQUENCE => Ok(Self::PreserveRowSequence),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1602,6 +1611,7 @@ pub enum UnsetRegionOption {
     Ttl,
     MaxRowGroupRowCount,
     WriteBufferSize,
+    PreserveRowSequence,
 }
 
 impl UnsetRegionOption {
@@ -1613,6 +1623,7 @@ impl UnsetRegionOption {
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
             Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
+            Self::PreserveRowSequence => PRESERVE_ROW_SEQUENCE,
         }
     }
 }
@@ -2018,6 +2029,37 @@ mod tests {
         assert_eq!(
             UnsetRegionOption::MaxRowGroupRowCount,
             UnsetRegionOption::try_from(MAX_ROW_GROUP_ROW_COUNT).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_set_region_option_preserve_row_sequence_try_from() {
+        for (value, expected) in [("true", true), ("false", false)] {
+            let pb = PbOption {
+                key: PRESERVE_ROW_SEQUENCE.to_string(),
+                value: value.to_string(),
+            };
+            assert_eq!(
+                SetRegionOption::PreserveRowSequence(expected),
+                SetRegionOption::try_from(&pb).unwrap()
+            );
+        }
+
+        for value in ["1", "invalid"] {
+            let pb = PbOption {
+                key: PRESERVE_ROW_SEQUENCE.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert_eq!(
+            UnsetRegionOption::PreserveRowSequence,
+            UnsetRegionOption::try_from(PRESERVE_ROW_SEQUENCE).unwrap()
+        );
+        assert_eq!(
+            SetRegionOption::PreserveRowSequence(false),
+            (&UnsetRegionOption::PreserveRowSequence).into()
         );
     }
 

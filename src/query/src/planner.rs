@@ -15,6 +15,7 @@
 use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -35,7 +36,8 @@ use datafusion_expr::{
     Analyze, Explain, ExplainFormat, Expr as DfExpr, LogicalPlan, LogicalPlanBuilder, PlanType,
     ToStringifiedPlan, col,
 };
-use datafusion_sql::planner::{ParserOptions, SqlToRel};
+use datafusion_sql::parser::Statement as DfStatement;
+use datafusion_sql::planner::{IdentNormalizer, ParserOptions, SqlToRel};
 use log_query::LogQuery;
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
@@ -46,6 +48,7 @@ use sql::statements::explain::ExplainStatement;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
+use sqlparser::ast::{AccessExpr, Value, visit_expressions_mut};
 
 use crate::error::{
     CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
@@ -193,6 +196,13 @@ impl DfLogicalPlanner {
         }
 
         let mut df_stmt = stmt.as_ref().try_into().context(SqlSnafu)?;
+        normalize_field_access_after_subscript(
+            &mut df_stmt,
+            self.session_state
+                .config_options()
+                .sql_parser
+                .enable_ident_normalization,
+        );
 
         // TODO(LFC): Remove this when Datafusion supports **both** the syntax and implementation of "explain with format".
         if let datafusion::sql::parser::Statement::Statement(
@@ -607,6 +617,72 @@ impl DfLogicalPlanner {
 
         Ok(param_types)
     }
+}
+
+/// Normalizes dot field accesses that follow a subscript for DataFusion.
+///
+/// sqlparser represents `j.o.l[1].inner.l[2]` as a compound field access with
+/// the following access chain:
+///
+/// ```text
+/// Dot(Identifier("o")),
+/// Dot(Identifier("l")),
+/// Subscript(1),
+/// Dot(Identifier("inner")),
+/// Dot(Identifier("l")),
+/// Subscript(2)
+/// ```
+///
+/// DataFusion first resolves the leading `j.o.l` through
+/// `JsonExprPlanner::plan_compound_identifier`, which produces an untyped
+/// `json_get` with path `o.l`. Before invoking `JsonExprPlanner::plan_field_access`,
+/// however, DataFusion eagerly converts every remaining access into a
+/// `GetFieldAccess`. It accepts string values but not [`SqlExpr::Identifier`]s
+/// in [`AccessExpr::Dot`] after a subscript. Without this normalization, that
+/// conversion fails at `.inner`, and `plan_field_access` is never called, even
+/// for the preceding `[1]`.
+///
+/// This function converts dot identifiers after the first subscript into
+/// `Dot(Value(SingleQuotedString(...)))`, applying DataFusion's identifier
+/// normalization before discarding whether each identifier was quoted. It
+/// changes neither the SQL text nor the dot accesses into subscript nodes: the
+/// resulting AST is conceptually `j.o.l[1].'inner'.'l'[2]`. DataFusion converts
+/// the string-valued dot accesses into named field accesses, which
+/// `plan_field_access` safely encodes as bracket members. It can then extend the
+/// JSON path to `o.l[1]["inner"]["l"][2]`.
+///
+/// This behavior is unchanged in the latest upstream releases checked here:
+/// DataFusion 55.0.0 and sqlparser 0.62.0.
+///
+/// TODO(LFC): Remove this workaround after upstream supports dot identifiers after subscripts.
+fn normalize_field_access_after_subscript(stmt: &mut DfStatement, normalize_ident: bool) {
+    let DfStatement::Statement(stmt) = stmt else {
+        return;
+    };
+    let normalizer = IdentNormalizer::new(normalize_ident);
+
+    let _ = visit_expressions_mut(stmt.as_mut(), |expr| {
+        let SqlExpr::CompoundFieldAccess { access_chain, .. } = expr else {
+            return ControlFlow::<()>::Continue(());
+        };
+        let Some(index) = access_chain
+            .iter()
+            .position(|x| matches!(x, AccessExpr::Subscript(_)))
+        else {
+            return ControlFlow::Continue(());
+        };
+
+        for access in &mut access_chain[index + 1..] {
+            let AccessExpr::Dot(SqlExpr::Identifier(ident)) = access else {
+                continue;
+            };
+            let value = normalizer.normalize(ident.clone());
+            *access = AccessExpr::Dot(SqlExpr::Value(
+                Value::SingleQuotedString(value).with_span(ident.span),
+            ));
+        }
+        ControlFlow::Continue(())
+    });
 }
 
 #[async_trait]

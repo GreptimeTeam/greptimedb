@@ -177,6 +177,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid OTLP metric input: {}", reason))]
+    InvalidOtlpMetricInput { reason: String },
+
     #[snafu(display(
         "Too many concurrent large requests, limit: {}, request size: {}",
         ReadableSize(*limit as u64),
@@ -755,6 +758,7 @@ impl ErrorExt for Error {
 
             NotSupported { .. }
             | InvalidParameter { .. }
+            | InvalidOtlpMetricInput { .. }
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
             | InvalidOpentsdbJsonRequest { .. }

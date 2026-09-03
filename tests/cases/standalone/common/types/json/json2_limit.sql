@@ -16,8 +16,6 @@ insert into json2_disable_non_object_insert values (4, 'true');
 
 insert into json2_disable_non_object_insert values (5, 'null');
 
-insert into json2_disable_non_object_insert values (6, '{}');
-
 drop table json2_disable_non_object_insert;
 
 create table json2_whole_and_path_read (

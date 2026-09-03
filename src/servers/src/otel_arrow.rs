@@ -146,6 +146,16 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     });
                 let outcome = match handler.metrics(request, query_ctx.clone()).await {
                     Ok(outcome) => outcome,
+                    Err(error::Error::InvalidOtlpMetricInput { reason }) => {
+                        let _ = sender
+                            .send(Ok(BatchStatus {
+                                batch_id,
+                                status_code: ArrowStatusCode::InvalidArgument as i32,
+                                status_message: reason,
+                            }))
+                            .await;
+                        continue;
+                    }
                     Err(e) => {
                         let _ = sender
                             .send(Err(Status::new(

@@ -6,3 +6,14 @@ SELECT ts, host, val FROM t_downgrade_compatibility ORDER BY ts, host;
 | 2024-02-09T00:00:00 | host_a | 1   |
 | 2024-02-09T00:01:00 | host_b | 2   |
 +---------------------+--------+-----+
+
+SELECT ts, host, val FROM t_preserve_sequence_downgrade ORDER BY ts, host;
+
++---------------------+--------+-----+
+| ts                  | host   | val |
++---------------------+--------+-----+
+| 2024-02-09T00:00:00 | host_a | 1   |
+| 2024-02-09T00:01:00 | host_b | 2   |
+| 2024-02-09T00:02:00 | host_a | 3   |
+| 2024-02-09T00:03:00 | host_c | 4   |
++---------------------+--------+-----+

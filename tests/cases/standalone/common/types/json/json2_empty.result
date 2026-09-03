@@ -1,0 +1,355 @@
+-- Empty-object JSON2 values are stored in the JSONB remainder column and must
+-- survive memtable flush and compaction unchanged, both as whole values and
+-- through path access.
+-- Whole-value empty objects: insert, flush, then mix with expanded documents
+-- before compacting.
+create table json_empty (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+insert into json_empty values (1, '{}');
+
+Affected Rows: 1
+
+select ts, j from json_empty order by ts;
+
++-------------------------+----+
+| ts                      | j  |
++-------------------------+----+
+| 1970-01-01T00:00:00.001 | {} |
++-------------------------+----+
+
+select ts, j.a from json_empty order by ts;
+
++-------------------------+----------------------------------+
+| ts                      | json_get(json_empty.j,Utf8("a")) |
++-------------------------+----------------------------------+
+| 1970-01-01T00:00:00.001 |                                  |
++-------------------------+----------------------------------+
+
+admin flush_table('json_empty');
+
++---------------------------------+
+| ADMIN flush_table('json_empty') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+select ts, j from json_empty order by ts;
+
++-------------------------+----+
+| ts                      | j  |
++-------------------------+----+
+| 1970-01-01T00:00:00.001 | {} |
++-------------------------+----+
+
+insert into json_empty values (2, '{}'), (3, '{"a": 1}');
+
+Affected Rows: 2
+
+select ts, j, j.a from json_empty order by ts;
+
++-------------------------+---------+----------------------------------+
+| ts                      | j       | json_get(json_empty.j,Utf8("a")) |
++-------------------------+---------+----------------------------------+
+| 1970-01-01T00:00:00.001 | {}      |                                  |
+| 1970-01-01T00:00:00.002 | {}      |                                  |
+| 1970-01-01T00:00:00.003 | {"a":1} | 1                                |
++-------------------------+---------+----------------------------------+
+
+admin flush_table('json_empty');
+
++---------------------------------+
+| ADMIN flush_table('json_empty') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+admin compact_table('json_empty');
+
++-----------------------------------+
+| ADMIN compact_table('json_empty') |
++-----------------------------------+
+| 0                                 |
++-----------------------------------+
+
+select ts, j, j.a from json_empty order by ts;
+
++-------------------------+---------+----------------------------------+
+| ts                      | j       | json_get(json_empty.j,Utf8("a")) |
++-------------------------+---------+----------------------------------+
+| 1970-01-01T00:00:00.001 | {}      |                                  |
+| 1970-01-01T00:00:00.002 | {}      |                                  |
+| 1970-01-01T00:00:00.003 | {"a":1} | 1                                |
++-------------------------+---------+----------------------------------+
+
+select count(*) from json_empty;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+drop table json_empty;
+
+Affected Rows: 0
+
+-- Nested empty objects and arrays, which also produce only remainder content,
+-- must round trip through flush and compaction as whole values.
+create table json_empty_nested (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+insert into json_empty_nested values
+    (1, '{"a": {}}'),
+    (2, '{"a": {"b": {}}}');
+
+Affected Rows: 2
+
+select ts, j from json_empty_nested order by ts;
+
++-------------------------+----------------+
+| ts                      | j              |
++-------------------------+----------------+
+| 1970-01-01T00:00:00.001 | {"a":{}}       |
+| 1970-01-01T00:00:00.002 | {"a":{"b":{}}} |
++-------------------------+----------------+
+
+admin flush_table('json_empty_nested');
+
++----------------------------------------+
+| ADMIN flush_table('json_empty_nested') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+select ts, j from json_empty_nested order by ts;
+
++-------------------------+----------------+
+| ts                      | j              |
++-------------------------+----------------+
+| 1970-01-01T00:00:00.001 | {"a":{}}       |
+| 1970-01-01T00:00:00.002 | {"a":{"b":{}}} |
++-------------------------+----------------+
+
+insert into json_empty_nested values (3, '{"x": []}');
+
+Affected Rows: 1
+
+admin flush_table('json_empty_nested');
+
++----------------------------------------+
+| ADMIN flush_table('json_empty_nested') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+admin compact_table('json_empty_nested');
+
++------------------------------------------+
+| ADMIN compact_table('json_empty_nested') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+select ts, j from json_empty_nested order by ts;
+
++-------------------------+----------------+
+| ts                      | j              |
++-------------------------+----------------+
+| 1970-01-01T00:00:00.001 | {"a":{}}       |
+| 1970-01-01T00:00:00.002 | {"a":{"b":{}}} |
+| 1970-01-01T00:00:00.003 | {"x":[]}       |
++-------------------------+----------------+
+
+drop table json_empty_nested;
+
+Affected Rows: 0
+
+-- Empty objects, SQL NULL values, and JSON null values must remain distinct
+-- through memtable flush and compaction.
+create table json_empty_null_mixed (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+insert into json_empty_null_mixed values
+    (1, '{}'),
+    (2, NULL),
+    (3, '{"a": {}}'),
+    (4, '{"a": null}');
+
+Affected Rows: 4
+
+select ts, j, j is null from json_empty_null_mixed order by ts;
+
++-------------------------+------------+---------------------------------+
+| ts                      | j          | json_empty_null_mixed.j IS NULL |
++-------------------------+------------+---------------------------------+
+| 1970-01-01T00:00:00.001 | {}         | false                           |
+| 1970-01-01T00:00:00.002 |            | true                            |
+| 1970-01-01T00:00:00.003 | {"a":{}}   | false                           |
+| 1970-01-01T00:00:00.004 | {"a":null} | false                           |
++-------------------------+------------+---------------------------------+
+
+admin flush_table('json_empty_null_mixed');
+
++--------------------------------------------+
+| ADMIN flush_table('json_empty_null_mixed') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+select ts, j, j is null from json_empty_null_mixed order by ts;
+
++-------------------------+------------+---------------------------------+
+| ts                      | j          | json_empty_null_mixed.j IS NULL |
++-------------------------+------------+---------------------------------+
+| 1970-01-01T00:00:00.001 | {}         | false                           |
+| 1970-01-01T00:00:00.002 |            | true                            |
+| 1970-01-01T00:00:00.003 | {"a":{}}   | false                           |
+| 1970-01-01T00:00:00.004 | {"a":null} | false                           |
++-------------------------+------------+---------------------------------+
+
+insert into json_empty_null_mixed values
+    (5, '{"a": 1}'),
+    (6, NULL);
+
+Affected Rows: 2
+
+select ts, j, j.a, j is null from json_empty_null_mixed order by ts;
+
++-------------------------+------------+---------------------------------------------+---------------------------------+
+| ts                      | j          | json_get(json_empty_null_mixed.j,Utf8("a")) | json_empty_null_mixed.j IS NULL |
++-------------------------+------------+---------------------------------------------+---------------------------------+
+| 1970-01-01T00:00:00.001 | {}         |                                             | false                           |
+| 1970-01-01T00:00:00.002 |            |                                             | true                            |
+| 1970-01-01T00:00:00.003 | {"a":{}}   | {}                                          | false                           |
+| 1970-01-01T00:00:00.004 | {"a":null} |                                             | false                           |
+| 1970-01-01T00:00:00.005 | {"a":1}    | 1                                           | false                           |
+| 1970-01-01T00:00:00.006 |            |                                             | true                            |
++-------------------------+------------+---------------------------------------------+---------------------------------+
+
+admin flush_table('json_empty_null_mixed');
+
++--------------------------------------------+
+| ADMIN flush_table('json_empty_null_mixed') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+admin compact_table('json_empty_null_mixed');
+
++----------------------------------------------+
+| ADMIN compact_table('json_empty_null_mixed') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+select ts, j, j.a, j is null from json_empty_null_mixed order by ts;
+
++-------------------------+------------+---------------------------------------------+---------------------------------+
+| ts                      | j          | json_get(json_empty_null_mixed.j,Utf8("a")) | json_empty_null_mixed.j IS NULL |
++-------------------------+------------+---------------------------------------------+---------------------------------+
+| 1970-01-01T00:00:00.001 | {}         |                                             | false                           |
+| 1970-01-01T00:00:00.002 |            |                                             | true                            |
+| 1970-01-01T00:00:00.003 | {"a":{}}   | {}                                          | false                           |
+| 1970-01-01T00:00:00.004 | {"a":null} |                                             | false                           |
+| 1970-01-01T00:00:00.005 | {"a":1}    | 1                                           | false                           |
+| 1970-01-01T00:00:00.006 |            |                                             | true                            |
++-------------------------+------------+---------------------------------------------+---------------------------------+
+
+select count(*) from json_empty_null_mixed;
+
++----------+
+| count(*) |
++----------+
+| 6        |
++----------+
+
+drop table json_empty_null_mixed;
+
+Affected Rows: 0
+
+-- Explicit SQL NULL and omitted-column inserts must be accepted and round trip
+-- as NULL (not panic), remaining distinct from empty objects.
+create table json_empty_null_forms (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+insert into json_empty_null_forms (ts, j) values (1, NULL);
+
+Affected Rows: 1
+
+insert into json_empty_null_forms (ts) values (2);
+
+Affected Rows: 1
+
+insert into json_empty_null_forms (ts, j) values (3, '{}');
+
+Affected Rows: 1
+
+select ts, j, j is null from json_empty_null_forms order by ts;
+
++-------------------------+----+---------------------------------+
+| ts                      | j  | json_empty_null_forms.j IS NULL |
++-------------------------+----+---------------------------------+
+| 1970-01-01T00:00:00.001 |    | true                            |
+| 1970-01-01T00:00:00.002 |    | true                            |
+| 1970-01-01T00:00:00.003 | {} | false                           |
++-------------------------+----+---------------------------------+
+
+admin flush_table('json_empty_null_forms');
+
++--------------------------------------------+
+| ADMIN flush_table('json_empty_null_forms') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+admin compact_table('json_empty_null_forms');
+
++----------------------------------------------+
+| ADMIN compact_table('json_empty_null_forms') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+select ts, j, j is null from json_empty_null_forms order by ts;
+
++-------------------------+----+---------------------------------+
+| ts                      | j  | json_empty_null_forms.j IS NULL |
++-------------------------+----+---------------------------------+
+| 1970-01-01T00:00:00.001 |    | true                            |
+| 1970-01-01T00:00:00.002 |    | true                            |
+| 1970-01-01T00:00:00.003 | {} | false                           |
++-------------------------+----+---------------------------------+
+
+drop table json_empty_null_forms;
+
+Affected Rows: 0
+

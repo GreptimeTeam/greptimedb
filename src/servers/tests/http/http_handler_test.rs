@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -27,9 +30,15 @@ use bytes::Bytes;
 use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use datafusion::execution::TaskContext;
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_common::Result as DfResult;
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
+use futures_util::StreamExt;
 use headers::HeaderValue;
 use mime_guess::mime;
 use query::parser::PromQuery;
@@ -47,6 +56,7 @@ use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::{QueryContext, QueryContextRef};
 use sql::statements::statement::Statement;
 use table::test_util::MemTable;
+use tokio::sync::{Notify, watch};
 
 use crate::create_testing_sql_query_handler;
 
@@ -98,9 +108,79 @@ impl RecordBatchStream for DelayedRecordBatchStream {
     }
 }
 
+#[derive(Debug)]
+struct PanickingMetricsExec {
+    properties: Arc<PlanProperties>,
+    metrics_calls: Arc<AtomicUsize>,
+    panic_after: usize,
+}
+
+impl PanickingMetricsExec {
+    fn with_panic_after(schema: SchemaRef, panic_after: usize) -> Self {
+        Self {
+            properties: Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(schema.arrow_schema().clone()),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )),
+            metrics_calls: Arc::new(AtomicUsize::new(0)),
+            panic_after,
+        }
+    }
+}
+
+impl DisplayAs for PanickingMetricsExec {
+    fn fmt_as(&self, _t: DisplayFormatType, _f: &mut fmt::Formatter) -> fmt::Result {
+        Ok(())
+    }
+}
+
+impl ExecutionPlan for PanickingMetricsExec {
+    fn name(&self) -> &str {
+        "PanickingMetricsExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> DfResult<common_recordbatch::DfSendableRecordBatchStream> {
+        unimplemented!("test plan is never executed")
+    }
+
+    fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
+        if self.metrics_calls.fetch_add(1, Ordering::Relaxed) >= self.panic_after {
+            panic!("metrics collection panicked")
+        }
+        Some(datafusion::physical_plan::metrics::MetricsSet::new())
+    }
+}
+
 struct SlowAnalyzeStreamHandler {
     inner: ServerSqlQueryHandlerRef,
     delay: Duration,
+    panic_metrics: bool,
+    panic_after: usize,
 }
 
 #[async_trait]
@@ -115,7 +195,17 @@ impl SqlQueryHandler for SlowAnalyzeStreamHandler {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         let output = self.inner.do_analyze_stream_query(query, query_ctx).await?;
-        let Output { data, meta } = output;
+        let Output { data, mut meta } = output;
+        if self.panic_metrics {
+            let schema = match &data {
+                OutputData::Stream(stream) => stream.schema(),
+                _ => unreachable!(),
+            };
+            meta.plan = Some(Arc::new(PanickingMetricsExec::with_panic_after(
+                schema,
+                self.panic_after,
+            )));
+        }
         let data = match data {
             OutputData::Stream(stream) => {
                 OutputData::Stream(Box::pin(DelayedRecordBatchStream::new(stream, self.delay)))
@@ -160,10 +250,7 @@ async fn test_sql_not_provided() {
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
     let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
-    let api_state = ApiState {
-        sql_handler,
-        experimental_enable_explain_analyze_stream: false,
-    };
+    let api_state = ApiState { sql_handler };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
         let query = http_handler::SqlQuery {
@@ -194,10 +281,7 @@ async fn test_sql_output_rows() {
 
     let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
-    let api_state = ApiState {
-        sql_handler,
-        experimental_enable_explain_analyze_stream: false,
-    };
+    let api_state = ApiState { sql_handler };
 
     let query_sql = "select sum(uint32s) from numbers limit 20";
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
@@ -302,10 +386,7 @@ async fn test_dashboard_sql_limit() {
     let sql_handler = create_testing_sql_query_handler(MemTable::specified_numbers_table(2000));
     let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
-    let api_state = ApiState {
-        sql_handler,
-        experimental_enable_explain_analyze_stream: false,
-    };
+    let api_state = ApiState { sql_handler };
     for format in ["greptimedb_v1", "csv", "table"] {
         let query = create_query(format, "select * from numbers", Some(1000));
         let sql_response = http_handler::sql(
@@ -348,10 +429,7 @@ async fn test_sql_form() {
 
     let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
-    let api_state = ApiState {
-        sql_handler,
-        experimental_enable_explain_analyze_stream: false,
-    };
+    let api_state = ApiState { sql_handler };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table", "null"] {
         let form = create_form(format);
@@ -526,6 +604,9 @@ async fn test_analyze_stream_route_rejects_invalid_sql() {
         "EXPLAIN ANALYZE SELECT 1",
         "EXPLAIN ANALYZE VERBOSE FORMAT TEXT SELECT 1",
         "EXPLAIN ANALYZE VERBOSE SELECT 1; SELECT 2",
+        "TQL ANALYZE (0, 10, '5s') physical_metric",
+        "TQL EXPLAIN VERBOSE (0, 10, '5s') physical_metric",
+        "TQL ANALYZE VERBOSE FORMAT TEXT (0, 10, '5s') physical_metric",
     ] {
         let response = client
             .post("/v1/sql/analyze/stream")
@@ -569,6 +650,173 @@ async fn test_analyze_stream_route_accepts_explicit_format_json() {
 }
 
 #[tokio::test]
+async fn test_analyze_stream_body_orders_latest_metrics_before_terminal() {
+    let (metrics_tx, metrics_rx) = watch::channel::<Option<String>>(None);
+    let (terminal_tx, terminal_rx) =
+        watch::channel::<Option<http_handler::AnalyzeStreamMessage>>(None);
+    let notify = Arc::new(Notify::new());
+    metrics_tx.send(Some("latest".to_string())).unwrap();
+    terminal_tx
+        .send(Some(http_handler::AnalyzeStreamMessage {
+            event_name: "final",
+            payload: "terminal".to_string(),
+        }))
+        .unwrap();
+    drop(metrics_tx);
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    let worker = tokio::spawn(async move {
+        let _ = cancel_rx.changed().await;
+    });
+    let body =
+        http_handler::analyze_stream_body(metrics_rx, terminal_rx, notify, cancel_tx, worker);
+    futures::pin_mut!(body);
+    let first = tokio::time::timeout(Duration::from_secs(1), body.next())
+        .await
+        .expect("timed out waiting for metrics")
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(1), body.next())
+        .await
+        .expect("timed out waiting for terminal")
+        .unwrap()
+        .unwrap();
+    assert!(format!("{first:?}").contains("latest"));
+    assert!(format!("{second:?}").contains("terminal"));
+}
+
+#[tokio::test]
+async fn test_analyze_stream_body_drop_cancels_worker() {
+    let (_, metrics_rx) = watch::channel::<Option<String>>(None);
+    let (_, terminal_rx) = watch::channel::<Option<http_handler::AnalyzeStreamMessage>>(None);
+    let notify = Arc::new(Notify::new());
+    let (cancel_tx, mut canceled_rx) = watch::channel(false);
+    let worker = tokio::spawn(async { futures::future::pending::<()>().await });
+    let mut body = Box::pin(http_handler::analyze_stream_body(
+        metrics_rx,
+        terminal_rx,
+        notify,
+        cancel_tx,
+        worker,
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), body.next())
+            .await
+            .is_err()
+    );
+    drop(body);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !*canceled_rx.borrow() {
+            canceled_rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("timed out waiting for worker cancellation");
+}
+
+#[tokio::test]
+async fn test_analyze_stream_terminal_is_sent_once() {
+    let (terminal_tx, mut terminal_rx) =
+        watch::channel::<Option<http_handler::AnalyzeStreamMessage>>(None);
+    let notify = Notify::new();
+    http_handler::send_analyze_terminal(&terminal_tx, &notify, "error", "one".to_string());
+    http_handler::send_analyze_terminal(&terminal_tx, &notify, "error", "two".to_string());
+    terminal_rx.changed().await.unwrap();
+    let terminal = terminal_rx.borrow_and_update().clone().unwrap();
+    assert_eq!(terminal.payload, "one");
+}
+
+#[tokio::test]
+async fn test_analyze_stream_worker_panic_emits_one_error_terminal() {
+    common_telemetry::init_default_ut_logging();
+
+    let inner = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let sql_handler = Arc::new(SlowAnalyzeStreamHandler {
+        inner,
+        delay: Duration::ZERO,
+        panic_metrics: true,
+        panic_after: 0,
+    });
+    let ctx = QueryContext::with_db_name(None);
+    ctx.set_current_user(auth::userinfo_by_name(None));
+    let response = http_handler::sql_analyze_stream(
+        State(ApiState { sql_handler }),
+        Query(http_handler::SqlQuery {
+            sql: Some("EXPLAIN ANALYZE VERBOSE SELECT sum(uint32s) FROM numbers".to_string()),
+            snapshot_interval_ms: Some(1000),
+            ..Default::default()
+        }),
+        axum::Extension(ctx),
+        Ok(Form(http_handler::SqlQuery::default())),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = tokio::time::timeout(
+        Duration::from_secs(3),
+        axum::body::to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("timed out waiting for panic terminal")
+    .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert_eq!(sse_event_payloads(&body, "error").len(), 1, "{body}");
+    assert!(sse_event_payload(&body, "final").is_none(), "{body}");
+    let payload: Value = serde_json::from_str(&sse_event_payload(&body, "error").unwrap()).unwrap();
+    assert_eq!(payload["state"], "error");
+    assert_eq!(payload["reason"], "analyze stream worker panicked");
+}
+
+#[tokio::test]
+async fn test_analyze_stream_worker_panic_after_metrics_uses_current_sequence() {
+    common_telemetry::init_default_ut_logging();
+
+    let inner = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let sql_handler = Arc::new(SlowAnalyzeStreamHandler {
+        inner,
+        delay: Duration::from_millis(2500),
+        panic_metrics: true,
+        panic_after: 1,
+    });
+    let ctx = QueryContext::with_db_name(None);
+    ctx.set_current_user(auth::userinfo_by_name(None));
+    let response = http_handler::sql_analyze_stream(
+        State(ApiState { sql_handler }),
+        Query(http_handler::SqlQuery {
+            sql: Some("EXPLAIN ANALYZE VERBOSE SELECT sum(uint32s) FROM numbers".to_string()),
+            snapshot_interval_ms: Some(1000),
+            ..Default::default()
+        }),
+        axum::Extension(ctx),
+        Ok(Form(http_handler::SqlQuery::default())),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("timed out waiting for panic terminal after metrics")
+    .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    let metrics_payload: Value =
+        serde_json::from_str(&sse_event_payload(&body, "metrics").expect(&body)).unwrap();
+    let error_payloads = sse_event_payloads(&body, "error");
+    assert_eq!(error_payloads.len(), 1, "{body}");
+    let error_payload: Value = serde_json::from_str(&error_payloads[0]).unwrap();
+    assert_eq!(metrics_payload["state"], "metrics");
+    assert_eq!(error_payload["state"], "error");
+    assert_eq!(error_payload["reason"], "analyze stream worker panicked");
+    let metrics_seq = metrics_payload["seq"].as_u64().unwrap();
+    let error_seq = error_payload["seq"].as_u64().unwrap();
+    assert!(
+        error_seq > metrics_seq,
+        "terminal sequence should follow metrics sequence: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_analyze_stream_emits_metrics_before_final_when_stream_is_pending() {
     common_telemetry::init_default_ut_logging();
 
@@ -576,12 +824,10 @@ async fn test_analyze_stream_emits_metrics_before_final_when_stream_is_pending()
     let sql_handler = Arc::new(SlowAnalyzeStreamHandler {
         inner,
         delay: Duration::from_millis(1500),
+        panic_metrics: false,
+        panic_after: 0,
     });
-    let options = HttpOptions {
-        experimental_enable_explain_analyze_stream: true,
-        ..Default::default()
-    };
-    let server = HttpServerBuilder::new(options)
+    let server = HttpServerBuilder::new(HttpOptions::default())
         .with_sql_handler(sql_handler)
         .build();
     let app = server.build(server.make_app()).unwrap();
@@ -617,27 +863,29 @@ async fn test_analyze_stream_emits_metrics_before_final_when_stream_is_pending()
     );
 }
 
-fn sse_event_payload(body: &str, event_name: &str) -> Option<String> {
-    body.split("\n\n").find_map(|event| {
-        let mut found = false;
-        let mut data = Vec::new();
-        for line in event.lines() {
-            if line.strip_prefix("event: ") == Some(event_name) {
-                found = true;
-            } else if let Some(value) = line.strip_prefix("data: ") {
-                data.push(value);
+fn sse_event_payloads(body: &str, event_name: &str) -> Vec<String> {
+    body.split("\n\n")
+        .filter_map(|event| {
+            let mut found = false;
+            let mut data = Vec::new();
+            for line in event.lines() {
+                if line.strip_prefix("event: ") == Some(event_name) {
+                    found = true;
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    data.push(value);
+                }
             }
-        }
-        found.then(|| data.join("\n"))
-    })
+            found.then(|| data.join("\n"))
+        })
+        .collect()
+}
+
+fn sse_event_payload(body: &str, event_name: &str) -> Option<String> {
+    sse_event_payloads(body, event_name).into_iter().next()
 }
 
 async fn analyze_stream_test_client(sql_handler: ServerSqlQueryHandlerRef) -> TestClient {
-    let options = HttpOptions {
-        experimental_enable_explain_analyze_stream: true,
-        ..Default::default()
-    };
-    let server = HttpServerBuilder::new(options)
+    let server = HttpServerBuilder::new(HttpOptions::default())
         .with_sql_handler(sql_handler)
         .build();
     let app = server.build(server.make_app()).unwrap();

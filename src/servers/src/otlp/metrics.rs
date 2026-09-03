@@ -23,7 +23,10 @@ use common_grpc::precision::Precision;
 use common_query::native_histogram::{
     encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
 };
-use common_query::prelude::{GREPTIME_COUNT, greptime_timestamp, greptime_value};
+use common_query::prelude::{
+    GREPTIME_COUNT, GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL,
+    greptime_timestamp, greptime_value,
+};
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_telemetry::warn;
 use lazy_static::lazy_static;
@@ -32,8 +35,9 @@ use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{metric, number_data_point, *};
 use session::protocol_ctx::{MetricType, OtlpMetricCtx};
 use table::requests::{
-    METADATA_QUALITY_DECLARED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_ORIGINAL_NAME,
-    SEMANTIC_METRIC_TEMPORALITY, SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT,
+    METADATA_QUALITY_DECLARED, METRIC_TEMPORALITY_CUMULATIVE, METRIC_TEMPORALITY_DELTA,
+    SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_ORIGINAL_NAME, SEMANTIC_METRIC_TEMPORALITY,
+    SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT,
 };
 
 use crate::error::{self, Result};
@@ -285,8 +289,8 @@ fn temporality_value(data: &metric::Data) -> Option<&'static str> {
         _ => return None,
     };
     match AggregationTemporality::try_from(raw) {
-        Ok(AggregationTemporality::Delta) => Some("delta"),
-        Ok(AggregationTemporality::Cumulative) => Some("cumulative"),
+        Ok(AggregationTemporality::Delta) => Some(METRIC_TEMPORALITY_DELTA),
+        Ok(AggregationTemporality::Cumulative) => Some(METRIC_TEMPORALITY_CUMULATIVE),
         _ => None,
     }
 }
@@ -509,18 +513,15 @@ fn encode_metrics(
                 add_accepted_data_points(outcome, summary.data_points.len())?;
                 !summary.data_points.is_empty()
             }
-            metric::Data::Histogram(hist) => {
-                encode_histogram(
-                    table_writer,
-                    &name,
-                    hist,
-                    resource_attrs,
-                    scope_attrs,
-                    metric_ctx,
-                )?;
-                add_accepted_data_points(outcome, hist.data_points.len())?;
-                !hist.data_points.is_empty()
-            }
+            metric::Data::Histogram(hist) => encode_histogram(
+                table_writer,
+                &name,
+                hist,
+                resource_attrs,
+                scope_attrs,
+                metric_ctx,
+                outcome,
+            )?,
             metric::Data::ExponentialHistogram(hist) => encode_exponential_histogram(
                 table_writer,
                 &name,
@@ -932,9 +933,12 @@ fn write_attributes(
         return Ok(());
     };
 
-    let tags = attrs.iter().filter_map(|attr| {
+    let mut tags = Vec::with_capacity(attrs.len());
+    for attr in attrs {
         // TODO(sunng87): allow different type of values
-        let value = scalar_value_string(attr.value.as_ref())?;
+        let Some(value) = scalar_value_string(attr.value.as_ref()) else {
+            continue;
+        };
         let key = match attribute_type {
             AttributeType::Resource | AttributeType::DataPoint => {
                 translate_label_name(&attr.key, metric_ctx.metric_translation_strategy)
@@ -947,9 +951,18 @@ fn write_attributes(
             }
             AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
         };
-        Some((key, value))
-    });
-    row_writer::write_tags(writer, tags, row)?;
+        if key == OTLP_AGGREGATION_TEMPORALITY_LABEL {
+            return Err(error::InvalidOtlpMetricInputSnafu {
+                reason: format!(
+                    "OTLP attribute `{}` resolves to reserved label `{}`",
+                    attr.key, OTLP_AGGREGATION_TEMPORALITY_LABEL
+                ),
+            }
+            .build());
+        }
+        tags.push((key, value));
+    }
+    row_writer::write_tags(writer, tags.into_iter(), row)?;
 
     Ok(())
 }
@@ -996,6 +1009,26 @@ fn write_data_point_value(
         _ => {}
     }
     Ok(())
+}
+
+fn write_temporality_tag(
+    table: &mut TableData,
+    row: &mut Vec<Value>,
+    is_delta: bool,
+) -> Result<()> {
+    if is_delta {
+        row_writer::write_tag(
+            table,
+            OTLP_AGGREGATION_TEMPORALITY_LABEL,
+            GREPTIME_TEMPORALITY_DELTA,
+            row,
+        )?;
+    }
+    Ok(())
+}
+
+fn has_no_recorded_value(flags: u32) -> bool {
+    flags & DataPointFlags::NoRecordedValueMask as u32 != 0
 }
 
 fn write_tags_and_timestamp(
@@ -1086,7 +1119,6 @@ fn encode_gauge(
 
 /// encode this sum metric
 ///
-/// `aggregation_temporality` and `monotonic` are ignored for now
 fn encode_sum(
     table_writer: &mut MultiTableData,
     name: &str,
@@ -1095,6 +1127,10 @@ fn encode_sum(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
+    let is_delta = matches!(
+        AggregationTemporality::try_from(sum.aggregation_temporality),
+        Ok(AggregationTemporality::Delta)
+    );
     let table = table_writer.get_or_default_table_data(
         name,
         APPROXIMATE_COLUMN_COUNT,
@@ -1112,7 +1148,17 @@ fn encode_sum(
             data_point.time_unix_nano as i64,
             metric_ctx,
         )?;
-        write_data_point_value(table, &mut row, greptime_value(), &data_point.value)?;
+        write_temporality_tag(table, &mut row, is_delta)?;
+        if has_no_recorded_value(data_point.flags) {
+            row_writer::write_f64(
+                table,
+                greptime_value(),
+                f64::from_bits(PROMETHEUS_STALE_NAN_BITS),
+                &mut row,
+            )?;
+        } else {
+            write_data_point_value(table, &mut row, greptime_value(), &data_point.value)?;
+        }
         table.add_row(row);
     }
 
@@ -1139,22 +1185,71 @@ fn encode_histogram(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
-) -> Result<()> {
+    outcome: &mut MetricsIngestOutcome,
+) -> Result<bool> {
     let normalized_name = name;
 
     let bucket_table_name = format!("{}{}", normalized_name, BUCKET_TABLE_SUFFIX);
     let sum_table_name = format!("{}{}", normalized_name, SUM_TABLE_SUFFIX);
     let count_table_name = format!("{}{}", normalized_name, COUNT_TABLE_SUFFIX);
 
-    let data_points_len = hist.data_points.len();
-    for data_point in &hist.data_points {
-        let bucket_table = table_writer.get_or_default_table_data(
-            &bucket_table_name,
-            APPROXIMATE_COLUMN_COUNT,
-            data_points_len * 3,
-        );
-        let mut accumulated_count = 0;
-        for (idx, count) in data_point.bucket_counts.iter().enumerate() {
+    let is_delta = matches!(
+        AggregationTemporality::try_from(hist.aggregation_temporality),
+        Ok(AggregationTemporality::Delta)
+    );
+    let stale_value = f64::from_bits(PROMETHEUS_STALE_NAN_BITS);
+    let mut emitted = false;
+    for (index, data_point) in hist.data_points.iter().enumerate() {
+        if let Some(reason) = histogram_data_point_rejection(data_point, is_delta) {
+            reject_data_points(outcome, 1, || {
+                format!("metric `{name}` data point {index}: {reason}")
+            })?;
+            continue;
+        }
+
+        let bucket_table =
+            table_writer.get_or_default_table_data(&bucket_table_name, APPROXIMATE_COLUMN_COUNT, 0);
+        let no_recorded_value = has_no_recorded_value(data_point.flags);
+        if no_recorded_value {
+            bucket_table.reserve_rows(data_point.explicit_bounds.len());
+            bucket_table.reserve_rows(1);
+        } else {
+            bucket_table.reserve_rows(data_point.bucket_counts.len().max(1));
+        }
+        let bucket_values = if no_recorded_value {
+            data_point
+                .explicit_bounds
+                .iter()
+                .copied()
+                .chain(std::iter::once(f64::INFINITY))
+                .map(|bound| (bound, stale_value))
+                .collect::<Vec<_>>()
+        } else if data_point.bucket_counts.is_empty() && data_point.explicit_bounds.is_empty() {
+            // OTLP count-only histograms map to one implicit Prometheus infinity bucket.
+            vec![(f64::INFINITY, data_point.count as f64)]
+        } else {
+            let mut accumulated_count = 0u64;
+            let mut values = Vec::with_capacity(data_point.bucket_counts.len());
+            for (idx, count) in data_point.bucket_counts.iter().enumerate() {
+                accumulated_count = accumulated_count.checked_add(*count).ok_or_else(|| {
+                    error::InvalidParameterSnafu {
+                        reason: format!(
+                            "metric `{name}` data point {index}: bucket prefix overflows u64"
+                        ),
+                    }
+                    .build()
+                })?;
+                let bound =
+                    data_point.explicit_bounds.get(idx).copied().or_else(|| {
+                        (idx == data_point.explicit_bounds.len()).then_some(f64::INFINITY)
+                    });
+                if let Some(bound) = bound {
+                    values.push((bound, accumulated_count as f64));
+                }
+            }
+            values
+        };
+        for (bound, value) in bucket_values {
             let mut bucket_row = bucket_table.alloc_one_row();
             write_tags_and_timestamp(
                 bucket_table,
@@ -1165,31 +1260,9 @@ fn encode_histogram(
                 data_point.time_unix_nano as i64,
                 metric_ctx,
             )?;
-
-            if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
-                row_writer::write_tag(
-                    bucket_table,
-                    HISTOGRAM_LE_COLUMN,
-                    upper_bounds,
-                    &mut bucket_row,
-                )?;
-            } else if idx == data_point.explicit_bounds.len() {
-                // The last bucket
-                row_writer::write_tag(
-                    bucket_table,
-                    HISTOGRAM_LE_COLUMN,
-                    f64::INFINITY,
-                    &mut bucket_row,
-                )?;
-            }
-
-            accumulated_count += count;
-            row_writer::write_f64(
-                bucket_table,
-                greptime_value(),
-                accumulated_count as f64,
-                &mut bucket_row,
-            )?;
+            write_temporality_tag(bucket_table, &mut bucket_row, is_delta)?;
+            row_writer::write_tag(bucket_table, HISTOGRAM_LE_COLUMN, bound, &mut bucket_row)?;
+            row_writer::write_f64(bucket_table, greptime_value(), value, &mut bucket_row)?;
 
             bucket_table.add_row(bucket_row);
         }
@@ -1198,7 +1271,7 @@ fn encode_histogram(
             let sum_table = table_writer.get_or_default_table_data(
                 &sum_table_name,
                 APPROXIMATE_COLUMN_COUNT,
-                data_points_len,
+                hist.data_points.len(),
             );
             let mut sum_row = sum_table.alloc_one_row();
             write_tags_and_timestamp(
@@ -1210,15 +1283,20 @@ fn encode_histogram(
                 data_point.time_unix_nano as i64,
                 metric_ctx,
             )?;
-
-            row_writer::write_f64(sum_table, greptime_value(), sum, &mut sum_row)?;
+            write_temporality_tag(sum_table, &mut sum_row, is_delta)?;
+            row_writer::write_f64(
+                sum_table,
+                greptime_value(),
+                if no_recorded_value { stale_value } else { sum },
+                &mut sum_row,
+            )?;
             sum_table.add_row(sum_row);
         }
 
         let count_table = table_writer.get_or_default_table_data(
             &count_table_name,
             APPROXIMATE_COLUMN_COUNT,
-            data_points_len,
+            hist.data_points.len(),
         );
         let mut count_row = count_table.alloc_one_row();
         write_tags_and_timestamp(
@@ -1230,17 +1308,75 @@ fn encode_histogram(
             data_point.time_unix_nano as i64,
             metric_ctx,
         )?;
-
+        write_temporality_tag(count_table, &mut count_row, is_delta)?;
         row_writer::write_f64(
             count_table,
             greptime_value(),
-            data_point.count as f64,
+            if no_recorded_value {
+                stale_value
+            } else {
+                data_point.count as f64
+            },
             &mut count_row,
         )?;
         count_table.add_row(count_row);
+        add_accepted_data_points(outcome, 1)?;
+        emitted = true;
     }
 
-    Ok(())
+    Ok(emitted)
+}
+
+pub(crate) fn histogram_data_point_rejection(
+    data_point: &HistogramDataPoint,
+    is_delta: bool,
+) -> Option<String> {
+    if has_no_recorded_value(data_point.flags) {
+        return None;
+    }
+
+    if is_delta {
+        let valid_empty_layout =
+            data_point.bucket_counts.is_empty() && data_point.explicit_bounds.is_empty();
+        let expected_buckets = data_point.explicit_bounds.len().checked_add(1);
+        if !valid_empty_layout && expected_buckets != Some(data_point.bucket_counts.len()) {
+            return Some(format!(
+                "bucket_counts length {} must equal explicit_bounds length {} plus one",
+                data_point.bucket_counts.len(),
+                data_point.explicit_bounds.len()
+            ));
+        }
+        if data_point
+            .explicit_bounds
+            .iter()
+            .any(|bound| !bound.is_finite())
+            || data_point
+                .explicit_bounds
+                .windows(2)
+                .any(|bounds| bounds[0] >= bounds[1])
+        {
+            return Some("explicit_bounds must be finite and strictly increasing".to_string());
+        }
+        if data_point.count == 0 && data_point.sum.is_some_and(|sum| sum != 0.0) {
+            return Some("sum must be absent or zero when count is zero".to_string());
+        }
+    }
+
+    let bucket_total = data_point
+        .bucket_counts
+        .iter()
+        .try_fold(0u64, |total, count| total.checked_add(*count));
+    let Some(bucket_total) = bucket_total else {
+        return Some("bucket prefix overflows u64".to_string());
+    };
+    if is_delta && !data_point.bucket_counts.is_empty() && bucket_total != data_point.count {
+        return Some(format!(
+            "buckets contain {bucket_total} observations, declared count is {}",
+            data_point.count
+        ));
+    }
+
+    None
 }
 
 fn encode_summary(
@@ -1387,6 +1523,8 @@ mod tests {
     use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
 
     use super::*;
+
+    mod delta;
 
     fn keyvalue(key: &str, value: &str) -> KeyValue {
         KeyValue {
@@ -1786,6 +1924,7 @@ mod tests {
     #[test]
     fn test_encode_histogram() {
         let mut tables = MultiTableData::default();
+        let mut outcome = MetricsIngestOutcome::default();
 
         let data_points = vec![HistogramDataPoint {
             attributes: vec![keyvalue("host", "testserver")],
@@ -1811,15 +1950,17 @@ mod tests {
             Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
+            &mut outcome,
         )
         .unwrap();
 
         assert_eq!(3, tables.num_tables());
+        assert_eq!(1, outcome.accepted_data_points);
 
         // bucket table
         let bucket_table = tables.get_or_default_table_data("histo_bucket", 0, 0);
         assert_eq!(bucket_table.num_rows(), 5);
-        assert_eq!(bucket_table.num_columns(), 5);
+        assert_eq!(bucket_table.num_columns(), 6);
         assert_eq!(
             bucket_table
                 .columns()
@@ -1830,6 +1971,7 @@ mod tests {
                 "otel_scope_scope",
                 "host",
                 greptime_timestamp(),
+                OTLP_AGGREGATION_TEMPORALITY_LABEL,
                 "le",
                 greptime_value(),
             ]
@@ -1837,7 +1979,7 @@ mod tests {
 
         let sum_table = tables.get_or_default_table_data("histo_sum", 0, 0);
         assert_eq!(sum_table.num_rows(), 1);
-        assert_eq!(sum_table.num_columns(), 4);
+        assert_eq!(sum_table.num_columns(), 5);
         assert_eq!(
             sum_table
                 .columns()
@@ -1848,13 +1990,14 @@ mod tests {
                 "otel_scope_scope",
                 "host",
                 greptime_timestamp(),
+                OTLP_AGGREGATION_TEMPORALITY_LABEL,
                 greptime_value()
             ]
         );
 
         let count_table = tables.get_or_default_table_data("histo_count", 0, 0);
         assert_eq!(count_table.num_rows(), 1);
-        assert_eq!(count_table.num_columns(), 4);
+        assert_eq!(count_table.num_columns(), 5);
         assert_eq!(
             count_table
                 .columns()
@@ -1865,6 +2008,7 @@ mod tests {
                 "otel_scope_scope",
                 "host",
                 greptime_timestamp(),
+                OTLP_AGGREGATION_TEMPORALITY_LABEL,
                 greptime_value()
             ]
         );

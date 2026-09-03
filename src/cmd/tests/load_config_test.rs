@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::io::Write;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
@@ -50,6 +51,12 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         compact_rt_max_blocking_threads = 6
         ingest_rt_size = 8
         query_rt_size = 7
+
+        [runtime.experimental_workload_scheduler]
+        enable = true
+        query_weight = 1
+        write_weight = 4
+        sample_every_polls = 32
     "#;
 
     let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
@@ -59,6 +66,44 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
     assert_eq!(6, options.runtime.compact_rt_max_blocking_threads);
     assert_eq!(8, options.runtime.ingest_rt_size);
     assert_eq!(7, options.runtime.query_rt_size);
+    assert!(options.runtime.experimental_workload_scheduler.enable);
+    assert_eq!(
+        NonZeroU32::new(1).unwrap(),
+        options.runtime.experimental_workload_scheduler.query_weight
+    );
+    assert_eq!(
+        NonZeroU32::new(4).unwrap(),
+        options.runtime.experimental_workload_scheduler.write_weight
+    );
+    assert_eq!(
+        NonZeroUsize::new(32).unwrap(),
+        options
+            .runtime
+            .experimental_workload_scheduler
+            .sample_every_polls
+    );
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_sampling() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        sample_every_polls = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_weight() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        query_weight = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
 }
 
 #[test]

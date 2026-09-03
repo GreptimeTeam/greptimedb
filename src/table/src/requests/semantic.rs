@@ -68,8 +68,8 @@ pub const SEMANTIC_METRIC_TYPE: &str = "greptime.semantic.metric.type";
 /// UCUM unit, e.g. `s`, `By`, `{request}`. Discarded by the row encoders, so it
 /// is unrecoverable once ingested.
 pub const SEMANTIC_METRIC_UNIT: &str = "greptime.semantic.metric.unit";
-/// `cumulative` / `delta` (OTel only). Invisible in the metric name, so it is
-/// unrecoverable from the table alone.
+/// Catalog-level `cumulative` / `delta` / `mixed` description for OTLP metrics.
+/// Per-series query behavior is determined from stored row identity instead.
 pub const SEMANTIC_METRIC_TEMPORALITY: &str = "greptime.semantic.metric.temporality";
 /// [`METADATA_QUALITY_DECLARED`] when the protocol stated the type, or
 /// [`METADATA_QUALITY_INFERRED`] when guessed from a name suffix.
@@ -134,6 +134,9 @@ pub const SOURCE_ELASTICSEARCH: &str = "elasticsearch";
 
 pub const METADATA_QUALITY_DECLARED: &str = "declared";
 pub const METADATA_QUALITY_INFERRED: &str = "inferred";
+
+pub const METRIC_TEMPORALITY_CUMULATIVE: &str = "cumulative";
+pub const METRIC_TEMPORALITY_DELTA: &str = "delta";
 
 /// Sentinel for a key that cannot be determined at stamp time.
 pub const SEMANTIC_VALUE_UNKNOWN: &str = "unknown";
@@ -277,7 +280,10 @@ pub fn validate_semantic_option(key: &str, value: &str) -> bool {
                 | "unknown"
         ),
         SEMANTIC_METRIC_TEMPORALITY => {
-            matches!(value, "cumulative" | "delta" | "mixed" | "unknown")
+            matches!(
+                value,
+                METRIC_TEMPORALITY_CUMULATIVE | METRIC_TEMPORALITY_DELTA | "mixed" | "unknown"
+            )
         }
         SEMANTIC_METRIC_METADATA_QUALITY => matches!(value, "declared" | "inferred" | "unknown"),
 

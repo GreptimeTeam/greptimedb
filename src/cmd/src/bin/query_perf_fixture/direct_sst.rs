@@ -310,6 +310,7 @@ fn file_meta_from_sst_info(
         num_series: info.num_series,
         primary_key_min: None,
         primary_key_max: None,
+        preserve_row_sequence: false,
     }
 }
 

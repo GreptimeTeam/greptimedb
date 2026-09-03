@@ -1548,6 +1548,9 @@ impl ScalarUDFImpl for MixedRangeUdf {
 enum MixedRangeFunction {
     Rate,
     Increase,
+    // Raw-delta modes sum floats while preserving mixed-range drop/warning semantics.
+    RawDeltaRate,
+    RawDeltaIncrease,
     Delta,
     IDelta,
     IRate,
@@ -1587,6 +1590,8 @@ impl MixedRangeFunction {
         match name {
             "rate" => Ok(Self::Rate),
             "increase" => Ok(Self::Increase),
+            "raw_delta_rate" => Ok(Self::RawDeltaRate),
+            "raw_delta_increase" => Ok(Self::RawDeltaIncrease),
             "delta" => Ok(Self::Delta),
             "idelta" => Ok(Self::IDelta),
             "irate" => Ok(Self::IRate),
@@ -1617,6 +1622,8 @@ impl MixedRangeFunction {
         match self {
             Self::Rate => "rate",
             Self::Increase => "increase",
+            Self::RawDeltaRate => "rate",
+            Self::RawDeltaIncrease => "increase",
             Self::Delta => "delta",
             Self::IDelta => "idelta",
             Self::IRate => "irate",
@@ -1642,9 +1649,13 @@ impl MixedRangeFunction {
 
     fn policy(self) -> MixedRangePolicy {
         match self {
-            Self::Rate | Self::Increase | Self::Delta | Self::AvgOverTime | Self::SumOverTime => {
-                MixedRangePolicy::DropMixed
-            }
+            Self::Rate
+            | Self::Increase
+            | Self::RawDeltaRate
+            | Self::RawDeltaIncrease
+            | Self::Delta
+            | Self::AvgOverTime
+            | Self::SumOverTime => MixedRangePolicy::DropMixed,
             Self::IDelta | Self::IRate => MixedRangePolicy::LastTwo,
             Self::LastOverTime => MixedRangePolicy::Last,
             Self::Changes
@@ -1668,6 +1679,7 @@ impl MixedRangeFunction {
         match self {
             Self::Rate => Some(Rate::scalar_udf()),
             Self::Increase => Some(Increase::scalar_udf()),
+            Self::RawDeltaRate | Self::RawDeltaIncrease => Some(SumOverTime::scalar_udf()),
             Self::Delta => Some(crate::functions::Delta::scalar_udf()),
             Self::IDelta => Some(IDelta::<false>::scalar_udf()),
             Self::IRate => Some(IDelta::<true>::scalar_udf()),
@@ -1708,6 +1720,7 @@ impl MixedRangeFunction {
                 collector,
             )),
             Self::LastOverTime => Some(NativeHistogramLastOverTime::scalar_udf()),
+            Self::RawDeltaRate | Self::RawDeltaIncrease => None,
             _ => None,
         }
     }

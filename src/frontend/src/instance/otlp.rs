@@ -130,7 +130,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         } = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
         if outcome.rejected_data_points > 0 {
             warn!(
-                "Rejected {} OTLP exponential histogram data points: {}",
+                "Rejected {} OTLP metrics data points: {}",
                 outcome.rejected_data_points,
                 outcome.error_message.as_deref().unwrap_or_default()
             );

@@ -26,13 +26,17 @@
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
+| `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.<br/>The weights set their relative runtime shares while both are backlogged. Disabled by default. |
+| `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
+| `runtime.experimental_workload_scheduler.write_weight` | Integer | `8` | Relative write share while both query and write workloads are backlogged. |
+| `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
-| `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
 | `grpc` | -- | -- | The gRPC server options. |
@@ -269,7 +273,6 @@
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
-| `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
 | `grpc` | -- | -- | The gRPC server options. |
@@ -526,6 +529,11 @@
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `runtime.query_rt_size` | Integer | `7` | The number of threads to execute datanode query operations.<br/>Defaults to max(num_cpus - 1, 2). |
 | `runtime.ingest_rt_size` | Integer | `8` | The number of threads to execute datanode ingestion operations. |
+| `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
+| `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.<br/>The weights set their relative runtime shares while both are backlogged. Disabled by default. |
+| `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
+| `runtime.experimental_workload_scheduler.write_weight` | Integer | `8` | Relative write share while both query and write workloads are backlogged. |
+| `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |

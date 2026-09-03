@@ -17,18 +17,25 @@ use std::sync::Arc;
 
 use api::helper::encode_json_value;
 use api::v1::helper::row;
+use api::v1::region::{StrictWindow, compact_request};
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
+use api::v1::{ArrowIpc, ColumnDataType, Rows, SemanticType, WriteHint};
 use arrow_schema::extension::ExtensionType;
 use common_base::readable_size::ReadableSize;
 use common_error::ext::{ErrorExt, WhateverResult};
 use common_error::status_code::StatusCode;
-use common_recordbatch::RecordBatches;
+use common_recordbatch::{DfRecordBatch, RecordBatches};
+use common_test_util::flight::encode_to_flight_data;
+use common_time::Timestamp;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
-use datatypes::arrow::array::AsArray;
-use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType, UInt64Type};
+use datatypes::arrow::array::{
+    ArrayRef, AsArray, Float64Array, StringArray, TimestampMillisecondArray,
+};
+use datatypes::arrow::datatypes::{
+    DataType, Field, Float64Type, Schema, TimeUnit, TimestampMillisecondType, UInt64Type,
+};
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
 use datatypes::json::value::JsonValue;
@@ -41,14 +48,21 @@ use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
-use store_api::region_request::{RegionCompactRequest, RegionPutRequest, RegionRequest};
+use store_api::region_request::{
+    AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
+    RegionPutRequest, RegionRequest, SetRegionOption,
+};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
+use store_api::storage::{
+    FileId, RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+};
 
 use crate::config::MitoConfig;
 use crate::error::Error;
+use crate::manifest::action::RegionEdit;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
+use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
@@ -1401,12 +1415,12 @@ async fn test_series_scan_flat_small_permits() {
     }
 }
 
-// Regression test: `ts = a OR ts = b` extracts to a `TimestampRange` that
-// `GenericRange::or` widens into `[min(a, b), max(a, b) + 1)`. Two such
-// predicates with different `a` values can both extract to ranges that cover
-// the same partition while selecting different (or no) rows. The previous
-// cover check would strip both predicates from the cache key, letting the
-// second scan return the first scan's cached row.
+/// Regression test: `ts = a OR ts = b` extracts to a `TimestampRange` that
+/// `GenericRange::or` widens into `[min(a, b), max(a, b) + 1)`. Two such
+/// predicates with different `a` values can both extract to ranges that cover
+/// the same partition while selecting different (or no) rows. The previous
+/// cover check would strip both predicates from the cache key, letting the
+/// second scan return the first scan's cached row.
 #[tokio::test]
 async fn test_range_cache_separates_or_equality_time_filters() {
     let mut env = TestEnv::new().await;
@@ -1492,5 +1506,1672 @@ async fn test_range_cache_separates_or_equality_time_filters() {
         row_count,
         "expected empty result, got: {}",
         batches.pretty_print().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_exact_sequence_read_compacted_sst_with_preserve_row_sequence() {
+    let mut env = TestEnv::new().await;
+    // Keep the explicit compaction below as the only compaction, so this test
+    // proves that the files are rewritten rather than observing an earlier
+    // background compaction.
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Flush 3 SSTs so the twcs compaction (trigger file num 2) can merge them.
+    for (start, end) in [(0, 3), (3, 6), (6, 9)] {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(start, end),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let output_files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(1, output_files.len(), "three input SSTs must be rewritten");
+    assert!(output_files[0].meta_ref().preserve_row_sequence);
+
+    // The compacted SST still preserves per-row sequences: the exact (2, 7] range
+    // returns rows with sequence 3..=7 even though C and H are older than the
+    // flushed frontier (which would normally fail the stale fences).
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(2),
+                memtable_max_sequence: Some(7),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
+| 6     | 6.0     | 1970-01-01T00:00:06 |
++-------+---------+---------------------+"
+    );
+}
+
+/// P0 regression: historical MemtableOnly reads must keep every fence even when
+/// the region preserves per-row sequences. The exact capability is only granted
+/// to the explicit `sequence_range` mode; a memtable-only scan whose checkpoint
+/// is behind the flushed frontier must stay stale instead of silently returning
+/// an incomplete delta.
+#[tokio::test]
+async fn test_exact_sequence_read_memtable_only_keeps_fences_with_preserve_option() {
+    let mut env = TestEnv::with_prefix("test_exact_sequence_read_memtable_only_keeps_fences").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(3),
+                skip_sst_files: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expected stale cursor error for memtable-only after flush");
+    assert!(
+        matches!(err, Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
+}
+
+/// SequenceRange mode on a region without preserve_row_sequence:
+/// the exact capability is unavailable, both bounds are enforceable, so the
+/// engine must return a structured unsupported error instead of approximating.
+#[tokio::test]
+async fn test_exact_sequence_range_unsupported_when_option_off() {
+    let mut env = TestEnv::with_prefix("test_exact_sequence_range_unsupported_option_off").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Bounds (3, 4] are both >= flushed frontier (3), so neither fence fires;
+    // the region still cannot serve exact row-level filtering -> unsupported.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(3),
+                memtable_max_sequence: Some(4),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expected sequence-range unsupported error");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+
+    // A stale checkpoint still yields the structured stale error (rebind path).
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(4),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expected stale cursor error");
+    assert!(
+        matches!(err, Error::IncrementalQueryStale { .. }),
+        "unexpected err: {err}"
+    );
+}
+
+/// SequenceRange mode when a legacy file without the preserved-sequence marker
+/// is present: exact capability unavailable -> structured unsupported error.
+#[tokio::test]
+async fn test_exact_sequence_range_unsupported_when_legacy_file() {
+    let mut env = TestEnv::with_prefix("test_exact_sequence_range_unsupported_legacy_file").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Inject a legacy file without the preserved-sequence marker. The region
+    // edit handler fills its max sequence with `committed + 1` (4), which is
+    // greater than C=3: the unmarked file may still contain in-range rows, so
+    // the exact capability is unavailable and the scan must fail with the
+    // structured unsupported error. (An unmarked file with an unknown max
+    // sequence fails closed in `files_allow_exact_sequence_range`, covered by
+    // the unit test.)
+    let edit = RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            level: 0,
+            file_size: 0,
+            max_row_group_uncompressed_size: 0,
+            available_indexes: Default::default(),
+            indexes: vec![],
+            index_file_size: 0,
+            index_version: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            sequence: None,
+            partition_expr: None,
+            num_series: 0,
+            preserve_row_sequence: false,
+            ..Default::default()
+        }],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    };
+    engine.edit_region(region_id, edit).await.unwrap();
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(3),
+                memtable_max_sequence: Some(4),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expected sequence-range unsupported error");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+}
+
+/// Region edit assigns a target-local barrier to an imported foreign SST, so
+/// exact sequence-range capability can admit it without trusting its source
+/// region marker.
+#[tokio::test]
+async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_range_accepts_foreign_file_with_target_barrier")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![FileMeta {
+                    region_id: RegionId::new(1, 2),
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    level: 0,
+                    file_size: 0,
+                    max_row_group_uncompressed_size: 0,
+                    available_indexes: Default::default(),
+                    indexes: vec![],
+                    index_file_size: 0,
+                    index_version: 0,
+                    num_rows: 0,
+                    num_row_groups: 0,
+                    sequence: None,
+                    partition_expr: None,
+                    num_series: 0,
+                    preserve_row_sequence: true,
+                    ..Default::default()
+                }],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let version = engine.get_region(region_id).unwrap().version();
+    let foreign_file = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .find(|file| file.region_id() != region_id)
+        .expect("foreign file should remain source-owned");
+    assert!(
+        foreign_file.meta_ref().sequence.is_some(),
+        "region edit must assign a target-local barrier"
+    );
+
+    engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(3),
+                memtable_max_sequence: Some(4),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("foreign file with target barrier should be exact-capable");
+}
+
+/// Exact sequence-range reads only require preserved row sequences in the
+/// SSTs selected by their time range. A legacy SST outside that range cannot
+/// contain a row in `(C, H]` for this request.
+#[tokio::test]
+async fn test_exact_sequence_range_ignores_time_pruned_unmarked_sst() {
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_range_ignores_time_pruned_unmarked_sst").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // The old, unmarked SST covers timestamps 0s..2s.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::PreserveRowSequence(true)],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The selected SST covers timestamps 10s..12s and carries the marker.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(10, 13),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                filters: vec![
+                    col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(10_000), None))),
+                ],
+                memtable_min_sequence: Some(3),
+                memtable_max_sequence: Some(6),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("time-pruned unmarked SST must not disable exact reads");
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
+/// Regression for #8865: a legacy (unmarked) SST written before the preserve
+/// option was enabled is excluded from exact scans once Flow's cursor reaches
+/// its admission barrier. A newer barrier still fails closed; normal scans
+/// continue to return every row.
+#[tokio::test]
+async fn test_exact_sequence_after_enable_with_old_unmarked_sst() {
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_after_enable_with_old_unmarked_sst").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Old data flushed while the option was off: unmarked SST with max seq 3.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Enable the preserve option; later flushes carry the marker.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::PreserveRowSequence(true)],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    // New marked data: seq 4..9 in two flushed SSTs.
+    for (start, end) in [(3, 6), (6, 9)] {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: test_util::build_rows(start, end),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+
+    let mut markers = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .map(|file| file.meta_ref().preserve_row_sequence)
+        .collect::<Vec<_>>();
+    markers.sort_unstable();
+    assert_eq!(vec![false, true, true], markers);
+
+    // The legacy file's barrier is 3, so C=9 excludes it and the marked SSTs
+    // are row-level filtered normally.
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(9),
+                memtable_max_sequence: Some(10),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("barrier should permit the exact scan");
+    assert_eq!(0, scanner.num_files(), "barrier file must be skipped");
+
+    // Normal scans still return everything.
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(9, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+}
+
+/// Exact sequence-range mode must read every time-matching SST, so the legacy
+/// `sst_min_sequence` file-pruning hint is incompatible: it could silently skip
+/// a preserved file that still contains rows inside `(min, max]`. The request
+/// must be rejected with the structured unsupported error, not approximated.
+#[tokio::test]
+async fn test_exact_sequence_range_rejects_sst_min_sequence_hint() {
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_range_rejects_sst_min_sequence_hint").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Non-trivial `sst_min_sequence` hint combined with an exact range: the
+    // pruning hint could drop the preserved file (whose max sequence is 3)
+    // for lower thresholds, losing in-range rows, so reject explicitly.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(1),
+                sst_min_sequence: Some(2),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expected sequence-range unsupported error");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+
+    // Without the hint the exact scan must still read the SST (no data loss).
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(1, row_count, "expected seq 1 only");
+}
+
+/// Exact `(0, 1]` scans must not let the row-group-level `LastRow` shortcut drop
+/// in-range rows: a series with seq 1 at t1 and seq 2 at t2 must return seq 1
+/// (t1) instead of being reduced to seq 2 (t2) and then filtered out. Non-exact
+/// `LastRow` scans keep their existing behavior (only the last row per series).
+#[tokio::test]
+async fn test_exact_sequence_read_with_last_row_selector_keeps_in_range_rows() {
+    let mut env = TestEnv::with_prefix("test_exact_sequence_read_with_last_row_selector").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Same series/tag: seq 1 at t1 (field 1.0), seq 2 at t2 (field 2.0).
+    let rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows_for_key("series", 1, 3, 1),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let scan = async |request: ScanRequest| -> String {
+        let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        batches.pretty_print().unwrap()
+    };
+
+    // Exact (0, 1] with the LastRow selector: seq 1 (t1) must survive the
+    // row-level sequence filter and be selected as the last row.
+    assert_eq!(
+        "\
++--------+---------+---------------------+
+| tag_0  | field_0 | ts                  |
++--------+---------+---------------------+
+| series | 1.0     | 1970-01-01T00:00:01 |
++--------+---------+---------------------+",
+        scan(ScanRequest {
+            memtable_min_sequence: Some(0),
+            memtable_max_sequence: Some(1),
+            exact_sequence_range: true,
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            ..Default::default()
+        })
+        .await
+    );
+
+    // Non-exact LastRow scan (no regression): still returns only the last row
+    // of the series, seq 2 (t2).
+    assert_eq!(
+        "\
++--------+---------+---------------------+
+| tag_0  | field_0 | ts                  |
++--------+---------+---------------------+
+| series | 2.0     | 1970-01-01T00:00:02 |
++--------+---------+---------------------+",
+        scan(ScanRequest {
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            ..Default::default()
+        })
+        .await
+    );
+}
+
+/// Exact delta spanning both SSTs and the memtable: rows after C that are partly
+/// flushed and partly still in the memtable must all be returned, with the H
+/// watermark respected.
+#[tokio::test]
+async fn test_exact_sequence_read_partial_sst_partial_memtable() {
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_read_partial_sst_partial_memtable").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // seq 1..3 flushed into an SST.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // seq 4..6 stay in the memtable.
+    let rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 6),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+
+    let scan_exact = async |min: Option<u64>, max: Option<u64>| -> String {
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    memtable_min_sequence: min,
+                    memtable_max_sequence: max,
+                    exact_sequence_range: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        batches.pretty_print().unwrap()
+    };
+
+    // The merged output order across SST + memtable sources is not guaranteed,
+    // and each source batch repeats the pretty-printed header row, so compare
+    // only the data rows (excluding header/separator lines).
+    let result = scan_exact(Some(2), Some(6)).await;
+    let mut rows = result
+        .lines()
+        .filter(|l| l.starts_with("| ") && !l.starts_with("| tag_0 "))
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    assert_eq!(
+        vec![
+            "| 2     | 2.0     | 1970-01-01T00:00:02 |",
+            "| 3     | 3.0     | 1970-01-01T00:00:03 |",
+            "| 4     | 4.0     | 1970-01-01T00:00:04 |",
+            "| 5     | 5.0     | 1970-01-01T00:00:05 |",
+        ],
+        rows,
+        "unexpected set for (2, 6]:\n{result}"
+    );
+}
+
+/// Builds a bulk insert request with rows `[start, end)` in the flat schema.
+fn build_bulk_insert_request(
+    region_id: RegionId,
+    start: usize,
+    end: usize,
+) -> RegionBulkInsertsRequest {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tag_0", DataType::Utf8, true),
+        Field::new("field_0", DataType::Float64, true),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let tag = Arc::new(StringArray::from_iter_values(
+        (start..end).map(|value| value.to_string()),
+    )) as ArrayRef;
+    let field = Arc::new(Float64Array::from_iter_values(
+        (start..end).map(|value| value as f64),
+    )) as ArrayRef;
+    let ts = Arc::new(TimestampMillisecondArray::from_iter_values(
+        (start..end).map(|value| value as i64 * 1000),
+    )) as ArrayRef;
+    let payload = DfRecordBatch::try_new(schema, vec![tag, field, ts]).unwrap();
+    let (schema, record_batch) = encode_to_flight_data(payload.clone());
+
+    RegionBulkInsertsRequest {
+        region_id,
+        payload,
+        raw_data: ArrowIpc {
+            schema: schema.data_header,
+            data_header: record_batch.data_header,
+            payload: record_batch.data_body,
+        },
+        partition_expr_version: None,
+        aligned_schema_version: None,
+    }
+}
+
+/// Bulk parts fold per-part sequences (commit-unit granularity): an exact range
+/// keeps or drops each whole part. The same set must hold before and after flush.
+#[tokio::test]
+async fn test_exact_sequence_read_bulk_parts() {
+    let mut env = TestEnv::with_prefix("test_exact_sequence_read_bulk_parts").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("memtable.type", "bulk")
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Two bulk parts: [0,3) and [3,6). Each part carries one folded sequence.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::BulkInserts(build_bulk_insert_request(region_id, 0, 3)),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::BulkInserts(build_bulk_insert_request(region_id, 3, 6)),
+        )
+        .await
+        .unwrap();
+
+    let scan_exact = async |min: Option<u64>, max: Option<u64>| -> String {
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    memtable_min_sequence: min,
+                    memtable_max_sequence: max,
+                    exact_sequence_range: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        batches.pretty_print().unwrap()
+    };
+
+    let expected_all = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
++-------+---------+---------------------+";
+
+    // A wide range covering every folded part sequence returns all rows.
+    assert_eq!(expected_all, scan_exact(Some(0), Some(100)).await);
+
+    // Commit-unit granularity: a lower bound that excludes the first part's
+    // folded sequence drops the whole first part, keeps the second.
+    let scan = scan_exact(Some(2), Some(100)).await;
+    assert!(
+        !scan.contains("| 0 ") && !scan.contains("| 1 ") && !scan.contains("| 2 "),
+        "first bulk part should be fully excluded, got:\n{scan}"
+    );
+    assert!(scan.contains("| 3 "), "second bulk part missing:\n{scan}");
+
+    test_util::flush_region(&engine, region_id, None).await;
+    assert_eq!(scan_exact(Some(2), Some(100)).await, scan);
+}
+
+/// Bulk commit publication ordering: the committed sequence must never cover a
+/// bulk part before its rows are physically installed in the memtable. A scan
+/// opening in the window between ordinary-memtable handling and bulk
+/// installation binds H to the pre-bulk committed sequence, sees no bulk rows,
+/// and a follow-up exact scan over the fresh range returns the bulk rows once.
+#[tokio::test]
+async fn test_bulk_write_sequence_not_committed_before_install() {
+    let mut env =
+        TestEnv::with_prefix("test_bulk_write_sequence_not_committed_before_install").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("memtable.type", "bulk")
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let committed_sequence = || {
+        engine
+            .find_region(region_id)
+            .unwrap()
+            .find_committed_sequence()
+    };
+    assert_eq!(0, committed_sequence());
+
+    let mut barrier = crate::region_write_ctx::test_hooks::arm_bulk_install_barrier(
+        region_id,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version_control
+            .clone(),
+    );
+
+    // Start a bulk write in the background; it pauses before installation.
+    let engine_clone = engine.clone();
+    let write_handle = tokio::spawn(async move {
+        engine_clone
+            .handle_request(
+                region_id,
+                RegionRequest::BulkInserts(build_bulk_insert_request(region_id, 0, 3)),
+            )
+            .await
+            .unwrap();
+    });
+
+    // Wait until the write paused between memtable handling and bulk install.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        barrier.wait_until_reached(),
+    )
+    .await
+    .expect("bulk write never reached the install barrier");
+
+    // Open the snapshot-bound scanner while the write is still paused at the
+    // barrier: it must bind H to the pre-bulk committed sequence (0) because
+    // the bulk part is not installed yet.
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                snapshot_on_scan: true,
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        Some(0),
+        scanner.snapshot_sequence(),
+        "snapshot-bound scan must bind H to the pre-bulk committed sequence"
+    );
+
+    // The committed sequence must still be the pre-bulk value: publication
+    // happens strictly after the bulk part is in the memtable.
+    assert_eq!(
+        0,
+        committed_sequence(),
+        "committed sequence leaked before the bulk part was installed"
+    );
+
+    // Release the barrier: the bulk part installs and the committed sequence
+    // advances to cover it.
+    barrier.release();
+    write_handle.await.expect("bulk write should complete");
+    assert_eq!(3, committed_sequence());
+
+    // The scanner opened while paused stays bound at the pre-bulk H and so
+    // sees no bulk rows.
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        0,
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        "bulk rows visible to a snapshot bound before installation:\n{}",
+        batches.pretty_print().unwrap()
+    );
+
+    // The follow-up exact scan over (pre_H, post_H] returns the bulk rows once.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(3),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        "bulk rows must be returned exactly once:\n{}",
+        batches.pretty_print().unwrap()
+    );
+    let pretty = batches.pretty_print().unwrap();
+    for tag in ["0", "1", "2"] {
+        assert!(
+            pretty.contains(&format!("| {tag} ")),
+            "bulk row {tag} missing from (0, 3]:\n{pretty}"
+        );
+    }
+}
+
+/// Non-preserving compaction must keep the physical input sequence below the
+/// admission barrier. Otherwise a later row at the barrier can collide with
+/// the compacted row when ordinary reads deduplicate overlapping SSTs.
+#[tokio::test]
+async fn test_non_preserve_compaction_sequence_collision() {
+    for flat_format in [false, true] {
+        test_non_preserve_compaction_sequence_collision_with_format(flat_format).await;
+    }
+}
+
+async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format: bool) {
+    let mut env = TestEnv::with_prefix("test_non_preserve_compaction_sequence_collision").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    async fn last_row(engine: &crate::engine::MitoEngine, region_id: RegionId) -> String {
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .pretty_print()
+            .unwrap()
+    }
+
+    // SST1 and SST2 contain the same key and timestamp. Their physical/file
+    // sequences are 1 and 2, so ordinary LastRow selects value 2.
+    for value in [1, 2] {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: test_util::build_rows_for_key("a", 0, 1, value),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let before = last_row(&engine, region_id).await;
+    assert!(
+        before.contains("| a     | 2.0"),
+        "before compaction: {before}"
+    );
+
+    // Both current SSTs are compacted through the real picker, merger, writer,
+    // and manifest update. With committed/flushed sequence 2, the untrusted
+    // output's admission barrier is exactly 3.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(1, files.len(), "both input SSTs must be replaced");
+    let compacted = files[0];
+    assert_eq!(1, compacted.meta_ref().level);
+    assert!(!compacted.meta_ref().preserve_row_sequence);
+    assert_eq!(1, compacted.num_rows());
+    assert_eq!(
+        Some(std::num::NonZeroU64::new(3).unwrap()),
+        compacted.meta_ref().sequence,
+        "admission barrier is input max 2 plus one"
+    );
+
+    // Hide FileMeta.sequence so this is a direct physical read, not a reader
+    // admission-barrier override. The output must contain physical sequence 2,
+    // not zero and not the output barrier 3.
+    let mut physical_meta = compacted.meta_ref().clone();
+    physical_meta.sequence = None;
+    let mut reader = region
+        .access_layer
+        .read_sst(FileHandle::new(
+            physical_meta,
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        ))
+        .build()
+        .await
+        .unwrap()
+        .expect("compaction output reader");
+    let batch = reader.next_record_batch().await.unwrap().unwrap();
+    let sequences = batch
+        .column(batch.num_columns() - 2)
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+        .unwrap();
+    assert_eq!(&[2], sequences.values());
+
+    let after_compaction = last_row(&engine, region_id).await;
+    assert!(
+        after_compaction.contains("| a     | 2.0"),
+        "after compaction: {after_compaction}"
+    );
+
+    // The next write receives physical sequence 3, equal to the compacted
+    // output's admission barrier. It must still win because the compacted row
+    // remains physically at sequence 2; an old zero/barrier encoding would
+    // collide here and incorrectly retain value 2.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("a", 0, 1, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(2, files.len(), "compacted L1 plus newest L0 SST");
+    let newest = files
+        .iter()
+        .find(|file| file.meta_ref().level == 0)
+        .expect("newest L0 SST");
+    assert_eq!(1, newest.num_rows());
+    assert_eq!(
+        Some(std::num::NonZeroU64::new(3).unwrap()),
+        newest.meta_ref().sequence
+    );
+    let compacted = files
+        .iter()
+        .find(|file| file.meta_ref().level == 1)
+        .expect("compacted L1 SST");
+    assert_eq!(
+        Some(std::num::NonZeroU64::new(3).unwrap()),
+        compacted.meta_ref().sequence
+    );
+
+    let after_newer_write = last_row(&engine, region_id).await;
+    assert!(
+        after_newer_write.contains("| a     | 3.0"),
+        "after newer sequence-3 write: {after_newer_write}"
+    );
+}
+
+/// Compaction rewrites a legacy (unmarked) input as an untrusted output with
+/// the region-local admission barrier. Its physical rows retain the known
+/// input maximum, while exact scans skip it once C reaches that barrier and
+/// fail closed while C is below it.
+#[tokio::test]
+async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
+    let mut env =
+        TestEnv::with_prefix("test_compaction_output_not_laundered_from_legacy_input").await;
+    // Suppress automatic edit-triggered compactions. The high TWCS trigger below
+    // also prevents flush-triggered compaction from consuming the inputs, so the
+    // explicit Compact below is the only compaction in flight (deterministic).
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Two real marked SSTs on disk so the strict-window compaction rewrites them.
+    for (start, end) in [(0, 3), (3, 6)] {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(start, end),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let level0 = &version.ssts.levels()[0].files;
+    assert_eq!(2, level0.len());
+    let first_file = level0
+        .values()
+        .next()
+        .expect("flushed SST")
+        .meta_ref()
+        .clone();
+    assert!(first_file.preserve_row_sequence);
+
+    // Seed the first physical file as a legacy (unmarked) file: replace the
+    // version's FileMeta so the marker is false while the file stays on disk.
+    let mut unmarked = first_file.clone();
+    unmarked.preserve_row_sequence = false;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![unmarked],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let level0 = &version.ssts.levels()[0].files;
+    assert_eq!(2, level0.len());
+    assert!(
+        level0
+            .values()
+            .any(|file| !file.meta_ref().preserve_row_sequence),
+        "seeded file should be unmarked"
+    );
+
+    // Compact: the rewritten output must NOT be laundered back to marked.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let outputs = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        outputs.len(),
+        "two inputs should rewrite into one output file"
+    );
+    assert!(
+        !outputs[0].meta_ref().preserve_row_sequence,
+        "legacy input must not be laundered into a marked output"
+    );
+
+    // The compacted output is sequence-less and carries the current region's
+    // admission barrier rather than any source-domain sequence.
+    let barrier = outputs[0]
+        .meta_ref()
+        .sequence
+        .expect("compaction output barrier")
+        .get();
+    assert_eq!(8, barrier);
+
+    // Reinstalling the legacy input assigns it sequence 7, so the physical
+    // parquet retains that known input maximum rather than encoding either
+    // zero or the output admission barrier 8. The manifest marker stays false.
+    let mut sequence_meta = outputs[0].meta_ref().clone();
+    sequence_meta.sequence = None;
+    let sequence_handle = FileHandle::new(
+        sequence_meta,
+        Arc::new(crate::sst::file_purger::NoopFilePurger),
+    );
+    let mut reader = region
+        .access_layer
+        .read_sst(sequence_handle)
+        .build()
+        .await
+        .unwrap()
+        .expect("compaction output reader");
+    let batch = reader
+        .next_record_batch()
+        .await
+        .unwrap()
+        .expect("compaction output batch");
+    let sequence = batch
+        .column(batch.num_columns() - 2)
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+        .expect("sequence column");
+    assert!(
+        sequence
+            .values()
+            .iter()
+            .all(|sequence| *sequence == barrier - 1)
+    );
+
+    // A cursor before the barrier must fail closed.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(barrier - 1),
+                memtable_max_sequence: Some(barrier),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("newer barrier must disable exact scanning");
+    assert!(matches!(err, Error::SequenceRangeUnsupported { .. }));
+
+    // Once C reaches the barrier the sequence-less file is skipped, so exact
+    // capability is restored without attempting row-level filtering.
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(barrier),
+                memtable_max_sequence: Some(barrier + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("barrier should restore exact capability");
+    assert_eq!(0, scanner.num_files());
+}
+
+/// Multi-input primary-key-format compaction: two preserved pk-format files
+/// rewrite into one output that still carries the marker, and an exact scan
+/// over the compacted output returns every row in range.
+#[tokio::test]
+async fn test_exact_sequence_read_pk_format_compaction_multiple_inputs() {
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_read_pk_format_compaction_multiple_inputs").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("sst_format", "primary_key")
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Two preserved pk-format input files: seq 1..3 and seq 4..6.
+    for (start, end) in [(0, 3), (3, 6)] {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(start, end),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The rewritten output still carries the preserved-sequence marker.
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let outputs = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        outputs.len(),
+        "two pk inputs should rewrite into one output file"
+    );
+    assert!(outputs[0].meta_ref().preserve_row_sequence);
+
+    // Exact scan over the compacted pk-format output returns all rows in range.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(1),
+                memtable_max_sequence: Some(5),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let pretty = batches.pretty_print().unwrap();
+    for tag in ["1", "2", "3", "4"] {
+        assert!(
+            pretty.contains(&format!("| {tag} ")),
+            "row {tag} missing from compacted pk output:\n{pretty}"
+        );
+    }
+    assert_eq!(
+        4,
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        "exact range rows:\n{pretty}"
+    );
+    assert!(
+        !pretty.contains("| 0 ") && !pretty.contains("| 5 "),
+        "rows outside (1, 5] leaked:\n{pretty}"
+    );
+}
+
+/// Exact sequence-range reads through the active production `PerSeries` series
+/// scan path: row-level filtering must hold across the flushed SST and the
+/// memtable regardless of the requested time-series distribution.
+#[tokio::test]
+async fn test_exact_sequence_read_series_scan_per_series() {
+    let mut env = TestEnv::with_prefix("test_exact_sequence_read_series_scan_per_series").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // seq 1..3 flushed into an SST, seq 4..6 stay in the memtable.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 6),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+
+    let scan_exact_series = async |min: Option<u64>, max: Option<u64>| -> String {
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    memtable_min_sequence: min,
+                    memtable_max_sequence: max,
+                    exact_sequence_range: true,
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        batches.pretty_print().unwrap()
+    };
+
+    let result = scan_exact_series(Some(2), Some(6)).await;
+    let mut rows = result
+        .lines()
+        .filter(|l| l.starts_with("| ") && !l.starts_with("| tag_0 "))
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    assert_eq!(
+        vec![
+            "| 2     | 2.0     | 1970-01-01T00:00:02 |",
+            "| 3     | 3.0     | 1970-01-01T00:00:03 |",
+            "| 4     | 4.0     | 1970-01-01T00:00:04 |",
+            "| 5     | 5.0     | 1970-01-01T00:00:05 |",
+        ],
+        rows,
+        "unexpected set for (2, 6] on PerSeries path:\n{result}"
+    );
+}
+
+/// Range-cache fingerprint: identical files and filters with different (C, H]
+/// sequence ranges must never share a cache entry, otherwise the second scan
+/// would replay the first scan's filtered rows.
+#[tokio::test]
+async fn test_range_cache_key_separates_sequence_ranges() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            // Explicitly enable the range result cache: the sharing bug only
+            // reproduces when the second scan can replay the first scan's
+            // cached batches.
+            range_result_cache_size: ReadableSize::mb(64),
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Single flushed flat SST with rows seq 1..6.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 6),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let tag_filter = || col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("0".to_string()))));
+    let scan_exact = async |min: Option<u64>, max: Option<u64>| -> Vec<String> {
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    filters: vec![tag_filter()],
+                    memtable_min_sequence: min,
+                    memtable_max_sequence: max,
+                    exact_sequence_range: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let mut rows = batches
+            .pretty_print()
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| tag_0 "))
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        rows
+    };
+
+    // (1, 3] -> rows with sequences 2..3: tags "1" and "2".
+    let first = scan_exact(Some(1), Some(3)).await;
+    assert_eq!(
+        vec![
+            "| 1     | 1.0     | 1970-01-01T00:00:01 |",
+            "| 2     | 2.0     | 1970-01-01T00:00:02 |",
+        ],
+        first
+    );
+
+    // (3, 4] -> row with sequence 4: tag "3" only. If the cache key ignored
+    // the sequence range, this would replay the (1, 3] cached rows instead.
+    let second = scan_exact(Some(3), Some(4)).await;
+    assert_eq!(
+        vec!["| 3     | 3.0     | 1970-01-01T00:00:03 |"],
+        second,
+        "different (C, H] shared a range-cache entry"
     );
 }
