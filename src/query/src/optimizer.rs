@@ -18,6 +18,7 @@ pub mod count_nest_aggr;
 pub mod count_wildcard;
 pub mod global_limit;
 pub(crate) mod insert_assignment;
+pub(crate) mod json_schema_concretize;
 pub(crate) mod json_type_concretize;
 pub mod parallelize_scan;
 pub mod pass_distribution;

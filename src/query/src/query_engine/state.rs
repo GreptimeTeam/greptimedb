@@ -66,6 +66,7 @@ use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
+use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
@@ -209,6 +210,7 @@ impl QueryEngineState {
 
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
+            analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
 

@@ -108,7 +108,7 @@ fn apply_json_type_hint(
     false
 }
 
-fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
+pub(crate) fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
     let mut json_types = HashMap::<String, JsonNativeType>::new();
 
     // JSON2 columns in the final output must retain their complete values even when
