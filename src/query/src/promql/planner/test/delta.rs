@@ -1,0 +1,759 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use common_query::logical_plan::SubstraitPlanDecoder;
+use common_query::prelude::set_default_prefix;
+use datafusion::catalog::SchemaProvider;
+
+use super::*;
+use crate::query_engine::DefaultPlanDecoder;
+
+fn delta_temporality_table_provider() -> (DfTableSourceProvider, QueryEngineState, Arc<MemTable>) {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "series".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            OTLP_AGGREGATION_TEMPORALITY_LABEL.to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            greptime_timestamp().to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.arrow_schema().clone(),
+        vec![
+            Arc::new(StringArray::from(vec![
+                "delta",
+                "delta",
+                "delta",
+                "single",
+                "stale",
+                "stale",
+                "cumulative",
+                "cumulative",
+                "cumulative",
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some(GREPTIME_TEMPORALITY_DELTA),
+                Some(GREPTIME_TEMPORALITY_DELTA),
+                Some(GREPTIME_TEMPORALITY_DELTA),
+                Some(GREPTIME_TEMPORALITY_DELTA),
+                Some(GREPTIME_TEMPORALITY_DELTA),
+                Some(GREPTIME_TEMPORALITY_DELTA),
+                None,
+                None,
+                None,
+            ])),
+            Arc::new(TimestampMillisecondArray::from(vec![
+                60_000, 120_000, 180_000, 180_000, 120_000, 180_000, 60_000, 120_000, 180_000,
+            ])),
+            Arc::new(Float64Array::from(vec![
+                10.0,
+                20.0,
+                15.0,
+                7.0,
+                7.0,
+                f64::from_bits(PROMETHEUS_STALE_NAN_BITS),
+                10.0,
+                20.0,
+                30.0,
+            ])),
+        ],
+    )
+    .unwrap();
+    let datafusion_table =
+        Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch.clone()]]).unwrap());
+    let table_meta = TableMetaBuilder::empty()
+        .schema(schema.clone())
+        .primary_key_indices(vec![0, 1])
+        .value_indices(vec![3])
+        .next_column_id(4)
+        .build()
+        .unwrap();
+    let table_info = Arc::new(
+        TableInfoBuilder::default()
+            .name("delta_metric")
+            .meta(table_meta)
+            .build()
+            .unwrap(),
+    );
+    let backing = GreptimeMemTable::new_with_catalog(
+        "delta_metric",
+        GreptimeRecordBatch::from_df_record_batch(schema, batch),
+        4_001,
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+    );
+    let table = Arc::new(Table::new(
+        table_info,
+        FilterPushDownType::Unsupported,
+        backing.data_source(),
+    ));
+    catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "delta_metric".to_string(),
+            table_id: 4_001,
+            table,
+        })
+        .unwrap();
+    let state = QueryEngineState::new(
+        catalog.clone(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        Plugins::default(),
+        QueryOptions::default(),
+    );
+    let provider = DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    );
+    (provider, state, datafusion_table)
+}
+
+#[tokio::test]
+async fn rate_and_increase_select_raw_delta_math_per_series() {
+    set_default_prefix(Some("custom")).unwrap();
+    assert_eq!(
+        OTLP_AGGREGATION_TEMPORALITY_LABEL,
+        "otlp_aggregation_temporality"
+    );
+
+    let eval_time = UNIX_EPOCH.checked_add(Duration::from_secs(180)).unwrap();
+    for (function, expected_delta, expected_single) in
+        [("increase", 45.0, 7.0), ("rate", 0.25, 7.0 / 180.0)]
+    {
+        let eval_stmt = EvalStmt {
+            expr: parser::parse(&format!("{function}(delta_metric[3m])")).unwrap(),
+            start: eval_time,
+            end: eval_time,
+            interval: Duration::from_secs(60),
+            lookback_delta: Duration::from_secs(300),
+        };
+        let (provider, state, datafusion_table) = delta_temporality_table_provider();
+        let raw = PromPlanner::stmt_to_plan(provider, &eval_stmt, &state)
+            .await
+            .unwrap();
+        let plan = raw.display_indent_schema().to_string();
+        assert!(plan.contains("prom_sum_over_time"), "{plan}");
+        assert!(plan.contains(OTLP_AGGREGATION_TEMPORALITY_LABEL), "{plan}");
+        let value_field = raw
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.data_type() == &ArrowDataType::Float64)
+            .unwrap()
+            .name()
+            .clone();
+        assert!(value_field.starts_with(&format!("prom_{function}")));
+
+        let executable = if function == "increase" {
+            let context = SessionContext::new_with_state(state.session_state());
+            let catalog = Arc::new(MemoryCatalogProvider::new());
+            let schema = Arc::new(MemorySchemaProvider::new());
+            schema
+                .register_table("delta_metric".to_string(), datafusion_table)
+                .unwrap();
+            catalog
+                .register_schema(DEFAULT_SCHEMA_NAME, schema)
+                .unwrap();
+            context.register_catalog("datafusion", catalog);
+            let decoder = DefaultPlanDecoder::new(context.state(), &QueryContext::arc()).unwrap();
+            decoder
+                .decode(
+                    DFLogicalSubstraitConvertor
+                        .encode(&raw, DefaultSerializer)
+                        .unwrap(),
+                    context.state().catalog_list().clone(),
+                    false,
+                )
+                .await
+                .unwrap()
+        } else {
+            raw
+        };
+        let (_, batches) = execute(executable, &state).await;
+        let mut results = HashMap::new();
+        for batch in batches {
+            let series = batch
+                .column_by_name("series")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let temporality = batch
+                .column_by_name(OTLP_AGGREGATION_TEMPORALITY_LABEL)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let values = batch
+                .column_by_name(&value_field)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                results.insert(
+                    series.value(row).to_string(),
+                    (
+                        (!temporality.is_null(row)).then(|| temporality.value(row).to_string()),
+                        values.value(row),
+                    ),
+                );
+            }
+        }
+        assert_eq!(
+            Some(&(Some(GREPTIME_TEMPORALITY_DELTA.to_string()), expected_delta)),
+            results.get("delta")
+        );
+        assert_eq!(
+            Some(&(
+                Some(GREPTIME_TEMPORALITY_DELTA.to_string()),
+                expected_single
+            )),
+            results.get("single")
+        );
+        assert_eq!(
+            Some(&(
+                Some(GREPTIME_TEMPORALITY_DELTA.to_string()),
+                expected_single
+            )),
+            results.get("stale")
+        );
+        assert!(results.contains_key("cumulative"));
+    }
+}
+
+#[tokio::test]
+async fn empty_metric_broadcasts_over_temporality_marker() {
+    let eval_time = UNIX_EPOCH.checked_add(Duration::from_secs(180)).unwrap();
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
+    for query in [
+        "vector(2) * delta_metric".to_string(),
+        format!("vector(2) * ignoring({marker}) delta_metric"),
+        "delta_metric * vector(2)".to_string(),
+        format!("delta_metric * ignoring({marker}) vector(2)"),
+    ] {
+        let eval_stmt = EvalStmt {
+            expr: parser::parse(&query).unwrap(),
+            start: eval_time,
+            end: eval_time,
+            interval: Duration::from_secs(60),
+            lookback_delta: Duration::from_secs(300),
+        };
+        let (provider, state, _) = delta_temporality_table_provider();
+        let plan = PromPlanner::stmt_to_plan(provider, &eval_stmt, &state)
+            .await
+            .unwrap();
+        let plan_text = plan.display_indent_schema().to_string();
+        assert!(
+            !plan_text.contains("Filter: Boolean(false)"),
+            "{query}: {plan_text}"
+        );
+        let value_field = plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.data_type() == &ArrowDataType::Float64)
+            .unwrap()
+            .name()
+            .clone();
+        let (_, batches) = execute(plan, &state).await;
+        let mut results = HashMap::new();
+        for batch in batches {
+            let series = batch
+                .column_by_name("series")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let values = batch
+                .column_by_name(&value_field)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let temporality = batch
+                .column_by_name(marker)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                results.insert(
+                    series.value(row).to_string(),
+                    (
+                        (!temporality.is_null(row)).then(|| temporality.value(row).to_string()),
+                        values.value(row),
+                    ),
+                );
+            }
+        }
+        assert_eq!(3, results.len(), "{query}");
+        assert_eq!(
+            Some(&(Some(GREPTIME_TEMPORALITY_DELTA.to_string()), 30.0)),
+            results.get("delta"),
+            "{query}"
+        );
+        assert_eq!(
+            Some(&(Some(GREPTIME_TEMPORALITY_DELTA.to_string()), 14.0)),
+            results.get("single"),
+            "{query}"
+        );
+        assert_eq!(Some(&(None, 60.0)), results.get("cumulative"), "{query}");
+    }
+}
+
+#[tokio::test]
+async fn native_histogram_rate_ignores_delta_marker() {
+    let provider =
+        build_test_native_histogram_table_provider_with_marker("native_delta_metric", true).await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("rate(native_delta_metric[5m])"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap()
+    .display_indent_schema()
+    .to_string();
+
+    assert!(plan.contains("prom_native_histogram_rate"), "{plan}");
+    assert!(!plan.contains("prom_sum_over_time"), "{plan}");
+    assert!(!plan.contains("CASE WHEN"), "{plan}");
+}
+
+#[tokio::test]
+async fn mixed_range_rate_selects_delta_math_only_for_float_samples() {
+    let plan = PromPlanner::stmt_to_plan(
+        build_test_mixed_native_histogram_table_provider_with_marker("some_metric", true).await,
+        &build_eval_stmt("rate(some_metric[5m])"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap()
+    .display_indent_schema()
+    .to_string();
+
+    assert!(plan.contains("CASE WHEN"), "{plan}");
+    assert!(plan.contains("prom_mixed_range_float"), "{plan}");
+    assert!(plan.contains("prom_mixed_range_histogram"), "{plan}");
+    assert!(plan.contains(OTLP_AGGREGATION_TEMPORALITY_LABEL), "{plan}");
+}
+
+#[tokio::test]
+async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
+    for function in ["rate", "increase"] {
+        for histogram_present in [true, false] {
+            let float = source(
+                "lhs",
+                false,
+                1_000,
+                vec![
+                    ("job", Some("job")),
+                    (marker, Some(GREPTIME_TEMPORALITY_DELTA)),
+                ],
+                DirectOrValue::Float64(1.0),
+            );
+            let histogram = source(
+                "rhs",
+                !histogram_present,
+                2_000,
+                vec![
+                    ("job", Some("job")),
+                    (marker, Some(GREPTIME_TEMPORALITY_DELTA)),
+                ],
+                DirectOrValue::NativeHistogram(direct_or_histogram()),
+            );
+            let collector = PromqlAnnotationCollector::default();
+            let mut planner = PromPlanner {
+                table_provider: build_test_table_provider_with_fields(
+                    &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                    &[],
+                )
+                .await,
+                ctx: PromPlannerContext::default(),
+                promql_annotations: Some(collector.clone()),
+            };
+            let left_context = direct_or_context("lhs", &["job", marker], "v");
+            let right_context = direct_or_context("rhs", &["job", marker], "v");
+            let input = planner
+                .or_operator(
+                    scan(&float),
+                    scan(&histogram),
+                    left_context.tag_columns.iter().cloned().collect(),
+                    right_context.tag_columns.iter().cloned().collect(),
+                    left_context,
+                    right_context,
+                    &or_modifier("lhs or rhs"),
+                )
+                .unwrap();
+
+            let mut sort_exprs = planner
+                .ctx
+                .tag_columns
+                .iter()
+                .map(|tag| DfExpr::Column(Column::from_name(tag)).sort(true, true))
+                .collect_vec();
+            sort_exprs.push(DfExpr::Column(Column::from_name("ts")).sort(true, true));
+            let input = LogicalPlanBuilder::from(input)
+                .sort(sort_exprs)
+                .unwrap()
+                .build()
+                .unwrap();
+            let input = LogicalPlan::Extension(Extension {
+                node: Arc::new(SeriesDivide::new(
+                    planner.ctx.tag_columns.clone(),
+                    "ts".to_string(),
+                    input,
+                )),
+            });
+            planner.ctx.start = 2_000;
+            planner.ctx.end = 2_000;
+            planner.ctx.interval = 1_000;
+            planner.ctx.range = Some(2_000);
+            let input = LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RangeManipulate::new(
+                        2_000,
+                        2_000,
+                        1_000,
+                        2_000,
+                        "ts".to_string(),
+                        planner.ctx.field_columns.clone(),
+                        input,
+                    )
+                    .unwrap(),
+                ),
+            });
+
+            let PromExpr::Call(call) = parser::parse(&format!("{function}(mixed[2s])")).unwrap()
+            else {
+                unreachable!()
+            };
+            let preserve_any_value = PromPlanner::field_columns_are_alternative_samples(
+                input.schema(),
+                &planner.ctx.field_columns,
+            );
+            let state = build_query_engine_state();
+            let (mut exprs, _) = planner
+                .create_function_expr(&call.func, vec![], input.schema(), &state)
+                .unwrap();
+            exprs.insert(0, planner.create_time_index_column_expr().unwrap());
+            let plan = LogicalPlanBuilder::from(input)
+                .project(exprs)
+                .unwrap()
+                .filter(
+                    planner
+                        .create_empty_values_filter_expr(preserve_any_value)
+                        .unwrap(),
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            let value_field = plan
+                .schema()
+                .fields()
+                .iter()
+                .find(|field| field.data_type() == &ArrowDataType::Float64)
+                .unwrap()
+                .name()
+                .clone();
+
+            let (_, batches) = execute(plan, &state).await;
+            let row_count = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+            if histogram_present {
+                assert_eq!(0, row_count, "{function}");
+            } else {
+                assert_eq!(1, row_count, "{function}");
+                let expected = if function == "rate" { 0.5 } else { 1.0 };
+                assert_eq!(vec![expected], values(&batches, &value_field), "{function}");
+            }
+            let mut warnings = Vec::new();
+            let mut infos = Vec::new();
+            collector.append_to(&mut warnings, &mut infos);
+            let expected_warnings = if histogram_present {
+                vec![format!(
+                    "{function}: encountered a mix of float and native histogram samples"
+                )]
+            } else {
+                vec![]
+            };
+            assert_eq!(expected_warnings, warnings);
+            assert!(infos.is_empty(), "{function}: {infos:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn temporality_matchers_treat_null_as_absent() {
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        marker,
+        ArrowDataType::Utf8,
+        true,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(vec![
+            None,
+            Some(GREPTIME_TEMPORALITY_DELTA),
+        ]))],
+    )
+    .unwrap();
+    let table = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
+
+    for (matcher, expected) in [
+        (r#"="""#, vec![None]),
+        (r#"!="delta""#, vec![None]),
+        (r#"=~".*""#, vec![None, Some(GREPTIME_TEMPORALITY_DELTA)]),
+        (r#"!~"delta""#, vec![None]),
+        (r#"="delta""#, vec![Some(GREPTIME_TEMPORALITY_DELTA)]),
+    ] {
+        let query = format!(r#"metric{{{marker}{matcher}}}"#);
+        let scan = LogicalPlanBuilder::scan("labels", provider_as_source(table.clone()), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let PromExpr::VectorSelector(selector) = parser::parse(&query).unwrap() else {
+            unreachable!()
+        };
+        let expressions = PromPlanner::matchers_to_expr(selector.matchers, scan.schema()).unwrap();
+        let display = expressions.iter().map(ToString::to_string).join(" AND ");
+        if matcher == r#"="delta""# {
+            assert!(!display.contains("coalesce"), "{display}");
+        } else if !expressions.is_empty() {
+            assert!(display.contains("coalesce"), "{display}");
+        }
+        let plan = if let Some(filter) = conjunction(expressions) {
+            LogicalPlanBuilder::from(scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap()
+        } else {
+            scan
+        };
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        let actual = batches
+            .iter()
+            .flat_map(|batch| {
+                let labels = batch
+                    .column_by_name(marker)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                (0..batch.num_rows())
+                    .map(move |row| (!labels.is_null(row)).then(|| labels.value(row).to_string()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected
+                .into_iter()
+                .map(|value| value.map(str::to_string))
+                .collect::<Vec<_>>(),
+            actual,
+            "{query}"
+        );
+    }
+
+    let ordinary_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "label",
+        ArrowDataType::Utf8,
+        true,
+    )]));
+    let ordinary_scan = LogicalPlanBuilder::scan(
+        "ordinary_labels",
+        provider_as_source(Arc::new(
+            MemTable::try_new(ordinary_schema, vec![vec![]]).unwrap(),
+        )),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let PromExpr::VectorSelector(selector) = parser::parse(r#"metric{label!="delta"}"#).unwrap()
+    else {
+        unreachable!()
+    };
+    let expressions = PromPlanner::matchers_to_expr(selector.matchers, ordinary_scan.schema())
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .join(" AND ");
+    assert!(!expressions.contains("coalesce"), "{expressions}");
+}
+
+#[tokio::test]
+async fn binary_joins_align_only_the_temporality_marker() {
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
+    for (left_marker, expected_rows) in [(Some(GREPTIME_TEMPORALITY_DELTA), 0), (None, 1)] {
+        let left = source(
+            "lhs",
+            false,
+            1,
+            vec![("job", Some("job")), (marker, left_marker)],
+            DirectOrValue::Float64(1.0),
+        );
+        let right = source(
+            "rhs",
+            false,
+            1,
+            vec![("job", Some("job"))],
+            DirectOrValue::Float64(2.0),
+        );
+        let left_context = direct_or_context("lhs", &["job", marker], "v");
+        let right_context = direct_or_context("rhs", &["job"], "v");
+        let planner = PromPlanner {
+            table_provider: build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                &[],
+            )
+            .await,
+            ctx: PromPlannerContext::default(),
+            promql_annotations: None,
+        };
+        let joined = planner
+            .join_on_non_field_columns(
+                scan(&left),
+                scan(&right),
+                TableReference::bare("lhs"),
+                TableReference::bare("rhs"),
+                Some("ts".to_string()),
+                Some("ts".to_string()),
+                false,
+                &None,
+                &left_context,
+                &right_context,
+            )
+            .unwrap();
+        assert!(
+            !joined
+                .display_indent_schema()
+                .to_string()
+                .contains("__promql_match_"),
+            "{joined:?}"
+        );
+        let (_, batches) = execute(joined, &build_query_engine_state()).await;
+        assert_eq!(
+            expected_rows,
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>()
+        );
+
+        let PromExpr::Binary(and_expr) = parser::parse("lhs and rhs").unwrap() else {
+            unreachable!()
+        };
+        let mut planner = PromPlanner {
+            table_provider: build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                &[],
+            )
+            .await,
+            ctx: PromPlannerContext::default(),
+            promql_annotations: None,
+        };
+        let set = planner
+            .set_op_on_non_field_columns(
+                scan(&left),
+                scan(&right),
+                left_context,
+                right_context,
+                and_expr.op,
+                &and_expr.modifier,
+            )
+            .unwrap();
+        assert!(
+            set.schema()
+                .fields()
+                .iter()
+                .all(|field| !field.name().starts_with("__promql_match_"))
+        );
+        assert!(
+            !set.display_indent_schema()
+                .to_string()
+                .contains("__promql_match_"),
+            "{set:?}"
+        );
+        let (_, batches) = execute(set, &build_query_engine_state()).await;
+        assert_eq!(
+            expected_rows,
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>()
+        );
+    }
+
+    let left = source(
+        "lhs",
+        false,
+        1,
+        vec![("job", Some("job"))],
+        DirectOrValue::Float64(1.0),
+    );
+    let right = source(
+        "rhs",
+        false,
+        1,
+        vec![("job", Some("job")), (marker, None)],
+        DirectOrValue::Float64(2.0),
+    );
+    let PromExpr::Binary(and_expr) = parser::parse("lhs and rhs").unwrap() else {
+        unreachable!()
+    };
+    let mut planner = PromPlanner {
+        table_provider: build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await,
+        ctx: PromPlannerContext::default(),
+        promql_annotations: None,
+    };
+    let set = planner
+        .set_op_on_non_field_columns(
+            scan(&left),
+            scan(&right),
+            direct_or_context("lhs", &["job"], "v"),
+            direct_or_context("rhs", &["job", marker], "v"),
+            and_expr.op,
+            &and_expr.modifier,
+        )
+        .unwrap();
+    assert!(set.schema().field_with_unqualified_name(marker).is_err());
+    let (_, batches) = execute(set, &build_query_engine_state()).await;
+    assert_eq!(1, batches.iter().map(RecordBatch::num_rows).sum::<usize>());
+}

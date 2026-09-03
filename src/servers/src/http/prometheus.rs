@@ -66,7 +66,10 @@ use store_api::metric_engine_consts::{
 };
 use table::TableRef;
 use table::metadata::TableInfo;
-use table::requests::{SEMANTIC_METRIC_TEMPORALITY, SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT};
+use table::requests::{
+    METRIC_TEMPORALITY_DELTA, SEMANTIC_METRIC_TEMPORALITY, SEMANTIC_METRIC_TYPE,
+    SEMANTIC_METRIC_UNIT, SEMANTIC_VALUE_MIXED,
+};
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
@@ -2024,7 +2027,12 @@ fn prometheus_metadata_from_table(table_info: &TableInfo) -> PromMetadata {
         Some(metric_type)
             if options
                 .get(SEMANTIC_METRIC_TEMPORALITY)
-                .is_some_and(|temporality| temporality == "delta")
+                .is_some_and(|temporality| {
+                    matches!(
+                        temporality.as_str(),
+                        METRIC_TEMPORALITY_DELTA | SEMANTIC_VALUE_MIXED
+                    )
+                })
                 && matches!(
                     metric_type.as_str(),
                     "counter" | "histogram" | "updown_counter"
@@ -3504,6 +3512,9 @@ mod tests {
             ("mixed", None, "unknown"),
             ("counter", Some("delta"), "unknown"),
             ("histogram", Some("delta"), "unknown"),
+            ("counter", Some("mixed"), "unknown"),
+            ("histogram", Some("mixed"), "unknown"),
+            ("updown_counter", Some("mixed"), "unknown"),
         ] {
             let mut table_info = table_info.clone();
             table_info
