@@ -26,10 +26,10 @@
 //!   account's current usage and limit.
 //! - [`MemoryPool::shrink`] maps to [`AccountGuard::shrink`], called only with
 //!   whole-permit amounts once that many bytes have actually been freed
-//!   ([`AccountGuard::shrink`] rounds up, so passing raw byte counts through
+//!   ([`AccountGuard::shrink`] rounds down, so passing raw byte counts through
 //!   would over-release).
-//! - [`MemoryPool::reserved`] reports the bytes charged to the account plus any
-//!   overdraft (see below).
+//! - [`MemoryPool::reserved`] reports the permit-rounded bytes charged to the
+//!   account.
 //!
 //! Account permits are coarse-grained (KB/MB), so the adapter tracks the exact
 //! reserved bytes itself and keeps the guard at exactly
@@ -37,20 +37,12 @@
 //! shared permits instead of charging one permit per call, and an aggregated
 //! shrink releases exactly the permits the preceding grows acquired.
 //!
-//! # PoC decision: infallible `grow` overdrafts
-//!
 //! [`MemoryPool::grow`] is contractually infallible, but the backing account
-//! can be exhausted. This adapter neither panics nor drops the accounting: the
-//! portion the account cannot back is recorded in an internal overdraft
-//! counter, [`MemoryPool::reserved`] includes it, and [`MemoryPool::shrink`]
-//! writes it off before returning real permits to the account. The account
-//! itself never over-grants, so an overdraft is visible as
-//! `pool.reserved() > account.used_bytes()`. This is a PoC decision pending
-//! architecture review.
+//! can be exhausted. The portion it cannot back is charged to the guard as
+//! account-visible debt, so later fallible admissions see it.
 
 use std::fmt;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use common_memory_manager::PermitGranularity;
 use common_memory_manager::ledger::{Account, AccountGuard};
@@ -62,20 +54,24 @@ use datafusion_common::{DataFusionError, resources_datafusion_err};
 /// A [`MemoryPool`] backed by a memory-ledger [`Account`].
 pub struct LedgerMemoryPool {
     account: Account,
-    /// Permit granularity of `account`. Must match the granularity the account
-    /// was created with; [`Account`] does not expose it.
+    /// Permit granularity of `account`. Must match [`Account::granularity`].
     granularity: PermitGranularity,
     state: Mutex<PoolState>,
-    /// Bytes `grow` charged but the account could not back (see module docs).
-    overdraft: AtomicU64,
 }
 
 struct PoolState {
     /// The pool's grant on the account, always holding exactly
-    /// `ceil(reserved_bytes / granularity)` permits minus the overdraft.
+    /// `ceil(reserved_bytes / granularity)` bytes, backed or unbacked.
     guard: AccountGuard,
     /// Exact bytes reserved by DataFusion reservations, before permit rounding.
     reserved_bytes: u64,
+    /// The exact reservation total exceeded `u64` or could not be rounded.
+    reserved_overflowed: bool,
+}
+
+enum CoverError {
+    Missing(u64),
+    Unrepresentable,
 }
 
 impl LedgerMemoryPool {
@@ -91,27 +87,34 @@ impl LedgerMemoryPool {
             state: Mutex::new(PoolState {
                 guard,
                 reserved_bytes: 0,
+                reserved_overflowed: false,
             }),
-            overdraft: AtomicU64::new(0),
         }
     }
 
     /// Rounds `bytes` up to whole permits of the account's granularity.
-    fn round_up_to_permits(&self, bytes: u64) -> u64 {
-        self.granularity
-            .permits_to_bytes(self.granularity.bytes_to_permits(bytes))
+    fn round_up_to_permits(&self, bytes: u64) -> Option<u64> {
+        let granularity = self.granularity.bytes();
+        bytes
+            .checked_add(granularity - 1)
+            .map(|sum| sum / granularity * granularity)
     }
 
-    /// Grows the guard so that guard plus overdraft cover `new_reserved` bytes
+    /// Grows the guard so its charge covers `new_reserved` bytes
     /// rounded up to whole permits. On failure returns the missing bytes and
     /// leaves the state untouched.
-    fn try_cover(&self, state: &mut PoolState, new_reserved: u64) -> Result<(), u64> {
-        let needed = self.round_up_to_permits(new_reserved);
-        let covered = state.guard.granted_bytes() + self.overdraft.load(Ordering::Relaxed);
+    fn try_cover(&self, state: &mut PoolState, new_reserved: u64) -> Result<(), CoverError> {
+        if state.guard.unbacked_overflowed() {
+            return Err(CoverError::Unrepresentable);
+        }
+        let needed = self
+            .round_up_to_permits(new_reserved)
+            .ok_or(CoverError::Unrepresentable)?;
+        let covered = state.guard.charged_bytes();
         if needed <= covered || state.guard.try_grow(needed - covered) {
             Ok(())
         } else {
-            Err(needed - covered)
+            Err(CoverError::Missing(needed - covered))
         }
     }
 
@@ -130,43 +133,47 @@ impl LedgerMemoryPool {
             human_readable_size(self.account.target_limit_bytes() as usize)
         )
     }
-
-    #[cfg(test)]
-    fn overdraft_bytes(&self) -> u64 {
-        self.overdraft.load(Ordering::Relaxed)
-    }
 }
 
 impl MemoryPool for LedgerMemoryPool {
     fn grow(&self, _reservation: &MemoryReservation, additional: usize) {
         let mut state = self.state.lock().unwrap();
-        let new_reserved = state.reserved_bytes + additional as u64;
-        if let Err(missing) = self.try_cover(&mut state, new_reserved) {
-            self.overdraft.fetch_add(missing, Ordering::Relaxed);
+        let Some(new_reserved) = state.reserved_bytes.checked_add(additional as u64) else {
+            state.guard.poison_unbacked();
+            state.reserved_bytes = u64::MAX;
+            state.reserved_overflowed = true;
+            return;
+        };
+        match self.try_cover(&mut state, new_reserved) {
+            Ok(()) => {}
+            Err(CoverError::Missing(missing)) => state.guard.charge_unbacked(missing),
+            Err(CoverError::Unrepresentable) => {
+                state.guard.poison_unbacked();
+                state.reserved_overflowed = true;
+            }
         }
         state.reserved_bytes = new_reserved;
     }
 
     fn shrink(&self, _reservation: &MemoryReservation, shrink: usize) {
         let mut state = self.state.lock().unwrap();
-        state.reserved_bytes = state.reserved_bytes.saturating_sub(shrink as u64);
-        let needed = self.round_up_to_permits(state.reserved_bytes);
-        let overdraft = self.overdraft.load(Ordering::Relaxed);
-        let release = (state.guard.granted_bytes() + overdraft).saturating_sub(needed);
-
-        // Write off overdraft first; only the remainder returns real permits.
-        let written_off = release.min(overdraft);
-        if written_off > 0 {
-            self.overdraft.fetch_sub(written_off, Ordering::Relaxed);
+        if state.reserved_overflowed {
+            return;
         }
-        let returned = release - written_off;
-        if returned > 0 {
-            let released = state.guard.shrink(returned);
-            // `returned` is permit-aligned and within the grant, so the
-            // round-up inside `AccountGuard::shrink` releases exactly it.
+        state.reserved_bytes = state.reserved_bytes.saturating_sub(shrink as u64);
+        let Some(needed) = self.round_up_to_permits(state.reserved_bytes) else {
+            state.guard.poison_unbacked();
+            state.reserved_overflowed = true;
+            return;
+        };
+        let release = state.guard.charged_bytes().saturating_sub(needed);
+        if release > 0 {
+            let released = state.guard.shrink(release);
+            // `release` is permit-aligned and within the charge, so
+            // `AccountGuard::shrink` releases exactly it.
             // Every operation rereads `granted_bytes` as ground truth, so a
             // deviation would be corrected on the next shrink anyway.
-            debug_assert_eq!(released, returned);
+            debug_assert_eq!(released, release);
         }
     }
 
@@ -176,7 +183,12 @@ impl MemoryPool for LedgerMemoryPool {
         additional: usize,
     ) -> datafusion_common::Result<()> {
         let mut state = self.state.lock().unwrap();
-        let new_reserved = state.reserved_bytes + additional as u64;
+        let Some(new_reserved) = state.reserved_bytes.checked_add(additional as u64) else {
+            return Err(self.insufficient_capacity_err(reservation, additional));
+        };
+        if state.reserved_overflowed || state.guard.unbacked_overflowed() {
+            return Err(self.insufficient_capacity_err(reservation, additional));
+        }
         if self.try_cover(&mut state, new_reserved).is_err() {
             return Err(self.insufficient_capacity_err(reservation, additional));
         }
@@ -186,7 +198,11 @@ impl MemoryPool for LedgerMemoryPool {
 
     fn reserved(&self) -> usize {
         let state = self.state.lock().unwrap();
-        (state.guard.granted_bytes() + self.overdraft.load(Ordering::Relaxed)) as usize
+        if state.reserved_overflowed {
+            usize::MAX
+        } else {
+            state.guard.charged_bytes().min(usize::MAX as u64) as usize
+        }
     }
 
     fn memory_limit(&self) -> MemoryLimit {
@@ -199,7 +215,10 @@ impl fmt::Debug for LedgerMemoryPool {
         f.debug_struct("LedgerMemoryPool")
             .field("account", &self.account.name())
             .field("reserved", &self.reserved())
-            .field("overdraft", &self.overdraft.load(Ordering::Relaxed))
+            .field(
+                "unbacked",
+                &self.state.lock().unwrap().guard.unbacked_bytes(),
+            )
             .finish()
     }
 }
@@ -345,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn grow_overdrafts_instead_of_panicking_when_exhausted() {
+    fn infallible_grow_charges_account_visible_debt() {
         let account = Account::new(
             "query/engine",
             Category::Query,
@@ -361,15 +380,14 @@ mod tests {
 
         r.try_grow(4 * KB as usize).unwrap(); // account full
         r.grow(2 * KB as usize); // must not panic
-        // The un-backed portion is carried as overdraft and reported honestly.
-        assert_eq!(pool.overdraft_bytes(), 2 * KB);
+        assert_eq!(account.backed_bytes(), 4 * KB);
+        assert_eq!(account.unbacked_bytes(), 2 * KB);
         assert_eq!(dyn_pool.reserved() as u64, 6 * KB);
-        // The account itself never over-grants.
-        assert_eq!(account.used_bytes(), 4 * KB);
+        assert_eq!(account.used_bytes(), 6 * KB);
 
-        // Shrink writes off the overdraft before returning real permits.
         r.shrink(2 * KB as usize);
-        assert_eq!(pool.overdraft_bytes(), 0);
+        assert_eq!(account.backed_bytes(), 4 * KB);
+        assert_eq!(account.unbacked_bytes(), 0);
         assert_eq!(dyn_pool.reserved() as u64, 4 * KB);
         r.free();
         assert_eq!(dyn_pool.reserved(), 0);
@@ -377,10 +395,90 @@ mod tests {
 
         // With capacity available again, grow takes real permits.
         r.grow(KB as usize);
-        assert_eq!(pool.overdraft_bytes(), 0);
+        assert_eq!(account.unbacked_bytes(), 0);
         assert_eq!(account.used_bytes(), KB);
         r.free();
         assert_eq!(dyn_pool.reserved(), 0);
+    }
+
+    #[test]
+    fn accounted_debt_blocks_fallible_growth_after_external_release() {
+        let (account, pool) = pool_with_limit(4);
+        let external = account.try_acquire(4 * KB).unwrap();
+        let reservation = MemoryConsumer::new("pool-face").register(&pool);
+
+        reservation.grow(2 * KB as usize);
+        assert_eq!(account.backed_bytes(), 4 * KB);
+        assert_eq!(account.unbacked_bytes(), 2 * KB);
+        assert_eq!(account.used_bytes(), 6 * KB);
+        assert_eq!(pool.reserved() as u64, 2 * KB);
+
+        drop(external);
+        let err = reservation.try_grow(3 * KB as usize).unwrap_err();
+        assert!(matches!(err, DataFusionError::ResourcesExhausted(_)));
+        assert_eq!(reservation.size() as u64, 2 * KB);
+        assert_eq!(pool.reserved() as u64, 2 * KB);
+        assert_eq!(account.backed_bytes(), 0);
+        assert_eq!(account.unbacked_bytes(), 2 * KB);
+        assert_eq!(account.used_bytes(), 2 * KB);
+
+        reservation.try_grow(2 * KB as usize).unwrap();
+        assert_eq!(reservation.size() as u64, 4 * KB);
+        assert_eq!(pool.reserved() as u64, 4 * KB);
+        assert_eq!(account.backed_bytes(), 2 * KB);
+        assert_eq!(account.unbacked_bytes(), 2 * KB);
+        assert_eq!(account.used_bytes(), 4 * KB);
+        reservation.free();
+        assert_eq!(account.used_bytes(), 0);
+    }
+
+    #[test]
+    fn infallible_grow_accounts_beyond_permit_conversion_limit() {
+        let (account, pool) = pool_with_limit(4);
+        let reservation = MemoryConsumer::new("large-infallible").register(&pool);
+        let max_permit_bytes = PermitGranularity::Kilobyte.permits_to_bytes(u32::MAX);
+        let requested = max_permit_bytes + KB;
+
+        reservation.grow(requested as usize);
+        assert_eq!(reservation.size() as u64, requested);
+        assert_eq!(pool.reserved() as u64, requested);
+        assert_eq!(account.backed_bytes(), 0);
+        assert_eq!(account.unbacked_bytes(), requested);
+        assert_eq!(account.used_bytes(), requested);
+
+        reservation.free();
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(account.used_bytes(), 0);
+    }
+
+    #[test]
+    fn unrepresentable_infallible_grow_poison_blocks_fallible_growth() {
+        let account = Account::new(
+            "query/engine",
+            Category::Query,
+            4 * KB,
+            PermitGranularity::Kilobyte,
+        );
+        let pool = Arc::new(LedgerMemoryPool::new(
+            account.clone(),
+            PermitGranularity::Kilobyte,
+        ));
+        let dyn_pool: Arc<dyn MemoryPool> = pool.clone();
+        let reservation = MemoryConsumer::new("overflow").register(&dyn_pool);
+
+        pool.grow(&reservation, usize::MAX);
+        assert_eq!(pool.reserved(), usize::MAX);
+        assert_eq!(account.unbacked_bytes(), u64::MAX);
+        assert_eq!(account.used_bytes(), u64::MAX);
+
+        let err = pool.try_grow(&reservation, 1).unwrap_err();
+        assert!(matches!(err, DataFusionError::ResourcesExhausted(_)));
+        assert_eq!(pool.reserved(), usize::MAX);
+        assert_eq!(account.used_bytes(), u64::MAX);
+
+        pool.shrink(&reservation, usize::MAX);
+        assert_eq!(pool.reserved(), usize::MAX);
+        assert_eq!(account.used_bytes(), u64::MAX);
     }
 }
 

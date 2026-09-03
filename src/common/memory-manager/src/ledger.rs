@@ -14,7 +14,7 @@
 
 //! PoC of the memory ledger: accounts with runtime-adjustable limits.
 //!
-//! This module validates the resize contract of the ARM memory ledger design:
+//! This module validates the resize contract of the memory ledger:
 //!
 //! - An [Account] is a bounded memory budget backed by a semaphore, shared by
 //!   any number of handles (the limit lives in shared atomics, so every handle
@@ -29,7 +29,7 @@
 //! - [AccountGuard] exposes both faces the ledger needs: async acquisition
 //!   with wait/fail policies (the scan-tracker face) and synchronous
 //!   `try_grow`/`shrink` (the DataFusion memory-pool face). Both draw from the
-//!   same semaphore, so their sum can never exceed the account limit.
+//!   same account admission protocol.
 //!
 //! Resize linearizes when its control critical section ends. Successful
 //! acquisition and growth linearize when their permits are added to the usage
@@ -76,13 +76,19 @@ struct AccountInner {
     /// Converges towards `target_permits` while shrinking.
     effective_permits: AtomicU32,
     /// Serializes limit changes, collector bookkeeping, and grant validation.
-    control: Mutex<()>,
+    control: Mutex<AccountControl>,
     /// Single-flight flag for the shrink collector.
     collecting: AtomicBool,
     /// Permits granted to guards, excluding collector reservations.
     used_permits: AtomicU32,
     /// Wakes a collector so it can cancel and replan an obsolete chunk.
     resize_tx: watch::Sender<()>,
+}
+
+#[derive(Default)]
+struct AccountControl {
+    unbacked_bytes: u64,
+    unbacked_overflowed: bool,
 }
 
 impl AccountInner {
@@ -94,7 +100,7 @@ impl AccountInner {
         self.granularity.permits_to_bytes(permits)
     }
 
-    fn lock_control(&self) -> MutexGuard<'_, ()> {
+    fn lock_control(&self) -> MutexGuard<'_, AccountControl> {
         self.control
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -105,11 +111,17 @@ impl AccountInner {
     }
 
     fn validate_and_record_grant(&self, permits: u32, requested_bytes: u64) -> Result<()> {
-        let _guard = self.lock_control();
+        let control = self.lock_control();
         let target = self.target_permits.load(Ordering::Acquire);
         let used = self.used_permits.load(Ordering::Acquire);
+        let delta = self.permits_to_bytes(permits);
         ensure!(
-            used.saturating_add(permits) <= target,
+            permits == 0
+                || self
+                    .permits_to_bytes(used)
+                    .saturating_add(control.unbacked_bytes)
+                    .saturating_add(delta)
+                    <= self.permits_to_bytes(target),
             MemoryLimitExceededSnafu {
                 requested_bytes,
                 limit_bytes: self.permits_to_bytes(target),
@@ -120,8 +132,52 @@ impl AccountInner {
     }
 
     fn release_used(&self, permits: u32) {
+        let _guard = self.lock_control();
         let previous = self.used_permits.fetch_sub(permits, Ordering::AcqRel);
         debug_assert!(previous >= permits, "account usage counter underflowed");
+    }
+
+    fn charge_unbacked(&self, local_bytes: &mut u64, local_overflowed: &mut bool, bytes: u64) {
+        let mut control = self.lock_control();
+        if *local_overflowed || control.unbacked_overflowed {
+            *local_overflowed = true;
+            *local_bytes = u64::MAX;
+            control.unbacked_overflowed = true;
+            control.unbacked_bytes = u64::MAX;
+            return;
+        }
+        match (
+            local_bytes.checked_add(bytes),
+            control.unbacked_bytes.checked_add(bytes),
+        ) {
+            (Some(local), Some(global)) => {
+                *local_bytes = local;
+                control.unbacked_bytes = global;
+            }
+            _ => {
+                *local_overflowed = true;
+                *local_bytes = u64::MAX;
+                control.unbacked_overflowed = true;
+                control.unbacked_bytes = u64::MAX;
+            }
+        }
+    }
+
+    fn poison_unbacked(&self, local_bytes: &mut u64, local_overflowed: &mut bool) {
+        let mut control = self.lock_control();
+        *local_overflowed = true;
+        *local_bytes = u64::MAX;
+        control.unbacked_overflowed = true;
+        control.unbacked_bytes = u64::MAX;
+    }
+
+    fn release_unbacked(&self, bytes: u64) {
+        let mut control = self.lock_control();
+        if control.unbacked_overflowed {
+            return;
+        }
+        debug_assert!(control.unbacked_bytes >= bytes);
+        control.unbacked_bytes -= bytes;
     }
 }
 
@@ -196,7 +252,7 @@ impl Account {
                 semaphore: Arc::new(Semaphore::new(limit_permits as usize)),
                 target_permits: AtomicU32::new(limit_permits),
                 effective_permits: AtomicU32::new(limit_permits),
-                control: Mutex::new(()),
+                control: Mutex::new(AccountControl::default()),
                 collecting: AtomicBool::new(false),
                 used_permits: AtomicU32::new(0),
                 resize_tx,
@@ -234,7 +290,7 @@ impl Account {
             .permits_to_bytes(self.inner.effective_permits.load(Ordering::Acquire))
     }
 
-    /// Bytes currently granted to guards.
+    /// Bytes currently charged to guards.
     ///
     /// Resize bookkeeping and collector reservations are excluded. A permit
     /// acquired internally but not yet revalidated is not granted to a guard.
@@ -242,8 +298,21 @@ impl Account {
     /// A release updates this counter immediately before returning its permit;
     /// resize cannot make the value under-report an already successful grant.
     pub fn used_bytes(&self) -> u64 {
+        let control = self.inner.lock_control();
         self.inner
             .permits_to_bytes(self.inner.used_permits.load(Ordering::Acquire))
+            .saturating_add(control.unbacked_bytes)
+    }
+
+    /// Bytes currently backed by semaphore permits.
+    pub fn backed_bytes(&self) -> u64 {
+        self.inner
+            .permits_to_bytes(self.inner.used_permits.load(Ordering::Acquire))
+    }
+
+    /// Bytes currently charged without semaphore permits.
+    pub fn unbacked_bytes(&self) -> u64 {
+        self.inner.lock_control().unbacked_bytes
     }
 
     /// Adjusts the limit. Returns the remaining shrink deficit in bytes.
@@ -424,6 +493,8 @@ impl Account {
         Ok(AccountGuard {
             inner: self.inner.clone(),
             permit,
+            unbacked_bytes: 0,
+            unbacked_overflowed: false,
         })
     }
 
@@ -442,6 +513,8 @@ impl Account {
         Some(AccountGuard {
             inner: self.inner.clone(),
             permit,
+            unbacked_bytes: 0,
+            unbacked_overflowed: false,
         })
     }
 
@@ -478,6 +551,8 @@ impl Account {
 pub struct AccountGuard {
     inner: Arc<AccountInner>,
     permit: OwnedSemaphorePermit,
+    unbacked_bytes: u64,
+    unbacked_overflowed: bool,
 }
 
 impl AccountGuard {
@@ -487,11 +562,26 @@ impl AccountGuard {
             .permits_to_bytes(self.permit.num_permits() as u32)
     }
 
+    /// Bytes charged to this guard, including unbacked infallible charges.
+    pub fn charged_bytes(&self) -> u64 {
+        self.granted_bytes().saturating_add(self.unbacked_bytes)
+    }
+
+    /// Bytes charged to this guard without semaphore permits.
+    pub fn unbacked_bytes(&self) -> u64 {
+        self.unbacked_bytes
+    }
+
+    /// Whether this guard's infallible charge exceeded representable bytes.
+    pub fn unbacked_overflowed(&self) -> bool {
+        self.unbacked_overflowed
+    }
+
     fn ensure_growth_within_target(&self, bytes: u64) -> Result<()> {
         let _guard = self.inner.lock_control();
         let target_bytes = self.inner.target_bytes();
         ensure!(
-            self.granted_bytes().saturating_add(bytes) <= target_bytes,
+            bytes == 0 || self.charged_bytes().saturating_add(bytes) <= target_bytes,
             MemoryLimitExceededSnafu {
                 requested_bytes: bytes,
                 limit_bytes: target_bytes,
@@ -541,6 +631,21 @@ impl AccountGuard {
         Ok(())
     }
 
+    /// Records an infallible charge that could not be backed by permits.
+    pub fn charge_unbacked(&mut self, bytes: u64) {
+        self.inner.charge_unbacked(
+            &mut self.unbacked_bytes,
+            &mut self.unbacked_overflowed,
+            bytes,
+        );
+    }
+
+    /// Conservatively marks an unrepresentable infallible charge.
+    pub fn poison_unbacked(&mut self) {
+        self.inner
+            .poison_unbacked(&mut self.unbacked_bytes, &mut self.unbacked_overflowed);
+    }
+
     /// Returns part of the granted capacity, releasing whole permits only:
     /// `bytes` is rounded DOWN to the permit granularity, so a request below
     /// one permit releases nothing and returns 0. Returns the bytes actually
@@ -548,16 +653,26 @@ impl AccountGuard {
     /// remainder stays granted and is the caller's (e.g. a pool adapter's)
     /// responsibility to track.
     pub fn shrink(&mut self, bytes: u64) -> u64 {
-        let whole_permits = bytes / self.inner.granularity.bytes();
+        if self.unbacked_overflowed {
+            return 0;
+        }
+        let aligned = bytes / self.inner.granularity.bytes() * self.inner.granularity.bytes();
+        let released_unbacked = aligned.min(self.unbacked_bytes);
+        if released_unbacked > 0 {
+            self.inner.release_unbacked(released_unbacked);
+            self.unbacked_bytes -= released_unbacked;
+        }
+        let remaining = aligned - released_unbacked;
+        let whole_permits = remaining / self.inner.granularity.bytes();
         let permits = whole_permits.min(self.permit.num_permits() as u64) as u32;
         if permits == 0 {
-            return 0;
+            return released_unbacked;
         }
         match self.permit.split(permits as usize) {
             Some(returned) => {
                 self.inner.release_used(permits);
                 drop(returned);
-                self.inner.permits_to_bytes(permits)
+                released_unbacked + self.inner.permits_to_bytes(permits)
             }
             None => {
                 // Unreachable: `permits` is clamped to `num_permits` above,
@@ -571,6 +686,7 @@ impl AccountGuard {
 
 impl Drop for AccountGuard {
     fn drop(&mut self) {
+        self.inner.release_unbacked(self.unbacked_bytes);
         self.inner.release_used(self.permit.num_permits() as u32);
     }
 }
@@ -620,14 +736,14 @@ impl MemoryLedger {
         account
     }
 
-    /// Sum of bytes granted across all accounts.
+    /// Sum of bytes charged across all accounts.
     pub fn total_used_bytes(&self) -> u64 {
         self.accounts
             .read()
             .unwrap()
             .iter()
             .map(|a| a.used_bytes())
-            .sum()
+            .fold(0, u64::saturating_add)
     }
 
     /// The unaccounted gap between an externally observed RSS and the ledger.
@@ -992,6 +1108,134 @@ mod tests {
         acc.collect_shrink().await;
         assert_eq!(acc.effective_limit_bytes(), 4 * KB);
         assert_eq!(acc.used_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn unbacked_charge_is_visible_and_released_with_its_guard() {
+        let ledger = MemoryLedger::new(16 * KB);
+        let acc = ledger.register(
+            "query",
+            Category::Query,
+            4 * KB,
+            PermitGranularity::Kilobyte,
+        );
+        let mut guard = acc.acquire(2 * KB).await.unwrap();
+        guard.charge_unbacked(3 * KB);
+
+        assert_eq!(guard.granted_bytes(), 2 * KB);
+        assert_eq!(guard.unbacked_bytes(), 3 * KB);
+        assert_eq!(guard.charged_bytes(), 5 * KB);
+        assert_eq!(acc.backed_bytes(), 2 * KB);
+        assert_eq!(acc.unbacked_bytes(), 3 * KB);
+        assert_eq!(acc.used_bytes(), 5 * KB);
+        assert_eq!(ledger.total_used_bytes(), 5 * KB);
+        assert_eq!(ledger.snapshot()[0].used_bytes, 5 * KB);
+        assert_eq!(ledger.unaccounted_bytes(8 * KB), 3 * KB);
+
+        drop(guard);
+        assert_eq!(acc.backed_bytes(), 0);
+        assert_eq!(acc.unbacked_bytes(), 0);
+        assert_eq!(ledger.total_used_bytes(), 0);
+    }
+
+    #[test]
+    fn shrink_releases_only_its_own_debt_before_backed_bytes() {
+        let acc = account(8);
+        let mut first = acc.try_acquire(2 * KB).unwrap();
+        let mut second = acc.try_acquire(KB).unwrap();
+        first.charge_unbacked(2 * KB);
+        second.charge_unbacked(3 * KB);
+
+        assert_eq!(first.shrink(3 * KB), 3 * KB);
+        assert_eq!(first.unbacked_bytes(), 0);
+        assert_eq!(first.granted_bytes(), KB);
+        assert_eq!(second.unbacked_bytes(), 3 * KB);
+        assert_eq!(acc.backed_bytes(), 2 * KB);
+        assert_eq!(acc.unbacked_bytes(), 3 * KB);
+        assert_eq!(acc.used_bytes(), 5 * KB);
+    }
+
+    #[test]
+    fn sub_permit_shrink_does_not_release_debt() {
+        let acc = account(4);
+        let mut guard = acc.try_acquire(KB).unwrap();
+        guard.charge_unbacked(KB);
+
+        assert_eq!(guard.shrink(512), 0);
+        assert_eq!(guard.granted_bytes(), KB);
+        assert_eq!(guard.unbacked_bytes(), KB);
+        assert_eq!(acc.used_bytes(), 2 * KB);
+    }
+
+    #[test]
+    fn unbacked_overflow_fails_closed() {
+        let acc = account(4);
+        let mut guard = acc.try_acquire(0).unwrap();
+        guard.charge_unbacked(u64::MAX);
+        guard.charge_unbacked(1);
+
+        assert_eq!(guard.unbacked_bytes(), u64::MAX);
+        assert_eq!(acc.unbacked_bytes(), u64::MAX);
+        assert_eq!(acc.used_bytes(), u64::MAX);
+        assert_eq!(guard.shrink(u64::MAX), 0);
+        drop(guard);
+        assert_eq!(acc.unbacked_bytes(), u64::MAX);
+        assert!(acc.try_acquire(KB).is_none());
+    }
+
+    #[test]
+    fn fallible_admission_is_all_or_nothing_with_existing_debt() {
+        let acc = account(4);
+        let mut debtor = acc.try_acquire(0).unwrap();
+        debtor.charge_unbacked(2 * KB);
+
+        assert!(acc.try_acquire(3 * KB).is_none());
+        assert_eq!(acc.backed_bytes(), 0);
+        assert_eq!(acc.unbacked_bytes(), 2 * KB);
+
+        let mut backed = acc.try_acquire(2 * KB).unwrap();
+        assert!(!backed.try_grow(KB));
+        assert_eq!(backed.granted_bytes(), 2 * KB);
+        assert_eq!(acc.used_bytes(), 4 * KB);
+        assert!(acc.try_acquire(0).is_some());
+    }
+
+    #[tokio::test]
+    async fn pending_grant_revalidates_against_unbacked_charge() {
+        let acc = account(4);
+        let held = acc.acquire(4 * KB).await.unwrap();
+        let mut waiter = Box::pin(acc.acquire(KB));
+        assert_pending(waiter.as_mut()).await;
+
+        let mut debtor = acc.try_acquire(0).unwrap();
+        debtor.charge_unbacked(4 * KB);
+        drop(held);
+
+        assert!(waiter.await.is_err());
+        assert_eq!(acc.backed_bytes(), 0);
+        assert_eq!(acc.unbacked_bytes(), 4 * KB);
+        assert_eq!(acc.used_bytes(), 4 * KB);
+    }
+
+    #[tokio::test]
+    async fn resize_below_accounted_usage_blocks_new_grants() {
+        let acc = account(6);
+        let mut held = acc.acquire(4 * KB).await.unwrap();
+        held.charge_unbacked(2 * KB);
+
+        assert_eq!(acc.set_limit_bytes(3 * KB), KB);
+        assert_eq!(acc.used_bytes(), 6 * KB);
+        assert_eq!(acc.effective_limit_bytes(), 4 * KB);
+        assert!(acc.try_acquire(KB).is_none());
+
+        let mut collector = Box::pin(acc.collect_shrink());
+        assert_pending(collector.as_mut()).await;
+        assert_eq!(held.shrink(3 * KB), 3 * KB);
+        collector.await;
+        assert_eq!(held.unbacked_bytes(), 0);
+        assert_eq!(held.granted_bytes(), 3 * KB);
+        assert_eq!(acc.effective_limit_bytes(), 3 * KB);
+        assert_eq!(acc.used_bytes(), 3 * KB);
     }
 
     #[tokio::test]
