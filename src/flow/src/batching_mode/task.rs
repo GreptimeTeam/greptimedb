@@ -771,6 +771,12 @@ impl BatchingTask {
 
         let res = res?;
         let (affected_rows, _) = res.output.extract_rows_and_cost();
+        if matches!(&res.output.data, common_query::OutputData::AffectedRows(_)) {
+            res.metrics.wait_ready().await;
+        }
+        if let Some(error) = res.metrics.completion_error() {
+            warn!("Flow {flow_id} completed with terminal metrics error: {error}");
+        }
         debug!(
             "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
             elapsed,
