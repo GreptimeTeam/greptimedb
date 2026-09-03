@@ -16,19 +16,13 @@
 
 import * as core from "@actions/core";
 import {obtainClient} from "@/common";
+import {docsWorkflowDispatch, WorkflowDispatch} from "@/docs-version";
 
 interface RepoConfig {
   tokenEnv: string;
   repo: string;
   workflowLogic: (version: string) => WorkflowDispatch | null | Promise<WorkflowDispatch | null>;
 }
-
-interface WorkflowDispatch {
-  workflowId: string;
-  inputs: Record<string, string>;
-}
-
-const DOCS_VERSION_RE = /^(\d+)\.(\d+)\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 const REPO_CONFIGS: Record<string, RepoConfig> = {
   website: {
@@ -65,20 +59,11 @@ const REPO_CONFIGS: Record<string, RepoConfig> = {
     tokenEnv: "DOCS_REPO_TOKEN",
     repo: "docs",
     workflowLogic: async (version: string): Promise<WorkflowDispatch | null> => {
-      // Check if it's a nightly version
+      // Nightly versions do not need the current docs version list.
       if (version.includes('nightly')) {
-        return {
-          workflowId: 'bump-nightly-version.yml',
-          inputs: {version},
-        };
+        return docsWorkflowDispatch(version, []);
       }
 
-      const match = version.match(DOCS_VERSION_RE);
-      if (!match) {
-        throw new Error('Invalid version format');
-      }
-
-      const docsVersion = `${match[1]}.${match[2]}`;
       const client = obtainClient('DOCS_REPO_TOKEN');
       const {data} = await client.rest.repos.getContent({
         owner: 'GreptimeTeam',
@@ -95,17 +80,7 @@ const REPO_CONFIGS: Record<string, RepoConfig> = {
         throw new Error('Expected docs versions.json to be a string array');
       }
 
-      if (versions.includes(docsVersion)) {
-        return {
-          workflowId: 'bump-patch-version.yml',
-          inputs: {version},
-        };
-      }
-
-      return {
-        workflowId: 'bump-version.yml',
-        inputs: {version: docsVersion},
-      };
+      return docsWorkflowDispatch(version, versions);
     }
   }
 };
