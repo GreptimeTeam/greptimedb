@@ -377,10 +377,13 @@ module.exports = async function validateQueryRegressionComment({ github, context
   if (pull.state !== 'open') {
     return skip(core, `PR #${prNumber} is ${pull.state}; skipping.`);
   }
-  if (pull.base.repo.full_name !== admission.base_repo || pull.head.repo.full_name !== admission.head_repo) {
+  if (
+    pull.base?.repo?.full_name !== admission.base_repo ||
+    pull.head?.repo?.full_name !== admission.head_repo
+  ) {
     return skip(core, 'Current PR repository metadata does not match trusted admission; skipping.');
   }
-  if (pull.head.sha !== admission.head_sha) {
+  if (pull.head?.sha !== admission.head_sha) {
     return skip(core, 'Current PR head SHA differs from trusted admission; skipping stale run.');
   }
 

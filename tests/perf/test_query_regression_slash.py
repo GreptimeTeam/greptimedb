@@ -290,6 +290,12 @@ class AdmitPullTest(unittest.TestCase):
         decision = admit(merge_commit_sha="not-a-sha")
         self.assertTrue(decision.skip)
 
+    def test_deleted_fork_head_repo_fails_closed(self) -> None:
+        decision = admit(head={"sha": HEAD, "repo": None})
+        self.assertTrue(decision.skip)
+        self.assertIn("head repository", decision.reason)
+        self.assertEqual(decision.pr_number, "42")
+
 
 if __name__ == "__main__":
     unittest.main()

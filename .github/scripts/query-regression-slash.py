@@ -112,6 +112,17 @@ def is_full_sha(value: str) -> bool:
     return bool(FULL_SHA.fullmatch(value or ""))
 
 
+def nested_str(payload: Any, *keys: str) -> str:
+    current: Any = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(key)
+    if current is None:
+        return ""
+    return str(current)
+
+
 def parse_github_id(value: str) -> int | None:
     stripped = (value or "").strip()
     if not stripped.isdigit():
@@ -311,13 +322,21 @@ def admit_pull(
             ),
         )
 
-    base_repo = str(pull.get("base", {}).get("repo", {}).get("full_name") or "")
-    head_repo = str(pull.get("head", {}).get("repo", {}).get("full_name") or "")
-    base_sha = str(pull.get("base", {}).get("sha") or "")
-    head_sha = str(pull.get("head", {}).get("sha") or "")
-    merge_sha = str(pull.get("merge_commit_sha") or "")
+    base_repo = nested_str(pull, "base", "repo", "full_name")
+    head_repo = nested_str(pull, "head", "repo", "full_name")
+    base_sha = nested_str(pull, "base", "sha")
+    head_sha = nested_str(pull, "head", "sha")
+    merge_sha = nested_str(pull, "merge_commit_sha")
     pr_number = str(pull.get("number") or pr_number)
 
+    if not head_repo:
+        return reject(
+            "PR head repository is missing",
+            reply=(
+                "Query regression command ignored: the pull request head repository "
+                "is unavailable (the fork may have been deleted)."
+            ),
+        )
     if base_repo != expected_repo:
         return reject(
             f"PR targets {base_repo}, not {expected_repo}",
