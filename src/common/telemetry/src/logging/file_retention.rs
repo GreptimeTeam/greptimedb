@@ -160,11 +160,7 @@ impl DirectoryRetention {
     /// Loads the initial file state after all enabled file-log kinds are registered.
     pub(crate) fn initialize(&self) {
         let mut state = self.state.lock();
-        if state.initialized {
-            return;
-        }
-
-        if !self.reconcile(&mut state) {
+        if !self.ensure_initialized(&mut state) {
             return;
         }
 
@@ -180,8 +176,7 @@ impl DirectoryRetention {
 
     fn reclaim(&self, incoming_size: u64) {
         let mut state = self.state.lock();
-        if !state.initialized {
-            self.report_error(&mut state, "using log retention before initialization");
+        if !self.ensure_initialized(&mut state) {
             return;
         }
 
@@ -192,8 +187,7 @@ impl DirectoryRetention {
         let latest_file = self.current(kind);
         let last_modified = SystemTime::now();
         let mut state = self.state.lock();
-        if !state.initialized {
-            self.report_error(&mut state, "recording a log write before initialization");
+        if !self.ensure_initialized(&mut state) {
             return;
         }
 
@@ -208,6 +202,7 @@ impl DirectoryRetention {
 
         state.files.track(kind, path, written, last_modified);
         self.prune_files(&mut state);
+        self.prune_size(&mut state, 0);
     }
 
     fn scan(&self, kinds: &HashSet<LogFileKind>) -> io::Result<FileIndex> {
@@ -271,6 +266,10 @@ impl DirectoryRetention {
                 false
             }
         }
+    }
+
+    fn ensure_initialized(&self, state: &mut RetentionState) -> bool {
+        state.initialized || self.reconcile(state)
     }
 
     fn current(&self, kind: LogFileKind) -> io::Result<PathBuf> {
@@ -540,16 +539,57 @@ mod tests {
         write_file(&old, b"old");
         write_file(&active, b"");
 
-        let retention = DirectoryRetention::new(directory.path(), ReadableSize(4), 0).unwrap();
+        let retention = DirectoryRetention::new(directory.path(), ReadableSize(3), 0).unwrap();
         register_default_kind(&retention, directory.path(), &old);
         retention.initialize();
         fs::remove_file(directory.path().join(".greptimedb.current")).unwrap();
         symlink(&active, directory.path().join(".greptimedb.current")).unwrap();
         retention.track(LogFileKind::Default, 1);
-        retention.reclaim(3);
 
         assert!(!old.exists());
         assert!(active.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_retention_retries_initialization() {
+        let directory = TempDir::new().unwrap();
+        let old = directory.path().join("greptimedb.2026-01-01-00");
+        let active = directory.path().join("greptimedb.2026-01-01-01");
+        let retention = DirectoryRetention::new(directory.path(), ReadableSize(5), 0).unwrap();
+
+        retention.register(LogFileKind::Default);
+        retention.initialize();
+        assert!(!retention.state.lock().initialized);
+
+        write_file(&old, b"old");
+        write_file(&active, b"new");
+        symlink(&active, directory.path().join(".greptimedb.current")).unwrap();
+        retention.reclaim(1);
+
+        assert!(!old.exists());
+        assert!(active.exists());
+        assert!(retention.state.lock().initialized);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_retention_track_retries_initialization() {
+        let directory = TempDir::new().unwrap();
+        let active = directory.path().join("greptimedb.2026-01-01-00");
+        let retention = DirectoryRetention::new(directory.path(), ReadableSize(1), 0).unwrap();
+
+        retention.register(LogFileKind::Default);
+        retention.initialize();
+        assert!(!retention.state.lock().initialized);
+
+        write_file(&active, b"");
+        symlink(&active, directory.path().join(".greptimedb.current")).unwrap();
+        retention.track(LogFileKind::Default, 0);
+
+        let state = retention.state.lock();
+        assert!(state.initialized);
+        assert_eq!(state.files.active[&LogFileKind::Default].path, active);
     }
 
     #[cfg(unix)]
