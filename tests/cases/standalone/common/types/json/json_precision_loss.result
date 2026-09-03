@@ -1,0 +1,46 @@
+-- Reproduction for JSON integer precision loss beyond u64::MAX.
+-- See issue: TBD (link once published)
+--
+-- Case 1 (control): integer within u64 range is stored exactly.
+-- Case 2 (bug): u64::MAX + 1 is silently coerced to f64.
+-- Case 3 (bug): 30-digit integer is severely distorted.
+create table t_json_precision (
+    ts timestamp time index,
+    j  json
+);
+
+Affected Rows: 0
+
+-- Within u64 range: exact round-trip
+insert into t_json_precision values (1, '{"n": 18446744073709551615}');
+
+Affected Rows: 1
+
+-- Beyond u64::MAX: currently accepted with Affected Rows: 1 and
+-- silently stored as a f64 approximation (precision lost forever).
+insert into t_json_precision values (2, '{"n": 18446744073709551616}');
+
+Affected Rows: 1
+
+insert into t_json_precision values (3, '{"n": 123456789012345678901234567890}');
+
+Affected Rows: 1
+
+select
+    ts,
+    json_get(j, '$.n') as n
+from t_json_precision
+order by ts;
+
++-------------------------+-----------------------+
+| ts                      | n                     |
++-------------------------+-----------------------+
+| 1970-01-01T00:00:00.001 | 18446744073709551615  |
+| 1970-01-01T00:00:00.002 | 1.8446744073709552e19 |
+| 1970-01-01T00:00:00.003 | 1.2345678901234568e29 |
++-------------------------+-----------------------+
+
+drop table t_json_precision;
+
+Affected Rows: 0
+
