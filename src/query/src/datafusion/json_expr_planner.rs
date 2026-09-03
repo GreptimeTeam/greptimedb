@@ -18,13 +18,16 @@ use arrow_schema::Field;
 use common_function::scalars::json::json_get::JsonGetWithType;
 use common_function::scalars::udf::create_udf;
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::{Column, DFSchema, Result, ScalarValue, TableReference};
+use datafusion_common::{Column, DFSchema, DataFusionError, Result, ScalarValue, TableReference};
 use datafusion_expr::expr::{BinaryExpr, ScalarFunction};
 use datafusion_expr::planner::{
-    ExprPlanner, PlannerResult, RawAggregateExpr, RawBinaryExpr, RawScalarExpr, RawWindowExpr,
+    ExprPlanner, PlannerResult, RawAggregateExpr, RawBinaryExpr, RawFieldAccessExpr, RawScalarExpr,
+    RawWindowExpr,
 };
 use datafusion_expr::type_coercion::functions::{UDFCoercionExt, fields_with_udf};
-use datafusion_expr::{Expr, ExprSchemable, Operator, ScalarUDF, WindowFunctionDefinition};
+use datafusion_expr::{
+    Expr, ExprSchemable, GetFieldAccess, Operator, ScalarUDF, WindowFunctionDefinition,
+};
 use datatypes::extension::json::is_json2_extension_type;
 use sqlparser::ast::BinaryOperator;
 
@@ -33,6 +36,8 @@ use sqlparser::ast::BinaryOperator;
 /// This planner handles three cases:
 /// - Rewrites compound identifiers on JSON extension columns into `json_get` function.
 ///   For example, `select a.b.c` => `select json_get(a, "b.c")`.
+/// - Extends a JSON path with list indexes and fields following an index.
+///   For example, `select a.b[0].c` => `select json_get(a, "b[0][\"c\"]")`.
 /// - Pushes an "expected type" argument into the `json_get` function when it participates in a
 ///   binary operator. So that `json_get` knows the wanted data type when dealing with variant
 ///   JSON values.
@@ -75,6 +80,51 @@ impl ExprPlanner for JsonExprPlanner {
         } else {
             Ok(PlannerResult::Original(RawBinaryExpr { op, left, right }))
         }
+    }
+
+    /// Extends the path of an untyped `json_get` with one field access.
+    ///
+    /// For `j.o.l[1].inner.l[2]`, `plan_compound_identifier` first produces
+    /// `json_get(j, "o.l")`. DataFusion then calls this method successively
+    /// with a list index, two named fields, and another list index, producing
+    /// the final path `o.l[1]["inner"]["l"][2]`.
+    fn plan_field_access(
+        &self,
+        mut expr: RawFieldAccessExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawFieldAccessExpr>> {
+        // See `normalize_field_access_after_subscript` for the reason why we construct the
+        // "suffix" like this.
+        let suffix = match &expr.field_access {
+            GetFieldAccess::ListIndex { key } => {
+                // DataFusion parses ordinary integer literals within the i64 range as Int64.
+                let Expr::Literal(ScalarValue::Int64(Some(index)), _) = key.as_ref() else {
+                    return Ok(PlannerResult::Original(expr));
+                };
+                format!("[{index}]")
+            }
+            GetFieldAccess::NamedStructField { name } => {
+                let Some(name) = name.try_as_str().flatten() else {
+                    return Ok(PlannerResult::Original(expr));
+                };
+                // Encode the field name as a JSON string before embedding it in the
+                // bracket accessor. This preserves dots as literal field-name characters
+                // and escapes quotes, backslashes, and control characters correctly.
+                let name = serde_json::to_string(name)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                format!("[{name}]")
+            }
+            GetFieldAccess::ListRange { .. } => return Ok(PlannerResult::Original(expr)),
+        };
+        let Some(json_get) = extract_untyped_json_get(&mut expr.expr) else {
+            return Ok(PlannerResult::Original(expr));
+        };
+        let Some(Expr::Literal(ScalarValue::Utf8(Some(path)), _)) = json_get.args.get_mut(1) else {
+            return Ok(PlannerResult::Original(expr));
+        };
+
+        path.push_str(&suffix);
+        Ok(PlannerResult::Planned(expr.expr))
     }
 
     fn plan_compound_identifier(
@@ -443,6 +493,55 @@ mod tests {
             ),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_plan_list_index() -> Result<()> {
+        let planner = JsonExprPlanner;
+        let planned = planner.plan_field_access(
+            RawFieldAccessExpr {
+                field_access: GetFieldAccess::ListIndex {
+                    key: Box::new(Expr::Literal(ScalarValue::Int64(Some(0)), None)),
+                },
+                expr: json_get_expr(Expr::Column(Column::new_unqualified("j")), "list"),
+            },
+            &DFSchema::empty(),
+        )?;
+        let PlannerResult::Planned(Expr::ScalarFunction(func)) = planned else {
+            unreachable!()
+        };
+        assert_eq!(func.func.name(), JsonGetWithType::NAME);
+        assert_eq!(func.args.len(), 2);
+        assert_eq!(
+            func.args[1],
+            Expr::Literal(ScalarValue::Utf8(Some("list[0]".to_string())), None)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_plan_field_after_list_index() -> Result<()> {
+        let planner = JsonExprPlanner;
+        let planned = planner.plan_field_access(
+            RawFieldAccessExpr {
+                field_access: GetFieldAccess::NamedStructField {
+                    name: ScalarValue::Utf8(Some("a.b".to_string())),
+                },
+                expr: json_get_expr(Expr::Column(Column::new_unqualified("j")), "list[0]"),
+            },
+            &DFSchema::empty(),
+        )?;
+        let PlannerResult::Planned(Expr::ScalarFunction(func)) = planned else {
+            unreachable!()
+        };
+        assert_eq!(
+            func.args[1],
+            Expr::Literal(
+                ScalarValue::Utf8(Some("list[0][\"a.b\"]".to_string())),
+                None
+            )
+        );
         Ok(())
     }
 
