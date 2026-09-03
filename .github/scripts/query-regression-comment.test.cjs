@@ -589,3 +589,150 @@ test('skips when the runner artifact forges a different PR number', async () => 
     fs.rmSync(temporaryDir, { recursive: true, force: true });
   }
 });
+
+test('posts after Re-run failed jobs when admission stays on attempt 1', async () => {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+
+  try {
+    fs.mkdirSync(artifactDir);
+    const admission = {
+      run_id: 505,
+      run_attempt: 1,
+      base_repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'pr-head-sha',
+      head_repo: 'fork/repo',
+      candidate_sha: 'merge-sha',
+      base_sha: 'base-sha',
+    };
+    const metadata = {
+      ...admission,
+      run_attempt: 2,
+      built_base_sha: 'base-sha',
+      event_base_sha: 'base-sha',
+    };
+    fs.mkdirSync(path.join(temporaryDir, 'query-regression-admission'));
+    fs.writeFileSync(
+      path.join(temporaryDir, 'query-regression-admission', 'query-regression-admission.json'),
+      JSON.stringify(admission),
+    );
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify(metadata));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = '505';
+    process.env.WORKFLOW_RUN_ATTEMPT = '2';
+
+    await handler({
+      core: {
+        info() {},
+        warning() {},
+        setOutput(name, value) { outputs.set(name, value); },
+      },
+      context: {
+        repo: { owner: 'owner', repo: 'repo' },
+        payload: {
+          workflow_run: {
+            event: 'repository_dispatch',
+            head_sha: 'default-branch-sha',
+            head_repository: { full_name: 'owner/repo' },
+            pull_requests: [],
+          },
+        },
+      },
+      github: {
+        rest: {
+          pulls: {
+            get: async () => ({
+              data: {
+                state: 'open',
+                base: { repo: { full_name: 'owner/repo' } },
+                head: { repo: { full_name: 'fork/repo' }, sha: 'pr-head-sha' },
+              },
+            }),
+          },
+        },
+      },
+    });
+
+    assert.equal(outputs.get('should_post'), 'true');
+    assert.equal(outputs.get('pr_number'), '42');
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});
+
+test('skips a stale runner artifact from a previous attempt', async () => {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+  const infos = [];
+
+  try {
+    fs.mkdirSync(artifactDir);
+    const admission = {
+      run_id: 606,
+      run_attempt: 1,
+      base_repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'pr-head-sha',
+      head_repo: 'fork/repo',
+      candidate_sha: 'merge-sha',
+      base_sha: 'base-sha',
+    };
+    fs.mkdirSync(path.join(temporaryDir, 'query-regression-admission'));
+    fs.writeFileSync(
+      path.join(temporaryDir, 'query-regression-admission', 'query-regression-admission.json'),
+      JSON.stringify(admission),
+    );
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify({
+      ...admission,
+      built_base_sha: 'base-sha',
+      event_base_sha: 'base-sha',
+    }));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = '606';
+    process.env.WORKFLOW_RUN_ATTEMPT = '2';
+
+    await handler({
+      core: {
+        info(message) { infos.push(message); },
+        warning() {},
+        setOutput(name, value) { outputs.set(name, value); },
+      },
+      context: {
+        repo: { owner: 'owner', repo: 'repo' },
+        payload: {
+          workflow_run: {
+            event: 'repository_dispatch',
+            head_sha: 'default-branch-sha',
+            head_repository: { full_name: 'owner/repo' },
+            pull_requests: [],
+          },
+        },
+      },
+      github: { rest: { pulls: { get: async () => { throw new Error('should not fetch PR'); } } } },
+    });
+
+    assert.equal(outputs.get('should_post'), 'false');
+    assert.match(infos.join('\n'), /does not match this workflow_run attempt/);
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});

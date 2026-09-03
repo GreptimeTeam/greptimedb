@@ -333,8 +333,16 @@ module.exports = async function validateQueryRegressionComment({ github, context
 
   const expectedRunId = Number(process.env.WORKFLOW_RUN_ID);
   const expectedRunAttempt = Number(process.env.WORKFLOW_RUN_ATTEMPT);
-  if (Number(admission.run_id) !== expectedRunId || Number(admission.run_attempt) !== expectedRunAttempt) {
+  // parse is not rerun on "Re-run failed jobs", so admission keeps attempt 1.
+  // Bind it to the stable run id; the runner artifact must match this attempt.
+  if (Number(admission.run_id) !== expectedRunId) {
     return skip(core, 'Trusted admission does not match this workflow_run; skipping.');
+  }
+  if (
+    Number(metadata.run_id) !== expectedRunId ||
+    Number(metadata.run_attempt) !== expectedRunAttempt
+  ) {
+    return skip(core, 'Runner artifact does not match this workflow_run attempt; skipping.');
   }
 
   if (admission.base_repo !== `${context.repo.owner}/${context.repo.repo}`) {
