@@ -8,11 +8,11 @@ CREATE TABLE distinct_basic (
 
 Affected Rows: 0
 
--- stateless projection is supported in streaming mode
+-- request-local DISTINCT is supported in streaming mode
 -- SQLNESS REPLACE id=\d+ id=REDACTED
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
 SELECT
-    number as dis
+    DISTINCT number as dis
 FROM
     distinct_basic;
 
@@ -29,7 +29,7 @@ LIMIT 1;
 Error: 1004(InvalidArguments), Invalid SQL, error: instant-TTL flow sources support only stateless projection/filter queries over one source; non-stateless queries require a persisted source
 
 -- flow_options should have a flow_type:streaming
--- since source table's ttl=instant and the query is stateless
+-- since source table's ttl=instant and DISTINCT is request-local
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 +---------------------+---------------------------+
@@ -37,15 +37,6 @@ SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 +---------------------+---------------------------+
 | test_distinct_basic | {"flow_type":"streaming"} |
 +---------------------+---------------------------+
-
--- instant-TTL sources reject DISTINCT because it is not stateless
-CREATE FLOW test_distinct_instant_rejected SINK TO out_distinct_instant_rejected EVAL INTERVAL '1m' AS
-SELECT
-    DISTINCT number
-FROM
-    distinct_basic;
-
-Error: 1004(InvalidArguments), Invalid SQL, error: instant-TTL flow sources support only stateless projection/filter queries over one source; non-stateless queries require a persisted source
 
 SHOW CREATE TABLE distinct_basic;
 
@@ -176,7 +167,7 @@ DROP TABLE out_distinct_basic;
 
 Affected Rows: 0
 
--- test ttl = 5s
+-- test ttl = 5s (DISTINCT remains batching for persisted sources)
 CREATE TABLE distinct_basic (
     "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -195,7 +186,7 @@ FROM
 Affected Rows: 0
 
 -- flow_options should have a flow_type:batching
--- ordinary persisted source keeps DISTINCT in batching mode
+-- persisted-source DISTINCT retains batching semantics
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 +---------------------+--------------------------+
