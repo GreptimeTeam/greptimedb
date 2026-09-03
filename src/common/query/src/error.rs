@@ -274,6 +274,7 @@ pub fn datafusion_status_code<T: ErrorExt + 'static>(
         DataFusionError::Internal(_) => StatusCode::Internal,
         DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
         DataFusionError::Plan(_) => StatusCode::PlanQuery,
+        DataFusionError::ResourcesExhausted(_) => StatusCode::RuntimeResourcesExhausted,
         DataFusionError::External(e) => {
             if let Some(ext) = (*e).downcast_ref::<T>() {
                 ext.status_code()
@@ -283,5 +284,19 @@ pub fn datafusion_status_code<T: ErrorExt + 'static>(
         }
         DataFusionError::Diagnostic(_, e) => datafusion_status_code::<T>(e, default_status),
         _ => default_status.unwrap_or(StatusCode::EngineExecuteQuery),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn datafusion_resource_exhaustion_keeps_status_code() {
+        let error = DataFusionError::ResourcesExhausted("memory limit reached".to_string());
+        assert_eq!(
+            datafusion_status_code::<Error>(&error, None),
+            StatusCode::RuntimeResourcesExhausted
+        );
     }
 }

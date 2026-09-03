@@ -27,6 +27,8 @@ use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_function::state::FunctionState;
+#[cfg(test)]
+use common_memory_manager::ledger::Account;
 use common_stat::get_total_memory_bytes;
 use common_telemetry::warn;
 use datafusion::catalog::TableFunction;
@@ -96,6 +98,8 @@ pub struct QueryEngineState {
     aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
     table_functions: Arc<RwLock<HashMap<String, Arc<TableFunction>>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
+    #[cfg(test)]
+    memory_ledger_account: Option<Account>,
     plugins: Plugins,
 }
 
@@ -173,7 +177,10 @@ impl QueryEngineState {
 
         let runtime_context = QueryRuntimeContext::new(&options, memory_pool_size);
         runtime_provider.configure_session_config(runtime_context, &mut session_config);
-        let runtime_builder = DefaultQueryRuntimeProvider::runtime_env_builder(runtime_context);
+        let (runtime_builder, memory_ledger_account) =
+            DefaultQueryRuntimeProvider::runtime_env_components(runtime_context);
+        #[cfg(not(test))]
+        drop(memory_ledger_account);
         let runtime_env = runtime_provider.build_runtime_env(runtime_context, runtime_builder)?;
 
         // Apply extension rules
@@ -284,6 +291,8 @@ impl QueryEngineState {
             aggr_functions: Arc::new(RwLock::new(HashMap::new())),
             table_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
+            #[cfg(test)]
+            memory_ledger_account,
             plugins,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -472,6 +481,11 @@ impl QueryEngineState {
         self.df_context.state()
     }
 
+    #[cfg(test)]
+    pub(crate) fn memory_ledger_account(&self) -> Option<&Account> {
+        self.memory_ledger_account.as_ref()
+    }
+
     /// Create a DataFrame for a table
     pub fn read_table(&self, table: TableRef) -> DfResult<DataFrame> {
         self.df_context
@@ -579,11 +593,15 @@ impl MetricsMemoryPool {
     // Number of top memory consumers to report in OOM error messages
     const TOP_CONSUMERS_TO_REPORT: usize = 5;
 
+    pub(super) fn top_consumers_to_report() -> NonZeroUsize {
+        NonZeroUsize::new(Self::TOP_CONSUMERS_TO_REPORT).unwrap()
+    }
+
     pub(super) fn new(limit: usize) -> Self {
         Self {
             inner: Arc::new(TrackConsumersPool::new(
                 GreedyMemoryPool::new(limit),
-                NonZeroUsize::new(Self::TOP_CONSUMERS_TO_REPORT).unwrap(),
+                Self::top_consumers_to_report(),
             )),
         }
     }
@@ -730,6 +748,31 @@ mod tests {
             },
         );
 
+        assert!(matches!(
+            state
+                .session_state()
+                .runtime_env()
+                .memory_pool
+                .memory_limit(),
+            DfMemoryLimit::Finite(1024)
+        ));
+        assert!(state.memory_ledger_account().is_none());
+    }
+
+    #[test]
+    fn query_runtime_uses_memory_ledger_only_when_enabled() {
+        let state = new_query_engine_state_with(
+            Plugins::default(),
+            QueryOptions {
+                memory_pool_size: MemoryLimit::Size(ReadableSize(1024)),
+                experimental_enable_memory_ledger: true,
+                ..Default::default()
+            },
+        );
+
+        let account = state.memory_ledger_account().unwrap();
+        assert_eq!(account.target_limit_bytes(), 1024);
+        assert_eq!(account.used_bytes(), 0);
         assert!(matches!(
             state
                 .session_state()

@@ -157,6 +157,10 @@ parallelism = 1
 ## NOTE: This does NOT limit memory used by table scans.
 memory_pool_size = "50%"
 
+## Use the experimental memory ledger to enforce the query memory pool limit.
+## Disabled by default.
+experimental_enable_memory_ledger = false
+
 ## The memory options.
 [memory]
 ## Whether to enable heap profiling activation during startup.

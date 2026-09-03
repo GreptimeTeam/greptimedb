@@ -205,6 +205,15 @@ impl ErrorExt for Error {
             | Error::PhysicalExpr { .. }
             | Error::RecordBatchSliceIndexOverflow { .. } => StatusCode::Internal,
 
+            Error::PollStream { error, .. }
+                if matches!(
+                    error.find_root(),
+                    datafusion::error::DataFusionError::ResourcesExhausted(_)
+                ) =>
+            {
+                StatusCode::RuntimeResourcesExhausted
+            }
+
             Error::PollStream { .. } => StatusCode::EngineExecuteQuery,
 
             Error::ArrowCompute { .. } => StatusCode::IllegalState,

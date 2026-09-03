@@ -278,6 +278,10 @@ parallelism = 0
 ## NOTE: This does NOT limit memory used by table scans.
 memory_pool_size = "50%"
 
+## Use the experimental memory ledger to enforce the query memory pool limit.
+## Disabled by default.
+experimental_enable_memory_ledger = false
+
 ## The data storage options.
 [storage]
 ## The working home directory.

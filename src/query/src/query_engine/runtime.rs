@@ -14,11 +14,15 @@
 
 use std::sync::Arc;
 
+use common_memory_manager::PermitGranularity;
+use common_memory_manager::ledger::{Account, Category};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionConfig;
+use datafusion::execution::memory_pool::TrackConsumersPool;
 use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 
 use crate::options::QueryOptions;
+use crate::query_engine::ledger_pool::LedgerMemoryPool;
 use crate::query_engine::state::MetricsMemoryPool;
 
 /// Reference-counted query runtime provider.
@@ -67,12 +71,38 @@ pub struct DefaultQueryRuntimeProvider;
 impl DefaultQueryRuntimeProvider {
     /// Creates a default DataFusion runtime environment builder.
     pub fn runtime_env_builder(ctx: QueryRuntimeContext<'_>) -> RuntimeEnvBuilder {
+        Self::runtime_env_components(ctx).0
+    }
+
+    pub(super) fn runtime_env_components(
+        ctx: QueryRuntimeContext<'_>,
+    ) -> (RuntimeEnvBuilder, Option<Account>) {
         if ctx.resolved_memory_pool_size > 0 {
-            RuntimeEnvBuilder::new().with_memory_pool(Arc::new(MetricsMemoryPool::new(
-                ctx.resolved_memory_pool_size,
-            )))
+            if ctx.query_options.experimental_enable_memory_ledger {
+                let account = Account::new(
+                    "query/engine",
+                    Category::Query,
+                    ctx.resolved_memory_pool_size as u64,
+                    PermitGranularity::Kilobyte,
+                );
+                let pool = TrackConsumersPool::new(
+                    LedgerMemoryPool::new(account.clone(), account.granularity()),
+                    MetricsMemoryPool::top_consumers_to_report(),
+                );
+                (
+                    RuntimeEnvBuilder::new().with_memory_pool(Arc::new(pool)),
+                    Some(account),
+                )
+            } else {
+                (
+                    RuntimeEnvBuilder::new().with_memory_pool(Arc::new(MetricsMemoryPool::new(
+                        ctx.resolved_memory_pool_size,
+                    ))),
+                    None,
+                )
+            }
         } else {
-            RuntimeEnvBuilder::new()
+            (RuntimeEnvBuilder::new(), None)
         }
     }
 }

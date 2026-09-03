@@ -310,6 +310,10 @@ allow_query_fallback = false
 ## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
 memory_pool_size = "50%"
 
+## Use the experimental memory ledger to enforce the query memory pool limit.
+## Disabled by default.
+experimental_enable_memory_ledger = false
+
 ## Datanode options.
 [datanode]
 ## Datanode client options.
