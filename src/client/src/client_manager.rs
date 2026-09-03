@@ -26,6 +26,9 @@ use crate::flow::FlowRequester;
 use crate::region::RegionRequester;
 
 pub struct NodeClients {
+    // Keep the channel managers independent by lane:
+    // query = Flight DoGet/distributed reads; control/mutation = health, unary RPCs,
+    // gateway, and Flight DoPut.
     query_channel_manager: ChannelManager,
     control_channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
@@ -144,15 +147,15 @@ mod tests {
         });
         assert_eq!(0, control_count);
 
-        client.make_mutation_flight_client(false, false).unwrap();
-        client.make_mutation_flight_client(false, false).unwrap();
+        client.make_control_flight_client(false, false).unwrap();
+        client.make_control_flight_client(false, false).unwrap();
         assert_pool_has_one_address(&node_clients.query_channel_manager);
         assert_pool_has_one_address(&node_clients.control_channel_manager);
 
         let manager = ChannelManager::new();
         let legacy = Client::with_manager_and_urls(manager.clone(), [PEER_ADDR]);
         legacy.make_flight_client(false, false).unwrap();
-        legacy.make_mutation_flight_client(false, false).unwrap();
+        legacy.make_control_flight_client(false, false).unwrap();
         assert_pool_has_one_address(&manager);
     }
 }

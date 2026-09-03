@@ -420,6 +420,9 @@ impl Client {
             .as_bytes() as usize
     }
 
+    /// Creates a Flight client on the query lane for DoGet/distributed reads.
+    ///
+    /// This public name is retained for compatibility.
     pub fn make_flight_client(
         &self,
         send_compression: bool,
@@ -432,7 +435,7 @@ impl Client {
         )
     }
 
-    pub(crate) fn make_mutation_flight_client(
+    pub(crate) fn make_control_flight_client(
         &self,
         send_compression: bool,
         accept_compression: bool,
