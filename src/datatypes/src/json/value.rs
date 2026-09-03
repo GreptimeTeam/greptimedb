@@ -723,12 +723,7 @@ where
     I: IntoIterator<Item = (K, JsonNativeType)>,
     K: Into<String>,
 {
-    let mut fields = fields.into_iter().peekable();
-    if fields.peek().is_none() {
-        JsonNativeType::Null
-    } else {
-        JsonNativeType::Object(fields.map(|(k, v)| (k.into(), v)).collect())
-    }
+    JsonNativeType::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
 
 impl From<()> for JsonVariantRef<'_> {
@@ -974,11 +969,10 @@ mod tests {
             ])))
         );
 
-        // Empty objects have native type Null, but the value still needs alignment
-        // before converting into a typed struct value.
+        // Empty objects have an empty Object type and remain distinct from Null.
         let expected = JsonNativeType::Object(JsonObjectType::from([(
             "empty".to_string(),
-            JsonNativeType::Null,
+            JsonNativeType::Object(JsonObjectType::default()),
         )]));
         let mut value = parse_json_value(r#"{"empty":{}}"#);
         assert_eq!(value.json_type(), &expected);
@@ -987,7 +981,7 @@ mod tests {
             value,
             JsonValue::from(JsonVariant::Object(BTreeMap::from([(
                 "empty".to_string(),
-                JsonVariant::Null,
+                JsonVariant::Object(BTreeMap::default()),
             )])))
         );
 

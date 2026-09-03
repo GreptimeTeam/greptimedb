@@ -50,6 +50,11 @@ pub enum JsonNumberType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum JsonNativeType {
+    /// JSON null value type.
+    ///
+    /// This variant may also appear as the initial state while merging inferred
+    /// types, but it does not represent an empty object. Empty objects are
+    /// represented as `Object({})`.
     #[default]
     Null,
     Bool,
