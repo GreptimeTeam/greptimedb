@@ -1,9 +1,7 @@
--- Reproduction for JSON integer precision loss beyond u64::MAX.
--- See issue: TBD (link once published)
---
--- Case 1 (control): integer within u64 range is stored exactly.
--- Case 2 (bug): u64::MAX + 1 is silently coerced to f64.
--- Case 3 (bug): 30-digit integer is severely distorted.
+-- Regression test for JSON integer precision loss beyond u64::MAX.
+-- Integers outside i64/u64 range must be rejected with an explicit
+-- error instead of being silently coerced to f64.
+-- See PR: fix(datatypes): reject JSON numbers beyond u64::MAX
 
 create table t_json_precision (
     ts timestamp time index,
@@ -13,10 +11,20 @@ create table t_json_precision (
 -- Within u64 range: exact round-trip
 insert into t_json_precision values (1, '{"n": 18446744073709551615}');
 
--- Beyond u64::MAX: currently accepted with Affected Rows: 1 and
--- silently stored as a f64 approximation (precision lost forever).
+-- i64::MIN also accepted exactly
+insert into t_json_precision values (4, '{"n": -9223372036854775808}');
+
+-- Floats and exponents are unaffected
+insert into t_json_precision values (5, '{"n": 1.5}');
+
+-- Beyond u64::MAX: rejected with an explicit error
 insert into t_json_precision values (2, '{"n": 18446744073709551616}');
+
+-- 30-digit integer: rejected
 insert into t_json_precision values (3, '{"n": 123456789012345678901234567890}');
+
+-- Negative beyond i64::MIN: rejected
+insert into t_json_precision values (6, '{"n": -9223372036854775809}');
 
 select
     ts,
