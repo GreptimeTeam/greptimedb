@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use colored::Colorize;
@@ -46,7 +46,7 @@ use moka::future::CacheBuilder;
 use object_store::manager::ObjectStoreManager;
 use object_store::util::normalize_dir;
 use query::optimizer::parallelize_scan::ParallelizeScan;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use sqlparser::ast::ExprWithAlias as SqlExprWithAlias;
 use sqlparser::dialect::GenericDialect;
@@ -102,8 +102,12 @@ pub struct ScanbenchCommand {
     scanner: String,
 
     /// Path to scan request JSON config file (optional)
-    #[clap(long, value_name = "FILE")]
+    #[clap(long, value_name = "FILE", conflicts_with = "scan_configs")]
     scan_config: Option<PathBuf>,
+
+    /// Path to a JSON array of scan request configs, each executed once
+    #[clap(long, value_name = "FILE", conflicts_with = "scan_config")]
+    scan_configs: Option<PathBuf>,
 
     /// Number of partitions for parallel scan (simulates parallelism)
     #[clap(long, default_value = "1")]
@@ -125,6 +129,10 @@ pub struct ScanbenchCommand {
     #[clap(long, value_name = "FILE")]
     pprof_file: Option<PathBuf>,
 
+    /// Output structured benchmark and analyze results as JSON
+    #[clap(long, value_name = "FILE")]
+    result_file: Option<PathBuf>,
+
     /// Enable WAL replay when opening the region.
     #[clap(long, default_value_t = false)]
     enable_wal: bool,
@@ -135,12 +143,300 @@ pub struct ScanbenchCommand {
 }
 
 /// JSON config for scan request parameters.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 struct ScanConfig {
+    name: Option<String>,
     projection: Option<Vec<usize>>,
     projection_names: Option<Vec<String>>,
     filters: Option<Vec<String>>,
     series_row_selector: Option<String>,
+}
+
+struct ScanConfigSet {
+    configs: Vec<ScanConfig>,
+    is_suite: bool,
+}
+
+impl ScanConfigSet {
+    fn run_count(&self, iterations: usize) -> usize {
+        if self.is_suite {
+            self.configs.len()
+        } else {
+            iterations
+        }
+    }
+
+    fn query_index(&self, iteration: usize) -> usize {
+        if self.is_suite { iteration } else { 0 }
+    }
+}
+
+struct ResolvedScanConfig {
+    name: String,
+    projection: Option<Vec<usize>>,
+    filters: Vec<DfExpr>,
+    series_row_selector: Option<TimeSeriesRowSelector>,
+}
+
+struct QueryRunSummary {
+    name: String,
+    runs: u64,
+    total_rows: u64,
+    total_elapsed: Duration,
+}
+
+impl QueryRunSummary {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            runs: 0,
+            total_rows: 0,
+            total_elapsed: Duration::ZERO,
+        }
+    }
+
+    fn record(&mut self, rows: u64, elapsed: Duration) {
+        self.runs += 1;
+        self.total_rows += rows;
+        self.total_elapsed += elapsed;
+    }
+
+    fn mean_rows(&self) -> u64 {
+        self.total_rows.checked_div(self.runs).unwrap_or_default()
+    }
+
+    fn mean_elapsed(&self) -> Duration {
+        self.total_elapsed
+            .checked_div(self.runs as u32)
+            .unwrap_or_default()
+    }
+}
+
+const RESULT_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize)]
+struct ScanbenchResult {
+    format_version: u32,
+    started_at_unix_ms: u64,
+    benchmark: BenchmarkMetadata,
+    runs: Vec<ScanRunResult>,
+    summary: BenchmarkResultSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkMetadata {
+    scanner: String,
+    region_id: String,
+    region_id_u64: u64,
+    table_dir: String,
+    path_type: String,
+    parallelism: usize,
+    enable_wal: bool,
+    config_mode: String,
+    run_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct NormalizedScanConfig {
+    name: String,
+    projection: Option<Vec<usize>>,
+    filters: Vec<String>,
+    series_row_selector: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScanRunResult {
+    iteration: usize,
+    query_index: usize,
+    name: String,
+    config: NormalizedScanConfig,
+    rows: u64,
+    batches: u64,
+    setup_elapsed_ns: u64,
+    scan_elapsed_ns: u64,
+    elapsed_ns: u64,
+    array_mem_size_bytes: u64,
+    estimated_size_bytes: u64,
+    partitions: Vec<PartitionResult>,
+    scanner_explain: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PartitionResult {
+    partition: usize,
+    rows: u64,
+    batches: u64,
+    array_mem_size_bytes: u64,
+    estimated_size_bytes: u64,
+    first_batch_elapsed_ns: Option<u64>,
+    elapsed_ns: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkResultSummary {
+    runs: u64,
+    total_rows: u64,
+    total_elapsed_ns: u64,
+    mean_rows: u64,
+    mean_elapsed_ns: u64,
+    queries: Vec<QueryResultSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct QueryResultSummary {
+    query_index: usize,
+    name: String,
+    runs: u64,
+    total_rows: u64,
+    total_elapsed_ns: u64,
+    mean_rows: u64,
+    mean_elapsed_ns: u64,
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
+fn started_at_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn result_summary(
+    total_rows: u64,
+    total_elapsed: Duration,
+    summaries: &[QueryRunSummary],
+) -> BenchmarkResultSummary {
+    let runs = summaries.iter().map(|summary| summary.runs).sum::<u64>();
+    BenchmarkResultSummary {
+        runs,
+        total_rows,
+        total_elapsed_ns: duration_ns(total_elapsed),
+        mean_rows: total_rows.checked_div(runs).unwrap_or_default(),
+        mean_elapsed_ns: duration_ns(total_elapsed.checked_div(runs as u32).unwrap_or_default()),
+        queries: summaries
+            .iter()
+            .enumerate()
+            .map(|(index, summary)| QueryResultSummary {
+                query_index: index + 1,
+                name: summary.name.clone(),
+                runs: summary.runs,
+                total_rows: summary.total_rows,
+                total_elapsed_ns: duration_ns(summary.total_elapsed),
+                mean_rows: summary.mean_rows(),
+                mean_elapsed_ns: duration_ns(summary.mean_elapsed()),
+            })
+            .collect(),
+    }
+}
+
+async fn write_result_file(path: &PathBuf, result: &ScanbenchResult) -> error::Result<()> {
+    let content = serde_json::to_vec_pretty(result).context(error::SerdeJsonSnafu)?;
+    fs::write(path, content).await.context(error::FileIoSnafu)
+}
+
+fn validate_scan_config_suite(
+    mut configs: Vec<ScanConfig>,
+    iterations: usize,
+) -> error::Result<Vec<ScanConfig>> {
+    if iterations != 1 {
+        return Err(error::IllegalConfigSnafu {
+            msg: format!(
+                "--iterations cannot be used with --scan-configs (got {iterations}); the array length defines the run count"
+            ),
+        }
+        .build());
+    }
+    if configs.is_empty() {
+        return Err(error::IllegalConfigSnafu {
+            msg: "--scan-configs file must contain at least one scan config".to_string(),
+        }
+        .build());
+    }
+
+    let mut names = HashSet::with_capacity(configs.len());
+    for (index, config) in configs.iter_mut().enumerate() {
+        let name = match config.name.take() {
+            Some(name) => {
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(error::IllegalConfigSnafu {
+                        msg: format!("scan config at index {index} has an empty name"),
+                    }
+                    .build());
+                }
+                name.to_string()
+            }
+            None => format!("query-{:03}", index + 1),
+        };
+        if !names.insert(name.clone()) {
+            return Err(error::IllegalConfigSnafu {
+                msg: format!("duplicate scan config name '{name}' at index {index}"),
+            }
+            .build());
+        }
+        config.name = Some(name);
+    }
+
+    Ok(configs)
+}
+
+fn resolve_series_row_selector(
+    scan_config: &ScanConfig,
+) -> error::Result<Option<TimeSeriesRowSelector>> {
+    match scan_config.series_row_selector.as_deref() {
+        Some("last_row") => Ok(Some(TimeSeriesRowSelector::LastRow)),
+        Some(other) => Err(error::IllegalConfigSnafu {
+            msg: format!("Unknown series_row_selector '{other}'"),
+        }
+        .build()),
+        None => Ok(None),
+    }
+}
+
+fn resolve_scan_configs(
+    config_set: &ScanConfigSet,
+    metadata: &RegionMetadata,
+) -> error::Result<Vec<ResolvedScanConfig>> {
+    config_set
+        .configs
+        .iter()
+        .enumerate()
+        .map(|(index, config)| {
+            let name = config
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("query-{:03}", index + 1));
+            let projection = resolve_projection(config, Some(metadata)).map_err(|err| {
+                error::IllegalConfigSnafu {
+                    msg: format!("invalid scan config at index {index} ('{name}'): {err}"),
+                }
+                .build()
+            })?;
+            let filters = resolve_filters(config, metadata).map_err(|err| {
+                error::IllegalConfigSnafu {
+                    msg: format!("invalid scan config at index {index} ('{name}'): {err}"),
+                }
+                .build()
+            })?;
+            let series_row_selector = resolve_series_row_selector(config).map_err(|err| {
+                error::IllegalConfigSnafu {
+                    msg: format!("invalid scan config at index {index} ('{name}'): {err}"),
+                }
+                .build()
+            })?;
+            Ok(ResolvedScanConfig {
+                name,
+                projection,
+                filters,
+                series_row_selector,
+            })
+        })
+        .collect()
 }
 
 fn resolve_projection(
@@ -399,12 +695,59 @@ fn mock_schema_metadata_manager() -> Arc<SchemaMetadataManager> {
 }
 
 impl ScanbenchCommand {
+    async fn load_scan_config_set(&self) -> error::Result<ScanConfigSet> {
+        match (&self.scan_config, &self.scan_configs) {
+            (Some(_), Some(_)) => Err(error::IllegalConfigSnafu {
+                msg: "--scan-config and --scan-configs are mutually exclusive".to_string(),
+            }
+            .build()),
+            (Some(path), None) => {
+                let content = tokio::fs::read_to_string(path)
+                    .await
+                    .context(error::FileIoSnafu)?;
+                let config =
+                    serde_json::from_str::<ScanConfig>(&content).context(error::SerdeJsonSnafu)?;
+                Ok(ScanConfigSet {
+                    configs: vec![config],
+                    is_suite: false,
+                })
+            }
+            (None, Some(path)) => {
+                if self.iterations != 1 {
+                    return Err(error::IllegalConfigSnafu {
+                        msg: format!(
+                            "--iterations cannot be used with --scan-configs (got {}); the array length defines the run count",
+                            self.iterations
+                        ),
+                    }
+                    .build());
+                }
+                let content = tokio::fs::read_to_string(path)
+                    .await
+                    .context(error::FileIoSnafu)?;
+                let configs = serde_json::from_str::<Vec<ScanConfig>>(&content)
+                    .context(error::SerdeJsonSnafu)?;
+                Ok(ScanConfigSet {
+                    configs: validate_scan_config_suite(configs, self.iterations)?,
+                    is_suite: true,
+                })
+            }
+            (None, None) => Ok(ScanConfigSet {
+                configs: vec![ScanConfig::default()],
+                is_suite: false,
+            }),
+        }
+    }
+
     pub async fn run(&self) -> error::Result<()> {
         if self.verbose {
             common_telemetry::init_default_ut_logging();
         }
 
         println!("{}", "Starting scanbench...".cyan().bold());
+        let benchmark_started_at_unix_ms = started_at_unix_ms();
+
+        let scan_config_set = self.load_scan_config_set().await?;
 
         let region_id = parse_region_id(&self.region_id)?;
         let path_type = parse_path_type(&self.path_type)?;
@@ -501,22 +844,12 @@ impl ScanbenchCommand {
             .context(error::BuildCliSnafu)?;
         println!("{} Region opened", "✓".green());
 
-        // Load scan config
-        let scan_config = if let Some(path) = &self.scan_config {
-            let content = tokio::fs::read_to_string(path)
-                .await
-                .context(error::FileIoSnafu)?;
-            serde_json::from_str::<ScanConfig>(&content).context(error::SerdeJsonSnafu)?
-        } else {
-            ScanConfig::default()
-        };
         let metadata = engine
             .get_metadata(region_id)
             .await
             .map_err(BoxedError::new)
             .context(error::BuildCliSnafu)?;
-        let projection = resolve_projection(&scan_config, Some(&metadata))?;
-        let filters = resolve_filters(&scan_config, &metadata)?;
+        let scan_configs = resolve_scan_configs(&scan_config_set, &metadata)?;
 
         // Build scan request
         let distribution = match self.scanner.as_str() {
@@ -534,24 +867,24 @@ impl ScanbenchCommand {
             }
         };
 
-        let series_row_selector = match scan_config.series_row_selector.as_deref() {
-            Some("last_row") => Some(TimeSeriesRowSelector::LastRow),
-            Some(other) => {
-                return Err(error::IllegalConfigSnafu {
-                    msg: format!("Unknown series_row_selector '{}'", other),
-                }
-                .build());
-            }
-            None => None,
-        };
-
-        println!(
-            "{} Scanner: {}, Parallelism: {}, Iterations: {}",
-            "ℹ".blue(),
-            self.scanner,
-            self.parallelism,
-            self.iterations,
-        );
+        let run_count = scan_config_set.run_count(self.iterations);
+        if scan_config_set.is_suite {
+            println!(
+                "{} Scanner: {}, Parallelism: {}, Queries: {}",
+                "ℹ".blue(),
+                self.scanner,
+                self.parallelism,
+                run_count,
+            );
+        } else {
+            println!(
+                "{} Scanner: {}, Parallelism: {}, Iterations: {}",
+                "ℹ".blue(),
+                self.scanner,
+                self.parallelism,
+                run_count,
+            );
+        }
 
         // Start profiling if pprof_file is specified (unless pprof_after_warmup is set)
         #[cfg(unix)]
@@ -584,12 +917,24 @@ impl ScanbenchCommand {
 
         let mut total_rows_all = 0u64;
         let mut total_elapsed_all = std::time::Duration::ZERO;
+        let mut run_results = Vec::with_capacity(if self.result_file.is_some() {
+            run_count
+        } else {
+            0
+        });
+        let mut query_summaries = scan_configs
+            .iter()
+            .map(|config| QueryRunSummary::new(config.name.clone()))
+            .collect::<Vec<_>>();
+        let collect_scanner_explain = self.verbose || self.result_file.is_some();
 
-        for iteration in 0..self.iterations {
+        for iteration in 0..run_count {
+            let query_index = scan_config_set.query_index(iteration);
+            let scan_config = &scan_configs[query_index];
             let request = ScanRequest {
-                projection: projection.clone(),
-                filters: filters.clone(),
-                series_row_selector,
+                projection: scan_config.projection.clone(),
+                filters: scan_config.filters.clone(),
+                series_row_selector: scan_config.series_row_selector,
                 distribution,
                 ..Default::default()
             };
@@ -642,7 +987,7 @@ impl ScanbenchCommand {
             // Scan all partitions
             let num_partitions = scanner.properties().partitions.len();
             let ctx = QueryScanContext {
-                explain_verbose: self.verbose,
+                explain_verbose: collect_scanner_explain,
             };
             let metrics_set = ExecutionPlanMetricsSet::new();
 
@@ -694,6 +1039,7 @@ impl ScanbenchCommand {
             }
 
             let mut total_rows = 0u64;
+            let mut total_batches = 0u64;
             let mut total_array_mem_size = 0u64;
             let mut total_estimated_size = 0u64;
             let mut partition_stats = Vec::with_capacity(num_partitions);
@@ -708,6 +1054,7 @@ impl ScanbenchCommand {
                     .context(error::BuildCliSnafu)?;
                 let stats = result.context(error::BuildCliSnafu)?;
                 total_rows += stats.rows;
+                total_batches += stats.batches;
                 total_array_mem_size += stats.array_mem_size;
                 total_estimated_size += stats.estimated_size;
                 partition_stats.push(stats);
@@ -717,10 +1064,23 @@ impl ScanbenchCommand {
             let elapsed = start.elapsed();
             total_rows_all += total_rows;
             total_elapsed_all += elapsed;
+            query_summaries[query_index].record(total_rows, elapsed);
+
+            let query_display = if scan_config_set.is_suite {
+                format!(
+                    " [query {}/{}: {}]",
+                    query_index + 1,
+                    scan_configs.len(),
+                    scan_config.name
+                )
+            } else {
+                String::new()
+            };
 
             println!(
-                "  [iter {}] {} rows in {:?} ({} partitions), array_mem_size: {}, estimated_size: {}",
+                "  [iter {}]{} {} rows in {:?} ({} partitions), array_mem_size: {}, estimated_size: {}",
                 iteration + 1,
+                query_display,
                 total_rows.to_string().cyan(),
                 elapsed,
                 num_partitions,
@@ -728,8 +1088,11 @@ impl ScanbenchCommand {
                 format_bytes(total_estimated_size),
             );
 
-            if self.verbose {
+            if collect_scanner_explain {
                 partition_stats.sort_unstable_by_key(|stats| stats.partition);
+            }
+
+            if self.verbose {
                 for stats in &partition_stats {
                     let first_batch = stats
                         .first_batch_elapsed
@@ -770,11 +1133,50 @@ impl ScanbenchCommand {
                         skew,
                     );
                 }
-                println!(
-                    "  {} Scanner explain: {}",
-                    "ℹ".blue(),
-                    VerboseScannerDisplay(scanner.as_ref())
-                );
+            }
+
+            let scanner_explain = if collect_scanner_explain {
+                format!("{}", VerboseScannerDisplay(scanner.as_ref()))
+            } else {
+                String::new()
+            };
+            if self.verbose {
+                println!("  {} Scanner explain: {}", "ℹ".blue(), scanner_explain);
+            }
+
+            if self.result_file.is_some() {
+                let source_config = &scan_config_set.configs[query_index];
+                run_results.push(ScanRunResult {
+                    iteration: iteration + 1,
+                    query_index: query_index + 1,
+                    name: scan_config.name.clone(),
+                    config: NormalizedScanConfig {
+                        name: scan_config.name.clone(),
+                        projection: scan_config.projection.clone(),
+                        filters: source_config.filters.clone().unwrap_or_default(),
+                        series_row_selector: source_config.series_row_selector.clone(),
+                    },
+                    rows: total_rows,
+                    batches: total_batches,
+                    setup_elapsed_ns: duration_ns(setup_elapsed),
+                    scan_elapsed_ns: duration_ns(scan_elapsed),
+                    elapsed_ns: duration_ns(elapsed),
+                    array_mem_size_bytes: total_array_mem_size,
+                    estimated_size_bytes: total_estimated_size,
+                    partitions: partition_stats
+                        .iter()
+                        .map(|stats| PartitionResult {
+                            partition: stats.partition,
+                            rows: stats.rows,
+                            batches: stats.batches,
+                            array_mem_size_bytes: stats.array_mem_size,
+                            estimated_size_bytes: stats.estimated_size,
+                            first_batch_elapsed_ns: stats.first_batch_elapsed.map(duration_ns),
+                            elapsed_ns: duration_ns(stats.elapsed),
+                        })
+                        .collect(),
+                    scanner_explain,
+                });
             }
 
             // Start profiling after the first iteration (warmup) if pprof_after_warmup is set
@@ -835,15 +1237,66 @@ impl ScanbenchCommand {
         }
 
         // Summary
-        if self.iterations > 1 {
-            let avg_elapsed = total_elapsed_all / self.iterations as u32;
-            let avg_rows = total_rows_all / self.iterations as u64;
+        if scan_config_set.is_suite {
+            let avg_elapsed = total_elapsed_all / run_count as u32;
+            let avg_rows = total_rows_all / run_count as u64;
+            println!(
+                "\n{} Overall average: {} rows in {:?} over {} queries",
+                "Summary".green().bold(),
+                avg_rows.to_string().cyan(),
+                avg_elapsed,
+                run_count,
+            );
+            println!("{} Per-query:", "Summary".green().bold());
+            for (index, summary) in query_summaries.iter().enumerate() {
+                println!(
+                    "  [{}] {}: runs={}, mean_rows={}, mean_elapsed={:?}",
+                    index + 1,
+                    summary.name,
+                    summary.runs,
+                    summary.mean_rows(),
+                    summary.mean_elapsed(),
+                );
+            }
+        } else if run_count > 1 {
+            let avg_elapsed = total_elapsed_all / run_count as u32;
+            let avg_rows = total_rows_all / run_count as u64;
             println!(
                 "\n{} Average: {} rows in {:?} over {} iterations",
                 "Summary".green().bold(),
                 avg_rows.to_string().cyan(),
                 avg_elapsed,
-                self.iterations,
+                run_count,
+            );
+        }
+
+        if let Some(result_file) = &self.result_file {
+            let result = ScanbenchResult {
+                format_version: RESULT_FORMAT_VERSION,
+                started_at_unix_ms: benchmark_started_at_unix_ms,
+                benchmark: BenchmarkMetadata {
+                    scanner: self.scanner.clone(),
+                    region_id: self.region_id.clone(),
+                    region_id_u64: region_id.as_u64(),
+                    table_dir: self.table_dir.clone(),
+                    path_type: self.path_type.clone(),
+                    parallelism: self.parallelism,
+                    enable_wal: self.enable_wal,
+                    config_mode: if scan_config_set.is_suite {
+                        "suite".to_string()
+                    } else {
+                        "single".to_string()
+                    },
+                    run_count,
+                },
+                runs: run_results,
+                summary: result_summary(total_rows_all, total_elapsed_all, &query_summaries),
+            };
+            write_result_file(result_file, &result).await?;
+            println!(
+                "{} Results saved to {}",
+                "✓".green(),
+                result_file.display().to_string().cyan()
             );
         }
 
@@ -862,7 +1315,11 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
-    use super::{ScanConfig, resolve_filters, resolve_projection};
+    use super::{
+        BenchmarkMetadata, BenchmarkResultSummary, NormalizedScanConfig, PartitionResult,
+        ScanConfig, ScanRunResult, ScanbenchResult, resolve_filters, resolve_projection,
+        validate_scan_config_suite, write_result_file,
+    };
     use crate::error;
 
     #[test]
@@ -880,6 +1337,7 @@ mod tests {
     #[test]
     fn test_resolve_projection_by_indexes() -> error::Result<()> {
         let config = ScanConfig {
+            name: None,
             projection: Some(vec![0, 2]),
             projection_names: None,
             filters: None,
@@ -894,6 +1352,7 @@ mod tests {
     #[test]
     fn test_resolve_projection_by_names_without_metadata() {
         let config = ScanConfig {
+            name: None,
             projection: None,
             projection_names: Some(vec!["cpu".to_string(), "host".to_string()]),
             filters: None,
@@ -910,6 +1369,7 @@ mod tests {
     #[test]
     fn test_resolve_projection_conflict_fields() {
         let config = ScanConfig {
+            name: None,
             projection: Some(vec![0]),
             projection_names: Some(vec!["host".to_string()]),
             filters: None,
@@ -965,6 +1425,7 @@ mod tests {
         let metadata = builder.build().unwrap();
 
         let config = ScanConfig {
+            name: None,
             projection: None,
             projection_names: None,
             filters: Some(vec!["table_id = 1117".to_string()]),
@@ -990,5 +1451,122 @@ mod tests {
             config.filters,
             Some(vec!["host = 'web-1'".to_string(), "cpu > 80".to_string()])
         );
+    }
+
+    #[test]
+    fn test_parse_and_validate_scan_config_suite() {
+        let json = r#"[
+            {"name":" cold ","filters":["host = 'web-1'"]},
+            {"projection_names":["host","cpu"]}
+        ]"#;
+        let configs: Vec<ScanConfig> = serde_json::from_str(json).unwrap();
+        let configs = validate_scan_config_suite(configs, 1).unwrap();
+
+        assert_eq!(2, configs.len());
+        assert_eq!(Some("cold"), configs[0].name.as_deref());
+        assert_eq!(Some("query-002"), configs[1].name.as_deref());
+        assert_eq!(
+            Some(&vec!["host = 'web-1'".to_string()]),
+            configs[0].filters.as_ref()
+        );
+    }
+
+    #[test]
+    fn test_validate_scan_config_suite_rejects_invalid_input() {
+        let empty = validate_scan_config_suite(Vec::new(), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("at least one"));
+
+        let iterations = validate_scan_config_suite(vec![ScanConfig::default()], 2)
+            .unwrap_err()
+            .to_string();
+        assert!(iterations.contains("--iterations"));
+
+        let configs: Vec<ScanConfig> =
+            serde_json::from_str(r#"[{"name":"query"},{"name":" query "}]"#).unwrap();
+        let duplicate = validate_scan_config_suite(configs, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate.contains("duplicate"));
+
+        let configs: Vec<ScanConfig> = serde_json::from_str(r#"[{"name":"  "}]"#).unwrap();
+        let blank = validate_scan_config_suite(configs, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(blank.contains("empty name"));
+    }
+
+    #[tokio::test]
+    async fn test_write_result_file_overwrites_complete_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scanbench-result.json");
+        tokio::fs::write(&path, b"old result").await.unwrap();
+
+        let result = ScanbenchResult {
+            format_version: 1,
+            started_at_unix_ms: 42,
+            benchmark: BenchmarkMetadata {
+                scanner: "seq".to_string(),
+                region_id: "1024:0".to_string(),
+                region_id_u64: RegionId::new(1024, 0).as_u64(),
+                table_dir: "greptime/public/1024".to_string(),
+                path_type: "bare".to_string(),
+                parallelism: 8,
+                enable_wal: false,
+                config_mode: "suite".to_string(),
+                run_count: 1,
+            },
+            runs: vec![ScanRunResult {
+                iteration: 1,
+                query_index: 1,
+                name: "cpu-host-1".to_string(),
+                config: NormalizedScanConfig {
+                    name: "cpu-host-1".to_string(),
+                    projection: Some(vec![1, 2]),
+                    filters: vec!["hostname = 'host_1'".to_string()],
+                    series_row_selector: None,
+                },
+                rows: 100,
+                batches: 2,
+                setup_elapsed_ns: 10,
+                scan_elapsed_ns: 80,
+                elapsed_ns: 90,
+                array_mem_size_bytes: 1024,
+                estimated_size_bytes: 512,
+                partitions: vec![PartitionResult {
+                    partition: 0,
+                    rows: 100,
+                    batches: 2,
+                    array_mem_size_bytes: 1024,
+                    estimated_size_bytes: 512,
+                    first_batch_elapsed_ns: Some(20),
+                    elapsed_ns: 80,
+                }],
+                scanner_explain: "SeqScanExec: prefilter_columns_read=[hostname]".to_string(),
+            }],
+            summary: BenchmarkResultSummary {
+                runs: 1,
+                total_rows: 100,
+                total_elapsed_ns: 90,
+                mean_rows: 100,
+                mean_elapsed_ns: 90,
+                queries: vec![],
+            },
+        };
+
+        write_result_file(&path, &result).await.unwrap();
+        let content = tokio::fs::read(&path).await.unwrap();
+        let actual: serde_json::Value = serde_json::from_slice(&content).unwrap();
+
+        assert_eq!(1, actual["format_version"]);
+        assert_eq!("suite", actual["benchmark"]["config_mode"]);
+        assert_eq!(2, actual["runs"][0]["config"]["projection"][1]);
+        assert_eq!(100, actual["runs"][0]["partitions"][0]["rows"]);
+        assert_eq!(
+            "SeqScanExec: prefilter_columns_read=[hostname]",
+            actual["runs"][0]["scanner_explain"]
+        );
+        assert_eq!(90, actual["summary"]["mean_elapsed_ns"]);
     }
 }
