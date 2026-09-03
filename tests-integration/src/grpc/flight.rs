@@ -17,22 +17,33 @@ mod test {
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::query_request::Query;
+    use api::v1::region::{FlushRequest, RegionRequest, RegionRequestHeader, region_request};
     use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, QueryRequest, SemanticType};
     use arrow_flight::flight_service_server::FlightServiceServer;
     use arrow_flight::{FlightData, FlightDescriptor, Ticket};
+    use async_trait::async_trait;
     use auth::user_provider_from_option;
+    use client::client_manager::NodeClients;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
     use common_grpc::flight::do_put::DoPutMetadata;
     use common_grpc::flight::{FlightEncoder, FlightMessage};
+    use common_meta::node_manager::DatanodeManager;
+    use common_meta::peer::Peer;
     use common_query::OutputData;
+    use common_query::request::QueryRequest as RegionQueryRequest;
     use common_recordbatch::adapter::RegionWatermarkEntry;
-    use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
+    use common_recordbatch::{
+        RecordBatch, RecordBatchStreamWrapper, RecordBatches, SendableRecordBatchStream,
+    };
+    use common_runtime::Builder as RuntimeBuilder;
+    use common_runtime::runtime::BuilderBuild;
     use common_telemetry::tracing_context::TracingContext;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
@@ -46,8 +57,11 @@ mod test {
         TonicStream,
     };
     use servers::grpc::greptime_handler::GreptimeRequestHandler;
+    use servers::grpc::region_server::{RegionServerHandler, RegionServerRequestHandler};
     use servers::grpc::{FlightCompression, GrpcServerConfig};
     use servers::server::Server;
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::Response;
     use tonic::transport::Server as TonicServer;
     use tower::service_fn;
@@ -58,6 +72,52 @@ mod test {
     use crate::tests::test_util::MockInstance;
 
     struct SlowFlightCraft;
+
+    struct RetainedFlightCraft;
+
+    struct RetainedRegionHandler;
+
+    #[async_trait]
+    impl RegionServerHandler for RetainedRegionHandler {
+        async fn handle(
+            &self,
+            _request: region_request::Body,
+        ) -> servers::error::Result<api::v1::region::RegionResponse> {
+            Ok(api::v1::region::RegionResponse {
+                header: Some(api::v1::ResponseHeader {
+                    status: Some(api::v1::Status {
+                        status_code: common_error::status_code::StatusCode::Success as _,
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[async_trait]
+    impl servers::grpc::flight::FlightCraft for RetainedFlightCraft {
+        async fn do_get(
+            &self,
+            _: tonic::Request<Ticket>,
+        ) -> std::result::Result<Response<TonicStream<FlightData>>, tonic::Status> {
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                "value",
+                ConcreteDataType::int32_datatype(),
+                false,
+            )]));
+            let stream =
+                futures_util::stream::pending::<common_recordbatch::error::Result<RecordBatch>>();
+            let recordbatches = RecordBatchStreamWrapper::new(schema, stream);
+            let stream = FlightRecordBatchStream::new(
+                FlightRecordBatchSource::RecordBatches(Box::pin(recordbatches)),
+                TracingContext::default(),
+                FlightCompression::default(),
+                session::context::QueryContext::arc(),
+            );
+            Ok(Response::new(Box::pin(stream)))
+        }
+    }
 
     fn slow_recordbatch_stream() -> SendableRecordBatchStream {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
@@ -94,6 +154,75 @@ mod test {
 
             Ok(Response::new(Box::pin(stream)))
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_node_clients_route_retained_region_query_and_control_to_separate_connections() {
+        let accepted_connections = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server_accepted_connections = accepted_connections.clone();
+        let incoming = TcpListenerStream::new(listener).map(move |result| {
+            result.map(|stream| {
+                server_accepted_connections.fetch_add(1, Ordering::SeqCst);
+                stream
+            })
+        });
+        let runtime = RuntimeBuilder::default()
+            .worker_threads(2)
+            .thread_name("retained-region-test")
+            .build()
+            .unwrap();
+        let region_handler =
+            RegionServerRequestHandler::new(Arc::new(RetainedRegionHandler), runtime);
+        let mut server = tokio::spawn(async move {
+            TonicServer::builder()
+                .add_service(FlightServiceServer::new(FlightCraftWrapper(
+                    RetainedFlightCraft,
+                )))
+                .add_service(api::v1::region::region_server::RegionServer::new(
+                    region_handler,
+                ))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let peer = Peer::new(1, addr.to_string());
+        let node_clients = NodeClients::new(ChannelConfig::new().timeout(None));
+        let datanode = node_clients.datanode(&peer).await;
+        let query_request = RegionQueryRequest {
+            header: None,
+            region_id: store_api::storage::RegionId::new(1, 0),
+            plan: datafusion_expr::LogicalPlanBuilder::empty(false)
+                .build()
+                .unwrap(),
+        };
+        let retained_query = datanode.handle_query(query_request.clone()).await.unwrap();
+
+        let control_request = RegionRequest {
+            header: Some(RegionRequestHeader::default()),
+            body: Some(region_request::Body::Flush(FlushRequest::default())),
+        };
+        datanode.handle(control_request.clone()).await.unwrap();
+        assert_eq!(2, accepted_connections.load(Ordering::SeqCst));
+
+        let second_query = datanode.handle_query(query_request).await.unwrap();
+        datanode.handle(control_request).await.unwrap();
+        assert_eq!(2, accepted_connections.load(Ordering::SeqCst));
+
+        drop(retained_query);
+        drop(second_query);
+        drop(datanode);
+        drop(node_clients);
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
