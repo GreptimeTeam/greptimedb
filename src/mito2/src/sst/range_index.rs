@@ -14,8 +14,10 @@
 
 //! Per-SST series row-range index.
 
+mod searcher;
 mod writer;
 
+pub use searcher::SstRangeIndexSearcher;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
     DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
