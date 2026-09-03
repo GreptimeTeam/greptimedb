@@ -663,7 +663,7 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
-    use crate::series_index::{TIME_UNIT_META_KEY, parse_time_unit};
+    use crate::series_index::TIME_UNIT_META_KEY;
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn object_store() -> ObjectStore {
@@ -760,7 +760,7 @@ mod tests {
                 .field(0)
                 .metadata()
                 .get(TIME_UNIT_META_KEY)
-                .and_then(|unit| parse_time_unit(unit.as_str()))
+                .and_then(|unit| unit.parse().ok())
         );
         assert_eq!(
             Some(TimeUnit::Millisecond),
@@ -768,7 +768,7 @@ mod tests {
                 .field(1)
                 .metadata()
                 .get(TIME_UNIT_META_KEY)
-                .and_then(|unit| parse_time_unit(unit.as_str()))
+                .and_then(|unit| unit.parse().ok())
         );
 
         let dense = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));

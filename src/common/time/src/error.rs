@@ -46,6 +46,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported time unit: {}", unit))]
+    UnsupportedTimeUnit {
+        unit: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Current timestamp overflow"))]
     TimestampOverflow {
         #[snafu(source)]
@@ -116,6 +123,7 @@ impl ErrorExt for Error {
             | Error::ParseDuration { .. }
             | Error::InvalidDatabaseTtl { .. }
             | Error::ParseTimestamp { .. }
+            | Error::UnsupportedTimeUnit { .. }
             | Error::InvalidTimezoneOffset { .. }
             | Error::Format { .. }
             | Error::ParseOffsetStr { .. }

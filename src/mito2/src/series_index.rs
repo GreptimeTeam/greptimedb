@@ -45,22 +45,10 @@ pub(crate) const TIME_UNIT_META_KEY: &str = "time_unit";
 
 /// Builds the field metadata recording that ts values are stored in `unit`.
 /// The recorded string is `TimeUnit`'s [`Display`](std::fmt::Display) form
-/// ("Millisecond", ...), the canonical human-readable unit name.
+/// ("Millisecond", ...), parsed back with [`FromStr`]
+/// (`common_time::timestamp::TimeUnit`).
 pub(crate) fn time_unit_metadata(unit: TimeUnit) -> HashMap<String, String> {
     HashMap::from([(TIME_UNIT_META_KEY.to_string(), unit.to_string())])
-}
-
-/// Parses a time unit string written by [`time_unit_metadata`]. Returns `None`
-/// for any unit this version does not know, so callers can distinguish an
-/// unknown unit from a missing one.
-pub(crate) fn parse_time_unit(unit: &str) -> Option<TimeUnit> {
-    match unit {
-        "Second" => Some(TimeUnit::Second),
-        "Millisecond" => Some(TimeUnit::Millisecond),
-        "Microsecond" => Some(TimeUnit::Microsecond),
-        "Nanosecond" => Some(TimeUnit::Nanosecond),
-        _ => None,
-    }
 }
 
 /// Identifies one series in a physical metric region.

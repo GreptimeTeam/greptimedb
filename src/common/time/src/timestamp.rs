@@ -16,6 +16,7 @@ use core::default::Default;
 use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
@@ -27,7 +28,10 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error;
-use crate::error::{ArithmeticOverflowSnafu, ParseTimestampSnafu, Result, TimestampOverflowSnafu};
+use crate::error::{
+    ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, Result, TimestampOverflowSnafu,
+    UnsupportedTimeUnitSnafu,
+};
 use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use crate::timezone::{Timezone, get_timezone};
 use crate::util::{datetime_to_utc, div_ceil};
@@ -681,6 +685,24 @@ impl Display for TimeUnit {
     }
 }
 
+/// Parses a time unit from its [`Display`](TimeUnit) form, e.g. `"Millisecond"`.
+impl FromStr for TimeUnit {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "Second" => Ok(TimeUnit::Second),
+            "Millisecond" => Ok(TimeUnit::Millisecond),
+            "Microsecond" => Ok(TimeUnit::Microsecond),
+            "Nanosecond" => Ok(TimeUnit::Nanosecond),
+            _ => UnsupportedTimeUnitSnafu {
+                unit: s.to_string(),
+            }
+            .fail(),
+        }
+    }
+}
+
 impl TimeUnit {
     pub fn factor(&self) -> u32 {
         match self {
@@ -1003,6 +1025,22 @@ mod tests {
             "2020-09-08T13:42:29.0042+08:00",
             "2020-09-08 05:42:29.004200",
         );
+    }
+
+    #[test]
+    fn test_time_unit_from_str() {
+        for unit in [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ] {
+            // The Display form round-trips through FromStr.
+            assert_eq!(unit.to_string().parse::<TimeUnit>().unwrap(), unit);
+        }
+
+        let err = "Femtosecond".parse::<TimeUnit>().unwrap_err();
+        assert_eq!("Unsupported time unit: Femtosecond", err.to_string());
     }
 
     #[test]

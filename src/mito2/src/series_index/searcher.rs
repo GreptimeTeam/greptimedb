@@ -44,7 +44,7 @@ use crate::error::{
 use crate::series_index::{
     MAX_TS_COLUMN, METRIC_SERIES_ID_BATCH_SIZE, MIN_TS_COLUMN, MetricSeriesId,
     MetricSeriesIdStream, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TIME_UNIT_META_KEY, TSID_COLUMN,
-    parse_time_unit, series_index_schema,
+    series_index_schema,
 };
 use crate::sst::parquet::format::{column_null_counts, column_values_by_type};
 use crate::sst::parquet::helper::fetch_byte_ranges;
@@ -308,10 +308,13 @@ fn index_time_unit(schema: &SchemaRef) -> Result<TimeUnit> {
                     "series index column {name} is missing the '{TIME_UNIT_META_KEY}' field metadata; the file was probably written before time units were recorded"
                 ),
             })?;
-        parse_time_unit(recorded).with_context(|| InvalidRecordBatchSnafu {
-            reason: format!(
-                "series index column {name} records unsupported time unit '{recorded}'"
-            ),
+        recorded.parse::<TimeUnit>().map_err(|_| {
+            InvalidRecordBatchSnafu {
+                reason: format!(
+                    "series index column {name} records unsupported time unit '{recorded}'"
+                ),
+            }
+            .build()
         })
     };
     let min_unit = unit(MIN_TS_COLUMN)?;
