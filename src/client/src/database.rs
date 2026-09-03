@@ -847,7 +847,7 @@ impl Database {
             MetadataValue::from_str(db_to_put).context(InvalidTonicMetadataValueSnafu)?,
         );
 
-        let mut client = self.client.make_flight_client(false, false)?;
+        let mut client = self.client.make_control_flight_client(false, false)?;
         let response = client.mut_inner().do_put(request).await?;
         let response = response
             .into_inner()
