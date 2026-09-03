@@ -10613,7 +10613,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
- "x509-certificate 0.25.0",
+ "x509-certificate",
 ]
 
 [[package]]
