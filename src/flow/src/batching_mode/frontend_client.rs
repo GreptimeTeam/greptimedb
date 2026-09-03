@@ -91,7 +91,8 @@ impl HandlerMutable {
 pub enum FrontendClient {
     Distributed {
         meta_client: Arc<MetaClient>,
-        chnl_mgr: ChannelManager,
+        query_channel_manager: ChannelManager,
+        control_channel_manager: ChannelManager,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
     },
@@ -136,17 +137,19 @@ impl FrontendClient {
         batch_opts: BatchingModeOptions,
     ) -> Result<Self, Error> {
         common_telemetry::info!("Frontend client build without auth");
+        let cfg = ChannelConfig::new()
+            .connect_timeout(batch_opts.grpc_conn_timeout)
+            .timeout(Some(batch_opts.query_timeout));
+        let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
+            .context(InvalidClientConfigSnafu)?;
+        // Keep separate TLS config handles and pools for query and control traffic.
+        let query_channel_manager = ChannelManager::with_config(cfg.clone(), tls_config.clone());
+        let control_channel_manager = ChannelManager::with_config(cfg, tls_config);
+
         Ok(Self::Distributed {
             meta_client,
-            chnl_mgr: {
-                let cfg = ChannelConfig::new()
-                    .connect_timeout(batch_opts.grpc_conn_timeout)
-                    .timeout(Some(batch_opts.query_timeout));
-
-                let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
-                    .context(InvalidClientConfigSnafu)?;
-                ChannelManager::with_config(cfg, tls_config)
-            },
+            query_channel_manager,
+            control_channel_manager,
             query,
             batch_opts,
         })
@@ -219,7 +222,8 @@ impl FrontendClient {
         frontends: &[Peer],
     ) -> Result<Vec<String>, Error> {
         let Self::Distributed {
-            chnl_mgr,
+            query_channel_manager,
+            control_channel_manager,
             batch_opts,
             ..
         } = self
@@ -232,10 +236,15 @@ impl FrontendClient {
             .iter()
             .map(|peer| {
                 let addr = peer.addr.clone();
-                let chnl_mgr = chnl_mgr.clone();
+                let query_channel_manager = query_channel_manager.clone();
+                let control_channel_manager = control_channel_manager.clone();
 
                 async move {
-                    let client = Client::with_manager_and_urls(chnl_mgr, vec![addr.clone()]);
+                    let client = Client::with_query_and_control_managers(
+                        query_channel_manager,
+                        control_channel_manager,
+                        vec![addr.clone()],
+                    );
                     let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
                     match tokio::time::timeout(probe_timeout, database.sql("SELECT 1")).await {
@@ -274,7 +283,8 @@ impl FrontendClient {
     ) -> Result<DatabaseWithPeer, Error> {
         let Self::Distributed {
             meta_client: _,
-            chnl_mgr,
+            query_channel_manager,
+            control_channel_manager,
             query: _,
             batch_opts,
         } = self
@@ -294,7 +304,11 @@ impl FrontendClient {
 
             for peer in frontends {
                 let addr = peer.addr.clone();
-                let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
+                let client = Client::with_query_and_control_managers(
+                    query_channel_manager.clone(),
+                    control_channel_manager.clone(),
+                    vec![addr.clone()],
+                );
                 let database = Database::new(catalog, schema, client);
                 let db = DatabaseWithPeer::new(database, peer);
                 match db.try_select_one().await {
