@@ -16,7 +16,7 @@
 //! TODO(discord9): write mock test
 
 use api::v1::SemanticType;
-use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::catalog::MemTable;
 use datafusion::datasource::provider_as_source;
 use datafusion_common::TableReference;
@@ -156,6 +156,49 @@ fn stateless_rejects_reserved_auto_names_for_auto_sink() {
 }
 
 #[test]
+fn stateless_distinct_preserves_direct_column_lineage() {
+    let source = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::int32_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let provider = MemTable::try_new(
+        Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+            Field::new("number", ArrowDataType::Int32, false),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+        ])),
+        vec![vec![]],
+    )
+    .unwrap();
+    let plan = LogicalPlanBuilder::scan(
+        TableReference::bare("source"),
+        provider_as_source(Arc::new(provider)),
+        None,
+    )
+    .unwrap()
+    .project(vec![datafusion_expr::col("number").alias("dis")])
+    .unwrap()
+    .distinct()
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let (output, lineage) = super::output_column_schemas(&plan, &source).unwrap();
+    assert_eq!(output[0].name, "dis");
+    assert_eq!(lineage, vec![Some(0)]);
+    let relation = super::relation_desc_from_output(&output, &lineage, &[0]);
+    assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
+}
+
+#[test]
 fn stateless_normalizes_dictionary_output_type() {
     let field = Field::new_dictionary("host", ArrowDataType::UInt32, ArrowDataType::Utf8, true);
     let arrow_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![field]));
@@ -263,3 +306,38 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
 ///
 /// containing several default table info and schema
 fn mock_harness_flow_node_manager() {}
+
+#[test]
+fn stateless_flow_slot_write_lease_fences_replacement() {
+    let slot = Arc::new(super::StatelessFlowSlot {
+        runtime: Arc::new(tokio::sync::RwLock::new(None)),
+        active: std::sync::atomic::AtomicBool::new(true),
+    });
+    let guard = slot.runtime.try_read().unwrap();
+    assert!(guard.is_none());
+    // A writer cannot acquire the lease while an execution read lease is held.
+    assert!(slot.runtime.try_write().is_err());
+    drop(guard);
+    assert!(slot.runtime.try_write().is_ok());
+}
+
+#[test]
+fn stateless_captured_slot_rejects_inactive_or_detached_slot() {
+    let slot = super::StatelessFlowSlot {
+        runtime: Arc::new(tokio::sync::RwLock::new(None)),
+        active: std::sync::atomic::AtomicBool::new(false),
+    };
+
+    assert!(super::validate_captured_slot(&slot, None, false, 1, 42).is_err());
+}
+
+#[test]
+fn stateless_captured_slot_rejects_source_mismatch() {
+    let slot = super::StatelessFlowSlot {
+        runtime: Arc::new(tokio::sync::RwLock::new(None)),
+        active: std::sync::atomic::AtomicBool::new(true),
+    };
+
+    assert!(super::validate_captured_slot(&slot, Some(2), true, 1, 42).is_err());
+    assert!(super::validate_captured_slot(&slot, Some(1), false, 1, 42).is_err());
+}
