@@ -231,6 +231,11 @@ impl WriteCache {
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
         let region_id = write_request.metadata.region_id;
+        let override_sequence = if write_request.preserve_row_sequence {
+            None
+        } else {
+            write_request.max_sequence
+        };
 
         let store = self.file_cache.local_store();
         let path_provider = WriteCachePathProvider::new(self.file_cache.clone());
@@ -268,14 +273,14 @@ impl WriteCache {
                 writer
                     .write_all_flat_as_primary_key(
                         write_request.source,
-                        write_request.max_sequence,
+                        override_sequence,
                         write_opts,
                     )
                     .await?
             }
             crate::sst::FormatType::Flat => {
                 writer
-                    .write_all_flat(write_request.source, write_request.max_sequence, write_opts)
+                    .write_all_flat(write_request.source, override_sequence, write_opts)
                     .await?
             }
         };
@@ -631,6 +636,7 @@ mod tests {
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: Default::default(),
+            preserve_row_sequence: false,
             index_options: IndexOptions::default(),
             index_config: Default::default(),
             inverted_index_config: Default::default(),
@@ -735,6 +741,7 @@ mod tests {
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
+            preserve_row_sequence: false,
             index_options: IndexOptions::default(),
             index_config: Default::default(),
             inverted_index_config: Default::default(),
@@ -829,6 +836,7 @@ mod tests {
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
+            preserve_row_sequence: false,
             index_options: IndexOptions::default(),
             index_config: Default::default(),
             inverted_index_config: Default::default(),

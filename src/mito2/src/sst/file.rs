@@ -282,6 +282,14 @@ pub struct FileMeta {
         deserialize_with = "deserialize_bytes_option"
     )]
     pub primary_key_max: Option<Bytes>,
+    /// Whether the file preserves per-row sequence numbers usable for exact
+    /// row-level sequence filtering.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preserve_row_sequence: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Debug for FileMeta {
@@ -505,6 +513,18 @@ impl FileHandle {
     /// Returns the region id of the file.
     pub fn region_id(&self) -> RegionId {
         self.inner.meta.region_id
+    }
+
+    /// Returns whether this file's row sequences are trusted in the target region.
+    ///
+    /// Foreign files use their target-local sequence barrier; local files require
+    /// the preserve marker because their physical sequences belong to this region.
+    pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
+        if self.region_id() != target_region_id {
+            self.meta_ref().sequence.is_some()
+        } else {
+            self.meta_ref().preserve_row_sequence
+        }
     }
 
     /// Returns the cross-region file id.
@@ -1116,6 +1136,30 @@ mod tests {
             deserialized_file_meta.file_id,
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap()
         );
+        assert!(!deserialized_file_meta.preserve_row_sequence);
+    }
+
+    #[test]
+    fn test_file_meta_preserve_row_sequence_serde() {
+        let file_meta = FileMeta {
+            preserve_row_sequence: true,
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_string(&file_meta).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["preserve_row_sequence"], true);
+
+        let deserialized: FileMeta = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(file_meta, deserialized);
+
+        let file_meta_false = FileMeta {
+            preserve_row_sequence: false,
+            ..file_meta.clone()
+        };
+        let serialized_false = serde_json::to_string(&file_meta_false).unwrap();
+        let value_false: serde_json::Value = serde_json::from_str(&serialized_false).unwrap();
+        assert!(value_false.get("preserve_row_sequence").is_none());
     }
     #[test]
     fn test_is_index_consistent_with_region() {

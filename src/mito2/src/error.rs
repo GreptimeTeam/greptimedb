@@ -286,6 +286,36 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "SEQUENCE_RANGE_UNSUPPORTED: exact sequence-range read unsupported, region: {}, min_seq: {}, max_seq: {}, reason: {}, retry_hint: FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE",
+        region_id,
+        min_seq,
+        max_seq,
+        reason
+    ))]
+    SequenceRangeUnsupported {
+        region_id: RegionId,
+        min_seq: u64,
+        max_seq: u64,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "region {} is unusable for sequence reads: file {} declares region {}",
+        region_id,
+        file_id,
+        file_region_id
+    ))]
+    RegionSequenceDomainBroken {
+        region_id: RegionId,
+        file_region_id: RegionId,
+        file_id: FileId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Old manifest missing for region {}", region_id))]
     MissingOldManifest {
         region_id: RegionId,
@@ -1466,7 +1496,10 @@ impl ErrorExt for Error {
 
             IncrementalQueryStale { .. } | SnapshotFenceStale { .. } => StatusCode::RequestOutdated,
 
-            RegionMetadataNotFound { .. }
+            SequenceRangeUnsupported { .. } => StatusCode::Unsupported,
+
+            RegionSequenceDomainBroken { .. }
+            | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }

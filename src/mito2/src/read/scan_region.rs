@@ -56,7 +56,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
-use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
+use crate::error::{
+    InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionSequenceDomainBrokenSnafu, Result,
+    SequenceRangeUnsupportedSnafu,
+};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
@@ -255,6 +258,8 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
+    /// Files and exact sequence capability selected together by the engine.
+    exact_selection: Option<(Vec<FileHandle>, Option<SequenceRange>)>,
     /// Counters that should receive query-load metrics.
     query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
@@ -282,6 +287,7 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
+            exact_selection: None,
             query_stat_counters: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
@@ -348,6 +354,14 @@ impl ScanRegion {
 
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
+    }
+
+    pub(crate) fn with_exact_selection(
+        mut self,
+        exact_selection: (Vec<FileHandle>, Option<SequenceRange>),
+    ) -> Self {
+        self.exact_selection = Some(exact_selection);
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -435,7 +449,7 @@ impl ScanRegion {
 
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
-    async fn scan_input(self) -> Result<ScanInput> {
+    async fn scan_input(mut self) -> Result<ScanInput> {
         let metadata = &self.version.metadata;
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
@@ -458,33 +472,23 @@ impl ScanRegion {
             mapper
         };
 
-        let ssts = &self.version.ssts;
-        let mut files = Vec::new();
-        if !self.request.skip_sst_files {
-            for level in ssts.levels() {
-                for file in level.files.values() {
-                    let exceed_min_sequence = match (sst_min_sequence, file.meta_ref().sequence) {
-                        (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
-                        // If the file's sequence is None (or actually is zero), it could mean the file
-                        // is generated and added to the region "directly". In this case, its data should
-                        // be considered as fresh as the memtable. So its sequence is treated greater than
-                        // the min_sequence, whatever the value of min_sequence is. Hence the default
-                        // "true" in this arm.
-                        (Some(_), None) => true,
-                        (None, _) => true,
-                    };
-
-                    // Finds SST files in range.
-                    if exceed_min_sequence && file_in_range(file, &time_range) {
-                        files.push(file.clone());
-                    }
-                    // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
-                    // unless the timing is too good, or the sequence number wouldn't be in file.
-                    // and the batch will be filtered out by tree reader anyway.
-                }
+        let (files, sequence_range) =
+            if let Some((files, sequence_range)) = self.exact_selection.take() {
+                (files, sequence_range)
+            } else {
+                exact_sequence_range(&self.request, &self.version)?
+            };
+        if sst_min_sequence.is_some() && sequence_range.is_some() {
+            return SequenceRangeUnsupportedSnafu {
+                region_id: self.region_id(),
+                min_seq: self.request.memtable_min_sequence.unwrap_or_default(),
+                max_seq: self.request.memtable_max_sequence.unwrap_or_default(),
+                reason:
+                    "sst_min_sequence pruning hint is incompatible with exact sequence-range reads"
+                        .to_string(),
             }
+            .fail();
         }
-
         let memtables = self.version.memtables.list_memtables();
         // Skip empty memtables and memtables out of time range.
         let mut mem_range_builders = Vec::new();
@@ -580,6 +584,7 @@ impl ScanRegion {
                     .then_some(self.request.memtable_max_sequence)
                     .flatten(),
             )
+            .with_sequence_range(sequence_range)
             .with_query_stat_counters(self.query_stat_counters);
         #[cfg(feature = "vector_index")]
         let input = input
@@ -590,6 +595,22 @@ impl ScanRegion {
         let input = if !self.request.skip_sst_files
             && let Some(provider) = self.extension_range_provider
         {
+            if sequence_range.is_some() {
+                // Defense in depth: the engine already rejects exact
+                // sequence-range reads on follower regions with an extension
+                // provider, but if one ever reaches the reader, fail closed
+                // here rather than letting unfiltered extension streams bypass
+                // the row-level sequence filter and emit out-of-range rows.
+                return SequenceRangeUnsupportedSnafu {
+                    region_id,
+                    min_seq: self.request.memtable_min_sequence.unwrap_or_default(),
+                    max_seq: self.request.memtable_max_sequence.unwrap_or_default(),
+                    reason:
+                        "exact sequence-range reads are unsupported when an extension range provider is present"
+                            .to_string(),
+                }
+                .fail();
+            }
             let ranges = provider
                 .find_extension_ranges(self.version.flushed_sequence, time_range, &self.request)
                 .await?;
@@ -951,6 +972,11 @@ pub struct ScanInput {
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
+    /// Set only when the region preserves per-row sequences
+    /// (`preserve_row_sequence` on an append-only table) and the scan
+    /// carries an explicit exact range. When set, SST readers apply the same
+    /// `(checkpoint, upper_bound]` row-level filter as memtables.
+    pub(crate) sequence_range: Option<SequenceRange>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     /// Compaction-only JSON2 physical rewrite targets.
@@ -994,6 +1020,7 @@ impl ScanInput {
             distribution: None,
             explain_flat_format: false,
             snapshot_sequence: None,
+            sequence_range: None,
             compaction: false,
             json2_rewrite_targets: Arc::default(),
             query_stat_counters: None,
@@ -1191,6 +1218,12 @@ impl ScanInput {
         snapshot_sequence: Option<SequenceNumber>,
     ) -> Self {
         self.snapshot_sequence = snapshot_sequence;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_sequence_range(mut self, sequence_range: Option<SequenceRange>) -> Self {
+        self.sequence_range = sequence_range;
         self
     }
 
@@ -1620,6 +1653,105 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
+/// Selects the SST files for a scan and, when requested, determines whether
+/// the selected files support an exact sequence-range scan.
+///
+/// Files excluded by the request time range are not selected: `(C, H]` rows are
+/// a subset of the query's time-range rows, so a time-pruned file cannot
+/// contribute a row to `(C, H]`.
+///
+/// Unmarked local files use `FileMeta.sequence` as an admission barrier rather
+/// than a row maximum. Compaction and edit assign it as `committed_sequence + 1`;
+/// `C >= barrier` proves Flow has already consumed the entire file, so such a
+/// file is excluded before the capability check.
+///
+/// A foreign file is different: the parquet reader virtualizes every row to its
+/// target-local `FileMeta.sequence`. Consequently, a present sequence is the
+/// only trust requirement for a foreign file; its source marker is irrelevant.
+/// A foreign file without that barrier is retained as a failed-closed error so
+/// it cannot be mistaken for a local sequence domain. This check is performed
+/// even when another exact-range capability condition would return `None`.
+pub(crate) fn exact_sequence_range(
+    request: &ScanRequest,
+    version: &crate::region::version::Version,
+) -> Result<(Vec<FileHandle>, Option<SequenceRange>)> {
+    if request.skip_sst_files {
+        return Ok((Vec::new(), None));
+    }
+
+    let time_index = version.metadata.time_index_column();
+    let unit = time_index
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .expect("Time index must have timestamp-compatible type")
+        .unit();
+    let time_range =
+        build_time_range_predicate(&time_index.column_schema.name, unit, &request.filters);
+    let min = request.memtable_min_sequence;
+    let mut check_capability = request.exact_sequence_range && min.is_some();
+    let sst_min_sequence = request.sst_min_sequence.and_then(NonZeroU64::new);
+    let mut files = Vec::new();
+    let mut files_allow_exact_range = true;
+
+    for file in version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .filter(|file| file_in_range(file, &time_range))
+    {
+        let meta = file.meta_ref();
+        let selected = (!request.exact_sequence_range
+            || min.is_none_or(|min| meta.sequence.is_none_or(|sequence| sequence.get() > min)))
+            && match (sst_min_sequence, meta.sequence) {
+                (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
+                // A missing file sequence is treated as newer than the SST
+                // pruning hint, matching scan input construction.
+                (Some(_), None) | (None, _) => true,
+            };
+        if !selected {
+            continue;
+        }
+
+        if let Some(min) = min
+            && check_capability
+        {
+            if meta.region_id != version.metadata.region_id && meta.sequence.is_none() {
+                return RegionSequenceDomainBrokenSnafu {
+                    region_id: version.metadata.region_id,
+                    file_region_id: meta.region_id,
+                    file_id: meta.file_id,
+                }
+                .fail();
+            }
+            if meta.region_id == version.metadata.region_id
+                && !file.is_effective_target_sequence_trusted(version.metadata.region_id)
+                && meta.sequence.is_none_or(|barrier| barrier.get() > min)
+            {
+                // Match the capability helper's short-circuit behavior: once
+                // an unadmitted local file is found, later files cannot change
+                // the result or expose a foreign-domain error.
+                files_allow_exact_range = false;
+                check_capability = false;
+            }
+        }
+        files.push(file.clone());
+    }
+
+    let sequence_range = match (
+        request.exact_sequence_range,
+        min,
+        version.options.preserve_row_sequence,
+        request.memtable_max_sequence,
+        files_allow_exact_range,
+    ) {
+        (true, Some(min), true, Some(max), true) => Some(SequenceRange::GtLtEq { min, max }),
+        _ => None,
+    };
+    Ok((files, sequence_range))
+}
+
 /// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
 /// implied time range used to decide whether the cache key can drop the time
 /// predicates for a given partition (see `build_range_cache_key`).
@@ -1734,6 +1866,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanFingerprin
         append_mode: input.append_mode,
         filter_deleted: input.filter_deleted,
         merge_mode: input.merge_mode,
+        sequence_range: input.sequence_range,
         partition_expr_version: metadata.partition_expr_version,
     }
     .build();
@@ -2286,6 +2419,7 @@ mod tests {
             append_mode: false,
             filter_deleted: false,
             merge_mode: MergeMode::LastNonNull,
+            sequence_range: None,
             partition_expr_version: 0,
         }
         .build();
@@ -2359,6 +2493,7 @@ mod tests {
             append_mode: false,
             filter_deleted: true,
             merge_mode: MergeMode::LastRow,
+            sequence_range: None,
             partition_expr_version: metadata.partition_expr_version,
         }
         .build();
@@ -2726,5 +2861,153 @@ mod tests {
 
             assert_eq!(expected_mode, input.range_pre_filter_mode(source_count));
         }
+    }
+
+    #[test]
+    fn test_exact_sequence_selection_preserves_range_and_fallback() {
+        let request = ScanRequest {
+            exact_sequence_range: true,
+            memtable_min_sequence: Some(1),
+            memtable_max_sequence: Some(2),
+            ..Default::default()
+        };
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+            metadata.clone(),
+            Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
+            0,
+            None,
+        ));
+        let version = Arc::new(
+            crate::region::version::VersionBuilder::new(metadata, mutable)
+                .options(crate::region::options::RegionOptions {
+                    preserve_row_sequence: true,
+                    ..Default::default()
+                })
+                .build(),
+        );
+        let (files, range) = exact_sequence_range(&request, &version).unwrap();
+        assert!(files.is_empty());
+        assert_eq!(Some(SequenceRange::GtLtEq { min: 1, max: 2 }), range);
+
+        let skip_sst_request = ScanRequest {
+            skip_sst_files: true,
+            ..request
+        };
+        let (files, range) = exact_sequence_range(&skip_sst_request, &version).unwrap();
+        assert!(files.is_empty());
+        assert_eq!(None, range);
+    }
+
+    #[test]
+    fn test_exact_sequence_selection_checks_selected_files() {
+        use std::num::NonZeroU64;
+
+        use crate::test_util::new_noop_file_purger;
+
+        let request = ScanRequest {
+            exact_sequence_range: true,
+            memtable_min_sequence: Some(5),
+            memtable_max_sequence: Some(10),
+            ..Default::default()
+        };
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+            metadata.clone(),
+            Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
+            0,
+            None,
+        ));
+        let target_region_id = metadata.region_id;
+
+        // Files at or below the cursor are excluded. Among the remaining files,
+        // marked locals are exact-capable while unmarked locals deny exactness.
+        for (sequence, marked, expected_files, expected_range) in [
+            (NonZeroU64::new(5), false, false, true),
+            (NonZeroU64::new(5), true, false, true),
+            (NonZeroU64::new(100), false, true, false),
+            (None, false, true, false),
+            (None, true, true, true),
+        ] {
+            let version =
+                crate::region::version::VersionBuilder::new(metadata.clone(), mutable.clone())
+                    .options(crate::region::options::RegionOptions {
+                        preserve_row_sequence: true,
+                        ..Default::default()
+                    })
+                    .add_files(
+                        new_noop_file_purger(),
+                        [FileMeta {
+                            region_id: target_region_id,
+                            sequence,
+                            preserve_row_sequence: marked,
+                            ..Default::default()
+                        }]
+                        .into_iter(),
+                    )
+                    .build();
+            let (files, range) = exact_sequence_range(&request, &version).unwrap();
+            assert_eq!(expected_files, !files.is_empty());
+            assert_eq!(expected_range, range.is_some());
+        }
+
+        // Foreign files use the target-local barrier, regardless of their
+        // source marker. A missing barrier fails closed.
+        for (sequence, marked, expected_count, expected_error) in [
+            (NonZeroU64::new(5), false, 0, false),
+            (NonZeroU64::new(6), false, 1, false),
+            (NonZeroU64::new(11), true, 1, false),
+            (None, true, 1, true),
+        ] {
+            let file_id = store_api::storage::FileId::random();
+            let version =
+                crate::region::version::VersionBuilder::new(metadata.clone(), mutable.clone())
+                    .options(crate::region::options::RegionOptions {
+                        preserve_row_sequence: true,
+                        ..Default::default()
+                    })
+                    .add_files(
+                        new_noop_file_purger(),
+                        [FileMeta {
+                            region_id: RegionId::new(1, 2),
+                            file_id,
+                            sequence,
+                            preserve_row_sequence: marked,
+                            ..Default::default()
+                        }]
+                        .into_iter(),
+                    )
+                    .build();
+            let result = exact_sequence_range(&request, &version);
+            if expected_error {
+                assert!(result.is_err());
+            } else {
+                let (files, range) = result.unwrap();
+                assert_eq!(expected_count, files.len());
+                assert!(range.is_some());
+            }
+        }
+
+        // Foreign-domain validation still takes precedence over preserve mode
+        // and a missing upper bound once the file is selected.
+        let request = ScanRequest {
+            memtable_max_sequence: None,
+            ..request
+        };
+        let version = crate::region::version::VersionBuilder::new(metadata, mutable)
+            .options(crate::region::options::RegionOptions {
+                preserve_row_sequence: false,
+                ..Default::default()
+            })
+            .add_files(
+                new_noop_file_purger(),
+                [FileMeta {
+                    region_id: RegionId::new(1, 2),
+                    ..Default::default()
+                }]
+                .into_iter(),
+            )
+            .build();
+        assert!(exact_sequence_range(&request, &version).is_err());
     }
 }
