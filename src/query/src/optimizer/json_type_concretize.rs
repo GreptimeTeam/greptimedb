@@ -184,6 +184,12 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         );
     };
 
+    // Object-only type deduction cannot represent bracket JSONPath access, so preserve the
+    // full Variant and let json_get apply the expression.
+    if path.contains('[') {
+        return Ok(Some((column.name.clone(), JsonNativeType::Variant)));
+    }
+
     let with_type = f
         .args
         .get(2)
@@ -321,6 +327,17 @@ mod tests {
         let request = provider.scan_request();
         assert_eq!(1, request.json_type_hint.len());
         assert_eq!(Some(&expected), request.json_type_hint.get("j"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_deduce_json_type_with_list_index() -> Result<()> {
+        let expr = json_get_expr(col("j"), path_expr("l[0]"), Some(DataType::Int64))?;
+
+        assert_eq!(
+            Some(("j".to_string(), JsonNativeType::Variant)),
+            deduce_json_type(&expr)?
+        );
         Ok(())
     }
 
