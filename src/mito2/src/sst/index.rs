@@ -1015,7 +1015,14 @@ impl IndexBuildTask {
             )
             .build_index_file_path_with_version(index_id);
             if let Err(e) = write_cache
-                .upload(puffin_key, &puffin_path, remote_store)
+                // Index rebuild is background maintenance work, so its uploads
+                // are reported as compaction uploads.
+                .upload(
+                    puffin_key,
+                    &puffin_path,
+                    remote_store,
+                    OperationType::Compact,
+                )
                 .await
             {
                 err = Some(e);
