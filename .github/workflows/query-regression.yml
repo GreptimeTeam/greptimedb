@@ -199,15 +199,18 @@ jobs:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
       QUERY_REGRESSION_CACHE_EPOCH: "1"
-      PR_ADMISSION: ${{ github.event_name == 'workflow_call' && inputs.pr_number != '' }}
+      # Reusable workflows keep the caller's github.event_name (slash is
+      # repository_dispatch; nightly is workflow_run), never "workflow_call".
+      # PR admission is the explicit pr_number input from the slash wrapper.
+      PR_ADMISSION: ${{ inputs.pr_number != '' }}
       PR_NUMBER: ${{ inputs.pr_number }}
       HEAD_REPO: ${{ inputs.head_repo }}
       BASE_REPO: ${{ inputs.base_repo }}
       BASE_REF: ${{ inputs.base_ref }}
       CANDIDATE_REF: ${{ inputs.candidate_ref || github.ref }}
-      EVENT_MERGE_SHA: ${{ github.event_name == 'workflow_call' && inputs.pr_number != '' && inputs.candidate_ref || '' }}
+      EVENT_MERGE_SHA: ${{ inputs.pr_number != '' && inputs.candidate_ref || '' }}
       EVENT_HEAD_SHA: ${{ inputs.head_sha }}
-      EVENT_BASE_SHA: ${{ github.event_name == 'workflow_call' && inputs.pr_number != '' && inputs.base_ref || '' }}
+      EVENT_BASE_SHA: ${{ inputs.pr_number != '' && inputs.base_ref || '' }}
       # Runner identity contract. The ECS image uses 1001; a manually prepared
       # host may override via repo variables when 1001 is already taken.
       EXPECTED_RUNNER_UID: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
@@ -745,7 +748,7 @@ jobs:
           CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
           OTELGEN_BIN: /usr/local/bin/otelgen
-          SUMMARY_SCRIPT: ${{ github.event_name == 'workflow_call' && inputs.pr_number != '' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
+          SUMMARY_SCRIPT: ${{ env.PR_ADMISSION == 'true' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
           QUERY_REGRESSION_RUNNER: ${{ github.workspace }}/query-regression-bins/candidate/query_regression_runner
         run: >-
           uv run --no-project python src/.github/scripts/query-regression-run.py
@@ -754,7 +757,7 @@ jobs:
           --summary-script "${SUMMARY_SCRIPT}"
 
       - name: Write PR metadata for trusted comment workflow
-        if: ${{ always() && github.event_name == 'workflow_call' && inputs.pr_number != '' }}
+        if: ${{ always() && env.PR_ADMISSION == 'true' }}
         env:
           HEAD_SHA: ${{ inputs.head_sha }}
           RUN_ID: ${{ github.run_id }}
@@ -778,7 +781,7 @@ jobs:
           retention-days: 7
 
       - name: Upload trusted comment artifact
-        if: ${{ always() && github.event_name == 'workflow_call' && inputs.pr_number != '' }}
+        if: ${{ always() && env.PR_ADMISSION == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: query-regression-comment
