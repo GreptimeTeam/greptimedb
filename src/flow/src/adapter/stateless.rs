@@ -28,7 +28,7 @@ use datafusion::catalog::MemTable;
 use datafusion::datasource::{TableProvider, provider_as_source};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{Column, DFSchema, TableReference};
-use datafusion_expr::logical_plan::Projection;
+use datafusion_expr::logical_plan::{Distinct, Projection};
 use datafusion_expr::{Expr, LogicalPlan};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::value::Value;
@@ -57,6 +57,7 @@ pub(crate) struct StatelessFlow {
     pub(crate) auto_columns: Vec<ColumnSchema>,
     pub(crate) plan: LogicalPlan,
     pub(crate) query_ctx: QueryContextRef,
+    pub(crate) create_args: crate::CreateFlowArgs,
 }
 
 /// Per-request input provider. It owns no catalog or storage state.
@@ -264,6 +265,9 @@ pub(crate) fn validate_plan(plan: &LogicalPlan) -> Result<(), Error> {
         match node {
             LogicalPlan::TableScan(_) => scans += 1,
             LogicalPlan::Projection(_) | LogicalPlan::Filter(_) => {}
+            // DISTINCT is evaluated against this request's transient input only. DISTINCT ON
+            // has ordering/selection semantics beyond the supported stateless subset.
+            LogicalPlan::Distinct(Distinct::All(_)) => {}
             _ => {
                 return Err(datafusion::error::DataFusionError::Plan(
                     "Streaming flow supports only projection and filter over one source scan"
@@ -435,12 +439,35 @@ pub(crate) async fn execute(
 #[cfg(test)]
 mod tests {
     use datafusion::catalog::MemTable;
+    use datafusion::logical_expr::LogicalPlanBuilder;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
     use session::context::QueryContext;
 
     use super::*;
+
+    #[test]
+    fn validation_accepts_distinct_over_one_source() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "number",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let plan = LogicalPlanBuilder::scan(
+            TableReference::bare("source"),
+            provider_as_source(provider(&schema, 1)),
+            None,
+        )
+        .unwrap()
+        .project(vec![datafusion_expr::col("number")])
+        .unwrap()
+        .distinct()
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(validate_plan(&plan).is_ok());
+    }
 
     #[test]
     fn validation_rejects_plan_without_source_scan() {
@@ -610,5 +637,54 @@ mod tests {
 
         assert_eq!(run(provider(&schema, 1)).await, 0);
         assert_eq!(run(provider(&schema, 2)).await, 1);
+    }
+
+    #[tokio::test]
+    async fn finite_distinct_collapses_duplicates_per_request() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "number",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let input = |values: &[i32]| {
+            let batch = RecordBatch::new(
+                schema.clone(),
+                vec![Arc::new(Int32Vector::from_slice(values)) as datatypes::prelude::VectorRef],
+            )
+            .unwrap();
+            input_provider(&batch).unwrap()
+        };
+        let plan = LogicalPlanBuilder::scan(
+            TableReference::bare("source"),
+            provider_as_source(input(&[1])),
+            None,
+        )
+        .unwrap()
+        .project(vec![datafusion_expr::col("number")])
+        .unwrap()
+        .distinct()
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(validate_plan(&plan).is_ok());
+
+        let engine = crate::test_utils::create_test_query_engine();
+        let run = |provider: Arc<dyn TableProvider>| {
+            let engine = engine.clone();
+            let plan = plan.clone();
+            async move {
+                let plan = replace_source(plan, &TableReference::bare("source"), provider).unwrap();
+                let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
+                let batches = match output.data {
+                    OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+                    OutputData::RecordBatches(batches) => batches,
+                    OutputData::AffectedRows(_) => panic!("unexpected affected rows"),
+                };
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+            }
+        };
+
+        assert_eq!(run(input(&[1, 1, 2])).await, 2);
+        assert_eq!(run(input(&[1, 1])).await, 1);
     }
 }

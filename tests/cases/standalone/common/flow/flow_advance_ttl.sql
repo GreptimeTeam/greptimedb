@@ -6,16 +6,16 @@ CREATE TABLE distinct_basic (
     TIME INDEX(ts)
 )WITH ('ttl' = 'instant');
 
--- should fallback to streaming mode when there is no EVAL INTERVAL
+-- request-local DISTINCT is supported in streaming mode
 -- SQLNESS REPLACE id=\d+ id=REDACTED
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
 SELECT
-    number as dis
+    DISTINCT number as dis
 FROM
     distinct_basic;
 
 -- instant-TTL sources reject non-stateless LIMIT plans
-CREATE FLOW test_limit_instant_rejected SINK TO out_limit_instant_rejected EVAL INTERVAL '1m' AS
+CREATE FLOW test_limit_instant_rejected SINK TO out_limit_instant_rejected AS
 SELECT
     number
 FROM
@@ -23,15 +23,8 @@ FROM
 LIMIT 1;
 
 -- flow_options should have a flow_type:streaming
--- since source table's ttl=instant and the query is stateless
+-- since source table's ttl=instant and DISTINCT is request-local
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
-
--- instant-TTL sources reject DISTINCT because it is not stateless
-CREATE FLOW test_distinct_instant_rejected SINK TO out_distinct_instant_rejected EVAL INTERVAL '1m' AS
-SELECT
-    DISTINCT number
-FROM
-    distinct_basic;
 
 SHOW CREATE TABLE distinct_basic;
 
@@ -99,7 +92,7 @@ SELECT count(*) FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'test_distinct_b
 
 DROP TABLE distinct_basic;
 
--- test ttl = 5s
+-- test ttl = 5s (DISTINCT remains batching for persisted sources)
 CREATE TABLE distinct_basic (
     "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -114,7 +107,7 @@ FROM
     distinct_basic;
 
 -- flow_options should have a flow_type:batching
--- ordinary persisted source keeps DISTINCT in batching mode
+-- persisted-source DISTINCT retains batching semantics
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 -- SQLNESS ARG restart=true
