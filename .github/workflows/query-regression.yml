@@ -779,6 +779,8 @@ jobs:
             machine-telemetry.log
           if-no-files-found: warn
           retention-days: 7
+          # Re-run failed jobs uploads again in the same run; v4 rejects duplicate names.
+          overwrite: true
 
       - name: Upload trusted comment artifact
         if: ${{ always() && env.PR_ADMISSION == 'true' }}
@@ -790,6 +792,7 @@ jobs:
             query-regression-work/**/query-regression-report.json
           if-no-files-found: warn
           retention-days: 7
+          overwrite: true
 
       - name: Report cache usage
         if: ${{ always() }}
