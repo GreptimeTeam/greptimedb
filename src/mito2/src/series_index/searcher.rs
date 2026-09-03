@@ -129,8 +129,7 @@ impl SeriesIndexSearcher {
                 .with_context(|_| ReadParquetSnafu {
                     path: path.to_string(),
                 })?;
-        validate_index_schema(arrow_metadata.schema())?;
-        let unit = index_time_unit(arrow_metadata.schema())?;
+        let unit = validate_index_schema(arrow_metadata.schema())?;
 
         // An older index file may not contain tags added by schema evolution.
         // Ignore filters on those tags to preserve a conservative candidate set.
@@ -270,7 +269,11 @@ fn time_range_exprs(unit: TimeUnit, time_range: Option<&TimestampRange>) -> Vec<
     exprs
 }
 
-fn validate_index_schema(schema: &SchemaRef) -> Result<()> {
+/// Validates an index file's schema and returns the time unit of its
+/// `__series_min_ts`/`__series_max_ts` columns. They are native
+/// `Timestamp(unit)` columns, so the unit is part of the datatype and each
+/// file is interpreted in the unit it was written with.
+fn validate_index_schema(schema: &SchemaRef) -> Result<TimeUnit> {
     for (name, data_type) in [
         (ROW_COUNT_COLUMN, DataType::UInt64),
         (TABLE_ID_COLUMN, DataType::UInt32),
@@ -292,14 +295,6 @@ fn validate_index_schema(schema: &SchemaRef) -> Result<()> {
             }
         );
     }
-    Ok(())
-}
-
-/// Reads the time unit of an index file's `__series_min_ts`/`__series_max_ts`
-/// columns. They are native `Timestamp(unit)` columns, so the unit is part of
-/// the datatype and each file is interpreted in the unit it was written with
-/// (the region's time index unit may have been widened since).
-fn index_time_unit(schema: &SchemaRef) -> Result<TimeUnit> {
     let unit = |name: &str| {
         let field = schema
             .field_with_name(name)
@@ -865,16 +860,15 @@ mod tests {
     }
 
     #[test]
-    fn index_time_unit_rejects_unusable_units() {
-        // Index files written before the min/max columns became native
-        // Timestamp columns (plain Int64) are rejected.
-        let err = index_time_unit(&index_file_schema(None, None))
+    fn validate_index_schema_rejects_unusable_columns() {
+        // Min/max columns that are not Timestamps are rejected.
+        let err = validate_index_schema(&index_file_schema(None, None))
             .unwrap_err()
             .to_string();
         assert!(err.contains("must be a Timestamp, got Int64"), "{err}");
 
         // The min and max columns must agree on the unit.
-        let err = index_time_unit(&index_file_schema(
+        let err = validate_index_schema(&index_file_schema(
             Some(ArrowTimeUnit::Millisecond),
             Some(ArrowTimeUnit::Microsecond),
         ))
@@ -884,7 +878,7 @@ mod tests {
 
         assert_eq!(
             TimeUnit::Nanosecond,
-            index_time_unit(&index_file_schema(
+            validate_index_schema(&index_file_schema(
                 Some(ArrowTimeUnit::Nanosecond),
                 Some(ArrowTimeUnit::Nanosecond),
             ))
@@ -986,7 +980,7 @@ mod tests {
             common_time::Timestamp::new_millisecond(4),
         )
         .unwrap();
-        let unit = index_time_unit(arrow_metadata.schema()).unwrap();
+        let unit = validate_index_schema(arrow_metadata.schema()).unwrap();
         let filters = searcher
             .filters
             .clone()
