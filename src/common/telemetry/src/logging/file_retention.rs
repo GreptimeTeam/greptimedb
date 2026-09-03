@@ -14,6 +14,7 @@
 
 //! File-log retention based on the total size of managed log files.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
@@ -88,23 +89,27 @@ struct FileIndex {
 
 impl FileIndex {
     fn track(&mut self, kind: LogFileKind, path: PathBuf, size: u64, last_modified: SystemTime) {
-        let is_new_active_file = self.active.get(&kind).is_none_or(|file| file.path != path);
-        if is_new_active_file
-            && let Some(previous) = self.active.insert(
-                kind,
-                LogFile {
+        let active = match self.active.entry(kind) {
+            Entry::Occupied(mut entry) if entry.get().path != path => {
+                let previous = entry.insert(LogFile {
                     kind,
                     path,
                     last_modified,
                     size: 0,
-                },
-            )
-        {
-            self.closed
-                .insert((previous.last_modified, previous.path.clone()), previous);
-        }
+                });
+                self.closed
+                    .insert((previous.last_modified, previous.path.clone()), previous);
+                entry.into_mut()
+            }
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(LogFile {
+                kind,
+                path,
+                last_modified,
+                size: 0,
+            }),
+        };
 
-        let active = self.active.get_mut(&kind).expect("active log file exists");
         active.size = active.size.saturating_add(size);
         active.last_modified = last_modified;
         self.total_size = self.total_size.saturating_add(size);
@@ -120,8 +125,9 @@ impl FileIndex {
     }
 
     fn remove(&mut self, key: &(SystemTime, PathBuf)) {
-        let file = self.closed.remove(key).expect("closed log file exists");
-        self.total_size = self.total_size.saturating_sub(file.size);
+        if let Some(file) = self.closed.remove(key) {
+            self.total_size = self.total_size.saturating_sub(file.size);
+        }
     }
 }
 
@@ -315,7 +321,6 @@ impl DirectoryRetention {
                 };
 
                 if !self.delete(state, key, entry) {
-                    self.reconcile(state);
                     return;
                 }
             }
@@ -340,7 +345,6 @@ impl DirectoryRetention {
             };
 
             if !self.delete(state, key, entry) {
-                self.reconcile(state);
                 return;
             }
         }
@@ -360,6 +364,9 @@ impl DirectoryRetention {
             }
             Err(error) => {
                 self.report_error(state, &format!("removing {}: {error}", file.path.display()));
+                if error.kind() == io::ErrorKind::NotFound {
+                    self.reconcile(state);
+                }
                 false
             }
         }
@@ -448,11 +455,13 @@ mod tests {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
 
     use common_base::readable_size::ReadableSize;
     use tempfile::TempDir;
 
+    use super::FileIndex;
     use crate::logging::LoggingOptions;
     use crate::logging::file_retention::{DirectoryRetention, LogFileKind, build_file_appender};
 
@@ -480,6 +489,15 @@ mod tests {
             LogFileKind::kind_from_file_name("greptimedb-slow-queries.2026-01-01-00").is_some()
         );
         assert!(LogFileKind::kind_from_file_name("greptimedb.2026-01-01-00.1").is_none());
+    }
+
+    #[test]
+    fn test_file_index_ignores_missing_closed_file() {
+        let mut files = FileIndex::default();
+
+        files.remove(&(SystemTime::UNIX_EPOCH, PathBuf::from("missing")));
+
+        assert_eq!(files.total_size, 0);
     }
 
     #[cfg(unix)]
