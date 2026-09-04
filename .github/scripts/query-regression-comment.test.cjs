@@ -1051,3 +1051,99 @@ test('skips a marker whose HMAC does not match', async () => {
     fs.rmSync(temporaryDir, { recursive: true, force: true });
   }
 });
+
+test('finds a newly posted marker after a full page of newer comments', async () => {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const originalHmac = process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+  const pages = [];
+
+  try {
+    fs.mkdirSync(artifactDir);
+    const metadata = {
+      run_id: 911,
+      run_attempt: 1,
+      base_repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'pr-head-sha',
+      head_repo: 'fork/repo',
+      candidate_sha: 'merge-sha',
+      base_sha: 'base-sha',
+    };
+    fs.mkdirSync(path.join(temporaryDir, 'query-regression-admission'));
+    fs.writeFileSync(
+      path.join(temporaryDir, 'query-regression-admission', 'query-regression-admission.json'),
+      JSON.stringify(metadata),
+    );
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify(metadata));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = '911';
+    process.env.WORKFLOW_RUN_ATTEMPT = '1';
+    process.env.QUERY_REGRESSION_ADMISSION_HMAC = HMAC_SECRET;
+
+    await handler({
+      core: {
+        info() {},
+        warning() {},
+        setOutput(name, value) { outputs.set(name, value); },
+      },
+      context: {
+        repo: { owner: 'owner', repo: 'repo' },
+        payload: {
+          workflow_run: {
+            event: 'repository_dispatch',
+            head_sha: 'default-branch-sha',
+            head_repository: { full_name: 'owner/repo' },
+            pull_requests: [],
+          },
+        },
+      },
+      github: {
+        rest: {
+          issues: {
+            listComments: async ({ page, direction }) => {
+              pages.push({ page, direction });
+              if (page === 1) {
+                return {
+                  data: Array.from({ length: 100 }, (_, index) => ({
+                    id: 10_000 - index,
+                    body: 'unrelated',
+                  })),
+                };
+              }
+              return { data: [markerComment(metadata, { id: 50 })] };
+            },
+          },
+          pulls: {
+            get: async () => ({
+              data: {
+                state: 'open',
+                base: { repo: { full_name: 'owner/repo' } },
+                head: { repo: { full_name: 'fork/repo' }, sha: 'pr-head-sha' },
+              },
+            }),
+          },
+        },
+      },
+    });
+
+    assert.equal(outputs.get('should_post'), 'true');
+    assert.deepEqual(pages, [
+      { page: 1, direction: 'desc' },
+      { page: 2, direction: 'desc' },
+    ]);
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    if (originalHmac === undefined) delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+    else process.env.QUERY_REGRESSION_ADMISSION_HMAC = originalHmac;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});

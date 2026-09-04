@@ -370,38 +370,38 @@ function isAdmissionIdentity(payload) {
 }
 
 async function loadAdmissionMarker(github, { owner, repo, prNumber, runId, secret }) {
-  const comments = [];
-  for (let page = 1; page <= 20; page += 1) {
+  // Newest first: the marker is posted at admit time, so it is among the
+  // latest comments. Oldest-first with a page cap misses it on busy PRs.
+  for (let page = 1; ; page += 1) {
     const { data } = await github.rest.issues.listComments({
       owner,
       repo,
       issue_number: prNumber,
       per_page: 100,
       page,
+      sort: 'created',
+      direction: 'desc',
     });
-    comments.push(...data);
-    if (!Array.isArray(data) || data.length < 100) {
-      break;
+    if (!Array.isArray(data) || data.length === 0) {
+      return null;
+    }
+    for (const comment of data) {
+      const payload = parseAdmissionMarker(comment.body);
+      if (!payload || !isAdmissionIdentity(payload)) {
+        continue;
+      }
+      if (Number(payload.run_id) !== Number(runId)) {
+        continue;
+      }
+      if (!verifyAdmissionMac(secret, payload, payload.mac)) {
+        continue;
+      }
+      return { id: Number(comment.id), payload };
+    }
+    if (data.length < 100) {
+      return null;
     }
   }
-  let best = null;
-  for (const comment of comments) {
-    const payload = parseAdmissionMarker(comment.body);
-    if (!payload || !isAdmissionIdentity(payload)) {
-      continue;
-    }
-    if (Number(payload.run_id) !== Number(runId)) {
-      continue;
-    }
-    if (!verifyAdmissionMac(secret, payload, payload.mac)) {
-      continue;
-    }
-    const id = Number(comment.id);
-    if (best === null || id > best.id) {
-      best = { id, payload };
-    }
-  }
-  return best;
 }
 
 function identitiesMatch(admission, metadata) {
