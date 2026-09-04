@@ -41,11 +41,12 @@ dyn-fmt = "0.4"
 enum_dispatch = "0.3"
 futures.workspace = true
 greptime-proto.workspace = true
+humantime-serde.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
 jsonpath-rust = "0.7.5"
 lazy_static.workspace = true
-moka = { workspace = true, features = ["sync"] }
+moka = { workspace = true, features = ["future"] }
 once_cell.workspace = true
 operator.workspace = true
 ordered-float.workspace = true
@@ -53,6 +54,7 @@ paste.workspace = true
 prometheus.workspace = true
 query.workspace = true
 regex.workspace = true
+serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true
 session.workspace = true
 snafu.workspace = true
@@ -67,7 +69,6 @@ yaml-rust = "0.4"
 catalog = { workspace = true, features = ["testing"] }
 criterion = { workspace = true, features = ["html_reports"] }
 rayon = "1.0"
-serde = { version = "1.0", features = ["derive"] }
 session = { workspace = true, features = ["testing"] }
 
 [[bench]]

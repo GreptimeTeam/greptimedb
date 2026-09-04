@@ -428,6 +428,12 @@ ttl = "90d"
 ## Default is true.
 enable_heap_profiling = true
 
+## The pipeline options.
+[pipeline]
+## Time to live of the frontend-local pipeline cache. A pipeline created or deleted on
+## another frontend takes effect on this one after at most this duration.
+cache_ttl = "10s"
+
 ## Configuration options for the event recorder.
 [event_recorder]
 ## TTL for the events table that will be used to store the events. Default is `90d`.

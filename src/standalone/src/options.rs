@@ -28,6 +28,7 @@ use frontend::service_config::{
     PromStoreOptions,
 };
 use mito2::config::MitoConfig;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -73,6 +74,8 @@ pub struct StandaloneOptions {
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    /// The pipeline options.
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -114,6 +117,7 @@ impl Default for StandaloneOptions {
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -162,6 +166,7 @@ impl StandaloneOptions {
             user_provider: cloned_opts.user_provider,
             query: cloned_opts.query,
             slow_query: cloned_opts.slow_query,
+            pipeline: cloned_opts.pipeline,
             event_recorder: cloned_opts.event_recorder,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
             ..Default::default()
