@@ -1835,6 +1835,7 @@ mod tests {
             usize::MAX,
             usize::MAX,
             DEFAULT_ROW_GROUP_SIZE,
+            FloatFieldEncoding::default(),
         )?
         .unwrap();
         let MergedPart::Multi(part) = merged else {

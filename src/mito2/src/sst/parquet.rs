@@ -169,7 +169,7 @@ mod tests {
         RecordBatch, StringArray, StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array,
         UInt64Array,
     };
-    use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::util::pretty::pretty_format_batches;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
