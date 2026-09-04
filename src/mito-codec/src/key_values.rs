@@ -46,7 +46,7 @@ impl KeyValues {
         let rows = mutation.rows.as_ref()?;
         let primary_key_encoding =
             infer_primary_key_encoding_from_hint(mutation.write_hint.as_ref());
-        let helper = SparseReadRowHelper::new(metadata, rows, primary_key_encoding);
+        let helper = SparseReadRowHelper::new(metadata, rows, primary_key_encoding)?;
 
         Some(KeyValues {
             mutation,
@@ -120,7 +120,7 @@ impl<'a> KeyValuesRef<'a> {
         let rows = mutation.rows.as_ref()?;
         let primary_key_encoding =
             infer_primary_key_encoding_from_hint(mutation.write_hint.as_ref());
-        let helper = SparseReadRowHelper::new(metadata, rows, primary_key_encoding);
+        let helper = SparseReadRowHelper::new(metadata, rows, primary_key_encoding)?;
 
         Some(KeyValuesRef {
             mutation,
@@ -276,7 +276,7 @@ impl SparseReadRowHelper {
         metadata: &RegionMetadata,
         rows: &Rows,
         primary_key_encoding: PrimaryKeyEncoding,
-    ) -> SparseReadRowHelper {
+    ) -> Option<SparseReadRowHelper> {
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
             // Optimized case: when schema has exactly 3 columns (primary key, timestamp, and one field),
             // we can directly use their indices in order without building an explicit mapping.
@@ -288,10 +288,10 @@ impl SparseReadRowHelper {
                     .enumerate()
                     .map(|(index, _)| Some(index))
                     .collect();
-                return SparseReadRowHelper {
+                return Some(SparseReadRowHelper {
                     indices,
                     num_primary_key_column: 1,
-                };
+                });
             };
 
             let mut indices = Vec::with_capacity(rows.schema.len());
@@ -313,10 +313,10 @@ impl SparseReadRowHelper {
                 let index = name_to_index.get(&column.column_schema.name);
                 indices.push(index.copied());
             }
-            return SparseReadRowHelper {
+            return Some(SparseReadRowHelper {
                 indices,
                 num_primary_key_column: 1,
-            };
+            });
         }
         // Build a name to index mapping for rows.
         let name_to_index: HashMap<_, _> = rows
@@ -335,10 +335,8 @@ impl SparseReadRowHelper {
             indices.push(index.copied());
         }
         // Get timestamp index.
-        // Safety: time index must exist
         let ts_index = name_to_index
-            .get(&metadata.time_index_column().column_schema.name)
-            .unwrap();
+            .get(&metadata.time_index_column().column_schema.name)?;
         indices.push(Some(*ts_index));
 
         // Iterate columns and find field columns.
@@ -348,10 +346,10 @@ impl SparseReadRowHelper {
             indices.push(index.copied());
         }
 
-        SparseReadRowHelper {
+        Some(SparseReadRowHelper {
             indices,
             num_primary_key_column: metadata.primary_key.len(),
-        }
+        })
     }
 }
 
@@ -535,5 +533,14 @@ mod tests {
         // ts: 2,
         // fields: [v0=1, v1=null]
         check_key_values(&kvs, 3, &[Some(0), None], 2, &[Some(1), None]);
+    }
+
+    #[test]
+    fn test_missing_time_index() {
+        let meta = new_region_metadata(2, 2);
+        // Mutation contains tags and fields, but lacks the time index column "ts"
+        let mutation = new_mutation(&["k0", "v0", "k1", "v1"], 3);
+        let kvs = KeyValues::new(&meta, mutation);
+        assert!(kvs.is_none());
     }
 }
