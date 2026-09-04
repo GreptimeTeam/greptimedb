@@ -399,6 +399,9 @@ fn infer_expanded_type(
         // Explicit paths are already in the output schema and do not consume the dynamic
         // expansion budget.
         .filter(|(_, stat)| !stat.is_explicit && stat.is_leaf)
+        // Parquet cannot store empty structs, while widening an empty object to a non-empty struct
+        // loses its shape. Keep paths containing empty objects in the Variant remainder.
+        .filter(|(_, stat)| !stat.contains_empty_object)
         // A leaf is eligible only when both itself and every object prefix have one stable
         // role and type across all observed values.
         .filter(|(path, _)| {
@@ -446,6 +449,8 @@ struct PathStats {
     expected_leaf_type: JsonNativeType,
     /// Number of compatible observations used to rank dynamic leaves.
     seen_count: usize,
+    /// Whether any observed value contains an empty object that requires lossless Variant storage.
+    contains_empty_object: bool,
     /// Whether the path has ever had inconsistent roles or leaf types.
     conflicts: bool,
 }
@@ -474,6 +479,7 @@ fn init_explicit_path_stats<'a>(
                 is_leaf,
                 expected_leaf_type,
                 seen_count: 0,
+                contains_empty_object: false,
                 conflicts: false,
             },
         );
@@ -494,7 +500,9 @@ fn count_dynamic_paths<'a>(
 
     if !path.is_empty() {
         let is_leaf = !matches!(value, JsonVariant::Object(_));
+        let contains_empty_object = is_leaf && value.contains_empty_object();
         let conflicts = if let Some(stats) = stats.get_mut(path.as_slice()) {
+            stats.contains_empty_object |= contains_empty_object;
             if !stats.conflicts {
                 let role_conflict = stats.is_leaf != is_leaf;
                 let type_conflict = || match (&stats.expected_leaf_type, value) {
@@ -524,6 +532,7 @@ fn count_dynamic_paths<'a>(
                     is_leaf,
                     expected_leaf_type,
                     seen_count: 1,
+                    contains_empty_object,
                     conflicts: false,
                 },
             );
