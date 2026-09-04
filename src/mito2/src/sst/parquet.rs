@@ -254,6 +254,7 @@ mod tests {
                 semantic_type: SemanticType::Timestamp,
                 column_id: 4,
             });
+        metadata_builder.primary_key(vec![2]);
         let metadata = Arc::new(metadata_builder.build().unwrap());
 
         let f32_values = [
