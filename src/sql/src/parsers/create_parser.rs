@@ -785,9 +785,7 @@ impl<'a> ParserContext<'a> {
 
         let data_type =
             if let Some((data_type, options)) = json::parse_json2_type_and_options(parser)? {
-                extensions.json2_options = options.filter(|options| {
-                    options.max_auto_expanded_paths.is_some() || !options.type_hints.is_empty()
-                });
+                extensions.json2_options = options;
                 data_type
             } else {
                 parser.parse_data_type().context(SyntaxSnafu)?

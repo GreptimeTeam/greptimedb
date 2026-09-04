@@ -6,6 +6,12 @@ CREATE TABLE application_logs (
 );
 
 ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2;
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2 ();
+
+ALTER TABLE application_logs
     MODIFY COLUMN attrs JSON2 (
         max_auto_expanded_paths = 2000
     );
