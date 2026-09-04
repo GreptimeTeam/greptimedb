@@ -661,8 +661,8 @@ dependencies = [
  "chrono",
  "datafusion",
  "futures",
- "pg_interval",
- "pgwire",
+ "pg_interval 0.5.0",
+ "pgwire 0.40.7",
  "postgres-types",
  "rust_decimal",
 ]
@@ -10583,10 +10583,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_interval"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8408fb1e08ebf2e7676d001caa6482d1b33e7e1f1dad9d3a758a05640eea2026"
+dependencies = [
+ "bytes",
+ "chrono",
+ "postgres-types",
+]
+
+[[package]]
 name = "pgwire"
 version = "0.40.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8265901ede50d0879fe401c6fe282e7e4ff83ae10a48c1f8e4f89b92f7d5f604"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "derive-new",
+ "futures",
+ "hex",
+ "lazy-regex",
+ "md5",
+ "pg_interval 0.5.0",
+ "postgres-types",
+ "rand 0.10.1",
+ "rust_decimal",
+ "ryu",
+ "serde",
+ "serde_json",
+ "smol_str",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "pgwire"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c667f8f4046889d52ed11e17aae954b1816d3df48dd23bdebcf199cef332df93"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -10598,7 +10636,7 @@ dependencies = [
  "hex",
  "lazy-regex",
  "md5",
- "pg_interval",
+ "pg_interval 0.6.0",
  "postgres-types",
  "rand 0.10.1",
  "rust_decimal",
@@ -13518,8 +13556,8 @@ dependencies = [
  "parking_lot 0.12.4",
  "partition",
  "permutation",
- "pg_interval",
- "pgwire",
+ "pg_interval 0.6.0",
+ "pgwire 0.41.0",
  "pin-project",
  "pipeline",
  "postgres-types",
