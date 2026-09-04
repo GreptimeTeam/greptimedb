@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use arrow_schema::{
-    ArrowError, DataType, DataType as ArrowDataType, Field, Schema as ArrowSchema,
+    ArrowError, DataType as ArrowDataType, Field, Schema as ArrowSchema,
     SchemaRef as ArrowSchemaRef, SortOptions,
 };
 use async_stream::stream;
@@ -43,14 +43,11 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion_common::stats::Precision;
-use datafusion_common::{Column as ColumnExpr, DataFusionError, Result, Statistics};
+use datafusion_common::{Column as ColumnExpr, DFSchemaRef, DataFusionError, Result, Statistics};
 use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
-use datatypes::extension::json::{
-    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
-    is_legacy_json2_extension_type,
-};
+use datatypes::extension::json::is_any_json_extension_type;
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -333,15 +330,53 @@ impl Drop for SubscriberRollbackGuard<'_> {
     }
 }
 
-#[derive(Debug, Hash, PartialOrd, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
     /// In logical plan phase it only contains one input
     input: LogicalPlan,
+    /// Schema exposed to the local stage.
+    output_schema: DFSchemaRef,
     /// If this plan is a placeholder
     is_placeholder: bool,
     partition_cols: AliasMapping,
     /// Assigned after dist-plan rewriting so rewriters only deal with plan shape.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
+}
+
+impl PartialOrd for MergeScanLogicalPlan {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let Self {
+            input,
+            output_schema,
+            is_placeholder,
+            partition_cols,
+            remote_dyn_filter_producer_id,
+        } = self;
+        let Self {
+            input: other_input,
+            output_schema: other_output_schema,
+            is_placeholder: other_is_placeholder,
+            partition_cols: other_partition_cols,
+            remote_dyn_filter_producer_id: other_remote_dyn_filter_producer_id,
+        } = other;
+
+        let ordering = (
+            input,
+            is_placeholder,
+            partition_cols,
+            remote_dyn_filter_producer_id,
+        )
+            .partial_cmp(&(
+                other_input,
+                other_is_placeholder,
+                other_partition_cols,
+                other_remote_dyn_filter_producer_id,
+            ));
+        match ordering {
+            Some(std::cmp::Ordering::Equal) if output_schema != other_output_schema => None,
+            ordering => ordering,
+        }
+    }
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -356,7 +391,7 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
     }
 
     fn schema(&self) -> &datafusion_common::DFSchemaRef {
-        self.input.schema()
+        &self.output_schema
     }
 
     // Prevent further optimization
@@ -382,13 +417,21 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
+    /// Creates a merge scan with the input plan's schema.
     pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
         Self {
+            output_schema: input.schema().clone(),
             input,
             is_placeholder,
             partition_cols,
             remote_dyn_filter_producer_id: None,
         }
+    }
+
+    /// Replaces the schema exposed to the local stage.
+    pub(crate) fn with_output_schema(mut self, output_schema: DFSchemaRef) -> Self {
+        self.output_schema = output_schema;
+        self
     }
 
     pub(crate) fn with_remote_dyn_filter_producer_id(
@@ -474,7 +517,7 @@ impl MergeScanExec {
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
-        let arrow_schema = maybe_amend_json2_field(arrow_schema);
+        let arrow_schema = Arc::new(arrow_schema.clone());
         let output_partition_count = Self::output_partition_count(regions.len(), target_partition);
 
         // States the output ordering of the plan.
@@ -994,44 +1037,6 @@ impl MergeScanExec {
     }
 }
 
-// If the schema has JSON2 field, AND the field is of empty Struct datatype, amend it with Binary
-// datatype.
-// This is a very hacky way to make it possible to query the whole JSON2 column. Because when
-// querying a whole JSON2 column, like in the SQL `select * from ...`, we can't concretize the JSON2
-// datatype from the query. Hence, the JSON2 datatype remains what in the column schema, i.e., empty
-// Struct. An empty Struct is not alignable like any other concretized JSON2 datatypes, so to make
-// the query work, we amend(rewrite) it to Binary datatype.
-// Why the Binary datatype? Because underlying the scan and projection stage, the JSON2 data are
-// variant shape, will be all converted to bytes.
-// Anyway, this is not clean nor elegant. TODO(LFC) Maybe make it into some plan analyzer rule?
-fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
-    let schema = schema.clone();
-    let mut new_fields = Vec::with_capacity(schema.fields().len());
-    for field in schema.fields().iter() {
-        let new_field = if is_json2_extension_type(field)
-            && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
-        {
-            let is_legacy_json2 = is_legacy_json2_extension_type(field);
-            let mut new_field = field.as_ref().clone();
-            new_field.set_data_type(DataType::Binary);
-            if is_legacy_json2 {
-                // Pre-type-hint JSON2 is identified partly by its Struct data type. Promote the
-                // ephemeral field before rewriting it to Binary so later checks retain its JSON2
-                // identity.
-                new_field = new_field.with_extension_type(Json2ExtensionType::default());
-            }
-            Arc::new(new_field)
-        } else {
-            field.clone()
-        };
-        new_fields.push(new_field);
-    }
-    Arc::new(ArrowSchema::new_with_metadata(
-        new_fields,
-        schema.metadata().clone(),
-    ))
-}
-
 #[cfg(test)]
 impl MergeScanExec {
     fn remote_dyn_filter_producer_id(&self) -> Option<RemoteDynFilterProducerId> {
@@ -1403,10 +1408,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use arrow::array::{Int64Array, TimestampMillisecondArray};
-    use arrow_schema::extension::{
-        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
-    };
-    use arrow_schema::{DataType as TestArrowDataType, Field, Fields, TimeUnit};
+    use arrow_schema::{DataType as TestArrowDataType, Field, TimeUnit};
     use async_trait::async_trait;
     use common_base::Plugins;
     use common_meta::peer::Peer;
@@ -1426,7 +1428,6 @@ mod tests {
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
-    use datatypes::extension::json::JsonExtensionType;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
@@ -1454,31 +1455,6 @@ mod tests {
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
-    }
-
-    #[test]
-    fn test_amend_legacy_json2_field_preserves_json2_identity() {
-        let field = Field::new("j", DataType::Struct(Fields::empty()), true).with_metadata(
-            StdHashMap::from([
-                (
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    JsonExtensionType::NAME.to_string(),
-                ),
-                (
-                    EXTENSION_TYPE_METADATA_KEY.to_string(),
-                    serde_json::json!({
-                        "json_structure_settings": { "Structured": null }
-                    })
-                    .to_string(),
-                ),
-            ]),
-        );
-
-        let schema = maybe_amend_json2_field(&ArrowSchema::new(vec![field]));
-        let field = schema.field(0);
-        assert_eq!(&DataType::Binary, field.data_type());
-        assert_eq!(Some(Json2ExtensionType::NAME), field.extension_type_name());
-        assert!(is_json2_extension_type(field));
     }
 
     fn merge_scan_exec_with_sorted_input(

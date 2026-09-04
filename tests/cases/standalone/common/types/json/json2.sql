@@ -60,6 +60,13 @@ select count(*) from (select distinct j from json2_table);
 
 select ts, j from (select ts, j from json2_table) order by ts;
 
+select
+    ts,
+    j,
+    row_number() over (order by ts) as row_num
+from json2_table
+order by ts;
+
 select json_get(j, '') from json2_table order by ts;
 
 select json_get(j, '$') from json2_table order by ts;

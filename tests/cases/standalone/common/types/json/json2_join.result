@@ -58,6 +58,19 @@ on l.k = r.k;
 | right                   | 1                                                 |
 +-------------------------+---------------------------------------------------+
 
+select
+    l.j as left_json,
+    r.j as right_json
+from json2_join_same_name_left l
+join json2_join_same_name_right r
+on l.k = r.k;
+
++----------------------------+---------------------------------------------+
+| left_json                  | right_json                                  |
++----------------------------+---------------------------------------------+
+| {"a":1,"left_only":"kept"} | {"a":"right","right_only":"should be kept"} |
++----------------------------+---------------------------------------------+
+
 drop table json2_join_same_name_left;
 
 Affected Rows: 0

@@ -32,6 +32,13 @@ from json2_join_same_name_left l
 join json2_join_same_name_right r
 on l.k = r.k;
 
+select
+    l.j as left_json,
+    r.j as right_json
+from json2_join_same_name_left l
+join json2_join_same_name_right r
+on l.k = r.k;
+
 drop table json2_join_same_name_left;
 
 drop table json2_join_same_name_right;
