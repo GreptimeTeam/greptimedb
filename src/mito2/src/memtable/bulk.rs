@@ -1573,7 +1573,7 @@ impl BulkMemtableBuilder {
         self
     }
 
-    pub fn with_float_field_encoding(mut self, encoding: FloatFieldEncoding) -> Self {
+    pub(super) fn with_float_field_encoding(mut self, encoding: FloatFieldEncoding) -> Self {
         self.float_field_encoding = encoding;
         self
     }
