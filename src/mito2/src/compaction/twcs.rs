@@ -152,6 +152,8 @@ impl TwcsPicker {
                 }
             }
         }
+        // The compactor consumes outputs from the end, so keep newer windows there.
+        output.reverse();
         Ok(output)
     }
 
@@ -1549,7 +1551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_twcs_output() {
+    async fn test_newer_windows_are_placed_last_for_execution() {
         let file_ids = (0..4).map(|_| FileId::random()).collect::<Vec<_>>();
 
         // Case 1: 2 runs found in each time window.
@@ -1564,11 +1566,11 @@ mod tests {
             .to_vec(),
             expected_outputs: vec![
                 ExpectedOutput {
-                    input_files: vec![2, 3],
+                    input_files: vec![0, 1],
                     output_level: 1,
                 },
                 ExpectedOutput {
-                    input_files: vec![0, 1],
+                    input_files: vec![2, 3],
                     output_level: 1,
                 },
             ],
@@ -1595,11 +1597,11 @@ mod tests {
             .to_vec(),
             expected_outputs: vec![
                 ExpectedOutput {
-                    input_files: vec![2, 3, 4],
+                    input_files: vec![0, 1],
                     output_level: 1,
                 },
                 ExpectedOutput {
-                    input_files: vec![0, 1],
+                    input_files: vec![2, 3, 4],
                     output_level: 1,
                 },
             ],
