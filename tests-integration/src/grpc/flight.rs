@@ -164,9 +164,8 @@ mod test {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let server_accepted_connections = accepted_connections.clone();
         let incoming = TcpListenerStream::new(listener).map(move |result| {
-            result.map(|stream| {
+            result.inspect(|_| {
                 server_accepted_connections.fetch_add(1, Ordering::SeqCst);
-                stream
             })
         });
         let runtime = RuntimeBuilder::default()
