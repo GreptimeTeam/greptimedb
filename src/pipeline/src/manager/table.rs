@@ -312,7 +312,7 @@ impl PipelineTable {
                         return self
                             .cache
                             .get_failover_cache(schema, name, input_version)
-                            .await
+                            .await?
                             .context(PipelineNotFoundSnafu {
                                 name,
                                 version: input_version,
@@ -338,7 +338,7 @@ impl PipelineTable {
             let pipeline_content = pipeline_vec.remove(0);
 
             self.cache
-                .insert_failover_cache(schema, pipeline_content.clone(), input_version.is_none())
+                .insert_failover_cache(pipeline_content.clone(), input_version.is_none())
                 .await;
             return Ok(pipeline_content);
         }
@@ -360,7 +360,7 @@ impl PipelineTable {
         })?;
 
         self.cache
-            .insert_failover_cache(schema, pipeline_content.clone(), input_version.is_none())
+            .insert_failover_cache(pipeline_content.clone(), input_version.is_none())
             .await;
         Ok(pipeline_content)
     }
