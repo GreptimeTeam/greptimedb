@@ -1379,13 +1379,13 @@ mod split_tests {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
-        let input = ScanInput::new(env.access_layer.clone(), mapper).with_files(files);
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
+            .with_files(files)
+            .build();
 
         StreamContext {
             input,
             ranges: vec![],
-            scan_fingerprint: None,
-            scan_implied_time_range: None,
             query_start: std::time::Instant::now(),
         }
     }
@@ -1823,16 +1823,15 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let metadata = metadata_for_test();
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_cache(CacheStrategy::Disabled)
             .with_memtables(memtables)
-            .with_files(files);
+            .with_files(files)
+            .build();
 
         Arc::new(StreamContext {
             input,
             ranges: Vec::new(),
-            scan_fingerprint: None,
-            scan_implied_time_range: None,
             query_start: Instant::now(),
         })
     }

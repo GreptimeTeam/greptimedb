@@ -395,13 +395,15 @@ pub(crate) fn build_bulk_filter_plan(
 ///
 /// With predicate prefiltering enabled, tag and timestamp predicates that lower to
 /// [`SimpleFilterEvaluator`] are an exception — the engine enforces them precisely in
-/// the prefilter pass. When it is disabled, all simple filters remain on the normal
-/// precise-filter path instead.
+/// the prefilter pass. A caller can postpone simple timestamp filters to the normal
+/// precise-filter path when the scan time range covers the SST. When predicate
+/// prefiltering is disabled, all simple filters remain on the normal path instead.
 pub(crate) fn build_reader_filter_plan(
     predicate: Option<&Predicate>,
     expected_metadata: Option<&RegionMetadata>,
     pre_filter_mode: PreFilterMode,
     enable_predicate_prefilter: bool,
+    postpone_time_index_filter: bool,
     read_format: &FlatReadFormat,
     codec: &Arc<dyn PrimaryKeyCodec>,
 ) -> ReaderFilterPlan {
@@ -454,6 +456,11 @@ pub(crate) fn build_reader_filter_plan(
                 remaining_simple_filters.push(filter_ctx);
                 continue;
             };
+
+            if postpone_time_index_filter && filter_ctx.semantic_type() == SemanticType::Timestamp {
+                remaining_simple_filters.push(filter_ctx);
+                continue;
+            }
 
             // If the column is stored as a separate parquet column and is already projected in the main read,
             // we can evaluate the simple filter directly during prefilter.
@@ -1592,6 +1599,7 @@ mod tests {
             None,
             PreFilterMode::SkipFields,
             true,
+            false,
             &full_read_format,
             &codec,
         );
@@ -1599,6 +1607,42 @@ mod tests {
         assert_eq!(
             remaining_simple_filter_columns(&skip_fields_plan.remaining_simple_filters),
             vec!["field_0"]
+        );
+
+        let postponed_time_plan = build_reader_filter_plan(
+            Some(&Predicate::new(vec![
+                col("tag_0").eq(lit("a")),
+                col("field_0").gt(lit(1_u64)),
+                col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(1), None))),
+            ])),
+            None,
+            PreFilterMode::SkipFields,
+            true,
+            true,
+            &full_read_format,
+            &codec,
+        );
+        assert!(postponed_time_plan.prefilter_builder.is_some());
+        assert_eq!(
+            remaining_simple_filter_columns(&postponed_time_plan.remaining_simple_filters),
+            vec!["field_0", "ts"]
+        );
+
+        let postponed_time_only_plan = build_reader_filter_plan(
+            Some(&Predicate::new(vec![col("ts").gt_eq(lit(
+                ScalarValue::TimestampMillisecond(Some(1), None),
+            ))])),
+            None,
+            PreFilterMode::All,
+            true,
+            true,
+            &full_read_format,
+            &codec,
+        );
+        assert!(postponed_time_only_plan.prefilter_builder.is_none());
+        assert_eq!(
+            remaining_simple_filter_columns(&postponed_time_only_plan.remaining_simple_filters),
+            vec!["ts"]
         );
 
         let metric_metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
@@ -1620,6 +1664,7 @@ mod tests {
             None,
             PreFilterMode::All,
             true,
+            false,
             &projected_read_format,
             &metric_codec,
         );
@@ -1643,6 +1688,7 @@ mod tests {
             None,
             PreFilterMode::All,
             false,
+            true,
             &projected_read_format,
             &metric_codec,
         );
@@ -1675,6 +1721,7 @@ mod tests {
             None,
             PreFilterMode::All,
             true,
+            false,
             &read_format,
             &codec,
         );
@@ -1683,6 +1730,7 @@ mod tests {
             None,
             PreFilterMode::All,
             true,
+            false,
             &read_format,
             &codec,
         );
