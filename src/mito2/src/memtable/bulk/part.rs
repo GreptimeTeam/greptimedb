@@ -53,6 +53,7 @@ use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::mito_engine_options::FloatFieldEncoding;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId, SequenceNumber, SequenceRange};
 
@@ -70,7 +71,9 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
+use crate::sst::parquet::{
+    PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding,
+};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
@@ -1306,22 +1309,29 @@ pub struct BulkPartEncoder {
 
 impl BulkPartEncoder {
     pub fn new(metadata: RegionMetadataRef, row_group_size: usize) -> Result<BulkPartEncoder> {
+        Self::new_with_float_field_encoding(metadata, row_group_size, FloatFieldEncoding::default())
+    }
+
+    pub fn new_with_float_field_encoding(
+        metadata: RegionMetadataRef,
+        row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
+    ) -> Result<BulkPartEncoder> {
         // TODO(yingwen): Skip arrow schema if needed.
         let json = metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta =
             parquet::file::metadata::KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
         // TODO(yingwen): Do we need compression?
-        let writer_props = Some(
-            WriterProperties::builder()
-                .set_key_value_metadata(Some(vec![key_value_meta]))
-                .set_write_batch_size(row_group_size)
-                .set_max_row_group_row_count(Some(row_group_size))
-                .set_compression(Compression::ZSTD(ZstdLevel::default()))
-                .set_column_index_truncate_length(None)
-                .set_statistics_truncate_length(None)
-                .build(),
-        );
+        let mut props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![key_value_meta]))
+            .set_write_batch_size(row_group_size)
+            .set_max_row_group_row_count(Some(row_group_size))
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_column_index_truncate_length(None)
+            .set_statistics_truncate_length(None);
+        props = apply_float_field_encoding(props, &metadata, float_field_encoding);
+        let writer_props = Some(props.build());
 
         Ok(Self {
             metadata,

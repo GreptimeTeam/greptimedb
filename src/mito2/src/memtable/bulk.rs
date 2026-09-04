@@ -40,6 +40,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use store_api::metadata::RegionMetadataRef;
+use store_api::mito_engine_options::FloatFieldEncoding;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
 use tokio::sync::Semaphore;
 
@@ -410,6 +411,7 @@ pub struct BulkMemtable {
     merge_mode: MergeMode,
     /// Max number of rows in a parquet row group for encoded parts.
     row_group_size: usize,
+    float_field_encoding: FloatFieldEncoding,
 }
 
 impl std::fmt::Debug for BulkMemtable {
@@ -655,11 +657,13 @@ impl Memtable for BulkMemtable {
                 id,
                 self.config.clone(),
                 self.row_group_size,
+                self.float_field_encoding,
             ))),
             compact_dispatcher: self.compact_dispatcher.clone(),
             append_mode: self.append_mode,
             merge_mode: self.merge_mode,
             row_group_size: self.row_group_size,
+            float_field_encoding: self.float_field_encoding,
         })
     }
 
@@ -723,6 +727,32 @@ impl BulkMemtable {
         merge_mode: MergeMode,
         row_group_size: usize,
     ) -> Self {
+        Self::new_with_row_group_size_and_encoding(
+            id,
+            config,
+            metadata,
+            write_buffer_manager,
+            compact_dispatcher,
+            append_mode,
+            merge_mode,
+            row_group_size,
+            FloatFieldEncoding::default(),
+        )
+    }
+
+    /// Creates a new BulkMemtable with the given row group size and float encoding.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_row_group_size_and_encoding(
+        id: MemtableId,
+        config: BulkMemtableConfig,
+        metadata: RegionMetadataRef,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        compact_dispatcher: Option<Arc<CompactDispatcher>>,
+        append_mode: bool,
+        merge_mode: MergeMode,
+        row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
+    ) -> Self {
         let config = config.sanitize();
         let region_id = metadata.region_id;
         Self {
@@ -740,11 +770,13 @@ impl BulkMemtable {
                 id,
                 config,
                 row_group_size,
+                float_field_encoding,
             ))),
             compact_dispatcher,
             append_mode,
             merge_mode,
             row_group_size,
+            float_field_encoding,
         }
     }
 
@@ -1154,6 +1186,7 @@ struct MemtableCompactor {
     config: BulkMemtableConfig,
     /// Max number of rows in a parquet row group for encoded parts.
     row_group_size: usize,
+    float_field_encoding: FloatFieldEncoding,
 }
 
 impl MemtableCompactor {
@@ -1163,12 +1196,14 @@ impl MemtableCompactor {
         memtable_id: MemtableId,
         config: BulkMemtableConfig,
         row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
     ) -> Self {
         Self {
             region_id,
             memtable_id,
             config,
             row_group_size,
+            float_field_encoding,
         }
     }
 
@@ -1208,6 +1243,7 @@ impl MemtableCompactor {
         let encode_row_threshold = self.config.encode_row_threshold;
         let encode_bytes_threshold = self.config.encode_bytes_threshold;
         let row_group_size = self.row_group_size;
+        let float_field_encoding = self.float_field_encoding;
 
         // Merge all groups in parallel
         let merged_parts = collected
@@ -1222,6 +1258,7 @@ impl MemtableCompactor {
                     encode_row_threshold,
                     encode_bytes_threshold,
                     row_group_size,
+                    float_field_encoding,
                 )
             })
             .collect::<Result<Vec<Option<MergedPart>>>>()?;
@@ -1257,6 +1294,7 @@ impl MemtableCompactor {
         encode_row_threshold: usize,
         encode_bytes_threshold: usize,
         row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
     ) -> Result<Option<MergedPart>> {
         if parts_to_merge.is_empty() {
             return Ok(None);
@@ -1357,7 +1395,11 @@ impl MemtableCompactor {
         if estimated_total_rows > encode_row_threshold
             || estimated_total_bytes > encode_bytes_threshold
         {
-            let encoder = BulkPartEncoder::new(metadata.clone(), row_group_size)?;
+            let encoder = BulkPartEncoder::new_with_float_field_encoding(
+                metadata.clone(),
+                row_group_size,
+                float_field_encoding,
+            )?;
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,
@@ -1483,6 +1525,7 @@ pub struct BulkMemtableBuilder {
     merge_mode: MergeMode,
     /// Max number of rows in a parquet row group for encoded parts.
     row_group_size: usize,
+    float_field_encoding: FloatFieldEncoding,
 }
 
 impl Default for BulkMemtableBuilder {
@@ -1494,6 +1537,7 @@ impl Default for BulkMemtableBuilder {
             append_mode: false,
             merge_mode: MergeMode::default(),
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
+            float_field_encoding: FloatFieldEncoding::default(),
         }
     }
 }
@@ -1525,6 +1569,11 @@ impl BulkMemtableBuilder {
         self
     }
 
+    pub fn with_float_field_encoding(mut self, encoding: FloatFieldEncoding) -> Self {
+        self.float_field_encoding = encoding;
+        self
+    }
+
     /// Sets the compact dispatcher.
     pub fn with_compact_dispatcher(mut self, compact_dispatcher: Arc<CompactDispatcher>) -> Self {
         self.compact_dispatcher = Some(compact_dispatcher);
@@ -1539,7 +1588,7 @@ impl BulkMemtableBuilder {
 
 impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(BulkMemtable::new_with_row_group_size(
+        Arc::new(BulkMemtable::new_with_row_group_size_and_encoding(
             id,
             self.config.clone(),
             metadata.clone(),
@@ -1548,6 +1597,7 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.append_mode,
             self.merge_mode,
             self.row_group_size,
+            self.float_field_encoding,
         ))
     }
 
