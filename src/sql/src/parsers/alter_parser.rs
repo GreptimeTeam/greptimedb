@@ -1612,14 +1612,11 @@ MODIFY COLUMN attrs JSON2 (
         let Statement::AlterTable(empty) = empty.remove(0) else {
             unreachable!()
         };
-        let AlterTableOperation::ModifyColumnType {
-            json2_options: Some(options),
-            ..
-        } = empty.alter_operation()
+        let AlterTableOperation::ModifyColumnType { json2_options, .. } = empty.alter_operation()
         else {
             unreachable!()
         };
-        assert!(options.type_hints.is_empty());
+        assert!(json2_options.is_none());
     }
 
     #[test]

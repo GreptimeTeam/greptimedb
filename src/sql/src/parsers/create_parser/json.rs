@@ -74,7 +74,7 @@ pub(crate) fn parse_json2_type_and_options(
 
 fn parse_json2_options(parser: &mut Parser<'_>) -> Result<Option<Json2Options>> {
     if parser.consume_token(&Token::RParen) {
-        return Ok(Some(Json2Options::default()));
+        return Ok(None);
     }
 
     let mut max_auto_expanded_paths = None;
