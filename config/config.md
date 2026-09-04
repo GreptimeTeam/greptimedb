@@ -106,7 +106,7 @@
 | `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.timeout` | String | `3s` | The timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_create_topics` | Bool | `true` | Automatically create topics for WAL.<br/>Set to `true` to automatically create topics for WAL.<br/>Otherwise, use topics named `topic_name_prefix_[0..num_topics)` |
 | `wal.num_topics` | Integer | `64` | Number of topics.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.selector_type` | String | `round_robin` | Topic selector type.<br/>Available selector types:<br/>- `round_robin` (default)<br/>**It's only used when the provider is `kafka`**. |
@@ -460,6 +460,8 @@
 | `wal` | -- | -- | -- |
 | `wal.provider` | String | `raft_engine` | -- |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster.<br/><br/>**It's only used when the provider is `kafka`**. |
+| `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_create_topics` | Bool | `true` | Automatically create topics for WAL.<br/>Set to `true` to automatically create topics for WAL.<br/>Otherwise, use topics named `topic_name_prefix_[0..num_topics)`<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_prune_interval` | String | `30m` | Interval of automatically WAL pruning.<br/>Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_prune_logical_delete` | Bool | `false` | Whether automatically WAL pruning only updates the metadata marker and skips Kafka DeleteRecords.<br/>Set to `true` for Kafka deployments that do not support DeleteRecords.<br/>**It's only used when the provider is `kafka`**. |
@@ -561,7 +563,7 @@
 | `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.timeout` | String | `3s` | The timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.create_index` | Bool | `false` | Whether to enable WAL index creation.<br/>**It's only used when the provider is `kafka`**. |

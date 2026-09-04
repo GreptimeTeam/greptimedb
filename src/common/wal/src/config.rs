@@ -214,7 +214,7 @@ mod tests {
                     client_key_path: None,
                 }),
                 connect_timeout: Duration::from_secs(3),
-                timeout: Duration::from_secs(3),
+                timeout: Duration::from_secs(5),
             },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 32,
@@ -252,7 +252,7 @@ mod tests {
                     client_key_path: None,
                 }),
                 connect_timeout: Duration::from_secs(3),
-                timeout: Duration::from_secs(3),
+                timeout: Duration::from_secs(5),
             },
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
@@ -289,5 +289,35 @@ mod tests {
         assert!(debug.contains("greptime"));
         assert!(debug.contains("<REDACTED>"));
         assert!(!debug.contains("kafka-secret"));
+    }
+}
+
+#[cfg(test)]
+mod rskafka_contract_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use rskafka::build_info::DEFAULT_CLIENT_ID;
+    use rskafka::messenger::{Messenger, RequestError, SyncVersionsError};
+
+    #[tokio::test]
+    async fn test_send_timeout_poisoned_messenger() {
+        let (_peer, stream) = tokio::io::duplex(1);
+        let mut messenger = Messenger::new(
+            stream,
+            1_000,
+            Arc::from(DEFAULT_CLIENT_ID),
+            Some(Duration::from_millis(50)),
+        );
+
+        let error = messenger.sync_versions().await.unwrap_err();
+        assert!(matches!(
+            error,
+            SyncVersionsError::RequestError(RequestError::Poisoned(error))
+                if matches!(
+                    error.as_ref(),
+                    RequestError::IO(error) if error.kind() == std::io::ErrorKind::TimedOut
+                )
+        ));
     }
 }

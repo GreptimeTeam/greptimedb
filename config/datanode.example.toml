@@ -186,9 +186,9 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## **It's only used when the provider is `kafka`**.
 #+ connect_timeout = "3s"
 
-## The timeout for kafka client.
+## The total request timeout for kafka client.
 ## **It's only used when the provider is `kafka`**.
-#+ timeout = "3s"
+#+ timeout = "5s"
 
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
