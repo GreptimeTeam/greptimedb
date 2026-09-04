@@ -139,7 +139,7 @@ struct RetentionState {
     cleanup_error_reported: bool,
 }
 
-/// Retains managed file logs within a directory-size limit.
+/// Retains managed file logs within configured directory-size and file-count limits.
 #[derive(Clone)]
 pub(crate) struct DirectoryRetention {
     directory: Arc<PathBuf>,
@@ -421,7 +421,8 @@ pub(crate) fn build_file_appender(
     kind: LogFileKind,
     retention: Option<&DirectoryRetention>,
 ) -> Box<dyn Write + Send> {
-    let max_log_files = if retention.is_some() {
+    // Directory retention owns size and count pruning so its index remains authoritative.
+    let upstream_max_log_files = if retention.is_some() {
         0
     } else {
         opts.max_log_files
@@ -429,7 +430,7 @@ pub(crate) fn build_file_appender(
     let mut builder = RollingFileAppender::builder()
         .rotation(Rotation::HOURLY)
         .filename_prefix(kind.prefix())
-        .max_log_files(max_log_files);
+        .max_log_files(upstream_max_log_files);
     if retention.is_some() {
         builder = builder.latest_symlink(kind.current_link_name());
     }
@@ -645,6 +646,29 @@ mod tests {
         let retention = DirectoryRetention::new(directory.path(), ReadableSize::gb(1), 2).unwrap();
         register_default_kind(&retention, directory.path(), &active);
         retention.initialize();
+
+        assert!(!oldest.exists());
+        assert!(old.exists());
+        assert!(active.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_retention_enforces_max_log_files_after_rotation() {
+        let directory = TempDir::new().unwrap();
+        let oldest = directory.path().join("greptimedb.2026-01-01-00");
+        let old = directory.path().join("greptimedb.2026-01-01-01");
+        let active = directory.path().join("greptimedb.2026-01-01-02");
+        write_file(&oldest, b"oldest");
+        write_file(&old, b"old");
+
+        let retention = DirectoryRetention::new(directory.path(), ReadableSize::gb(1), 2).unwrap();
+        register_default_kind(&retention, directory.path(), &old);
+        retention.initialize();
+        write_file(&active, b"");
+        fs::remove_file(directory.path().join(".greptimedb.current")).unwrap();
+        symlink(&active, directory.path().join(".greptimedb.current")).unwrap();
+        retention.track(LogFileKind::Default, 1);
 
         assert!(!oldest.exists());
         assert!(old.exists());
