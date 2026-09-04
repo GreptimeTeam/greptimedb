@@ -346,6 +346,7 @@ mod tests {
         let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(bss.build())).unwrap();
         writer.write(&batch).unwrap();
         let footer = writer.finish().unwrap();
+        drop(writer);
         for name in ["f32", "f64"] {
             let column = footer.row_groups()[0]
                 .columns()
