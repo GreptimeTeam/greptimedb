@@ -410,12 +410,13 @@ mod tests {
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::logical_plan::JoinType;
     use datafusion_expr::{
-        Expr, LogicalPlan, LogicalPlanBuilder, Signature, Subquery, Volatility, col, lit,
+        Expr, Extension, LogicalPlan, LogicalPlanBuilder, Signature, Subquery, Volatility, col, lit,
     };
     use datafusion_optimizer::{OptimizerContext, OptimizerRule};
     use datatypes::schema::ColumnSchema;
+    use promql::extension_plan::InstantManipulate;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::{ConcreteDataType, VectorDistanceMetric};
+    use store_api::storage::{ConcreteDataType, VectorDistanceMetric, VectorSearchRequest};
 
     use super::VectorSearchState;
     use crate::dummy_catalog::DummyTableProvider;
@@ -469,14 +470,40 @@ mod tests {
     }
 
     fn vec_distance_expr(function_name: &'static str) -> Expr {
+        vec_distance_expr_with_query(function_name, "[1.0, 2.0]")
+    }
+
+    fn vec_distance_expr_with_query(function_name: &'static str, query_vector: &str) -> Expr {
         let udf = create_udf(Arc::new(TestVectorFunction::new(function_name)));
         Expr::ScalarFunction(ScalarFunction::new_udf(
             Arc::new(udf),
             vec![
                 col("v"),
-                lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
+                lit(ScalarValue::Utf8(Some(query_vector.to_string()))),
             ],
         ))
+    }
+
+    fn scan_request_from_plan(plan: &LogicalPlan) -> store_api::storage::ScanRequest {
+        let mut request = None;
+        plan.apply_with_subqueries(|node| {
+            if let LogicalPlan::TableScan(scan) = node
+                && let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+                && let Some(provider) = source
+                    .table_provider
+                    .as_any()
+                    .downcast_ref::<DummyTableProvider>()
+            {
+                request = Some(provider.scan_request());
+            }
+            Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        request.unwrap()
+    }
+
+    fn vector_hint_from_plan(plan: &LogicalPlan) -> Option<VectorSearchRequest> {
+        scan_request_from_plan(plan).vector_search
     }
 
     fn build_dummy_provider(column_id: u32) -> Arc<DummyTableProvider> {
@@ -565,13 +592,135 @@ mod tests {
             .unwrap();
 
         let context = OptimizerContext::default();
-        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
 
-        let hint = dummy_provider.get_vector_search_hint().unwrap();
+        let hint = vector_hint_from_plan(&rewritten).unwrap();
         assert_eq!(hint.column_id, 10);
         assert_eq!(hint.k, 5);
         assert_eq!(hint.metric, VectorDistanceMetric::L2sq);
         assert_eq!(hint.query_vector, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_vector_hint_is_skipped_for_single_evaluation() {
+        let provider = build_dummy_provider(10);
+        let source = Arc::new(DefaultTableSource::new(provider));
+        let distance = vec_distance_expr(VEC_L2SQ_DISTANCE);
+        let scan = LogicalPlanBuilder::scan_with_filters("t", source, None, vec![])
+            .unwrap()
+            .sort(vec![distance.sort(true, false)])
+            .unwrap()
+            .limit(0, Some(5))
+            .unwrap()
+            .build()
+            .unwrap();
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                1000,
+                1000,
+                "ts".to_string(),
+                vec![],
+                Some("v".to_string()),
+                scan,
+            )),
+        });
+
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+        let request = scan_request_from_plan(&rewritten);
+        assert_eq!(
+            request.series_row_selector,
+            Some(store_api::storage::TimeSeriesRowSelector::LastRow)
+        );
+        assert!(request.vector_search.is_none());
+    }
+
+    #[test]
+    fn test_single_evaluation_consumes_only_its_vector_hint() {
+        let provider_a = build_dummy_provider(10);
+        let provider_b = build_dummy_provider(20);
+        let distance_a = vec_distance_expr_with_query(VEC_L2SQ_DISTANCE, "[1.0, 2.0]");
+        let distance_b = vec_distance_expr_with_query(VEC_L2SQ_DISTANCE, "[3.0, 4.0]");
+
+        let branch_a = LogicalPlanBuilder::scan_with_filters(
+            "t",
+            Arc::new(DefaultTableSource::new(provider_a)),
+            None,
+            vec![],
+        )
+        .unwrap()
+        .sort(vec![distance_a.sort(true, false)])
+        .unwrap()
+        .limit(0, Some(5))
+        .unwrap()
+        .build()
+        .unwrap();
+        let branch_a = LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                1000,
+                1000,
+                "ts".to_string(),
+                vec![],
+                Some("v".to_string()),
+                branch_a,
+            )),
+        });
+
+        let branch_b = LogicalPlanBuilder::scan_with_filters(
+            "t",
+            Arc::new(DefaultTableSource::new(provider_b)),
+            None,
+            vec![],
+        )
+        .unwrap()
+        .sort(vec![distance_b.sort(true, false)])
+        .unwrap()
+        .limit(0, Some(9))
+        .unwrap()
+        .build()
+        .unwrap();
+
+        let plan = LogicalPlanBuilder::from(branch_a)
+            .union(branch_b)
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        let LogicalPlan::Union(union) = rewritten else {
+            panic!("expected union plan")
+        };
+        let request_a = scan_request_from_plan(&union.inputs[0]);
+        let request_b = scan_request_from_plan(&union.inputs[1]);
+
+        assert_eq!(
+            request_a.series_row_selector,
+            Some(store_api::storage::TimeSeriesRowSelector::LastRow)
+        );
+        assert!(request_a.vector_search.is_none());
+        assert_eq!(request_b.series_row_selector, None);
+        assert_eq!(
+            request_b.vector_search,
+            Some(VectorSearchRequest {
+                column_id: 20,
+                query_vector: vec![3.0, 4.0],
+                k: 9,
+                metric: VectorDistanceMetric::L2sq,
+            })
+        );
+
+        // The catalog providers are not mutated; the requests above belong to
+        // the two rewritten scan use-sites.
+        assert!(request_b.vector_search != request_a.vector_search);
     }
 
     #[test]
@@ -589,9 +738,9 @@ mod tests {
             .unwrap();
 
         let context = OptimizerContext::default();
-        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
 
-        let hint = dummy_provider.get_vector_search_hint().unwrap();
+        let hint = vector_hint_from_plan(&rewritten).unwrap();
         assert_eq!(hint.k, 15);
     }
 
@@ -621,8 +770,8 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
-        let hint = dummy_provider.get_vector_search_hint().unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
+        let hint = vector_hint_from_plan(&rewritten).unwrap();
         assert_eq!(hint.metric, VectorDistanceMetric::InnerProduct);
     }
 
@@ -681,9 +830,9 @@ mod tests {
             .unwrap();
 
         let context = OptimizerContext::default();
-        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
 
-        let hint = dummy_provider.get_vector_search_hint().unwrap();
+        let hint = vector_hint_from_plan(&rewritten).unwrap();
         assert_eq!(hint.column_id, 10);
         assert_eq!(hint.k, 5);
     }
@@ -701,9 +850,9 @@ mod tests {
             .unwrap();
 
         let context = OptimizerContext::default();
-        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
 
-        let hint = dummy_provider.get_vector_search_hint().unwrap();
+        let hint = vector_hint_from_plan(&rewritten).unwrap();
         assert_eq!(hint.k, 4);
     }
 
@@ -828,10 +977,10 @@ mod tests {
             .unwrap();
 
         let context = OptimizerContext::default();
-        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
 
         // Hint propagates through simple subquery
-        let hint = provider.get_vector_search_hint().unwrap();
+        let hint = vector_hint_from_plan(&rewritten).unwrap();
         assert_eq!(hint.k, 5);
     }
 
@@ -901,8 +1050,8 @@ mod tests {
         let _ = ScanHintRule.rewrite(t1_plan, &context).unwrap();
         assert!(t1_provider.get_vector_search_hint().is_none());
 
-        let _ = ScanHintRule.rewrite(t2_plan, &context).unwrap();
-        let hint = t2_provider.get_vector_search_hint().unwrap();
+        let rewritten = ScanHintRule.rewrite(t2_plan, &context).unwrap().data;
+        let hint = vector_hint_from_plan(&rewritten).unwrap();
         assert_eq!(hint.column_id, 20);
         assert_eq!(hint.k, 5);
     }

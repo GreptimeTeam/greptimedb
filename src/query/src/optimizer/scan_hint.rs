@@ -19,11 +19,12 @@ use arrow_schema::SortOptions;
 use common_function::aggrs::aggr_wrapper::aggr_state_func_name;
 use common_recordbatch::OrderOption;
 use datafusion::datasource::DefaultTableSource;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use promql::extension_plan::InstantManipulate;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -59,65 +60,89 @@ impl OptimizerRule for ScanHintRule {
 
 impl ScanHintRule {
     fn optimize(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
-        let mut visitor = ScanHintVisitor::default();
-        let _ = plan.visit(&mut visitor)?;
-
-        if visitor.need_rewrite() {
-            plan.transform_down(&mut |plan| Self::set_hints(plan, &mut visitor))
-        } else {
-            Ok(Transformed::no(plan))
-        }
+        let mut rewriter = ScanHintRewriter::default();
+        // The extension's input is included by DataFusion's normal TreeNode
+        // rewrite, so this is one scoped recursive walk (subquery expressions
+        // are included by the dedicated API as well).
+        plan.rewrite_with_subqueries(&mut rewriter)
     }
 
     fn set_hints(
         plan: LogicalPlan,
-        visitor: &mut ScanHintVisitor,
+        rewriter: &mut ScanHintRewriter,
     ) -> Result<Transformed<LogicalPlan>> {
-        match &plan {
-            LogicalPlan::TableScan(table_scan) => {
-                let mut transformed = false;
-                if let Some(source) = table_scan
-                    .source
-                    .as_any()
-                    .downcast_ref::<DefaultTableSource>()
-                {
-                    // The provider in the region server is [DummyTableProvider].
-                    if let Some(adapter) = source
-                        .table_provider
-                        .as_any()
-                        .downcast_ref::<DummyTableProvider>()
-                    {
-                        // set order_hint
-                        if let Some(order_expr) = &visitor.order_expr {
-                            Self::set_order_hint(adapter, order_expr);
-                        }
+        let LogicalPlan::TableScan(mut table_scan) = plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(source) = table_scan
+            .source
+            .as_any()
+            .downcast_ref::<DefaultTableSource>()
+        else {
+            return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
+        };
+        // The provider in the region server is [DummyTableProvider].
+        let Some(original) = source
+            .table_provider
+            .as_any()
+            .downcast_ref::<DummyTableProvider>()
+        else {
+            return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
+        };
 
-                        // set time series selector hint
-                        if let Some((group_by_cols, order_by_col)) = &visitor.ts_row_selector {
-                            Self::set_time_series_row_selector_hint(
-                                adapter,
-                                group_by_cols,
-                                order_by_col,
-                            );
-                        }
+        #[cfg(feature = "vector_index")]
+        let has_vector_hint = rewriter.vector_search.need_rewrite();
+        #[cfg(not(feature = "vector_index"))]
+        let has_vector_hint = false;
+        let has_hint = rewriter.order_expr.is_some()
+            || rewriter.ts_row_selector.is_some()
+            || rewriter.inside_single_evaluation
+            || has_vector_hint;
+        if !has_hint {
+            return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
+        }
 
-                        #[cfg(feature = "vector_index")]
-                        if let Some(vector_request) = visitor
-                            .vector_search
-                            .take_vector_request_from_dummy(adapter, &table_scan.table_name)
-                        {
-                            adapter.with_vector_search_hint(vector_request);
-                        }
-                        transformed = true;
-                    }
-                }
-                if transformed {
-                    Ok(Transformed::yes(plan))
-                } else {
-                    Ok(Transformed::no(plan))
-                }
-            }
-            _ => Ok(Transformed::no(plan)),
+        // A provider can be used by several TableScan nodes. Fork its request
+        // for every hinted use-site before applying hints, rather than mutating
+        // the shared catalog provider. This keeps order/vector/legacy hints
+        // local as well as the new LastRow hint.
+        let adapter = original.clone_for_scan();
+        Self::apply_hints(&adapter, rewriter, &table_scan);
+        if rewriter.inside_single_evaluation {
+            adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow);
+        }
+        table_scan.source =
+            std::sync::Arc::new(DefaultTableSource::new(std::sync::Arc::new(adapter)));
+        Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
+    }
+
+    fn apply_hints(
+        adapter: &DummyTableProvider,
+        rewriter: &mut ScanHintRewriter,
+        table_scan: &datafusion_expr::logical_plan::TableScan,
+    ) {
+        #[cfg(not(feature = "vector_index"))]
+        let _ = table_scan;
+        if let Some(order_expr) = &rewriter.order_expr {
+            Self::set_order_hint(adapter, order_expr);
+        }
+        if let Some((group_by_cols, order_by_col)) = &rewriter.ts_row_selector {
+            Self::set_time_series_row_selector_hint(adapter, group_by_cols, order_by_col);
+        }
+        #[cfg(feature = "vector_index")]
+        if rewriter.inside_single_evaluation {
+            // LastRow and vector search are mutually exclusive for one scan:
+            // vector search would bypass the ordinary sort/limit path needed by
+            // the single-evaluation semantics. Still consume the queued hint so
+            // it cannot be applied to a later scan of the same table.
+            let _ = rewriter
+                .vector_search
+                .take_vector_request_from_dummy(adapter, &table_scan.table_name);
+        } else if let Some(vector_request) = rewriter
+            .vector_search
+            .take_vector_request_from_dummy(adapter, &table_scan.table_name)
+        {
+            adapter.with_vector_search_hint(vector_request);
         }
     }
 
@@ -226,181 +251,161 @@ impl ScanHintRule {
     }
 }
 
-/// Traverse and fetch hints.
+/// Traverse and apply hints with state scoped to the current logical-plan path.
+///
+/// Rewriting the scan while walking down the tree is important: the state then
+/// describes the actual parent path of that scan, and a shared provider is forked
+/// at that exact use-site. No traversal-order identity is involved.
 #[derive(Default)]
-struct ScanHintVisitor {
-    /// The closest order requirement to the leaf node.
+struct ScanHintRewriter {
     order_expr: Option<Vec<Sort>>,
-    /// Row selection on time series distribution.
-    /// This field stores saved `group_by` columns when all aggregate functions are `last_value`
-    /// and the `order_by` column which should be time index.
+    order_stack: Vec<Option<Vec<Sort>>>,
     ts_row_selector: Option<(HashSet<Column>, Column)>,
+    ts_stack: Vec<Option<(HashSet<Column>, Column)>>,
+    inside_single_evaluation: bool,
+    single_evaluation_stack: Vec<bool>,
     #[cfg(feature = "vector_index")]
     vector_search: VectorSearchState,
 }
 
-impl TreeNodeVisitor<'_> for ScanHintVisitor {
+impl TreeNodeRewriter for ScanHintRewriter {
     type Node = LogicalPlan;
 
-    fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
-        #[cfg(feature = "vector_index")]
-        if let LogicalPlan::Limit(limit) = node {
-            // Track LIMIT so vector hint k can be derived within the same input chain.
-            self.vector_search.on_limit_enter(limit);
-        }
+    fn f_down(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+        self.order_stack.push(self.order_expr.clone());
+        self.ts_stack.push(self.ts_row_selector.clone());
+        self.single_evaluation_stack
+            .push(self.inside_single_evaluation);
 
-        // Get order requirement from sort plan
-        if let LogicalPlan::Sort(sort) = node {
+        if let LogicalPlan::Sort(sort) = &node {
             self.order_expr = Some(sort.expr.clone());
-
-            #[cfg(feature = "vector_index")]
-            {
-                // Capture vector ORDER BY and TopK hints from sort nodes.
-                self.vector_search.on_sort_enter(sort);
-            }
+        }
+        if let LogicalPlan::Extension(extension) = &node
+            && let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>()
+        {
+            self.inside_single_evaluation = instant.is_single_evaluation();
+        }
+        // DataFusion uses a synthetic Subquery plan node for expression
+        // subqueries. It is an evaluation boundary: an outer instant query
+        // must not make the subquery's scan use LastRow. SubqueryAlias is not
+        // a boundary here because it can still be part of the direct data flow.
+        if matches!(node, LogicalPlan::Subquery(_)) {
+            self.inside_single_evaluation = false;
+        }
+        if let LogicalPlan::Aggregate(aggregate) = &node {
+            self.ts_row_selector = Self::extract_last_value_selector(aggregate);
         }
 
-        // Get time series row selector from aggr plan
-        if let LogicalPlan::Aggregate(aggregate) = node {
-            let mut is_all_last_value = !aggregate.aggr_expr.is_empty();
-            let mut order_by_expr = None;
-            for expr in &aggregate.aggr_expr {
-                // check function name
-                let Expr::AggregateFunction(func) = expr else {
-                    is_all_last_value = false;
-                    break;
-                };
-                if (func.func.name() != "last_value"
-                    && func.func.name() != aggr_state_func_name("last_value"))
-                    || func.params.filter.is_some()
-                    || func.params.distinct
-                {
-                    is_all_last_value = false;
-                    break;
-                }
-                // check order by requirement
-                let order_by = &func.params.order_by;
-                if let Some(first_order_by) = order_by.first()
-                    && order_by.len() == 1
-                {
-                    if let Some(existing_order_by) = &order_by_expr {
-                        if existing_order_by != first_order_by {
-                            is_all_last_value = false;
-                            break;
-                        }
-                    } else {
-                        // only allow `order by xxx [ASC]`, xxx is a bare column reference so `last_value()` is the max
-                        // value of the column.
-                        if !first_order_by.asc || !matches!(&first_order_by.expr, Expr::Column(_)) {
-                            is_all_last_value = false;
-                            break;
-                        }
-                        order_by_expr = Some(first_order_by.clone());
-                    }
-                }
-            }
-            is_all_last_value &= order_by_expr.is_some();
-            if is_all_last_value {
-                // make sure all the exprs are DIRECT `col` and collect them
-                let mut group_by_cols = HashSet::with_capacity(aggregate.group_expr.len());
-                for expr in &aggregate.group_expr {
-                    if let Expr::Column(col) = expr {
-                        group_by_cols.insert(col.clone());
-                    } else {
-                        is_all_last_value = false;
-                        break;
-                    }
-                }
-                // Safety: checked in the above loop
-                let order_by_expr = order_by_expr.unwrap();
-                let Expr::Column(order_by_col) = order_by_expr.expr else {
-                    unreachable!()
-                };
-                if is_all_last_value {
-                    self.ts_row_selector = Some((group_by_cols, order_by_col));
-                }
-            }
-        }
-
-        // Avoid carrying vector hints across branching inputs (join/subquery) to prevent
-        // pruning results before global ordering is applied. Only treat a subquery as a
-        // barrier when it contains non-inlineable operators.
-        let is_branching_for_ts = matches!(
+        let is_branching = matches!(
             node,
             LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_)
         ) || node.inputs().len() > 1;
-        if is_branching_for_ts && self.ts_row_selector.is_some() {
-            // clean previous time series selector hint when encounter subqueries or join
+        if is_branching {
             self.ts_row_selector = None;
         }
-        #[cfg(feature = "vector_index")]
-        if is_branching_for_vector(node) {
-            self.vector_search.on_branching_enter();
-        }
-
-        if let LogicalPlan::Filter(filter) = node
+        if let LogicalPlan::Filter(filter) = &node
             && let Some(group_by_exprs) = &self.ts_row_selector
         {
-            let mut filter_referenced_cols = HashSet::default();
-            utils::expr_to_columns(&filter.predicate, &mut filter_referenced_cols)?;
-            // ensure only group_by columns are used in filter
-            if !filter_referenced_cols.is_subset(&group_by_exprs.0) {
+            let mut referenced = HashSet::default();
+            utils::expr_to_columns(&filter.predicate, &mut referenced)?;
+            if !referenced.is_subset(&group_by_exprs.0) {
                 self.ts_row_selector = None;
             }
         }
 
         #[cfg(feature = "vector_index")]
-        if let LogicalPlan::Filter(filter) = node {
-            self.vector_search.on_filter_enter(&filter.predicate);
+        {
+            if let LogicalPlan::Limit(limit) = &node {
+                self.vector_search.on_limit_enter(limit);
+            }
+            if let LogicalPlan::Sort(sort) = &node {
+                self.vector_search.on_sort_enter(sort);
+            }
+            if is_branching_for_vector(&node) {
+                self.vector_search.on_branching_enter();
+            }
+            if let LogicalPlan::Filter(filter) = &node {
+                self.vector_search.on_filter_enter(&filter.predicate);
+            }
+            if let LogicalPlan::TableScan(table_scan) = &node {
+                self.vector_search.on_table_scan(table_scan);
+            }
         }
 
-        #[cfg(feature = "vector_index")]
-        if let LogicalPlan::TableScan(table_scan) = node {
-            // Record vector hints at leaf scans after scope checks.
-            self.vector_search.on_table_scan(table_scan);
-        }
-
-        Ok(TreeNodeRecursion::Continue)
+        ScanHintRule::set_hints(node, self)
     }
 
-    fn f_up(&mut self, _node: &Self::Node) -> Result<TreeNodeRecursion> {
+    fn f_up(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
         #[cfg(feature = "vector_index")]
-        match _node {
-            LogicalPlan::Limit(_) => {
-                self.vector_search.on_limit_exit();
+        {
+            match &node {
+                LogicalPlan::Limit(_) => self.vector_search.on_limit_exit(),
+                LogicalPlan::Sort(_) => self.vector_search.on_sort_exit(),
+                LogicalPlan::Filter(_) => self.vector_search.on_filter_exit(),
+                LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_)
+                    if is_branching_for_vector(&node) =>
+                {
+                    self.vector_search.on_branching_exit()
+                }
+                _ if node.inputs().len() > 1 => self.vector_search.on_branching_exit(),
+                _ => {}
             }
-            LogicalPlan::Sort(_) => {
-                self.vector_search.on_sort_exit();
-            }
-            LogicalPlan::Filter(_) => {
-                self.vector_search.on_filter_exit();
-            }
-            LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_)
-                if is_branching_for_vector(_node) =>
-            {
-                self.vector_search.on_branching_exit();
-            }
-            _ if _node.inputs().len() > 1 => {
-                self.vector_search.on_branching_exit();
-            }
-            _ => {}
         }
-
-        Ok(TreeNodeRecursion::Continue)
+        if let Some(previous) = self.order_stack.pop() {
+            self.order_expr = previous;
+        }
+        if let Some(previous) = self.ts_stack.pop() {
+            self.ts_row_selector = previous;
+        }
+        if let Some(previous) = self.single_evaluation_stack.pop() {
+            self.inside_single_evaluation = previous;
+        }
+        Ok(Transformed::no(node))
     }
 }
 
-impl ScanHintVisitor {
-    fn need_rewrite(&self) -> bool {
-        let base = self.order_expr.is_some() || self.ts_row_selector.is_some();
-        #[cfg(feature = "vector_index")]
-        {
-            base || self.vector_search.need_rewrite()
+impl ScanHintRewriter {
+    fn extract_last_value_selector(
+        aggregate: &datafusion_expr::logical_plan::Aggregate,
+    ) -> Option<(HashSet<Column>, Column)> {
+        let mut order_by_expr = None;
+        if aggregate.aggr_expr.is_empty() {
+            return None;
         }
-        #[cfg(not(feature = "vector_index"))]
-        {
-            base
+        for expr in &aggregate.aggr_expr {
+            let Expr::AggregateFunction(func) = expr else {
+                return None;
+            };
+            if (func.func.name() != "last_value"
+                && func.func.name() != aggr_state_func_name("last_value"))
+                || func.params.filter.is_some()
+                || func.params.distinct
+            {
+                return None;
+            }
+            let order_by = &func.params.order_by;
+            if order_by.len() != 1 || !order_by[0].asc {
+                return None;
+            }
+            if let Some(existing) = &order_by_expr {
+                if existing != &order_by[0] {
+                    return None;
+                }
+            } else {
+                order_by_expr = Some(order_by[0].clone());
+            }
         }
+        let Expr::Column(order_by_col) = order_by_expr?.expr else {
+            return None;
+        };
+        let mut group_by_cols = HashSet::with_capacity(aggregate.group_expr.len());
+        for expr in &aggregate.group_expr {
+            let Expr::Column(col) = expr else {
+                return None;
+            };
+            group_by_cols.insert(col.clone());
+        }
+        Some((group_by_cols, order_by_col))
     }
 }
 
@@ -443,17 +448,271 @@ fn has_non_inlineable_ops(plan: &LogicalPlan) -> bool {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use datafusion::functions_aggregate::first_last::last_value_udaf;
+    use datafusion_common::tree_node::TreeNodeRecursion;
     use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
-    use datafusion_expr::{LogicalPlanBuilder, col};
+    use datafusion_expr::expr_fn::scalar_subquery;
+    use datafusion_expr::{Extension, LogicalPlan, LogicalPlanBuilder, col};
     use datafusion_optimizer::OptimizerContext;
     use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
-    use store_api::storage::RegionId;
+    use store_api::storage::{RegionId, TimeSeriesRowSelector};
 
     use super::*;
+
+    fn scan_requests(plan: &LogicalPlan) -> Vec<store_api::storage::ScanRequest> {
+        scan_requests_with_names(plan)
+            .into_iter()
+            .map(|(_, request)| request)
+            .collect()
+    }
+
+    fn scan_requests_with_names(
+        plan: &LogicalPlan,
+    ) -> Vec<(String, store_api::storage::ScanRequest)> {
+        let mut requests = Vec::new();
+        plan.apply_with_subqueries(|node| {
+            if let LogicalPlan::TableScan(scan) = node
+                && let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+                && let Some(provider) = source
+                    .table_provider
+                    .as_any()
+                    .downcast_ref::<DummyTableProvider>()
+            {
+                requests.push((scan.table_name.to_string(), provider.scan_request()));
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        requests
+    }
+
+    fn instant_plan(provider: Arc<DummyTableProvider>, end: i64) -> LogicalPlan {
+        instant_plan_named(provider, "t", end)
+    }
+
+    fn scan_plan(provider: Arc<DummyTableProvider>, table_name: &str) -> LogicalPlan {
+        LogicalPlanBuilder::scan(
+            table_name,
+            Arc::new(DefaultTableSource::new(provider)),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    fn instant_with_expression_subquery(
+        outer_provider: Arc<DummyTableProvider>,
+        inner_plan: LogicalPlan,
+        outer_end: i64,
+    ) -> LogicalPlan {
+        let outer_scan = scan_plan(outer_provider, "outer");
+        let input = LogicalPlanBuilder::from(outer_scan)
+            .project(vec![
+                col("ts"),
+                col("v0"),
+                scalar_subquery(Arc::new(inner_plan)),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                outer_end,
+                1000,
+                1000,
+                "ts".to_string(),
+                vec![],
+                Some("v0".to_string()),
+                input,
+            )),
+        })
+    }
+
+    fn instant_plan_named(
+        provider: Arc<DummyTableProvider>,
+        table_name: &str,
+        end: i64,
+    ) -> LogicalPlan {
+        let input = LogicalPlanBuilder::scan(
+            table_name,
+            Arc::new(DefaultTableSource::new(provider)),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                end,
+                1000,
+                1000,
+                "ts".to_string(),
+                vec![],
+                Some("v0".to_string()),
+                input,
+            )),
+        })
+    }
     use crate::optimizer::test_util::{mock_table_provider, mock_table_provider_with_tsid};
+
+    #[test]
+    fn single_evaluation_sets_last_row_on_the_rewritten_scan() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan(provider.clone(), 1000);
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+        assert_eq!(provider.scan_request().series_row_selector, None);
+    }
+
+    #[test]
+    fn range_evaluation_does_not_set_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan(provider.clone(), 2000);
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+        assert_eq!(provider.scan_request().series_row_selector, None);
+    }
+
+    #[test]
+    fn expression_subquery_isolated_from_outer_single_evaluation() {
+        let outer_provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let inner_provider = Arc::new(mock_table_provider(RegionId::new(2, 1)));
+        let plan = instant_with_expression_subquery(
+            outer_provider.clone(),
+            instant_plan_named(inner_provider, "inner", 2000),
+            1000,
+        );
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        let requests = scan_requests_with_names(&rewritten)
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            requests["outer"].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+        assert_eq!(requests["inner"].series_row_selector, None);
+    }
+
+    #[test]
+    fn expression_subquery_can_start_its_own_single_evaluation() {
+        let outer_provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let inner_provider = Arc::new(mock_table_provider(RegionId::new(2, 1)));
+        let plan = instant_with_expression_subquery(
+            outer_provider,
+            instant_plan_named(inner_provider, "inner", 1000),
+            1000,
+        );
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        let requests = scan_requests_with_names(&rewritten)
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            requests["outer"].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+        assert_eq!(
+            requests["inner"].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+    }
+
+    #[test]
+    fn nested_single_outer_range_inner_does_not_set_inner_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan_named(provider.clone(), "nested", 2000);
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                1000,
+                1000,
+                "ts".to_string(),
+                vec![],
+                Some("v0".to_string()),
+                plan,
+            )),
+        });
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+        assert_eq!(provider.scan_request().series_row_selector, None);
+    }
+
+    #[test]
+    fn nested_range_outer_single_inner_sets_inner_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan_named(provider.clone(), "nested", 1000);
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                2000,
+                1000,
+                1000,
+                "ts".to_string(),
+                vec![],
+                Some("v0".to_string()),
+                plan,
+            )),
+        });
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+    }
+
+    #[test]
+    fn shared_provider_isolated_between_single_and_range_scans() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = LogicalPlanBuilder::from(instant_plan(provider.clone(), 1000))
+            .union(instant_plan(provider.clone(), 2000))
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+        let requests = scan_requests(&rewritten);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+        assert_eq!(requests[1].series_row_selector, None);
+        assert_eq!(provider.scan_request().series_row_selector, None);
+    }
 
     #[test]
     fn set_order_hint() {
@@ -469,10 +728,10 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        ScanHintRule.rewrite(plan, &context).unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
 
         // should read the first (with `.sort(true, false)`) sort option
-        let scan_req = provider.scan_request();
+        let scan_req = scan_requests(&rewritten)[0].clone();
         assert_eq!(
             OrderOption {
                 name: "ts".to_string(),
@@ -513,9 +772,9 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        ScanHintRule.rewrite(plan, &context).unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
 
-        let scan_req = provider.scan_request();
+        let scan_req = scan_requests(&rewritten)[0].clone();
         let _ = scan_req.series_row_selector.unwrap();
     }
 
@@ -534,9 +793,9 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        ScanHintRule.rewrite(plan, &context).unwrap();
+        let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
 
-        let scan_req = provider.scan_request();
+        let scan_req = scan_requests(&rewritten)[0].clone();
         assert_eq!(
             scan_req.distribution,
             Some(TimeSeriesDistribution::PerSeries)
