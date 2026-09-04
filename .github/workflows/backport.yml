@@ -1,0 +1,95 @@
+name: Backport
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  backport:
+    name: Backport PR
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+
+      - name: Extract backport labels
+        id: extract-labels
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          labels=$(echo "$LABELS" | jq -r '.[]' | grep -oP '^backport-\K.+' || true)
+          if [ -z "$labels" ]; then
+            echo "No backport labels found, skipping."
+            echo "has_labels=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "has_labels=true" >> "$GITHUB_OUTPUT"
+          echo "targets<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$labels" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Cherry-pick and create backport PRs
+        if: steps.extract-labels.outputs.has_labels == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.merged_by.login }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          MERGE_COMMIT=$(gh pr view "$PR_NUMBER" --json mergeCommit --jq '.mergeCommit.oid')
+
+          while IFS= read -r target; do
+            release_branch="release/${target}"
+            head_branch="backport/${target}/pr-${PR_NUMBER}"
+
+            echo "=== Backporting to ${release_branch} ==="
+
+            if ! git ls-remote --exit-code origin "${release_branch}" >/dev/null 2>&1; then
+              echo "WARNING: Branch '${release_branch}' does not exist, skipping."
+              continue
+            fi
+
+            git fetch origin "${release_branch}"
+
+            git checkout -b "${head_branch}" "origin/${release_branch}"
+
+            if ! git cherry-pick -x "${MERGE_COMMIT}"; then
+              echo "ERROR: Cherry-pick failed for ${release_branch}. Creating an issue instead."
+              gh issue create \
+                --title "Backport failure: PR #${PR_NUMBER} to ${release_branch}" \
+                --body "Cherry-pick of ${MERGE_COMMIT} (PR #${PR_NUMBER}) failed on ${release_branch}. Manual backport required." \
+              git cherry-pick --abort
+              git checkout "${BASE_BRANCH}"
+              git branch -D "${head_branch}"
+              continue
+            fi
+
+            git push origin "${head_branch}"
+
+            gh pr create \
+              --base "${release_branch}" \
+              --head "${head_branch}" \
+              --title "${PR_TITLE} [Backport ${release_branch}]" \
+              --body "Backport of #${PR_NUMBER} to ${release_branch}.
+
+          ---
+          Original PR: #${PR_NUMBER}
+          Merged by: @${AUTHOR}"
+
+            git checkout "${BASE_BRANCH}"
+            git branch -D "${head_branch}"
+          done <<< "${{ steps.extract-labels.outputs.targets }}"
