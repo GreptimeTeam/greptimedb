@@ -45,7 +45,7 @@ itertools.workspace = true
 jsonb.workspace = true
 jsonpath-rust = "0.7.5"
 lazy_static.workspace = true
-moka = { workspace = true, features = ["sync"] }
+moka = { workspace = true, features = ["future"] }
 once_cell.workspace = true
 operator.workspace = true
 ordered-float.workspace = true

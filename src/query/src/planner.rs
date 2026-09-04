@@ -852,6 +852,30 @@ mod tests {
         engine.planner().plan(&stmt, query_ctx).await.unwrap()
     }
 
+    /// Plans `sql` and runs the DataFusion analyzer, which is where
+    /// `InsertAssignmentRule` sits. Planning alone stops short of it, so these
+    /// assertions would not see the assignment rewrite at all.
+    async fn analyze_insert(
+        engine: &QueryEngineRef,
+        sql: &str,
+        query_ctx: &QueryContextRef,
+    ) -> String {
+        let stmt = QueryLanguageParser::parse_sql(sql, query_ctx).unwrap();
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .unwrap();
+        let context = engine.engine_context(query_ctx.clone());
+        let state = context.state();
+        state
+            .analyzer()
+            .execute_and_check(plan, state.config_options(), |_, _| {})
+            .unwrap()
+            .display_indent_schema()
+            .to_string()
+    }
+
     #[tokio::test]
     async fn test_insert_timestamp_literals_use_query_timezone() {
         let query_ctx = Arc::new(
@@ -886,20 +910,6 @@ mod tests {
             ),
             (
                 "INSERT INTO timestamps (ts, st) \
-                 SELECT '2026-08-06 12:00:00.001', now() \
-                 UNION ALL \
-                 SELECT '2026-08-07 12:00:00.001', now()",
-                &[1_785_988_800_001_i64, 1_786_075_200_001_i64][..],
-            ),
-            (
-                "INSERT INTO timestamps (ts, st) \
-                 SELECT '2026-08-16 12:00:00.001', now() \
-                 UNION \
-                 SELECT '2026-08-17 12:00:00.001', now()",
-                &[1_786_852_800_001_i64, 1_786_939_200_001_i64][..],
-            ),
-            (
-                "INSERT INTO timestamps (ts, st) \
                  SELECT '2026-08-18 12:00:00.001', max(st) \
                  FROM timestamps GROUP BY note",
                 &[1_787_025_600_001_i64][..],
@@ -926,14 +936,7 @@ mod tests {
                 &[1_786_766_400_001_i64][..],
             ),
         ] {
-            let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
-            let plan = engine
-                .planner()
-                .plan(&stmt, query_ctx.clone())
-                .await
-                .unwrap()
-                .display_indent()
-                .to_string();
+            let plan = analyze_insert(&engine, sql, &query_ctx).await;
 
             for expected_timestamp in expected_timestamps {
                 assert!(
@@ -954,17 +957,17 @@ mod tests {
         let engine = create_timestamp_test_engine().await;
         let sql = "INSERT INTO timestamps (ts, st) \
                    VALUES (CAST('2026-08-08 12:00:00.001' AS TIMESTAMP), now())";
-        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
-        let plan = engine
-            .planner()
-            .plan(&stmt, query_ctx)
-            .await
-            .unwrap()
-            .display_indent()
-            .to_string();
+        let plan = analyze_insert(&engine, sql, &query_ctx).await;
 
+        // An explicit cast reaches the analyzer as an `arrow_cast` call rather
+        // than an `Expr::Cast`, which is how it stays out of the rewrite.
         assert!(
             plan.contains("arrow_cast(Utf8(\"2026-08-08 12:00:00.001\")"),
+            "{plan}"
+        );
+        // 12:00:00.001 read as Shanghai local time; the source query keeps UTC.
+        assert!(
+            !plan.contains("TimestampMillisecond(1786104000001, None)"),
             "{plan}"
         );
     }
@@ -1003,14 +1006,7 @@ mod tests {
                 ][..],
             ),
         ] {
-            let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
-            let plan = engine
-                .planner()
-                .plan(&stmt, query_ctx.clone())
-                .await
-                .unwrap()
-                .display_indent_schema()
-                .to_string();
+            let plan = analyze_insert(&engine, sql, &query_ctx).await;
 
             for expected in expected {
                 assert!(plan.contains(expected), "{plan}");
@@ -1019,30 +1015,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_union_tolerates_uncoerced_untouched_column() {
+    async fn test_insert_union_converts_via_assignment_cast() {
         let query_ctx = Arc::new(
             QueryContextBuilder::default()
                 .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
                 .build(),
         );
         let engine = create_timestamp_test_engine().await;
-        // `st` stays Timestamp vs Null across branches until TypeCoercion runs.
-        let sql = "INSERT INTO timestamps (ts, st) \
-                   SELECT '2026-08-06 12:00:00.001', now() \
-                   UNION ALL \
-                   SELECT '2026-08-07 12:00:00.001', NULL";
-        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
-        let plan = engine
-            .planner()
-            .plan(&stmt, query_ctx)
-            .await
-            .unwrap()
-            .display_indent()
-            .to_string();
+        // Branches disagree, so the conversion stays as a cast on the
+        // assignment instead of folding. One cast covers every branch, which is
+        // why a NULL branch no longer cancels the conversion for the column and
+        // why UNION's dedup keys stay on the original strings.
+        for sql in [
+            "INSERT INTO timestamps (ts, st) \
+             SELECT '2026-08-06 12:00:00.001', now() \
+             UNION ALL \
+             SELECT '2026-08-07 12:00:00.001', NULL",
+            "INSERT INTO timestamps (ts, st) \
+             SELECT '2026-08-16 12:00:00.001', now() \
+             UNION \
+             SELECT '2026-08-17 12:00:00.001', now()",
+        ] {
+            let plan = analyze_insert(&engine, sql, &query_ctx).await;
 
-        for expected_timestamp in [1_785_988_800_001_i64, 1_786_075_200_001_i64] {
             assert!(
-                plan.contains(&format!("TimestampMillisecond({expected_timestamp}, None)")),
+                plan.contains("AS Timestamp(ms, \"Asia/Shanghai\")"),
+                "{plan}"
+            );
+            // The branches themselves are untouched.
+            assert!(
+                plan.contains("Utf8(\"2026-08-07 12:00:00.001\")")
+                    || plan.contains("Utf8(\"2026-08-17 12:00:00.001\")"),
                 "{plan}"
             );
         }
@@ -1060,14 +1063,8 @@ mod tests {
                    SELECT '2026-08-10 12:00:00.001', now() \
                    UNION ALL \
                    SELECT CAST('2026-08-11 12:00:00.001' AS TIMESTAMP), now()";
-        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
-        let plan = engine
-            .planner()
-            .plan(&stmt, query_ctx)
-            .await
-            .unwrap()
-            .display_indent_schema()
-            .to_string();
+        let plan = analyze_insert(&engine, sql, &query_ctx).await;
+
         assert!(
             !plan.contains("TimestampMillisecond(1786334400001, None)"),
             "{plan}"
@@ -1076,6 +1073,11 @@ mod tests {
             plan.contains("arrow_cast(Utf8(\"2026-08-11 12:00:00.001\")"),
             "{plan}"
         );
+        // TypeCoercion has already settled this union to timestamp, so the
+        // assignment has nothing left to reinterpret. Retargeting the cast here
+        // would leave a Timestamp(None) -> Timestamp(Some(tz)) step behind,
+        // which shifts the value instead of relabelling it.
+        assert!(!plan.contains("Asia/Shanghai"), "{plan}");
     }
 
     #[tokio::test]

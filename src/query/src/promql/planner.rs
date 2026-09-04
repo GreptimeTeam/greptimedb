@@ -4925,12 +4925,20 @@ impl PromPlanner {
         F: FnMut(&String) -> Result<DfExpr>,
     {
         let table_ref = self.ctx.table_name.clone().map(TableReference::bare);
+        // Derived labels can be unqualified even when the context still names the source table.
+        let input_schema = input.schema().clone();
         let non_field_columns_iter = self
             .ctx
             .tag_columns
             .iter()
             .chain(self.ctx.time_index_column.iter())
-            .map(|col| Ok(DfExpr::Column(Column::new(table_ref.clone(), col))));
+            .map(|col| {
+                input_schema
+                    .qualified_field_with_name(table_ref.as_ref(), col)
+                    .or_else(|_| input_schema.qualified_field_with_unqualified_name(col))
+                    .map(|field| DfExpr::Column(field.into()))
+                    .context(DataFusionPlanningSnafu)
+            });
         let tsid_iter =
             Self::optional_tsid_projection(input.schema(), table_ref.as_ref(), self.ctx.use_tsid)
                 .into_iter()
@@ -8741,6 +8749,37 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:
 
         let ret = plan.display_indent_schema().to_string();
         assert_eq!(format!("\n{ret}"), expected, "\n{}", ret);
+    }
+
+    #[tokio::test]
+    async fn label_replace_aggregation_queries_plan_successfully() {
+        let aggregate =
+            r#"sum by (foo) (label_replace(some_metric, "foo", "$1", "tag_0", "(.*)"))"#;
+        let queries = [
+            aggregate.to_string(),
+            format!("{aggregate} <= 10"),
+            format!("{aggregate} * 0.8"),
+            format!("0.8 * {aggregate}"),
+            format!("{aggregate} <= {aggregate} * 0.8"),
+        ];
+        let state = build_query_engine_state();
+        let mut failures = Vec::new();
+
+        for query in queries {
+            let table_provider = build_test_table_provider(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                1,
+                1,
+            )
+            .await;
+            if let Err(error) =
+                PromPlanner::stmt_to_plan(table_provider, &build_eval_stmt(&query), &state).await
+            {
+                failures.push(format!("{query}: {error:?}"));
+            }
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[tokio::test]

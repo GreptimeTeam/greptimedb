@@ -111,6 +111,12 @@ impl Session {
             .into()
     }
 
+    /// Cursors are shared across query contexts created from this session.
+    pub fn get_cursor(&self, name: &str) -> Option<Arc<RecordBatchStreamCursor>> {
+        let guard = self.mutable_inner.read().unwrap();
+        guard.cursors.get(name).cloned()
+    }
+
     pub fn conn_info(&self) -> &ConnInfo {
         &self.conn_info
     }
