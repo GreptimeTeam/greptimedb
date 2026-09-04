@@ -277,6 +277,25 @@ class DispatchTrustTest(unittest.TestCase):
             )
         self.assertEqual(code, 1)
 
+    def test_write_outputs_preserves_multiline_reason_and_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = os.path.join(tmp, "github_output")
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": output_path}):
+                slash.write_outputs(
+                    slash.deny(
+                        "HTTP 502: line1\nline2",
+                        reply="please retry\nthen comment again",
+                        pr_number="42",
+                    )
+                )
+            text = Path(output_path).read_text(encoding="utf-8")
+        self.assertIn("HTTP 502: line1\nline2\n", text)
+        self.assertIn("please retry\nthen comment again\n", text)
+        self.assertNotIn("reason=HTTP 502", text)
+        self.assertRegex(text, r"reason<<ghadelimiter_[0-9a-f]+\n")
+        self.assertRegex(text, r"reply<<ghadelimiter_[0-9a-f]+\n")
+        self.assertRegex(text, r"skip<<ghadelimiter_[0-9a-f]+\ntrue\n")
+
 
 class ParseAllowlistTest(unittest.TestCase):
     def test_splits_commas_whitespace_and_strips_at(self) -> None:

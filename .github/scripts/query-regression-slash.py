@@ -36,6 +36,7 @@ import os
 import re
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -481,7 +482,8 @@ def write_outputs(decision: Decision) -> None:
     if output_path:
         with open(output_path, "a", encoding="utf-8") as handle:
             for key, value in values.items():
-                handle.write(f"{key}={value}\n")
+                delimiter = f"ghadelimiter_{uuid.uuid4().hex}"
+                handle.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
     for key, value in values.items():
         print(f"{key}={value}")
 
