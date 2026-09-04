@@ -42,6 +42,7 @@ use query::query_engine::DefaultSerializer;
 use snafu::{OptionExt, ResultExt, location};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
+use tonic::codec::CompressionEncoding;
 
 use crate::error::{
     self, FlightGetSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
@@ -144,17 +145,25 @@ impl RegionRequester {
     }
 
     async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponse> {
-        let request_type = request
+        let request_body = request
             .body
             .as_ref()
-            .with_context(|| MissingFieldSnafu { field: "body" })?
-            .as_ref()
-            .to_string();
+            .with_context(|| MissingFieldSnafu { field: "body" })?;
+        let is_bulk_insert = matches!(request_body, region_request::Body::BulkInsert(_));
+        let request_type = request_body.as_ref().to_string();
         let _timer = metrics::METRIC_REGION_REQUEST_GRPC
             .with_label_values(&[request_type.as_str()])
             .start_timer();
 
         let (addr, mut client) = self.client.raw_region_client()?;
+        if is_bulk_insert {
+            if self.send_compression {
+                client = client.send_compressed(CompressionEncoding::Zstd);
+            }
+            if self.accept_compression {
+                client = client.accept_compressed(CompressionEncoding::Zstd);
+            }
+        }
 
         let response = client
             .handle(request)
@@ -408,8 +417,10 @@ pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
 #[cfg(test)]
 mod test {
     use api::v1::Status as PbStatus;
+    use api::v1::region::region_server::{Region, RegionServer};
     use api::v1::region::{
-        RemoteDynFilterUnregister, RemoteDynFilterUpdate, region_request, remote_dyn_filter_request,
+        BulkInsertRequest, RegionResponse as PbRegionResponse, RemoteDynFilterUnregister,
+        RemoteDynFilterUpdate, region_request, remote_dyn_filter_request,
     };
     use common_recordbatch::adapter::RecordBatchMetrics;
     use datatypes::arrow::array::Int32Array;
@@ -417,10 +428,97 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::stream;
-    use tonic::Status;
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::codec::CompressionEncoding;
+    use tonic::{Request, Response, Status};
 
     use super::*;
     use crate::Error::{self, IllegalDatabaseResponse, Server};
+
+    #[derive(Clone)]
+    struct CompressionRecordingRegionService {
+        zstd_headers: Arc<std::sync::Mutex<Vec<(bool, bool)>>>,
+    }
+
+    #[tonic::async_trait]
+    impl Region for CompressionRecordingRegionService {
+        async fn handle(
+            &self,
+            request: Request<RegionRequest>,
+        ) -> std::result::Result<Response<PbRegionResponse>, Status> {
+            let metadata = request.metadata();
+            let sends_zstd = metadata
+                .get("grpc-encoding")
+                .is_some_and(|value| value == "zstd");
+            let accepts_zstd = metadata
+                .get("grpc-accept-encoding")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.split(',').any(|encoding| encoding == "zstd"));
+            self.zstd_headers
+                .lock()
+                .unwrap()
+                .push((sends_zstd, accepts_zstd));
+
+            Ok(Response::new(PbRegionResponse {
+                header: Some(ResponseHeader {
+                    status: Some(PbStatus {
+                        status_code: StatusCode::Success as u32,
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_only_uses_transport_compression() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let zstd_headers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = CompressionRecordingRegionService {
+            zstd_headers: zstd_headers.clone(),
+        };
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    RegionServer::new(service)
+                        .accept_compressed(CompressionEncoding::Zstd)
+                        .send_compressed(CompressionEncoding::Zstd),
+                )
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        let client = Client::with_urls([addr.to_string()]);
+        let requester = RegionRequester::new(client.clone(), true, true);
+        let disabled_requester = RegionRequester::new(client, false, false);
+        let bulk_insert = || RegionRequest {
+            body: Some(region_request::Body::BulkInsert(
+                BulkInsertRequest::default(),
+            )),
+            ..Default::default()
+        };
+
+        requester.handle(bulk_insert()).await.unwrap();
+        disabled_requester.handle(bulk_insert()).await.unwrap();
+        requester
+            .handle(build_remote_dyn_filter_unregister_request(
+                "query-1",
+                RemoteDynFilterUnregister {
+                    filter_id: "filter-1".to_string(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vec![(true, true), (false, false), (false, false)],
+            *zstd_headers.lock().unwrap()
+        );
+        server.abort();
+    }
 
     #[test]
     fn test_flight_stream_error_preserves_peer_address() {
