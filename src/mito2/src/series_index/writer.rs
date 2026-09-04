@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, DictionaryArray, StringArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
+    UInt64Array,
 };
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -544,8 +544,8 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
 }
 
 /// Extracts the time index column as timestamps in the writer's `unit`.
-/// Plain Int64 values are interpreted in `unit`; a timestamp array carrying
-/// a different unit is rejected rather than silently reinterpreted.
+/// A timestamp array carrying a different unit is rejected rather than
+/// silently reinterpreted.
 fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Timestamp>> {
     ensure!(
         array.null_count() == 0,
@@ -553,36 +553,27 @@ fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Timestamp>> 
             reason: "series index input contains null timestamps",
         }
     );
-    let timestamps = if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
-        array
-            .values()
-            .iter()
-            .map(|value| Timestamp::new(*value, unit))
-            .collect::<Vec<_>>()
-    } else {
-        let (values, array_unit) =
-            timestamp_array_to_primitive(array).with_context(|| InvalidRecordBatchSnafu {
-                reason: format!(
-                    "series index requires an Int64 or timestamp time index, got {:?}",
-                    array.data_type()
-                ),
-            })?;
-        let array_unit: TimeUnit = array_unit.into();
-        ensure!(
-            array_unit == unit,
-            InvalidRecordBatchSnafu {
-                reason: format!(
-                    "series index input time index unit {array_unit:?} does not match the index unit {unit:?}"
-                ),
-            }
-        );
-        values
-            .values()
-            .iter()
-            .map(|value| Timestamp::new(*value, unit))
-            .collect()
-    };
-    Ok(timestamps)
+    let (values, array_unit) =
+        timestamp_array_to_primitive(array).with_context(|| InvalidRecordBatchSnafu {
+            reason: format!(
+                "series index requires a timestamp time index column, got {:?}",
+                array.data_type()
+            ),
+        })?;
+    let array_unit: TimeUnit = array_unit.into();
+    ensure!(
+        array_unit == unit,
+        InvalidRecordBatchSnafu {
+            reason: format!(
+                "series index input time index unit {array_unit:?} does not match the index unit {unit:?}"
+            ),
+        }
+    );
+    Ok(values
+        .values()
+        .iter()
+        .map(|value| Timestamp::new(*value, unit))
+        .collect())
 }
 
 // TODO(yingwen): Bench and optimize the performance if this is costly.
@@ -711,7 +702,9 @@ mod tests {
     use api::v1::SemanticType;
     use bytes::Bytes;
     use common_time::timestamp::{TimeUnit, Timestamp};
-    use datatypes::arrow::array::{BinaryDictionaryBuilder, TimestampMillisecondArray, UInt8Array};
+    use datatypes::arrow::array::{
+        BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
+    };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
@@ -862,13 +855,6 @@ mod tests {
 
     #[test]
     fn test_timestamp_values() {
-        // Plain Int64 values are interpreted in the given unit.
-        let array: ArrayRef = Arc::new(Int64Array::from(vec![1, 2]));
-        assert_eq!(
-            timestamp_values(&array, TimeUnit::Millisecond).unwrap(),
-            vec![Timestamp::new_millisecond(1), Timestamp::new_millisecond(2)]
-        );
-
         // Timestamp arrays keep their unit; a mismatching unit is rejected
         // instead of being silently reinterpreted.
         let array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1, 2]));
@@ -882,6 +868,17 @@ mod tests {
             "{error}"
         );
 
+        // Plain Int64 columns carry no unit to validate against and are
+        // rejected.
+        let int64: ArrayRef = Arc::new(Int64Array::from(vec![1, 2]));
+        let error = timestamp_values(&int64, TimeUnit::Millisecond).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires a timestamp time index column"),
+            "{error}"
+        );
+
         let nulls: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![Some(1), None]));
         let error = timestamp_values(&nulls, TimeUnit::Millisecond).unwrap_err();
         assert!(error.to_string().contains("null timestamps"), "{error}");
@@ -889,7 +886,9 @@ mod tests {
         let unsupported: ArrayRef = Arc::new(UInt8Array::from(vec![1, 2]));
         let error = timestamp_values(&unsupported, TimeUnit::Millisecond).unwrap_err();
         assert!(
-            error.to_string().contains("requires an Int64 or timestamp"),
+            error
+                .to_string()
+                .contains("requires a timestamp time index column"),
             "{error}"
         );
     }
