@@ -543,9 +543,9 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
     column_id == ReservedColumnId::table_id() || column_id == ReservedColumnId::tsid()
 }
 
-/// Extracts the time index column as timestamps in the writer's `unit`.
-/// A timestamp array carrying a different unit is rejected rather than
-/// silently reinterpreted.
+/// Extracts the time index column as timestamps in the writer's `unit`,
+/// rescaling values from the array's own unit when the two differ. A value
+/// that overflows `unit` is an error rather than a silent bound corruption.
 fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Timestamp>> {
     ensure!(
         array.null_count() == 0,
@@ -561,19 +561,19 @@ fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Timestamp>> 
             ),
         })?;
     let array_unit: TimeUnit = array_unit.into();
-    ensure!(
-        array_unit == unit,
-        InvalidRecordBatchSnafu {
-            reason: format!(
-                "series index input time index unit {array_unit:?} does not match the index unit {unit:?}"
-            ),
-        }
-    );
-    Ok(values
+    values
         .values()
         .iter()
-        .map(|value| Timestamp::new(*value, unit))
-        .collect())
+        .map(|value| {
+            Timestamp::new(*value, array_unit)
+                .convert_to(unit)
+                .with_context(|| InvalidRecordBatchSnafu {
+                    reason: format!(
+                        "series index timestamp {value} cannot be represented in {unit:?}"
+                    ),
+                })
+        })
+        .collect()
 }
 
 // TODO(yingwen): Bench and optimize the performance if this is costly.
@@ -855,16 +855,28 @@ mod tests {
 
     #[test]
     fn test_timestamp_values() {
-        // Timestamp arrays keep their unit; a mismatching unit is rejected
-        // instead of being silently reinterpreted.
+        // Values already in the writer's unit pass through unchanged.
         let array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1, 2]));
         assert_eq!(
             timestamp_values(&array, TimeUnit::Millisecond).unwrap(),
             vec![Timestamp::new_millisecond(1), Timestamp::new_millisecond(2)]
         );
-        let error = timestamp_values(&array, TimeUnit::Microsecond).unwrap_err();
+        // Values from a timestamp array of another unit are rescaled into
+        // the writer's unit instead of being rejected.
+        let array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1, 2]));
+        assert_eq!(
+            timestamp_values(&array, TimeUnit::Microsecond).unwrap(),
+            vec![
+                Timestamp::new_microsecond(1_000),
+                Timestamp::new_microsecond(2_000)
+            ]
+        );
+
+        // A value that overflows the writer's unit is an error.
+        let overflow: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![i64::MAX]));
+        let error = timestamp_values(&overflow, TimeUnit::Microsecond).unwrap_err();
         assert!(
-            error.to_string().contains("does not match the index unit"),
+            error.to_string().contains("cannot be represented in"),
             "{error}"
         );
 
