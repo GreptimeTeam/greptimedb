@@ -396,7 +396,7 @@ impl SeriesIndexWriter {
         if self.buffered_rows.is_empty() {
             return Ok(());
         }
-        let batch = rows_to_batch(&self.schema, &self.buffered_rows)?;
+        let batch = rows_to_batch(&self.schema, &self.buffered_rows, self.time_unit)?;
         let start = Instant::now();
         let result = self.writer.write(&batch).await;
         self.metrics.write_elapsed += start.elapsed();
@@ -543,9 +543,11 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
     column_id == ReservedColumnId::table_id() || column_id == ReservedColumnId::tsid()
 }
 
-/// Extracts the time index column as timestamps in the writer's `unit`,
-/// rescaling values from the array's own unit when the two differ. A value
-/// that overflows `unit` is an error rather than a silent bound corruption.
+/// Extracts the time index column as timestamps in the writer's `unit`.
+/// A timestamp array carrying a different unit is an invariant violation:
+/// the alter path flushes memtables before widening the region's time index
+/// unit, so a writer never receives batches in the region's previous unit.
+/// Reject the mismatch rather than reinterpreting or rescaling the values.
 fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Timestamp>> {
     ensure!(
         array.null_count() == 0,
@@ -561,19 +563,19 @@ fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Timestamp>> 
             ),
         })?;
     let array_unit: TimeUnit = array_unit.into();
-    values
+    ensure!(
+        array_unit == unit,
+        InvalidRecordBatchSnafu {
+            reason: format!(
+                "series index input time index unit {array_unit:?} does not match the index unit {unit:?}"
+            ),
+        }
+    );
+    Ok(values
         .values()
         .iter()
-        .map(|value| {
-            Timestamp::new(*value, array_unit)
-                .convert_to(unit)
-                .with_context(|| InvalidRecordBatchSnafu {
-                    reason: format!(
-                        "series index timestamp {value} cannot be represented in {unit:?}"
-                    ),
-                })
-        })
-        .collect()
+        .map(|value| Timestamp::new(*value, unit))
+        .collect())
 }
 
 // TODO(yingwen): Bench and optimize the performance if this is costly.
@@ -632,53 +634,29 @@ fn decode_primary_key(
     })
 }
 
-fn rows_to_batch(schema: &SchemaRef, rows: &[SeriesIndexRow]) -> Result<RecordBatch> {
-    // The min/max ts columns are native Timestamp columns in the time index's
-    // unit; the rows' timestamps must already carry that unit.
-    let ts_data_type = schema
-        .field_with_name(MIN_TS_COLUMN)
-        .ok()
-        .map(|field| field.data_type().clone())
-        .context(InvalidRecordBatchSnafu {
-            reason: format!("series index schema is missing internal column {MIN_TS_COLUMN}"),
-        })?;
-    let unit = match ts_data_type {
-        DataType::Timestamp(unit, _) => TimeUnit::from(unit),
-        ts_data_type => {
-            return InvalidRecordBatchSnafu {
-                reason: format!(
-                    "series index min/max ts columns must be a Timestamp, got {ts_data_type:?}"
-                ),
-            }
-            .fail();
-        }
-    };
-    let ts_array = |timestamps: Vec<Timestamp>| -> Result<ArrayRef> {
-        for ts in &timestamps {
-            ensure!(
-                ts.unit() == unit,
-                InvalidRecordBatchSnafu {
-                    reason: format!(
-                        "series index timestamps are in {:?}, expected the index unit {unit:?}",
-                        ts.unit()
-                    ),
-                }
-            );
-        }
+/// Builds a batch in the index `schema` from aggregated rows. The rows'
+/// timestamps already carry `unit` (guaranteed by `timestamp_values`), which
+/// `series_index_schema` stamps into the min/max ts columns.
+fn rows_to_batch(
+    schema: &SchemaRef,
+    rows: &[SeriesIndexRow],
+    unit: TimeUnit,
+) -> Result<RecordBatch> {
+    let ts_array = |timestamps: Vec<Timestamp>| -> ArrayRef {
         let values = timestamps
             .into_iter()
             .map(|ts| ts.value())
             .collect::<Vec<_>>();
-        Ok(match unit {
-            TimeUnit::Second => Arc::new(TimestampSecondArray::from(values)) as ArrayRef,
-            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(values)) as ArrayRef,
-            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef,
-            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(values)) as ArrayRef,
-        })
+        match unit {
+            TimeUnit::Second => Arc::new(TimestampSecondArray::from(values)),
+            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(values)),
+            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(values)),
+            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(values)),
+        }
     };
     let mut arrays: Vec<ArrayRef> = vec![
-        ts_array(rows.iter().map(|row| row.min_ts).collect())?,
-        ts_array(rows.iter().map(|row| row.max_ts).collect())?,
+        ts_array(rows.iter().map(|row| row.min_ts).collect()),
+        ts_array(rows.iter().map(|row| row.max_ts).collect()),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|row| row.row_count),
         )),
@@ -861,22 +839,12 @@ mod tests {
             timestamp_values(&array, TimeUnit::Millisecond).unwrap(),
             vec![Timestamp::new_millisecond(1), Timestamp::new_millisecond(2)]
         );
-        // Values from a timestamp array of another unit are rescaled into
-        // the writer's unit instead of being rejected.
+        // A timestamp array carrying a different unit is rejected instead of
+        // being silently reinterpreted or rescaled.
         let array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1, 2]));
-        assert_eq!(
-            timestamp_values(&array, TimeUnit::Microsecond).unwrap(),
-            vec![
-                Timestamp::new_microsecond(1_000),
-                Timestamp::new_microsecond(2_000)
-            ]
-        );
-
-        // A value that overflows the writer's unit is an error.
-        let overflow: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![i64::MAX]));
-        let error = timestamp_values(&overflow, TimeUnit::Microsecond).unwrap_err();
+        let error = timestamp_values(&array, TimeUnit::Microsecond).unwrap_err();
         assert!(
-            error.to_string().contains("cannot be represented in"),
+            error.to_string().contains("does not match the index unit"),
             "{error}"
         );
 
