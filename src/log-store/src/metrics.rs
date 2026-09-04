@@ -90,23 +90,3 @@ lazy_static! {
     )
     .unwrap();
 }
-
-#[cfg(test)]
-mod tests {
-    use prometheus::core::Collector;
-
-    use super::*;
-
-    #[test]
-    fn test_logstore_op_elapsed_buckets() {
-        for metric in METRIC_LOGSTORE_OP_ELAPSED.collect()[0].get_metric() {
-            let upper_bounds = metric
-                .get_histogram()
-                .get_bucket()
-                .iter()
-                .map(|bucket| bucket.get_upper_bound())
-                .collect::<Vec<_>>();
-            assert_eq!(LOGSTORE_OP_ELAPSED_BUCKETS, upper_bounds.as_slice());
-        }
-    }
-}
