@@ -571,19 +571,16 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
     if let Some(value) = flow_task
         .flow_options
         .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+        && value != FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE
     {
-        if value != FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE {
-            value
-                .parse::<bool>()
-                .map_err(|_| {
-                    UnexpectedSnafu {
-                        err_msg: format!(
-                            "Invalid flow option {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}: {value}"
-                        ),
-                    }
-                    .build()
-                })?;
-        }
+        value.parse::<bool>().map_err(|_| {
+            UnexpectedSnafu {
+                err_msg: format!(
+                    "Invalid flow option {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}: {value}"
+                ),
+            }
+            .build()
+        })?;
     }
 
     defer_on_missing_source(flow_task)?;

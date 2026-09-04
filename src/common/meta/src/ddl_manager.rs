@@ -1776,6 +1776,7 @@ mod tests {
             create_if_not_exists: false,
             expire_after: None,
             eval_interval_secs: None,
+            eval_offset_secs: None,
             comment: String::new(),
             sql: "select 1".to_string(),
             flow_options: Default::default(),
