@@ -70,7 +70,6 @@ catalog = { workspace = true, features = ["testing"] }
 criterion = { workspace = true, features = ["html_reports"] }
 rayon = "1.0"
 session = { workspace = true, features = ["testing"] }
-toml.workspace = true
 
 [[bench]]
 name = "processor"

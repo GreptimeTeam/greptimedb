@@ -366,11 +366,9 @@ impl PipelineTable {
     }
 
     /// Insert a pipeline into the pipeline table and compile it.
-    /// Newly created pipelines are stored under the empty schema, but cached
-    /// under `schema` — the caller's schema — since that is how lookups key.
+    /// Newly created pipelines will be saved under empty schema.
     pub async fn insert_and_compile(
         &self,
-        schema: &str,
         name: &str,
         content_type: &str,
         pipeline: &str,
@@ -381,15 +379,7 @@ impl PipelineTable {
             .insert_pipeline_to_pipeline_table(name, content_type, pipeline)
             .await?;
 
-        let pipeline_content = PipelineContent {
-            name: name.to_string(),
-            content: pipeline.to_string(),
-            version: TimestampNanosecond(version),
-            schema: EMPTY_SCHEMA_NAME.to_string(),
-        };
-        self.cache
-            .insert_pipeline(schema, pipeline_content, compiled_pipeline.clone())
-            .await;
+        self.cache.invalidate(name, None).await;
 
         Ok((version, compiled_pipeline))
     }
@@ -458,7 +448,7 @@ impl PipelineTable {
         );
 
         // remove cache with version and latest
-        self.cache.remove_cache(name, version).await;
+        self.cache.invalidate(name, version).await;
 
         Ok(Some(()))
     }

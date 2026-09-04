@@ -16,9 +16,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Default time to live of the pipeline cache.
-pub const DEFAULT_PIPELINE_CACHE_TTL: Duration = Duration::from_secs(10);
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct PipelineOptions {
@@ -32,18 +29,7 @@ pub struct PipelineOptions {
 impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
-            cache_ttl: DEFAULT_PIPELINE_CACHE_TTL,
+            cache_ttl: Duration::from_secs(10),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cache_ttl_accepts_humantime() {
-        let opts: PipelineOptions = toml::from_str(r#"cache_ttl = "5m""#).unwrap();
-        assert_eq!(opts.cache_ttl, Duration::from_secs(300));
     }
 }

@@ -151,48 +151,28 @@ impl PipelineCache {
     }
 
     pub(crate) async fn insert_failover_cache(&self, content: PipelineContent, with_latest: bool) {
-        for key in cache_keys(&content.schema, &content, with_latest) {
-            self.failover_cache.insert(key, content.clone()).await;
+        let versioned =
+            generate_pipeline_cache_key(&content.schema, &content.name, Some(content.version));
+        let latest = generate_pipeline_cache_key(&content.schema, &content.name, None);
+
+        self.failover_cache.insert(versioned, content.clone()).await;
+        if with_latest {
+            self.failover_cache.insert(latest, content).await;
         }
     }
 
-    /// Prime the caches with a pipeline that was just created, so the creating
-    /// frontend does not have to read it back.
+    /// Drop cached entries for `name` across all schemas and all three caches:
+    /// the `latest` alias always, plus `version` when given.
     ///
-    /// The new version supersedes whatever `latest` resolved to before, so every
-    /// schema's `latest` alias is dropped first. Without that, a schema which
-    /// had already cached an older version would keep transforming data with it
-    /// until the entry expired.
-    pub(crate) async fn insert_pipeline(
-        &self,
-        schema: &str,
-        content: PipelineContent,
-        compiled: Arc<Pipeline>,
-    ) {
-        self.invalidate_by_suffixes(&[generate_pipeline_cache_key_suffix(&content.name, None)])
-            .await;
-
-        for key in cache_keys(schema, &content, true) {
-            self.pipelines.insert(key.clone(), compiled.clone()).await;
-            self.original_pipelines
-                .insert(key.clone(), content.clone())
-                .await;
+    /// Creating a pipeline passes `None`: the new version supersedes whatever
+    /// `latest` resolved to, and a schema that had already cached an older
+    /// version would otherwise keep transforming data with it until expiry.
+    pub(crate) async fn invalidate(&self, name: &str, version: PipelineVersion) {
+        let mut suffixes = vec![generate_pipeline_cache_key_suffix(name, None)];
+        if version.is_some() {
+            suffixes.push(generate_pipeline_cache_key_suffix(name, version));
         }
-        self.insert_failover_cache(content, true).await;
-    }
 
-    // remove cache with version and latest in all schemas
-    pub(crate) async fn remove_cache(&self, name: &str, version: PipelineVersion) {
-        self.invalidate_by_suffixes(&[
-            generate_pipeline_cache_key_suffix(name, version),
-            generate_pipeline_cache_key_suffix(name, None),
-        ])
-        .await;
-    }
-
-    /// Drop every entry whose key ends with one of `suffixes`, across all
-    /// schemas and all three caches.
-    async fn invalidate_by_suffixes(&self, suffixes: &[String]) {
         let ks = self
             .pipelines
             .iter()
@@ -211,20 +191,6 @@ impl PipelineCache {
     }
 }
 
-/// The key under the pipeline's own version, plus the `latest` alias when the
-/// pipeline is the newest one under that name.
-fn cache_keys(schema: &str, content: &PipelineContent, with_latest: bool) -> Vec<String> {
-    let mut keys = vec![generate_pipeline_cache_key(
-        schema,
-        &content.name,
-        Some(content.version),
-    )];
-    if with_latest {
-        keys.push(generate_pipeline_cache_key(schema, &content.name, None));
-    }
-    keys
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -233,28 +199,14 @@ mod tests {
 
     use super::*;
 
-    const PIPELINE_YAML: &str = r#"
-transform:
-  - field: field1
-    type: uint32
-"#;
-
-    fn test_content() -> PipelineContent {
-        content_at(1)
-    }
-
     /// A pipeline stored under the empty schema, i.e. visible from every schema.
     fn content_at(version: i64) -> PipelineContent {
         PipelineContent {
             name: "p".to_string(),
-            content: PIPELINE_YAML.to_string(),
+            content: "transform:".to_string(),
             version: TimestampNanosecond::new(version),
             schema: EMPTY_SCHEMA_NAME.to_string(),
         }
-    }
-
-    fn compiled() -> Arc<Pipeline> {
-        Arc::new(crate::etl::parse(&crate::etl::Content::Yaml(PIPELINE_YAML)).unwrap())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -275,7 +227,7 @@ transform:
                             loads.fetch_add(1, Ordering::SeqCst);
                             // Hold the loader open so every caller is waiting on it.
                             tokio::time::sleep(Duration::from_millis(100)).await;
-                            Ok(test_content())
+                            Ok(content_at(1))
                         })
                         .await
                         .unwrap()
@@ -284,29 +236,29 @@ transform:
             .collect::<Vec<_>>();
 
         for handle in handles {
-            assert_eq!(handle.await.unwrap(), test_content());
+            assert_eq!(handle.await.unwrap(), content_at(1));
         }
         assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
-    /// A pipeline read through `get_pipeline_str` only populates
-    /// `original_pipelines`, so deletion must sweep that cache too.
+    /// Deleting a specific version must drop the version-pinned key, not just
+    /// the `latest` alias.
     #[tokio::test]
-    async fn test_remove_cache_drops_definition_only_entries() {
+    async fn test_delete_drops_version_pinned_entry() {
         let cache = PipelineCache::new(Duration::from_secs(60));
-        let content = test_content();
+        let content = content_at(1);
+        let version = Some(content.version);
 
-        let load = || async { Ok(content.clone()) };
         cache
-            .get_pipeline_str_with("db", "p", None, load())
+            .get_pipeline_str_with("db", "p", version, async { Ok(content.clone()) })
             .await
             .unwrap();
 
-        cache.remove_cache("p", Some(content.version)).await;
+        cache.invalidate("p", version).await;
 
         let loads = AtomicUsize::new(0);
         cache
-            .get_pipeline_str_with("db", "p", None, async {
+            .get_pipeline_str_with("db", "p", version, async {
                 loads.fetch_add(1, Ordering::SeqCst);
                 Ok(content.clone())
             })
@@ -315,21 +267,20 @@ transform:
         assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
-    /// Creating a new version on one schema must not leave another schema on
-    /// this frontend serving the older version from its `latest` alias.
+    /// The `latest` sweep must reach every schema, not just the one that
+    /// triggered it, and must cover `original_pipelines` — where an entry read
+    /// through `get_pipeline_str` lives alone.
     #[tokio::test]
-    async fn test_create_invalidates_latest_across_schemas() {
+    async fn test_invalidate_latest_sweeps_all_schemas() {
         let cache = PipelineCache::new(Duration::from_secs(60));
-        let v1 = content_at(1);
         let v2 = content_at(2);
 
-        let cached = cache
-            .get_pipeline_str_with("a", "p", None, async { Ok(v1.clone()) })
+        cache
+            .get_pipeline_str_with("a", "p", None, async { Ok(content_at(1)) })
             .await
             .unwrap();
-        assert_eq!(cached.version, v1.version);
 
-        cache.insert_pipeline("b", v2.clone(), compiled()).await;
+        cache.invalidate("p", None).await;
 
         let loads = AtomicUsize::new(0);
         let cached = cache
@@ -349,7 +300,7 @@ transform:
     #[tokio::test]
     async fn test_failover_serves_global_pipeline_to_unwarmed_schema() {
         let cache = PipelineCache::new(Duration::from_secs(60));
-        let content = test_content();
+        let content = content_at(1);
 
         cache.insert_failover_cache(content.clone(), true).await;
 
