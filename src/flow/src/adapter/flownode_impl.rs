@@ -33,13 +33,12 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowScheduleConfig;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_runtime::JoinHandle;
-use common_telemetry::{error, info, trace, warn};
-use datatypes::value::Value;
+use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
 use itertools::Itertools;
 use operator::utils::try_to_session_query_context;
 use session::context::QueryContextBuilder;
-use snafu::{IntoError, OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, TableId};
 use tokio::sync::{Mutex, RwLock};
 
@@ -48,11 +47,10 @@ use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, FlowNotRecoveredSnafu,
-    IllegalCheckTaskStateSnafu, InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu,
-    NoAvailableFrontendSnafu, SyncCheckTaskSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    IllegalCheckTaskStateSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu,
+    NoAvailableFrontendSnafu, SyncCheckTaskSnafu, UnsupportedSnafu,
 };
 use crate::metrics::{METRIC_FLOW_ROWS, METRIC_FLOW_TASK_COUNT};
-use crate::repr::{self, DiffRow};
 use crate::utils::StateReportHandler;
 use crate::{Error, FlowId};
 
@@ -165,23 +163,7 @@ impl FlowDualEngine {
     }
 
     pub async fn gen_state_report(&self) -> FlowStat {
-        let streaming = self.streaming_engine.flow_stat().await;
-        let batching = self.batching_engine.flow_stat().await;
-
-        let mut state_size = streaming.state_size;
-        state_size.extend(batching.state_size);
-
-        let mut last_exec_time_map = streaming.last_exec_time_map;
-        last_exec_time_map.extend(batching.last_exec_time_map);
-
-        let mut start_time_map = streaming.start_time_map;
-        start_time_map.extend(batching.start_time_map);
-
-        FlowStat {
-            state_size,
-            last_exec_time_map,
-            start_time_map,
-        }
+        self.batching_engine.flow_stat().await
     }
 
     /// Start state report task, which receives a sender from heartbeat task and sends report back.
@@ -700,6 +682,11 @@ impl FlowEngine for FlowDualEngine {
 
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
+        let flow_type = match flow_type {
+            Some(flow_type) => Some(flow_type),
+            None if self.streaming_engine.flow_exist(flow_id).await? => Some(FlowType::Streaming),
+            None => None,
+        };
 
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
@@ -740,11 +727,12 @@ impl FlowEngine for FlowDualEngine {
 
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
         let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
-        // not using `flow_type.is_some()` to make sure the flow is actually exist in the underlying engine
+        // Check the underlying registry so stateless flows survive a missing
+        // routing-map entry during recovery.
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flow_exist(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flow_exist(flow_id).await,
-            None => Ok(false),
+            None => self.streaming_engine.flow_exist(flow_id).await,
         }
     }
 
@@ -988,13 +976,7 @@ impl FlowEngine for StreamingEngine {
     }
 
     async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
-        Ok(self
-            .flow_err_collectors
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>())
+        Ok(self.stateless_flow_ids().await)
     }
 
     async fn handle_flow_inserts(
@@ -1012,151 +994,6 @@ impl FlowEngine for StreamingEngine {
             reason: "handle_mark_window_dirty in streaming engine",
         }
         .fail()
-    }
-}
-
-/// Simple helper enum for fetching value from row with default value
-#[derive(Debug, Clone)]
-enum FetchFromRow {
-    Idx(usize),
-    Default(Value),
-}
-
-impl FetchFromRow {
-    /// Panic if idx is out of bound
-    fn fetch(&self, row: &repr::Row) -> Value {
-        match self {
-            FetchFromRow::Idx(idx) => row.get(*idx).unwrap().clone(),
-            FetchFromRow::Default(v) => v.clone(),
-        }
-    }
-}
-
-impl StreamingEngine {
-    async fn handle_inserts_inner(
-        &self,
-        request: InsertRequests,
-    ) -> std::result::Result<(), Error> {
-        // using try_read to ensure two things:
-        // 1. flush wouldn't happen until inserts before it is inserted
-        // 2. inserts happening concurrently with flush wouldn't be block by flush
-        let _flush_lock = self.flush_lock.try_read();
-        for write_request in request.requests {
-            let region_id = write_request.region_id;
-            let table_id = RegionId::from(region_id).table_id();
-
-            let (insert_schema, rows_proto) = write_request
-                .rows
-                .map(|r| (r.schema, r.rows))
-                .unwrap_or_default();
-
-            // TODO(discord9): reconsider time assignment mechanism
-            let now = self.tick_manager.tick();
-
-            let (table_types, fetch_order) = {
-                let ctx = self.node_context.read().await;
-
-                // TODO(discord9): also check schema version so that altered table can be reported
-                let table_schema = ctx.table_source.table_from_id(&table_id).await?;
-                let default_vals = table_schema
-                    .default_values
-                    .iter()
-                    .zip(table_schema.relation_desc.typ().column_types.iter())
-                    .map(|(v, ty)| {
-                        v.as_ref().and_then(|v| {
-                            match v.create_default(ty.scalar_type(), ty.nullable()) {
-                                Ok(v) => Some(v),
-                                Err(err) => {
-                                    common_telemetry::error!(err; "Failed to create default value");
-                                    None
-                                }
-                            }
-                        })
-                    })
-                    .collect_vec();
-
-                let table_types = table_schema
-                    .relation_desc
-                    .typ()
-                    .column_types
-                    .clone()
-                    .into_iter()
-                    .map(|t| t.scalar_type)
-                    .collect_vec();
-                let table_col_names = table_schema.relation_desc.names;
-                let table_col_names = table_col_names
-                    .iter().enumerate()
-                    .map(|(idx,name)| match name {
-                        Some(name) => Ok(name.clone()),
-                        None => InternalSnafu {
-                            reason: format!("Expect column {idx} of table id={table_id} to have name in table schema, found None"),
-                        }
-                        .fail(),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let name_to_col = HashMap::<_, _>::from_iter(
-                    insert_schema
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (&name.column_name, i)),
-                );
-
-                let fetch_order: Vec<FetchFromRow> = table_col_names
-                    .iter()
-                    .zip(default_vals)
-                    .map(|(col_name, col_default_val)| {
-                        name_to_col
-                            .get(col_name)
-                            .copied()
-                            .map(FetchFromRow::Idx)
-                            .or_else(|| col_default_val.clone().map(FetchFromRow::Default))
-                            .with_context(|| UnexpectedSnafu {
-                                reason: format!(
-                                    "Column not found: {}, default_value: {:?}",
-                                    col_name, col_default_val
-                                ),
-                            })
-                    })
-                    .try_collect()?;
-
-                trace!("Reordering columns: {:?}", fetch_order);
-                (table_types, fetch_order)
-            };
-
-            // TODO(discord9): use column instead of row
-            let rows: Vec<DiffRow> = rows_proto
-                .into_iter()
-                .map(|r| {
-                    let r = repr::Row::from(r);
-                    let reordered = fetch_order.iter().map(|i| i.fetch(&r)).collect_vec();
-                    repr::Row::new(reordered)
-                })
-                .map(|r| (r, now, 1))
-                .collect_vec();
-            if let Err(err) = self
-                .handle_write_request(region_id.into(), rows, &table_types)
-                .await
-            {
-                let err = BoxedError::new(err);
-                let flow_ids = self
-                    .node_context
-                    .read()
-                    .await
-                    .get_flow_ids(table_id)
-                    .into_iter()
-                    .flatten()
-                    .cloned()
-                    .collect_vec();
-                let err = InsertIntoFlowSnafu {
-                    region_id,
-                    flow_ids,
-                }
-                .into_error(err);
-                common_telemetry::error!(err; "Failed to handle write request");
-                return Err(err);
-            }
-        }
-        Ok(())
     }
 }
 

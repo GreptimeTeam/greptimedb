@@ -8,7 +8,7 @@ CREATE TABLE distinct_basic (
 
 Affected Rows: 0
 
--- should fallback to streaming mode
+-- request-local DISTINCT is supported in streaming mode
 -- SQLNESS REPLACE id=\d+ id=REDACTED
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
 SELECT
@@ -18,8 +18,18 @@ FROM
 
 Affected Rows: 0
 
+-- instant-TTL sources reject non-stateless LIMIT plans
+CREATE FLOW test_limit_instant_rejected SINK TO out_limit_instant_rejected EVAL INTERVAL '1m' AS
+SELECT
+    number
+FROM
+    distinct_basic
+LIMIT 1;
+
+Error: 1004(InvalidArguments), Invalid SQL, error: instant-TTL flow sources support only stateless projection/filter queries over one source; non-stateless queries require a persisted source
+
 -- flow_options should have a flow_type:streaming
--- since source table's ttl=instant
+-- since source table's ttl=instant and DISTINCT is request-local
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 +---------------------+---------------------------+
@@ -157,7 +167,7 @@ DROP TABLE out_distinct_basic;
 
 Affected Rows: 0
 
--- test ttl = 5s
+-- test ttl = 5s (DISTINCT remains batching for persisted sources)
 CREATE TABLE distinct_basic (
     "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -176,7 +186,7 @@ FROM
 Affected Rows: 0
 
 -- flow_options should have a flow_type:batching
--- since source table's ttl=instant
+-- persisted-source DISTINCT retains batching semantics
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 +---------------------+--------------------------+

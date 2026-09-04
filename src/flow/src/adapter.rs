@@ -12,110 +12,381 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! for getting data from source and sending results to sink
-//! and communicating with other parts of the database
-#![warn(unused_imports)]
+//! Flow source schema management and stateless streaming execution.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use common_base::memory_limit::MemoryLimit;
 use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_options::memory::MemoryOptions;
-use common_runtime::JoinHandle;
+use common_recordbatch::map_dictionary_to_values_data_type;
 use common_stat::get_total_cpu_cores;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use common_telemetry::{debug, info, trace};
-use datatypes::schema::ColumnSchema;
-use datatypes::value::Value;
-use greptime_proto::v1;
-use itertools::{EitherOrBoth, Itertools};
+use common_telemetry::{error, info};
+use datafusion_common::TableReference;
+use datafusion_common::tree_node::TreeNode;
+use datafusion_expr::logical_plan::Distinct;
+use datafusion_expr::{Expr, LogicalPlan};
+use datatypes::schema::{ColumnSchema, SchemaRef};
+use itertools::Itertools;
 use meta_client::MetaClientOptions;
 use query::QueryEngine;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
-use session::context::QueryContext;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::storage::{ConcreteDataType, RegionId};
-use table::metadata::TableId;
-use tokio::sync::broadcast::error::TryRecvError;
-use tokio::sync::{Mutex, RwLock, broadcast, watch};
+use tokio::sync::RwLock;
 
-pub(crate) use crate::adapter::node_context::FlownodeContext;
-use crate::adapter::refill::RefillTask;
+use crate::adapter::stateless::StatelessFlow;
 use crate::adapter::table_source::ManagedTableSource;
-use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
-pub(crate) use crate::adapter::worker::{Worker, WorkerHandle, create_worker};
+use crate::adapter::util::{
+    relation_desc_to_column_schemas_with_fallback, table_info_value_to_relation_desc,
+};
 use crate::batching_mode::BatchingModeOptions;
-use crate::compute::ErrCollector;
-use crate::df_optimizer::sql_to_flow_plan;
-use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
-use crate::expr::Batch;
-use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
-use crate::repr::{self, BATCH_SIZE, DiffRow, RelationDesc, Row};
+use crate::batching_mode::frontend_client::FrontendClient;
+use crate::batching_mode::utils::sql_to_df_plan;
+use crate::error::{
+    DatafusionSnafu, Error, ExternalSnafu, FlowNotFoundSnafu, InsertIntoFlowSnafu, InternalSnafu,
+    InvalidQuerySnafu, UnexpectedSnafu,
+};
+use crate::repr::{ColumnType, DiffRow, RelationDesc, Row};
 use crate::{CreateFlowArgs, FlowId, TableName};
 
 pub(crate) mod flownode_impl;
-mod parse_expr;
-pub(crate) mod refill;
-mod stat;
+pub(crate) mod stateless;
+pub(crate) mod table_source;
 #[cfg(test)]
 mod tests;
 pub(crate) mod util;
-mod worker;
 
-pub(crate) mod node_context;
-pub(crate) mod table_source;
-
-use crate::FrontendInvoker;
-use crate::error::Error;
-
-fn expire_after_secs_to_millis(expire_after_secs: i64) -> Result<repr::Duration, Error> {
-    ensure!(
-        expire_after_secs >= 0,
-        InvalidQuerySnafu {
-            reason: format!("EXPIRE AFTER must be non-negative, got {expire_after_secs} seconds"),
-        }
-    );
-
-    expire_after_secs
-        .checked_mul(1_000)
-        .with_context(|| InvalidQuerySnafu {
-            reason: format!(
-                "EXPIRE AFTER value {expire_after_secs} seconds cannot be represented in milliseconds"
-            ),
+/// Converts a retained plan's output to logical schemas. Only a direct source
+/// column (optionally wrapped in an alias) carries source semantics; computed
+/// expressions deliberately use the physical output field metadata instead.
+fn output_column_schemas(
+    plan: &LogicalPlan,
+    source_schema: &SchemaRef,
+) -> Result<(Vec<ColumnSchema>, Vec<Option<usize>>), Error> {
+    // Plain DISTINCT preserves the selected columns and their source semantics. Inspect its
+    // input for lineage, while leaving computed expressions without source metadata.
+    let expressions = match plan {
+        LogicalPlan::Projection(projection) => Some(&projection.expr),
+        LogicalPlan::Distinct(Distinct::All(input)) => match input.as_ref() {
+            LogicalPlan::Projection(projection) => Some(&projection.expr),
+            _ => None,
+        },
+        _ => None,
+    };
+    let is_pass_through = matches!(plan, LogicalPlan::TableScan(_) | LogicalPlan::Filter(_))
+        || matches!(plan, LogicalPlan::Distinct(Distinct::All(input)) if matches!(input.as_ref(), LogicalPlan::TableScan(_) | LogicalPlan::Filter(_)));
+    let mut lineage = Vec::new();
+    let columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let mut column = ColumnSchema::try_from(field.as_ref())
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            let source_index = expressions
+                .and_then(|exprs| {
+                    let expr = exprs.get(idx)?;
+                    let expr = match expr {
+                        Expr::Column(column) => Some(column),
+                        Expr::Alias(alias) => match alias.expr.as_ref() {
+                            Expr::Column(column) => Some(column),
+                            _ => None,
+                        },
+                        _ => None,
+                    }?;
+                    source_schema.column_index_by_name(&expr.name)
+                })
+                .or_else(|| {
+                    is_pass_through
+                        .then(|| source_schema.column_index_by_name(field.name()))
+                        .flatten()
+                });
+            if let Some(source_index) = source_index {
+                let mut source = source_schema.column_schemas()[source_index].clone();
+                source.name = field.name().clone();
+                source.data_type = map_dictionary_to_values_data_type(&source.data_type);
+                column = source;
+            } else {
+                column.data_type = map_dictionary_to_values_data_type(&column.data_type);
+                // DataFusion may propagate field metadata through a computed expression.  Such
+                // an expression has no source-column lineage and must not inherit its PK/time
+                // semantics into the sink relation.
+                if expressions.is_some() {
+                    column = column.with_time_index(false);
+                }
+            }
+            lineage.push(source_index);
+            Ok(column)
         })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok((columns, lineage))
 }
 
-// `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
-pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
+fn relation_desc_from_output(
+    columns: &[ColumnSchema],
+    lineage: &[Option<usize>],
+    source_primary_key_indices: &[usize],
+) -> RelationDesc {
+    let keys = source_primary_key_indices
+        .iter()
+        .filter_map(|source_index| {
+            lineage
+                .iter()
+                .position(|index| index == &Some(*source_index))
+        })
+        .collect_vec();
+    let time_index = columns.iter().position(ColumnSchema::is_time_index);
+    RelationDesc {
+        typ: crate::repr::RelationType {
+            column_types: columns
+                .iter()
+                .map(|column| ColumnType::new(column.data_type.clone(), column.is_nullable()))
+                .collect(),
+            keys: if keys.is_empty() {
+                vec![]
+            } else {
+                vec![crate::repr::Key::from(keys)]
+            },
+            time_index,
+            auto_columns: vec![],
+        },
+        names: columns
+            .iter()
+            .map(|column| Some(column.name.clone()))
+            .collect(),
+    }
+}
 
+fn default_num_workers() -> usize {
+    get_total_cpu_cores().div_ceil(2)
+}
+
+/// Returns whether an existing sink uses the legacy explicit source-time-index layout.
+///
+/// This check is deliberately separate from [`resolve_sink_layout`]: ordinary auto-column
+/// resolution remains the first choice, and this compatibility path is only for a sink whose
+/// trailing column is a real, user-defined time index.
+pub(crate) fn is_explicit_source_timestamp_compatibility(
+    output_schema: &[ColumnSchema],
+    output_lineage: &[Option<usize>],
+    sink_schema: &[ColumnSchema],
+    source_schema: &SchemaRef,
+) -> bool {
+    if sink_schema.len() != output_schema.len() + 1 || output_lineage.len() != output_schema.len() {
+        return false;
+    }
+    if !output_schema
+        .iter()
+        .zip(&sink_schema[..output_schema.len()])
+        .all(|(output, sink)| output.data_type == sink.data_type)
+    {
+        return false;
+    }
+
+    let Some(source_timestamp_index) = source_schema.timestamp_index() else {
+        return false;
+    };
+    let sink_timestamp = &sink_schema[output_schema.len()];
+    sink_timestamp.data_type == source_schema.column_schemas()[source_timestamp_index].data_type
+        && sink_timestamp.data_type.is_timestamp()
+        && sink_timestamp.is_time_index()
+        && sink_timestamp.default_constraint().is_some()
+        && sink_timestamp.name != AUTO_CREATED_UPDATE_AT_TS_COL
+        && sink_timestamp.name != AUTO_CREATED_PLACEHOLDER_TS_COL
+        && !output_lineage.contains(&Some(source_timestamp_index))
+}
+
+pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "update_at";
 
-/// Flow config that exists both in standalone&distributed mode
+/// Resolves the columns appended by the flow, validating the complete output/sink layout.
+///
+/// A sink with the same arity as the query is an ordinary sink, even when its last
+/// column happens to be named `update_at`. Auto columns are only inferred from the
+/// arity difference and their exact trailing layout.
+pub(crate) fn resolve_sink_layout(
+    output_schema: &[ColumnSchema],
+    sink_schema: &[ColumnSchema],
+) -> Result<Vec<ColumnSchema>, Error> {
+    ensure!(
+        sink_schema.len() >= output_schema.len() && sink_schema.len() - output_schema.len() <= 2,
+        InvalidQuerySnafu {
+            reason: format!(
+                "Flow output has {} columns, but sink has {} columns; only zero, one, or two trailing auto columns are supported",
+                output_schema.len(),
+                sink_schema.len()
+            )
+        }
+    );
+    let suffix_len = sink_schema.len() - output_schema.len();
+    for (idx, (output, sink)) in output_schema.iter().zip(sink_schema.iter()).enumerate() {
+        ensure!(
+            output.data_type == sink.data_type,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Flow output column {idx} has type {:?}, but sink column {} has type {:?}",
+                    output.data_type, sink.name, sink.data_type
+                )
+            }
+        );
+    }
+    let suffix = &sink_schema[output_schema.len()..];
+    match suffix_len {
+        0 => Ok(vec![]),
+        1 => {
+            let column = &suffix[0];
+            ensure!(
+                column.name == AUTO_CREATED_UPDATE_AT_TS_COL && column.data_type.is_timestamp(),
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "The trailing sink column must be timestamp {}",
+                        AUTO_CREATED_UPDATE_AT_TS_COL
+                    )
+                }
+            );
+            Ok(suffix.to_vec())
+        }
+        2 => {
+            let update_at = &suffix[0];
+            let placeholder = &suffix[1];
+            ensure!(
+                update_at.name == AUTO_CREATED_UPDATE_AT_TS_COL
+                    && update_at.data_type.is_timestamp()
+                    && placeholder.name == AUTO_CREATED_PLACEHOLDER_TS_COL
+                    && placeholder.data_type.is_timestamp()
+                    && placeholder.is_time_index(),
+                InvalidQuerySnafu {
+                    reason: "The two trailing sink columns must be timestamp update_at followed by timestamp time-index __ts_placeholder".to_string()
+                }
+            );
+            Ok(suffix.to_vec())
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Legacy helper for callers that only have a sink schema. New stateless flows
+/// resolve the suffix against both schemas and store it in `StatelessFlow`.
+pub(crate) fn sink_output_column_count(sink_schema: &[ColumnSchema]) -> Result<usize, Error> {
+    let mut count = sink_schema.len();
+    if sink_schema
+        .last()
+        .is_some_and(|column| column.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
+    {
+        let placeholder = &sink_schema[count - 1];
+        ensure!(
+            placeholder.data_type.is_timestamp() && placeholder.is_time_index(),
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Auto-created sink column {} must be a timestamp time index",
+                    AUTO_CREATED_PLACEHOLDER_TS_COL
+                )
+            }
+        );
+        count -= 1;
+    }
+    if sink_schema
+        .get(count.saturating_sub(1))
+        .is_some_and(|column| column.name == AUTO_CREATED_UPDATE_AT_TS_COL)
+    {
+        ensure!(
+            sink_schema[count - 1].data_type.is_timestamp(),
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Auto-created sink column {} must be a timestamp",
+                    AUTO_CREATED_UPDATE_AT_TS_COL
+                )
+            }
+        );
+        count -= 1;
+    }
+    Ok(count)
+}
+
+pub(crate) fn validate_sink_layout(
+    output_schema: &[ColumnSchema],
+    sink_schema: &[ColumnSchema],
+) -> Result<(), Error> {
+    resolve_sink_layout(output_schema, sink_schema).map(|_| ())
+}
+
+pub(crate) fn validate_auto_column_names(output_schema: &[ColumnSchema]) -> Result<(), Error> {
+    for column in output_schema {
+        ensure!(
+            column.name != AUTO_CREATED_UPDATE_AT_TS_COL
+                && column.name != AUTO_CREATED_PLACEHOLDER_TS_COL,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Flow output column {} is reserved for an auto-created sink column",
+                    column.name
+                )
+            }
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_sink_layout_with_suffix(
+    output_schema: &[ColumnSchema],
+    sink_schema: &[ColumnSchema],
+    suffix: &[ColumnSchema],
+) -> Result<(), Error> {
+    ensure!(
+        sink_schema.len() == output_schema.len() + suffix.len()
+            && sink_schema[output_schema.len()..] == *suffix,
+        InvalidQuerySnafu {
+            reason: "Stored sink auto-column layout no longer matches the sink schema".to_string()
+        }
+    );
+    for (idx, (output, sink)) in output_schema
+        .iter()
+        .zip(&sink_schema[..output_schema.len()])
+        .enumerate()
+    {
+        ensure!(
+            output.data_type == sink.data_type,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Flow output column {idx} has type {:?}, but sink column {} has type {:?}",
+                    output.data_type, sink.name, sink.data_type
+                )
+            }
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FlowConfig {
+    /// Deprecated and ignored. Flow workers have been removed.
+    #[deprecated(note = "flow workers have been removed; this field is ignored")]
+    #[serde(default = "default_num_workers")]
     pub num_workers: usize,
     pub batching_mode: BatchingModeOptions,
 }
 
+#[allow(deprecated)]
 impl Default for FlowConfig {
     fn default() -> Self {
         Self {
-            num_workers: (get_total_cpu_cores() / 2).max(1),
+            num_workers: get_total_cpu_cores().div_ceil(2),
             batching_mode: BatchingModeOptions::default(),
         }
     }
 }
 
-/// Options for flow node
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FlownodeOptions {
@@ -140,8 +411,6 @@ impl Default for FlownodeOptions {
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
-            // flownode's query option is set to 1 to throttle flow's query so
-            // that it won't use too much cpu or memory
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
@@ -156,328 +425,563 @@ impl Default for FlownodeOptions {
 
 impl Configurable for FlownodeOptions {
     fn validate_sanitize(&mut self) -> common_config::error::Result<()> {
-        if self.flow.num_workers == 0 {
-            self.flow.num_workers = (get_total_cpu_cores() / 2).max(1);
-        }
         Ok(())
     }
 }
 
-/// Arc-ed FlowNodeManager, cheaper to clone
 pub type FlowStreamingEngineRef = Arc<StreamingEngine>;
 
-/// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
-///
-/// The choice of timestamp is just using current system timestamp for now
-///
-pub struct StreamingEngine {
-    /// The handler to the worker that will run the dataflow
-    /// which is `!Send` so a handle is used
-    pub worker_handles: Vec<WorkerHandle>,
-    /// The selector to select a worker to run the dataflow
-    worker_selector: Mutex<usize>,
-    /// The query engine that will be used to parse the query and convert it to a dataflow plan
-    pub query_engine: Arc<dyn QueryEngine>,
-    /// Getting table name and table schema from table info manager
-    table_info_source: ManagedTableSource,
-    frontend_invoker: RwLock<Option<FrontendInvoker>>,
-    /// contains mapping from table name to global id, and table schema
-    node_context: RwLock<FlownodeContext>,
-    /// Contains all refill tasks
-    refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
-    flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
-    src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
-    tick_manager: FlowTickManager,
-    /// This node id is only available in distributed mode, on standalone mode this is guaranteed to be `None`
-    pub node_id: Option<u32>,
-    /// Lock for flushing, will be `read` by `handle_inserts` and `write` by `flush_flow`
-    ///
-    /// So that a series of event like `inserts -> flush` can be handled correctly
-    flush_lock: RwLock<()>,
+struct StatelessFlowSlot {
+    runtime: Arc<RwLock<Option<Arc<StatelessFlow>>>>,
+    /// Cleared at registry-detach time, fencing creators that already captured this slot.
+    active: std::sync::atomic::AtomicBool,
 }
 
-/// Building FlownodeManager
-impl StreamingEngine {
-    /// set frontend invoker
-    pub async fn set_frontend_invoker(&self, frontend: FrontendInvoker) {
-        *self.frontend_invoker.write().await = Some(frontend);
-    }
+fn validate_captured_slot(
+    slot: &StatelessFlowSlot,
+    current_source_table_id: Option<table::metadata::TableId>,
+    runtime_matches: bool,
+    expected_table_id: table::metadata::TableId,
+    flow_id: FlowId,
+) -> Result<(), Error> {
+    ensure!(
+        slot.active.load(Ordering::Acquire),
+        FlowNotFoundSnafu { id: flow_id }
+    );
+    let current_source_table_id =
+        current_source_table_id.context(FlowNotFoundSnafu { id: flow_id })?;
+    ensure!(
+        current_source_table_id == expected_table_id,
+        InvalidQuerySnafu {
+            reason: format!("Flow {flow_id} source table changed while it was selected")
+        }
+    );
+    ensure!(
+        runtime_matches,
+        InvalidQuerySnafu {
+            reason: format!("Flow {flow_id} changed while it was prepared")
+        }
+    );
+    Ok(())
+}
 
-    /// Create **without** setting `frontend_invoker`
+pub struct StreamingEngine {
+    pub query_engine: Arc<dyn QueryEngine>,
+    pub frontend_client: Arc<FrontendClient>,
+    table_info_source: ManagedTableSource,
+    stateless_flows: RwLock<BTreeMap<FlowId, Arc<StatelessFlowSlot>>>,
+    pub node_id: Option<u32>,
+}
+
+impl StreamingEngine {
     pub fn new(
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
+        frontend_client: Arc<FrontendClient>,
     ) -> Self {
-        let srv_map = ManagedTableSource::new(
+        let table_info_source = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
             table_meta.table_name_manager().clone(),
         );
-        let node_context = FlownodeContext::new(Box::new(srv_map.clone()) as _);
-        let tick_manager = FlowTickManager::new();
-        let worker_handles = Vec::new();
-        StreamingEngine {
-            worker_handles,
-            worker_selector: Mutex::new(0),
+        Self {
             query_engine,
-            table_info_source: srv_map,
-            frontend_invoker: RwLock::new(None),
-            node_context: RwLock::new(node_context),
-            refill_tasks: Default::default(),
-            flow_err_collectors: Default::default(),
-            src_send_buf_lens: Default::default(),
-            tick_manager,
+            frontend_client,
+            table_info_source,
+            stateless_flows: Default::default(),
             node_id,
-            flush_lock: RwLock::new(()),
         }
     }
 
-    /// Create a flownode manager with one worker
-    pub fn new_with_workers<'s>(
-        node_id: Option<u32>,
-        query_engine: Arc<dyn QueryEngine>,
-        table_meta: TableMetadataManagerRef,
-        num_workers: usize,
-    ) -> (Self, Vec<Worker<'s>>) {
-        let mut zelf = Self::new(node_id, query_engine, table_meta);
-
-        let workers: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let (handle, worker) = create_worker();
-                zelf.add_worker_handle(handle);
-                worker
-            })
-            .collect();
-        (zelf, workers)
-    }
-
-    /// add a worker handler to manager, meaning this corresponding worker is under it's manage
-    pub fn add_worker_handle(&mut self, handle: WorkerHandle) {
-        self.worker_handles.push(handle);
-    }
-}
-
-#[derive(Debug)]
-pub enum DiffRequest {
-    Insert(Vec<(Row, repr::Timestamp)>),
-    Delete(Vec<(Row, repr::Timestamp)>),
-}
-
-impl DiffRequest {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Insert(v) => v.len(),
-            Self::Delete(v) => v.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-pub fn batches_to_rows_req(batches: Vec<Batch>) -> Result<Vec<DiffRequest>, Error> {
-    let mut reqs = Vec::new();
-    for batch in batches {
-        let mut rows = Vec::with_capacity(batch.row_count());
-        for i in 0..batch.row_count() {
-            let row = batch.get_row(i).context(EvalSnafu)?;
-            rows.push((Row::new(row), 0));
-        }
-        reqs.push(DiffRequest::Insert(rows));
-    }
-    Ok(reqs)
-}
-
-/// This impl block contains methods to send writeback requests to frontend
-impl StreamingEngine {
-    /// Return the number of requests it made
-    pub async fn send_writeback_requests(&self) -> Result<usize, Error> {
-        let all_reqs = self.generate_writeback_request().await?;
-        if all_reqs.is_empty() || all_reqs.iter().all(|v| v.1.is_empty()) {
-            return Ok(0);
-        }
-        let mut req_cnt = 0;
-        for (table_name, reqs) in all_reqs {
-            if reqs.is_empty() {
-                continue;
-            }
-            let (catalog, schema) = (table_name[0].clone(), table_name[1].clone());
-            let ctx = Arc::new(QueryContext::with(&catalog, &schema));
-
-            let (is_ts_placeholder, proto_schema) = match self
-                .try_fetch_existing_table(&table_name)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Table not found: {}", table_name.join(".")),
-                }) {
-                Ok(r) => r,
-                Err(e) => {
-                    if self
-                        .table_info_source
-                        .get_opt_table_id_from_name(&table_name)
-                        .await?
-                        .is_none()
-                    {
-                        // deal with both flow&sink table no longer exists
-                        // but some output is still in output buf
-                        common_telemetry::warn!(e; "Table `{}` no longer exists, skip writeback", table_name.join("."));
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-            let schema_len = proto_schema.len();
-
-            let total_rows = reqs.iter().map(|r| r.len()).sum::<usize>();
-            trace!(
-                "Sending {} writeback requests to table {}, reqs total rows={}",
-                reqs.len(),
-                table_name.join("."),
-                reqs.iter().map(|r| r.len()).sum::<usize>()
-            );
-
-            METRIC_FLOW_ROWS
-                .with_label_values(&["out-streaming"])
-                .inc_by(total_rows as u64);
-
-            let now = self.tick_manager.tick();
-            for req in reqs {
-                match req {
-                    DiffRequest::Insert(insert) => {
-                        let rows_proto: Vec<v1::Row> = insert
-                            .into_iter()
-                            .map(|(mut row, _ts)| {
-                                // extend `update_at` col if needed
-                                // if schema include a millisecond timestamp here, and result row doesn't have it, add it
-                                if row.len() < proto_schema.len()
-                                    && proto_schema[row.len()].datatype
-                                        == greptime_proto::v1::ColumnDataType::TimestampMillisecond
-                                            as i32
-                                {
-                                    row.extend([Value::from(
-                                        common_time::Timestamp::new_millisecond(now),
-                                    )]);
-                                }
-                                // ts col, if auto create
-                                if is_ts_placeholder {
-                                    ensure!(
-                                        row.len() == schema_len - 1,
-                                        InternalSnafu {
-                                            reason: format!(
-                                                "Row len mismatch, expect {} got {}",
-                                                schema_len - 1,
-                                                row.len()
-                                            )
-                                        }
-                                    );
-                                    row.extend([Value::from(
-                                        common_time::Timestamp::new_millisecond(0),
-                                    )]);
-                                }
-                                if row.len() != proto_schema.len() {
-                                    UnexpectedSnafu {
-                                        reason: format!(
-                                            "Flow output row length mismatch, expect {} got {}, the columns in schema are: {:?}",
-                                            proto_schema.len(),
-                                            row.len(),
-                                            proto_schema.iter().map(|c|&c.column_name).collect_vec()
-                                        ),
-                                    }
-                                    .fail()?;
-                                }
-                                Ok(row.into())
-                            })
-                            .collect::<Result<Vec<_>, Error>>()?;
-                        let table_name = table_name.last().unwrap().clone();
-                        let req = RowInsertRequest {
-                            table_name,
-                            rows: Some(v1::Rows {
-                                schema: proto_schema.clone(),
-                                rows: rows_proto,
-                            }),
-                        };
-                        req_cnt += 1;
-                        self.frontend_invoker
-                            .read()
-                            .await
-                            .as_ref()
-                            .with_context(|| UnexpectedSnafu {
-                                reason: "Expect a frontend invoker for flownode to write back",
-                            })?
-                            .row_inserts(RowInsertRequests { inserts: vec![req] }, ctx.clone())
-                            .await
-                            .map_err(BoxedError::new)
-                            .with_context(|_| ExternalSnafu {})?;
-                    }
-                    DiffRequest::Delete(remove) => {
-                        info!("original remove rows={:?}", remove);
-                        let rows_proto: Vec<v1::Row> = remove
-                            .into_iter()
-                            .map(|(mut row, _ts)| {
-                                row.extend(Some(Value::from(
-                                    common_time::Timestamp::new_millisecond(0),
-                                )));
-                                row.into()
-                            })
-                            .collect::<Vec<_>>();
-                        let table_name = table_name.last().unwrap().clone();
-                        let req = RowDeleteRequest {
-                            table_name,
-                            rows: Some(v1::Rows {
-                                schema: proto_schema.clone(),
-                                rows: rows_proto,
-                            }),
-                        };
-
-                        req_cnt += 1;
-                        self.frontend_invoker
-                            .read()
-                            .await
-                            .as_ref()
-                            .with_context(|| UnexpectedSnafu {
-                                reason: "Expect a frontend invoker for flownode to write back",
-                            })?
-                            .row_deletes(RowDeleteRequests { deletes: vec![req] }, ctx.clone())
-                            .await
-                            .map_err(BoxedError::new)
-                            .with_context(|_| ExternalSnafu {})?;
-                    }
-                }
-            }
-        }
-        Ok(req_cnt)
-    }
-
-    /// Generate writeback request for all sink table
-    pub async fn generate_writeback_request(
+    pub async fn handle_write_request(
         &self,
-    ) -> Result<BTreeMap<TableName, Vec<DiffRequest>>, Error> {
-        trace!("Start to generate writeback request");
-        let mut output = BTreeMap::new();
-        let mut total_row_count = 0;
-        for (name, sink_recv) in self
-            .node_context
+        region_id: RegionId,
+        rows: Vec<DiffRow>,
+        batch_datatypes: &[ConcreteDataType],
+        source_schema_version: u32,
+    ) -> Result<(), Error> {
+        let table_id = region_id.table_id();
+        let flow_ids = self.flow_ids_for_table(table_id).await;
+        let mut failed_flow_ids = Vec::new();
+        let mut first_error = None;
+        for (flow_id, slot) in flow_ids {
+            let result = self
+                .execute_flow(
+                    flow_id,
+                    slot,
+                    table_id,
+                    rows.clone(),
+                    batch_datatypes,
+                    source_schema_version,
+                )
+                .await;
+            if let Err(err) = result {
+                error!(err; "Failed to insert into flow={}, region_id={}", flow_id, region_id);
+                failed_flow_ids.push(flow_id);
+                if first_error.is_none() {
+                    first_error = Some(BoxedError::new(err));
+                }
+            }
+        }
+        match first_error {
+            Some(source) => Err(InsertIntoFlowSnafu {
+                region_id: u64::from(region_id),
+                flow_ids: failed_flow_ids,
+            }
+            .into_error(source)),
+            None => Ok(()),
+        }
+    }
+
+    async fn flow_ids_for_table(
+        &self,
+        table_id: table::metadata::TableId,
+    ) -> Vec<(FlowId, Arc<StatelessFlowSlot>)> {
+        let slots = self
+            .stateless_flows
+            .read()
+            .await
+            .iter()
+            .map(|(id, slot)| (*id, Arc::clone(slot)))
+            .collect::<Vec<_>>();
+        let mut flows = Vec::new();
+        for (id, slot) in slots {
+            if slot
+                .runtime
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|flow| flow.source_table_id == table_id)
+            {
+                flows.push((id, slot));
+            }
+        }
+        flows
+    }
+
+    async fn execute_flow(
+        &self,
+        flow_id: FlowId,
+        slot: Arc<StatelessFlowSlot>,
+        expected_table_id: table::metadata::TableId,
+        rows: Vec<DiffRow>,
+        batch_datatypes: &[ConcreteDataType],
+        source_schema_version: u32,
+    ) -> Result<usize, Error> {
+        // The slot is the request's source-selection lease.  Do not resolve flow_id through the
+        // registry again: removal/recreation may have installed a different slot in the meantime.
+        let guard = slot.runtime.clone().read_owned().await;
+        let selected = guard.as_ref().context(FlowNotFoundSnafu { id: flow_id })?;
+        validate_captured_slot(
+            &slot,
+            Some(selected.source_table_id),
+            true,
+            expected_table_id,
+            flow_id,
+        )?;
+        let selected = Arc::clone(selected);
+        drop(guard);
+
+        let flow = self
+            .flow_for_write(
+                flow_id,
+                slot.clone(),
+                expected_table_id,
+                selected,
+                source_schema_version,
+            )
+            .await?;
+        let guard = slot.runtime.clone().read_owned().await;
+        let current = guard.as_ref().context(FlowNotFoundSnafu { id: flow_id })?;
+        validate_captured_slot(
+            &slot,
+            Some(current.source_table_id),
+            Arc::ptr_eq(current, &flow),
+            expected_table_id,
+            flow_id,
+        )?;
+        // This is the last check before planning.  In particular, a request normalized against
+        // an old source schema is never allowed to reach a newly published plan.
+        let latest = self
+            .table_info_source
+            .get_table_info_value(&flow.source_table_id)
+            .await?
+            .context(UnexpectedSnafu {
+                reason: "Source table metadata is missing",
+            })?
+            .table_info
+            .meta
+            .schema
+            .version();
+        ensure!(
+            source_schema_version == latest && flow.source_schema_version == latest,
+            InvalidQuerySnafu {
+                reason: format!("Source schema version changed before flow {flow_id} execution")
+            }
+        );
+        stateless::execute(
+            &flow,
+            &rows,
+            batch_datatypes,
+            &self.query_engine,
+            &self.frontend_client,
+            latest,
+        )
+        .await
+    }
+
+    async fn flow_for_write(
+        &self,
+        flow_id: FlowId,
+        slot: Arc<StatelessFlowSlot>,
+        expected_table_id: table::metadata::TableId,
+        selected: Arc<StatelessFlow>,
+        source_schema_version: u32,
+    ) -> Result<Arc<StatelessFlow>, Error> {
+        validate_captured_slot(
+            &slot,
+            Some(selected.source_table_id),
+            true,
+            expected_table_id,
+            flow_id,
+        )?;
+        let current = selected;
+        if current.source_schema_version == source_schema_version {
+            return Ok(current);
+        }
+        let replacement = Arc::new(
+            self.build_stateless_flow(&current.create_args, false)
+                .await?,
+        );
+        ensure!(
+            replacement.source_table_id == current.source_table_id
+                && replacement.source_schema_version == source_schema_version,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Source schema changed while rebuilding flow {flow_id}: expected version {source_schema_version}, got {}",
+                    replacement.source_schema_version
+                )
+            }
+        );
+        let mut published = slot.runtime.write().await;
+        let latest = published
+            .as_ref()
+            .context(FlowNotFoundSnafu { id: flow_id })?;
+        validate_captured_slot(
+            &slot,
+            Some(latest.source_table_id),
+            Arc::ptr_eq(latest, &current),
+            expected_table_id,
+            flow_id,
+        )?;
+        if latest.source_schema_version == source_schema_version {
+            return Ok(Arc::clone(latest));
+        }
+        ensure!(
+            Arc::ptr_eq(latest, &current),
+            InvalidQuerySnafu {
+                reason: format!("Flow {flow_id} was replaced while its source schema was rebuilt")
+            }
+        );
+        // Metadata is fetched after acquiring the publication lease.  Thus a schema bump cannot
+        // slip between the final validation and publishing this runtime.
+        let latest_schema_version = self
+            .table_info_source
+            .get_table_info_value(&current.source_table_id)
+            .await?
+            .context(UnexpectedSnafu {
+                reason: "Source table metadata is missing",
+            })?
+            .table_info
+            .meta
+            .schema
+            .version();
+        ensure!(
+            latest_schema_version == source_schema_version,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Source schema changed while rebuilding flow {flow_id}: expected version {source_schema_version}, got {latest_schema_version}"
+                )
+            }
+        );
+        *published = Some(Arc::clone(&replacement));
+        Ok(replacement)
+    }
+
+    pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
+        // Detach first: this is the tombstone/linearization point. A concurrent create must
+        // install a different slot and can never republish into the removed one.
+        let slot = self
+            .stateless_flows
             .write()
             .await
-            .sink_receiver
-            .iter_mut()
-            .map(|(n, (_s, r))| (n, r))
-        {
-            let mut batches = Vec::new();
-            while let Ok(batch) = sink_recv.try_recv() {
-                total_row_count += batch.row_count();
-                batches.push(batch);
-            }
-            let reqs = batches_to_rows_req(batches)?;
-            output.insert(name.clone(), reqs);
-        }
-        trace!("Prepare writeback req: total row count={}", total_row_count);
-        Ok(output)
+            .remove(&flow_id)
+            .context(FlowNotFoundSnafu { id: flow_id })?;
+        slot.active.store(false, Ordering::Release);
+        slot.runtime.write().await.take();
+        Ok(())
     }
 
-    /// Fetch table schema and primary key from table info source, if table not exist return None
+    async fn publish_initial_flow(
+        &self,
+        slot: Arc<StatelessFlowSlot>,
+        flow: Arc<StatelessFlow>,
+        create_if_not_exists: bool,
+        or_replace: bool,
+    ) -> Result<bool, Error> {
+        let mut runtime = slot.runtime.write().await;
+        ensure!(
+            slot.active.load(Ordering::Acquire),
+            FlowNotFoundSnafu {
+                id: flow.create_args.flow_id
+            }
+        );
+        if runtime.is_some() && !or_replace {
+            if create_if_not_exists {
+                return Ok(false);
+            }
+            return crate::error::FlowAlreadyExistSnafu {
+                id: flow.create_args.flow_id,
+            }
+            .fail();
+        }
+        let latest = self
+            .table_info_source
+            .get_table_info_value(&flow.source_table_id)
+            .await?
+            .context(UnexpectedSnafu {
+                reason: "Source table metadata is missing",
+            })?
+            .table_info
+            .meta
+            .schema
+            .version();
+        ensure!(
+            latest == flow.source_schema_version,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Source schema changed while building flow: built version {}, current version {latest}",
+                    flow.source_schema_version
+                )
+            }
+        );
+        *runtime = Some(flow);
+        Ok(true)
+    }
+
+    pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+        let flow_id = args.flow_id;
+        let flow = Arc::new(self.build_stateless_flow(&args, true).await?);
+        let slot = {
+            let mut slots = self.stateless_flows.write().await;
+            if let Some(slot) = slots.get(&flow_id) {
+                Arc::clone(slot)
+            } else {
+                let slot = Arc::new(StatelessFlowSlot {
+                    runtime: Arc::new(RwLock::new(None)),
+                    active: AtomicBool::new(true),
+                });
+                slots.insert(flow_id, Arc::clone(&slot));
+                slot
+            }
+        };
+        let published = self
+            .publish_initial_flow(
+                slot.clone(),
+                flow,
+                args.create_if_not_exists,
+                args.or_replace,
+            )
+            .await?;
+        ensure!(
+            self.stateless_flows
+                .read()
+                .await
+                .get(&flow_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &slot)),
+            FlowNotFoundSnafu { id: flow_id }
+        );
+        if published {
+            info!("Successfully create flow with id={flow_id}");
+            Ok(Some(flow_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn build_stateless_flow(
+        &self,
+        args: &CreateFlowArgs,
+        create_sink: bool,
+    ) -> Result<StatelessFlow, Error> {
+        let CreateFlowArgs {
+            flow_id,
+            sink_table_name,
+            source_table_ids,
+            sql,
+            query_ctx,
+            ..
+        } = args;
+        ensure!(
+            source_table_ids.len() == 1,
+            InvalidQuerySnafu {
+                reason: "Stateless streaming flow does not support multiple source tables",
+            }
+        );
+
+        let query_ctx = query_ctx.clone().map(Arc::new).context(UnexpectedSnafu {
+            reason: "Query context is missing",
+        })?;
+        let flow_plan =
+            sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), sql, true).await?;
+        stateless::validate_plan(&flow_plan)?;
+        let source_table_id = source_table_ids[0];
+        let source_table_name = self
+            .table_info_source
+            .get_table_name(&source_table_id)
+            .await?;
+        let source_table_info = self
+            .table_info_source
+            .get_table_info_value(&source_table_id)
+            .await?
+            .context(UnexpectedSnafu {
+                reason: "Source table metadata is missing",
+            })?;
+        let source_meta = source_table_info.table_info.meta;
+        let source_schema = source_meta.schema;
+        let source_primary_key_indices = source_meta.primary_key_indices;
+        let (inferred_schema, lineage) = output_column_schemas(&flow_plan, &source_schema)?;
+        let inferred_relation =
+            relation_desc_from_output(&inferred_schema, &lineage, &source_primary_key_indices);
+        let sink_exists = self.fetch_table_pk_schema(sink_table_name).await?.is_some();
+        if !sink_exists {
+            validate_auto_column_names(&inferred_schema)?;
+        }
+        if !sink_exists
+            && create_sink
+            && !self
+                .create_table_from_relation(
+                    &format!("flow-id={flow_id}"),
+                    sink_table_name,
+                    &inferred_relation,
+                )
+                .await?
+        {
+            return UnexpectedSnafu {
+                reason: format!("Failed to create table {sink_table_name:?}"),
+            }
+            .fail();
+        }
+        ensure!(
+            sink_exists || create_sink,
+            UnexpectedSnafu {
+                reason: format!("Sink table metadata is missing: {sink_table_name:?}"),
+            }
+        );
+
+        // Fetch the metadata after validation or auto-creation. The sink's layout is the insert
+        // contract: flow output aliases must not leak into the request schema.
+        let (sink_primary_keys, _, sink_schema) = self
+            .fetch_table_pk_schema(sink_table_name)
+            .await?
+            .context(UnexpectedSnafu {
+                reason: format!("Sink table metadata is missing: {sink_table_name:?}"),
+            })?;
+        let (auto_columns, plan) = match resolve_sink_layout(&inferred_schema, &sink_schema) {
+            Ok(auto_columns) => (auto_columns, flow_plan),
+            Err(normal_error) => {
+                // Appending a hidden source timestamp changes DISTINCT's key.  It is therefore
+                // never a valid compatibility rewrite for a DISTINCT flow.
+                let has_distinct = {
+                    let mut found = false;
+                    flow_plan
+                        .apply(|node| {
+                            if matches!(node, LogicalPlan::Distinct(Distinct::All(_))) {
+                                found = true;
+                            }
+                            Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+                        })
+                        .context(DatafusionSnafu {
+                            context: "Failed to inspect flow plan",
+                        })?;
+                    found
+                };
+                if has_distinct
+                    || !sink_exists
+                    || !is_explicit_source_timestamp_compatibility(
+                        &inferred_schema,
+                        &lineage,
+                        &sink_schema,
+                        &source_schema,
+                    )
+                {
+                    return Err(normal_error);
+                }
+                let source_timestamp_index = source_schema.timestamp_index().unwrap();
+                let source_timestamp_name =
+                    &source_schema.column_schemas()[source_timestamp_index].name;
+                let plan = stateless::rewrite_source_timestamp(
+                    flow_plan,
+                    &TableReference::full(
+                        source_table_name[0].clone(),
+                        source_table_name[1].clone(),
+                        source_table_name[2].clone(),
+                    ),
+                    source_timestamp_name,
+                )?;
+                let (effective_output, _) = output_column_schemas(&plan, &source_schema)?;
+                ensure!(
+                    effective_output.len() == sink_schema.len()
+                        && effective_output
+                            .iter()
+                            .zip(&sink_schema)
+                            .all(|(output, sink)| output.data_type == sink.data_type),
+                    InvalidQuerySnafu {
+                        reason: "Compatibility plan output does not match the full sink schema"
+                    }
+                );
+                (vec![], plan)
+            }
+        };
+
+        Ok(StatelessFlow {
+            source_table_id,
+            source_table_name,
+            source_schema_version: source_schema.version(),
+            source_schema,
+            sink_table_name: sink_table_name.clone(),
+            sink_schema,
+            sink_primary_keys,
+            auto_columns,
+            plan,
+            query_ctx,
+            create_args: args.clone(),
+        })
+    }
+
+    pub async fn flush_flow_inner(&self, _flow_id: FlowId) -> Result<usize, Error> {
+        Ok(0)
+    }
+
+    pub(crate) async fn stateless_flow_ids(&self) -> Vec<FlowId> {
+        let slots = self.stateless_flows.read().await;
+        let mut ids = Vec::new();
+        for (id, slot) in slots.iter() {
+            if slot.runtime.read().await.is_some() {
+                ids.push(*id);
+            }
+        }
+        ids
+    }
+
+    pub async fn flow_exist_inner(&self, flow_id: FlowId) -> Result<bool, Error> {
+        let slot = self.stateless_flows.read().await.get(&flow_id).cloned();
+        Ok(match slot {
+            Some(slot) => slot.runtime.read().await.is_some(),
+            None => false,
+        })
+    }
+
     async fn fetch_table_pk_schema(
         &self,
         table_name: &TableName,
@@ -499,30 +1003,22 @@ impl StreamingEngine {
                 .into_iter()
                 .map(|i| schema[i].name.clone())
                 .collect_vec();
-            let time_index = meta.schema.timestamp_index();
-            Ok(Some((primary_keys, time_index, schema)))
+            Ok(Some((primary_keys, meta.schema.timestamp_index(), schema)))
         } else {
             Ok(None)
         }
     }
 
-    /// return (primary keys, schema and if the table have a placeholder timestamp column)
-    /// schema of the table comes from flow's output plan
-    ///
-    /// adjust to add `update_at` column and ts placeholder if needed
     async fn adjust_auto_created_table_schema(
         &self,
         schema: &RelationDesc,
     ) -> Result<(Vec<String>, Vec<ColumnSchema>, bool), Error> {
-        // TODO(discord9): consider remove buggy auto create by schema
-
-        // TODO(discord9): use default key from schema
         let primary_keys = schema
             .typ()
             .keys
             .first()
-            .map(|v| {
-                v.column_indices
+            .map(|key| {
+                key.column_indices
                     .iter()
                     .map(|i| {
                         schema
@@ -533,431 +1029,210 @@ impl StreamingEngine {
                     .collect_vec()
             })
             .unwrap_or_default();
-        let update_at = ColumnSchema::new(
+        let mut columns = relation_desc_to_column_schemas_with_fallback(schema);
+        columns.push(ColumnSchema::new(
             AUTO_CREATED_UPDATE_AT_TS_COL,
             ConcreteDataType::timestamp_millisecond_datatype(),
             true,
-        );
-
-        let original_schema = relation_desc_to_column_schemas_with_fallback(schema);
-
-        let mut with_auto_added_col = original_schema.clone();
-        with_auto_added_col.push(update_at);
-
-        // if no time index, add one as placeholder
+        ));
         let no_time_index = schema.typ().time_index.is_none();
         if no_time_index {
-            let ts_col = ColumnSchema::new(
-                AUTO_CREATED_PLACEHOLDER_TS_COL,
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                true,
-            )
-            .with_time_index(true);
-            with_auto_added_col.push(ts_col);
-        }
-
-        Ok((primary_keys, with_auto_added_col, no_time_index))
-    }
-}
-
-/// Flow Runtime related methods
-impl StreamingEngine {
-    /// run in common_runtime background runtime
-    pub fn run_background(
-        self: Arc<Self>,
-        shutdown: Option<broadcast::Receiver<()>>,
-    ) -> JoinHandle<()> {
-        info!("Starting flownode manager's background task");
-        common_runtime::spawn_global(async move { self.run(shutdown).await })
-    }
-
-    /// log all flow errors
-    pub async fn log_all_errors(&self) {
-        for (f_id, f_err) in self.flow_err_collectors.read().await.iter() {
-            let all_errors = f_err.get_all().await;
-            if !all_errors.is_empty() {
-                let all_errors = all_errors
-                    .into_iter()
-                    .map(|i| format!("{:?}", i))
-                    .join("\n");
-                common_telemetry::error!("Flow {} has following errors: {}", f_id, all_errors);
-            }
-        }
-    }
-
-    /// Trigger dataflow running, and then send writeback request to the source sender
-    ///
-    /// note that this method didn't handle input mirror request, as this should be handled by grpc server
-    pub async fn run(&self, mut shutdown: Option<broadcast::Receiver<()>>) {
-        debug!("Starting to run");
-        let default_interval = Duration::from_secs(1);
-        let mut tick_interval = tokio::time::interval(default_interval);
-        // burst mode, so that if we miss a tick, we will run immediately to fully utilize the cpu
-        tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
-        let mut avg_spd = 0; // rows/sec
-        let mut since_last_run = tokio::time::Instant::now();
-        let run_per_trace = 10;
-        let mut run_cnt = 0;
-        loop {
-            // TODO(discord9): only run when new inputs arrive or scheduled to
-            let row_cnt = self.run_available(false).await.unwrap_or_else(|err| {
-                common_telemetry::error!(err;"Run available errors");
-                0
-            });
-
-            if let Err(err) = self.send_writeback_requests().await {
-                common_telemetry::error!(err;"Send writeback request errors");
-            };
-            self.log_all_errors().await;
-
-            // determine if need to shutdown
-            match &shutdown.as_mut().map(|s| s.try_recv()) {
-                Some(Ok(())) => {
-                    info!("Shutdown flow's main loop");
-                    break;
-                }
-                Some(Err(TryRecvError::Empty)) => (),
-                Some(Err(TryRecvError::Closed)) => {
-                    common_telemetry::error!("Shutdown channel is closed");
-                    break;
-                }
-                Some(Err(TryRecvError::Lagged(num))) => {
-                    common_telemetry::error!(
-                        "Shutdown channel is lagged by {}, meaning multiple shutdown cmd have been issued",
-                        num
-                    );
-                    break;
-                }
-                None => (),
-            }
-
-            // for now we want to batch rows until there is around `BATCH_SIZE` rows in send buf
-            // before trigger a run of flow's worker
-            let wait_for = since_last_run.elapsed();
-
-            // last runs insert speed
-            let cur_spd = row_cnt * 1000 / wait_for.as_millis().max(1) as usize;
-            // rapid increase, slow decay
-            avg_spd = if cur_spd > avg_spd {
-                cur_spd
-            } else {
-                (9 * avg_spd + cur_spd) / 10
-            };
-            let new_wait = BATCH_SIZE * 1000 / avg_spd.max(1); //in ms
-            let new_wait = Duration::from_millis(new_wait as u64).min(default_interval);
-
-            // print trace every `run_per_trace` times so that we can see if there is something wrong
-            // but also not get flooded with trace
-            if run_cnt >= run_per_trace {
-                trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
-                trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
-                run_cnt = 0;
-            } else {
-                run_cnt += 1;
-            }
-
-            METRIC_FLOW_RUN_INTERVAL_MS.set(new_wait.as_millis() as i64);
-            since_last_run = tokio::time::Instant::now();
-            tokio::select! {
-                _ = tick_interval.tick() => (),
-                _ = tokio::time::sleep(new_wait) => ()
-            }
-        }
-        // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
-        // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
-        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_streaming_engine.frontend_invoker
-        self.frontend_invoker.write().await.take();
-    }
-
-    /// Run all available subgraph in the flow node
-    /// This will try to run all dataflow in this node
-    ///
-    /// set `blocking` to true to wait until worker finish running
-    /// false to just trigger run and return immediately
-    /// return numbers of rows send to worker(Inaccuary)
-    /// TODO(discord9): add flag for subgraph that have input since last run
-    pub async fn run_available(&self, blocking: bool) -> Result<usize, Error> {
-        let mut row_cnt = 0;
-
-        let now = self.tick_manager.tick();
-        for worker in self.worker_handles.iter() {
-            // TODO(discord9): consider how to handle error in individual worker
-            worker.run_available(now, blocking).await?;
-        }
-        // check row send and rows remain in send buf
-        let flush_res = if blocking {
-            let ctx = self.node_context.read().await;
-            ctx.flush_all_sender().await
-        } else {
-            match self.node_context.try_read() {
-                Ok(ctx) => ctx.flush_all_sender().await,
-                Err(_) => return Ok(row_cnt),
-            }
-        };
-        match flush_res {
-            Ok(r) => {
-                common_telemetry::trace!("Total flushed {} rows", r);
-                row_cnt += r;
-            }
-            Err(err) => {
-                common_telemetry::error!("Flush send buf errors: {:?}", err);
-            }
-        };
-
-        Ok(row_cnt)
-    }
-
-    /// send write request to related source sender
-    pub async fn handle_write_request(
-        &self,
-        region_id: RegionId,
-        rows: Vec<DiffRow>,
-        batch_datatypes: &[ConcreteDataType],
-    ) -> Result<(), Error> {
-        let rows_len = rows.len();
-        let table_id = region_id.table_id();
-        let _timer = METRIC_FLOW_INSERT_ELAPSED
-            .with_label_values(&[table_id.to_string().as_str()])
-            .start_timer();
-        self.node_context
-            .read()
-            .await
-            .send(table_id, rows, batch_datatypes)
-            .await?;
-        trace!(
-            "Handling write request for table_id={} with {} rows",
-            table_id, rows_len
-        );
-        Ok(())
-    }
-}
-
-/// Create&Remove flow
-impl StreamingEngine {
-    /// remove a flow by it's id
-    pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
-        for handle in self.worker_handles.iter() {
-            if handle.contains_flow(flow_id).await? {
-                handle.remove_flow(flow_id).await?;
-                break;
-            }
-        }
-        self.node_context.write().await.remove_flow(flow_id);
-        Ok(())
-    }
-
-    /// Return task id if a new task is created, otherwise return None
-    ///
-    /// steps to create task:
-    /// 1. parse query into typed plan(and optional parse expire_after expr)
-    /// 2. render source/sink with output table id and used input table id
-    pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
-        let CreateFlowArgs {
-            flow_id,
-            sink_table_name,
-            source_table_ids,
-            create_if_not_exists,
-            or_replace,
-            expire_after: expire_after_secs,
-            eval_interval: _,
-            comment,
-            sql,
-            flow_options,
-            query_ctx,
-            ..
-        } = args;
-        let expire_after = expire_after_secs
-            .map(expire_after_secs_to_millis)
-            .transpose()?;
-
-        let mut node_ctx = self.node_context.write().await;
-        // assign global id to source and sink table
-        for source in &source_table_ids {
-            node_ctx
-                .assign_global_id_to_table(&self.table_info_source, None, Some(*source))
-                .await?;
-        }
-        node_ctx
-            .assign_global_id_to_table(&self.table_info_source, Some(sink_table_name.clone()), None)
-            .await?;
-
-        node_ctx.register_task_src_sink(flow_id, &source_table_ids, sink_table_name.clone());
-
-        node_ctx.query_context = query_ctx.map(Arc::new);
-        // construct a active dataflow state with it
-        let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
-
-        debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
-
-        // check schema against actual table schema if exists
-        // if not exist create sink table immediately
-        if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(&sink_table_name).await? {
-            let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
-
-            // for column schema, only `data_type` need to be check for equality
-            // since one can omit flow's column name when write flow query
-            // print a user friendly error message about mismatch and how to correct them
-            for (idx, zipped) in auto_schema
-                .iter()
-                .zip_longest(real_schema.iter())
-                .enumerate()
-            {
-                match zipped {
-                    EitherOrBoth::Both(auto, real) => {
-                        if auto.data_type != real.data_type {
-                            InvalidQuerySnafu {
-                                    reason: format!(
-                                        "Column {}(name is '{}', flow inferred name is '{}')'s data type mismatch, expect {:?} got {:?}",
-                                        idx,
-                                        real.name,
-                                        auto.name,
-                                        real.data_type,
-                                        auto.data_type
-                                    ),
-                                }
-                                .fail()?;
-                        }
-                    }
-                    EitherOrBoth::Right(real) if real.data_type.is_timestamp() => {
-                        // if table is auto created, the last one or two column should be timestamp(update at and ts placeholder)
-                        continue;
-                    }
-                    _ => InvalidQuerySnafu {
-                        reason: format!(
-                            "schema length mismatched, expected {} found {}",
-                            real_schema.len(),
-                            auto_schema.len()
-                        ),
-                    }
-                    .fail()?,
-                }
-            }
-        } else {
-            // assign inferred schema to sink table
-            // create sink table
-            let did_create = self
-                .create_table_from_relation(
-                    &format!("flow-id={flow_id}"),
-                    &sink_table_name,
-                    &flow_plan.schema,
+            columns.push(
+                ColumnSchema::new(
+                    AUTO_CREATED_PLACEHOLDER_TS_COL,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    true,
                 )
-                .await?;
-            if !did_create {
-                UnexpectedSnafu {
-                    reason: format!("Failed to create table {:?}", sink_table_name),
+                .with_time_index(true),
+            );
+        }
+        Ok((primary_keys, columns, no_time_index))
+    }
+}
+
+impl StreamingEngine {
+    async fn handle_inserts_inner(
+        &self,
+        request: api::v1::region::InsertRequests,
+    ) -> Result<(), Error> {
+        // A mirrored envelope can contain several regions of one source.  Normalize each request,
+        // then concatenate by source so DISTINCT is evaluated once over the complete envelope.
+        let mut grouped: BTreeMap<_, (_, Vec<DiffRow>, Vec<ConcreteDataType>, u32)> =
+            BTreeMap::new();
+        let mut poisoned_tables = std::collections::HashSet::new();
+        let mut first_error = None;
+        for write_request in request.requests {
+            let region_id = RegionId::from(write_request.region_id);
+            let table_id = region_id.table_id();
+            if poisoned_tables.contains(&table_id) {
+                continue;
+            }
+            match self.handle_insert_request(write_request).await {
+                Ok((rows, types, version)) => {
+                    let entry = grouped
+                        .entry(table_id)
+                        .or_insert_with(|| (region_id, vec![], types.clone(), version));
+                    if entry.2 != types || entry.3 != version {
+                        poisoned_tables.insert(table_id);
+                        grouped.remove(&table_id);
+                        let err = InvalidQuerySnafu { reason: format!("Source table {table_id} metadata changed within one insert envelope") }.build();
+                        let ids: Vec<FlowId> = self
+                            .flow_ids_for_table(table_id)
+                            .await
+                            .into_iter()
+                            .map(|(id, _)| id)
+                            .collect();
+                        let err = InsertIntoFlowSnafu {
+                            region_id: u64::from(region_id),
+                            flow_ids: ids,
+                        }
+                        .into_error(BoxedError::new(err));
+                        error!(err; "Failed to normalize flow insert request for region_id={region_id}");
+                        if first_error.is_none() {
+                            first_error = Some(err);
+                        }
+                    } else {
+                        entry.1.extend(rows);
+                    }
                 }
-                .fail()?;
+                Err(err) => {
+                    let ids: Vec<FlowId> = self
+                        .flow_ids_for_table(table_id)
+                        .await
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect();
+                    poisoned_tables.insert(table_id);
+                    grouped.remove(&table_id);
+                    let err = InsertIntoFlowSnafu {
+                        region_id: u64::from(region_id),
+                        flow_ids: ids,
+                    }
+                    .into_error(BoxedError::new(err));
+                    error!(err; "Failed to normalize flow insert request for region_id={region_id}");
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
             }
         }
+        for (_, (region_id, rows, types, version)) in grouped {
+            if let Err(err) = self
+                .handle_write_request(region_id, rows, &types, version)
+                .await
+                && first_error.is_none()
+            {
+                first_error = Some(err);
+            }
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
 
-        node_ctx.add_flow_plan(flow_id, flow_plan.clone());
-
-        let _ = comment;
-        let _ = flow_options;
-
-        // TODO(discord9): add more than one handles
-        let sink_id = node_ctx.table_repr.get_by_name(&sink_table_name).unwrap().1;
-        let sink_sender = node_ctx.get_sink_by_global_id(&sink_id)?;
-
-        let source_ids = source_table_ids
-            .iter()
-            .map(|id| node_ctx.table_repr.get_by_table_id(id).unwrap().1)
-            .collect_vec();
-        let source_receivers = source_ids
-            .iter()
-            .map(|id| {
-                node_ctx
-                    .get_source_by_global_id(id)
-                    .map(|s| s.get_receiver())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let err_collector = ErrCollector::default();
-        self.flow_err_collectors
-            .write()
-            .await
-            .insert(flow_id, err_collector.clone());
-        // TODO(discord9): load balance?
-        let handle = self.get_worker_handle_for_create_flow().await;
-        let create_request = worker::Request::Create {
-            flow_id,
-            plan: flow_plan,
-            sink_id,
-            sink_sender,
-            source_ids,
-            src_recvs: source_receivers,
-            expire_after,
-            or_replace,
-            create_if_not_exists,
-            err_collector,
+    async fn handle_insert_request(
+        &self,
+        write_request: api::v1::region::InsertRequest,
+    ) -> Result<(Vec<DiffRow>, Vec<ConcreteDataType>, u32), Error> {
+        let region_id = write_request.region_id;
+        let table_id = RegionId::from(region_id).table_id();
+        let (insert_schema, rows_proto) = write_request
+            .rows
+            .map(|r| (r.schema, r.rows))
+            .unwrap_or_default();
+        let now = common_time::util::current_time_millis();
+        let (table_types, fetch_order, source_schema_version) = {
+            // Fetch the source metadata once for both current-schema normalization and
+            // retained-plan validation. In particular, do not execute a retained plan
+            // against rows normalized with a newer schema.
+            let table_info = self
+                .table_info_source
+                .get_table_info_value(&table_id)
+                .await?
+                .context(UnexpectedSnafu {
+                    reason: format!("Table metadata is missing for table id {table_id}"),
+                })?;
+            let source_schema_version = table_info.table_info.meta.schema.version();
+            let table_schema = table_info_value_to_relation_desc(table_info)?;
+            let defaults = table_schema
+                .default_values
+                .iter()
+                .zip(table_schema.relation_desc.typ().column_types.iter())
+                .map(|(value, ty)| {
+                    value.as_ref().and_then(|value| {
+                        value.create_default(ty.scalar_type(), ty.nullable()).ok()
+                    })
+                })
+                .collect_vec();
+            let types = table_schema
+                .relation_desc
+                .typ()
+                .column_types
+                .iter()
+                .map(|ty| ty.scalar_type.clone())
+                .collect_vec();
+            let names = table_schema
+                .relation_desc
+                .names
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| {
+                    name.clone().context(InternalSnafu {
+                        reason: format!("Column {idx} of table {table_id} has no name"),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let input_columns = insert_schema
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| (&column.column_name, idx))
+                .collect::<std::collections::HashMap<_, _>>();
+            let order = names
+                .iter()
+                .zip(defaults)
+                .map(|(name, default)| {
+                    input_columns
+                        .get(name)
+                        .copied()
+                        .map(FetchFromRow::Idx)
+                        .or_else(|| default.map(FetchFromRow::Default))
+                        .with_context(|| UnexpectedSnafu {
+                            reason: format!("Column not found: {name}"),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (types, order, source_schema_version)
         };
-
-        handle.create_flow(create_request).await?;
-        info!("Successfully create flow with id={}", flow_id);
-        Ok(Some(flow_id))
+        let rows = rows_proto
+            .into_iter()
+            .map(|row| {
+                let row = Row::from(row);
+                let row = fetch_order
+                    .iter()
+                    .map(|item| item.fetch(&row))
+                    .collect_vec();
+                (Row::new(row), now, 1)
+            })
+            .collect_vec();
+        Ok((rows, table_types, source_schema_version))
     }
+}
 
-    pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
-        debug!("Starting to flush flow_id={:?}", flow_id);
-        // lock to make sure writes before flush are written to flow
-        // and immediately drop to prevent following writes to be blocked
-        drop(self.flush_lock.write().await);
-        let flushed_input_rows = self.node_context.read().await.flush_all_sender().await?;
-        let rows_send = self.run_available(true).await?;
-        let row = self.send_writeback_requests().await?;
-        debug!(
-            "Done to flush flow_id={:?} with {} input rows flushed, {} rows sent and {} output rows flushed",
-            flow_id, flushed_input_rows, rows_send, row
-        );
-        Ok(row)
-    }
+#[derive(Debug, Clone)]
+enum FetchFromRow {
+    Idx(usize),
+    Default(datatypes::value::Value),
+}
 
-    pub async fn flow_exist_inner(&self, flow_id: FlowId) -> Result<bool, Error> {
-        let mut exist = false;
-        for handle in self.worker_handles.iter() {
-            if handle.contains_flow(flow_id).await? {
-                exist = true;
-                break;
-            }
+impl FetchFromRow {
+    fn fetch(&self, row: &Row) -> datatypes::value::Value {
+        match self {
+            Self::Idx(idx) => row
+                .get(*idx)
+                .cloned()
+                .unwrap_or(datatypes::value::Value::Null),
+            Self::Default(value) => value.clone(),
         }
-        Ok(exist)
-    }
-}
-
-/// FlowTickManager is a manager for flow tick, which trakc flow execution progress
-///
-/// TODO(discord9): better way to do it, and not expose flow tick even to other flow to avoid
-/// TSO coord mess
-#[derive(Clone, Debug)]
-pub struct FlowTickManager {
-    /// The starting instant of the flow, used with `start_timestamp` to calculate the current timestamp
-    start: Instant,
-    /// The timestamp when the flow started
-    start_timestamp: repr::Timestamp,
-}
-
-impl Default for FlowTickManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FlowTickManager {
-    pub fn new() -> Self {
-        FlowTickManager {
-            start: Instant::now(),
-            start_timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as repr::Timestamp,
-        }
-    }
-
-    /// Return the current timestamp in milliseconds
-    ///
-    /// TODO(discord9): reconsider since `tick()` require a monotonic clock and also need to survive recover later
-    pub fn tick(&self) -> repr::Timestamp {
-        let current = Instant::now();
-        let since_the_epoch = current - self.start;
-        since_the_epoch.as_millis() as repr::Timestamp + self.start_timestamp
     }
 }

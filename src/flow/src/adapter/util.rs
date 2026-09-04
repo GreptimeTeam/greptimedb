@@ -14,43 +14,24 @@
 
 //! Util functions for adapter
 
-use std::sync::Arc;
-
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
-use api::v1::{ColumnDataType, ColumnDataTypeExtension, CreateTableExpr, SemanticType};
+use api::v1::{ColumnDataType, ColumnDataTypeExtension, SemanticType};
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::TableInfoValue;
-use common_meta::rpc::ddl::TriggerReason;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use itertools::Itertools;
 use operator::expr_helper;
-use session::context::QueryContextBuilder;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use table::table_reference::TableReference;
 
 use crate::StreamingEngine;
 use crate::adapter::table_source::TableDesc;
-use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, TableName, WorkerHandle};
-use crate::error::{Error, ExternalSnafu, UnexpectedSnafu};
+use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, TableName};
+use crate::error::{Error, ExternalSnafu};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 impl StreamingEngine {
-    /// Get a worker handle for creating flow, using round robin to select a worker
-    pub(crate) async fn get_worker_handle_for_create_flow(&self) -> &WorkerHandle {
-        let use_idx = {
-            let mut selector = self.worker_selector.lock().await;
-            if *selector >= self.worker_handles.len() {
-                *selector = 0
-            };
-            let use_idx = *selector;
-            *selector += 1;
-            use_idx
-        };
-        // Safety: selector is always in bound
-        &self.worker_handles[use_idx]
-    }
-
     /// Create table from given schema(will adjust to add auto column if needed), return true if table is created
     pub(crate) async fn create_table_from_relation(
         &self,
@@ -81,7 +62,9 @@ impl StreamingEngine {
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
-        self.submit_create_sink_table_ddl(create_expr).await?;
+        self.frontend_client
+            .create(create_expr, &table_name[0], &table_name[1])
+            .await?;
         Ok(true)
     }
 
@@ -108,36 +91,6 @@ impl StreamingEngine {
         } else {
             Ok(None)
         }
-    }
-
-    /// submit a create table ddl
-    pub(crate) async fn submit_create_sink_table_ddl(
-        &self,
-        mut create_table: CreateTableExpr,
-    ) -> Result<(), Error> {
-        let stmt_exec = {
-            self.frontend_invoker
-                .read()
-                .await
-                .as_ref()
-                .map(|f| f.statement_executor())
-        }
-        .context(UnexpectedSnafu {
-            reason: "Failed to get statement executor",
-        })?;
-        let ctx = Arc::new(
-            QueryContextBuilder::default()
-                .current_catalog(create_table.catalog_name.clone())
-                .current_schema(create_table.schema_name.clone())
-                .build(),
-        );
-        stmt_exec
-            .create_table_inner(&mut create_table, None, ctx, TriggerReason::AutoCreate)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-
-        Ok(())
     }
 }
 

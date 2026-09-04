@@ -22,7 +22,6 @@ use cache::{
 use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
-use cmd::error::StartFlownodeSnafu;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
@@ -55,7 +54,6 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
-use snafu::ResultExt;
 use standalone::options::StandaloneOptions;
 use standalone::{StandaloneDatanodeManager, StandaloneRepartitionProcedureFactory};
 
@@ -310,23 +308,6 @@ impl GreptimeDbStandaloneBuilder {
         frontend_instance_handler
             .set_handler(weak_grpc_handler)
             .await;
-
-        let flow_streaming_engine = flownode.flow_engine().streaming_engine();
-        let invoker = flow::FrontendInvoker::build_from(
-            flow_streaming_engine.clone(),
-            catalog_manager.clone(),
-            kv_backend.clone(),
-            cache_registry.clone(),
-            procedure_executor.clone(),
-            node_manager.clone(),
-            instance.frontend_peer_addr().to_string(),
-        )
-        .await
-        .context(StartFlownodeSnafu)
-        .unwrap();
-
-        flow_streaming_engine.set_frontend_invoker(invoker).await;
-
         procedure_manager.start().await.unwrap();
         wal_provider.start().await.unwrap();
 

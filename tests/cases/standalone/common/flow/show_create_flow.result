@@ -395,12 +395,12 @@ SELECT number FROM out_num_cnt_show;
 -- should mismatch, hence the old flow remains
 CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2 FROM numbers_input_show where number > 15;
 
-Error: 3001(EngineExecuteQuery), Invalid query: Column 1(name is 'ts', flow inferred name is 'n2')'s data type mismatch, expect Timestamp(Millisecond(TimestampMillisecondType)) got Int32(Int32Type)
+Error: 3001(EngineExecuteQuery), Invalid query: Flow output column 1 has type Int32(Int32Type), but sink column ts has type Timestamp(Millisecond(TimestampMillisecondType))
 
 -- should mismatch, hence the old flow remains
 CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2, number AS n3 FROM numbers_input_show where number > 15;
 
-Error: 3001(EngineExecuteQuery), Invalid query: Column 1(name is 'ts', flow inferred name is 'n2')'s data type mismatch, expect Timestamp(Millisecond(TimestampMillisecondType)) got Int32(Int32Type)
+Error: 3001(EngineExecuteQuery), Invalid query: Flow output has 3 columns, but sink has 2 columns; only zero, one, or two trailing auto columns are supported
 
 SELECT flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 

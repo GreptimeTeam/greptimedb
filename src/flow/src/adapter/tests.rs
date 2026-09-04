@@ -15,11 +15,256 @@
 //! Mock test for adapter module
 //! TODO(discord9): write mock test
 
-use datatypes::schema::{ColumnSchema, SchemaBuilder};
-use store_api::storage::ConcreteDataType;
+use api::v1::SemanticType;
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
+use datafusion::catalog::MemTable;
+use datafusion::datasource::provider_as_source;
+use datafusion_common::TableReference;
+use datafusion_expr::LogicalPlanBuilder;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaBuilder};
+use store_api::storage::{ConcreteDataType, TableId};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 
 use super::*;
+
+#[test]
+fn stateless_output_aliases_are_matched_by_position() {
+    let output = vec![ColumnSchema::new(
+        "output_alias",
+        ConcreteDataType::int32_datatype(),
+        false,
+    )];
+    let sink = vec![ColumnSchema::new(
+        "sink_column",
+        ConcreteDataType::int32_datatype(),
+        false,
+    )];
+    assert!(validate_sink_layout(&output, &sink).is_ok());
+    let proto = crate::adapter::util::column_schemas_to_proto(sink, &[]).unwrap();
+    assert_eq!(proto[0].column_name, "sink_column");
+}
+
+#[test]
+fn stateless_sink_schema_has_tag_and_timestamp_semantics() {
+    let schema = vec![
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("ts", ConcreteDataType::timestamp_second_datatype(), false)
+            .with_time_index(true),
+    ];
+    let proto =
+        crate::adapter::util::column_schemas_to_proto(schema, &["host".to_string()]).unwrap();
+    assert_eq!(proto[0].semantic_type, SemanticType::Tag as i32);
+    assert_eq!(proto[1].semantic_type, SemanticType::Timestamp as i32);
+}
+
+#[test]
+fn stateless_resolves_suffix_by_output_arity() {
+    let ordinary = ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false);
+    let update_at = ColumnSchema::new(
+        AUTO_CREATED_UPDATE_AT_TS_COL,
+        ConcreteDataType::timestamp_second_datatype(),
+        true,
+    );
+    // Equal arity is an ordinary sink, despite the reserved-looking name.
+    assert!(
+        resolve_sink_layout(
+            &[ordinary.clone(), update_at.clone()],
+            &[ordinary.clone(), update_at.clone()]
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        resolve_sink_layout(
+            std::slice::from_ref(&ordinary),
+            &[ordinary.clone(), update_at]
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn stateless_explicit_timestamp_compatibility_requires_default_and_lineage_absence() {
+    let source = Arc::new(Schema::new(vec![
+        ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let output = vec![ColumnSchema::new(
+        "value",
+        ConcreteDataType::int32_datatype(),
+        false,
+    )];
+    let sink_ts = ColumnSchema::new(
+        "event_time",
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+    )
+    .with_time_index(true)
+    .with_default_constraint(Some(ColumnDefaultConstraint::Function("now()".into())))
+    .unwrap();
+    assert!(is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(0)],
+        &[output[0].clone(), sink_ts.clone()],
+        &source,
+    ));
+    assert!(!is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(1)],
+        &[output[0].clone(), sink_ts],
+        &source,
+    ));
+    let sink_ts_without_default = ColumnSchema::new(
+        "event_time",
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+    )
+    .with_time_index(true);
+    assert!(!is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(0)],
+        &[output[0].clone(), sink_ts_without_default],
+        &source,
+    ));
+}
+
+#[test]
+fn stateless_rejects_reserved_auto_names_for_auto_sink() {
+    assert!(
+        validate_auto_column_names(&[ColumnSchema::new(
+            AUTO_CREATED_UPDATE_AT_TS_COL,
+            ConcreteDataType::int32_datatype(),
+            true,
+        )])
+        .is_err()
+    );
+    assert!(
+        validate_auto_column_names(&[ColumnSchema::new(
+            AUTO_CREATED_PLACEHOLDER_TS_COL,
+            ConcreteDataType::int32_datatype(),
+            true,
+        )])
+        .is_err()
+    );
+}
+
+#[test]
+fn stateless_distinct_preserves_direct_column_lineage() {
+    let source = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::int32_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let provider = MemTable::try_new(
+        Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+            Field::new("number", ArrowDataType::Int32, false),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+        ])),
+        vec![vec![]],
+    )
+    .unwrap();
+    let plan = LogicalPlanBuilder::scan(
+        TableReference::bare("source"),
+        provider_as_source(Arc::new(provider)),
+        None,
+    )
+    .unwrap()
+    .project(vec![datafusion_expr::col("number").alias("dis")])
+    .unwrap()
+    .distinct()
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let (output, lineage) = super::output_column_schemas(&plan, &source).unwrap();
+    assert_eq!(output[0].name, "dis");
+    assert_eq!(lineage, vec![Some(0)]);
+    let relation = super::relation_desc_from_output(&output, &lineage, &[0]);
+    assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
+}
+
+#[test]
+fn stateless_normalizes_dictionary_output_type() {
+    let field = Field::new_dictionary("host", ArrowDataType::UInt32, ArrowDataType::Utf8, true);
+    let arrow_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![field]));
+    let provider = MemTable::try_new(arrow_schema.clone(), vec![vec![]]).unwrap();
+    let plan = LogicalPlanBuilder::scan(
+        TableReference::bare("source"),
+        provider_as_source(Arc::new(provider)),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let source = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "host",
+        ConcreteDataType::string_datatype(),
+        true,
+    )]));
+    let (output, lineage) = super::output_column_schemas(&plan, &source).unwrap();
+    assert_eq!(output[0].data_type, ConcreteDataType::string_datatype());
+    assert_eq!(lineage, vec![Some(0)]);
+
+    let relation = super::relation_desc_from_output(&output, &lineage, &[0]);
+    assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
+}
+
+#[test]
+fn stateless_allows_only_trailing_auto_columns() {
+    let ordinary = ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false);
+    let update_at = ColumnSchema::new(
+        AUTO_CREATED_UPDATE_AT_TS_COL,
+        ConcreteDataType::timestamp_second_datatype(),
+        true,
+    );
+    let placeholder = ColumnSchema::new(
+        AUTO_CREATED_PLACEHOLDER_TS_COL,
+        ConcreteDataType::timestamp_microsecond_datatype(),
+        true,
+    )
+    .with_time_index(true);
+
+    assert_eq!(
+        sink_output_column_count(&[ordinary.clone(), update_at.clone()]).unwrap(),
+        1
+    );
+    assert_eq!(
+        sink_output_column_count(&[ordinary.clone(), update_at, placeholder]).unwrap(),
+        1
+    );
+    assert!(
+        validate_sink_layout(
+            std::slice::from_ref(&ordinary),
+            std::slice::from_ref(&ordinary)
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_sink_layout(
+            &[ordinary],
+            &[
+                ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+                ColumnSchema::new("unexpected", ConcreteDataType::int32_datatype(), false),
+            ]
+        )
+        .is_err()
+    );
+}
 
 pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
     table_id: TableId,
@@ -63,23 +308,36 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
 fn mock_harness_flow_node_manager() {}
 
 #[test]
-fn test_expire_after_secs_to_millis() {
-    assert_eq!(expire_after_secs_to_millis(300).unwrap(), 300_000);
-    assert_eq!(expire_after_secs_to_millis(0).unwrap(), 0);
-
-    let max_secs = i64::MAX / 1_000;
-    assert_eq!(
-        expire_after_secs_to_millis(max_secs).unwrap(),
-        max_secs * 1_000
-    );
+fn stateless_flow_slot_write_lease_fences_replacement() {
+    let slot = Arc::new(super::StatelessFlowSlot {
+        runtime: Arc::new(tokio::sync::RwLock::new(None)),
+        active: std::sync::atomic::AtomicBool::new(true),
+    });
+    let guard = slot.runtime.try_read().unwrap();
+    assert!(guard.is_none());
+    // A writer cannot acquire the lease while an execution read lease is held.
+    assert!(slot.runtime.try_write().is_err());
+    drop(guard);
+    assert!(slot.runtime.try_write().is_ok());
 }
 
 #[test]
-fn test_expire_after_secs_to_millis_invalid() {
-    let invalid_values = [i64::MAX / 1_000 + 1, -1];
+fn stateless_captured_slot_rejects_inactive_or_detached_slot() {
+    let slot = super::StatelessFlowSlot {
+        runtime: Arc::new(tokio::sync::RwLock::new(None)),
+        active: std::sync::atomic::AtomicBool::new(false),
+    };
 
-    for invalid_secs in invalid_values {
-        let error = expire_after_secs_to_millis(invalid_secs).unwrap_err();
-        assert!(matches!(error, Error::InvalidQuery { .. }));
-    }
+    assert!(super::validate_captured_slot(&slot, None, false, 1, 42).is_err());
+}
+
+#[test]
+fn stateless_captured_slot_rejects_source_mismatch() {
+    let slot = super::StatelessFlowSlot {
+        runtime: Arc::new(tokio::sync::RwLock::new(None)),
+        active: std::sync::atomic::AtomicBool::new(true),
+    };
+
+    assert!(super::validate_captured_slot(&slot, Some(2), true, 1, 42).is_err());
+    assert!(super::validate_captured_slot(&slot, Some(1), false, 1, 42).is_err());
 }
