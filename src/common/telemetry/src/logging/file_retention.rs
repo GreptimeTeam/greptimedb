@@ -520,6 +520,103 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_file_appender_prunes_closed_files_by_size() {
+        let directory = TempDir::new().unwrap();
+        let oldest = directory.path().join("greptimedb.2026-01-01-00");
+        let old = directory.path().join("greptimedb.2026-01-01-01");
+        write_file(&oldest, &vec![b'a'; 2 * 1024]);
+        write_file(&old, &vec![b'b'; 2 * 1024]);
+
+        let opts = LoggingOptions {
+            dir: directory.path().display().to_string(),
+            ..Default::default()
+        };
+        let retention = DirectoryRetention::new(directory.path(), ReadableSize(1024), 0).unwrap();
+        let mut appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+
+        retention.initialize();
+        appender.write_all(b"current").unwrap();
+
+        assert!(!oldest.exists());
+        assert!(!old.exists());
+        assert!(
+            fs::read_link(directory.path().join(".greptimedb.current"))
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_appender_prunes_oldest_closed_file_by_size() {
+        let directory = TempDir::new().unwrap();
+        let oldest = directory.path().join("greptimedb.2026-01-01-00");
+        let old = directory.path().join("greptimedb.2026-01-01-01");
+        write_file(&oldest, &vec![b'a'; 2 * 1024]);
+        write_file(&old, &vec![b'b'; 512]);
+
+        let opts = LoggingOptions {
+            dir: directory.path().display().to_string(),
+            ..Default::default()
+        };
+        let retention = DirectoryRetention::new(directory.path(), ReadableSize(1024), 0).unwrap();
+        let mut appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+
+        retention.initialize();
+        appender.write_all(b"current").unwrap();
+
+        assert!(!oldest.exists());
+        assert!(old.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_appender_prunes_closed_files_by_count() {
+        let directory = TempDir::new().unwrap();
+        let oldest = directory.path().join("greptimedb.2026-01-01-00");
+        let old = directory.path().join("greptimedb.2026-01-01-01");
+        write_file(&oldest, b"oldest");
+        write_file(&old, b"old");
+
+        let opts = LoggingOptions {
+            dir: directory.path().display().to_string(),
+            ..Default::default()
+        };
+        let retention = DirectoryRetention::new(directory.path(), ReadableSize::gb(1), 2).unwrap();
+        let mut appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+
+        retention.initialize();
+        appender.write_all(b"current").unwrap();
+
+        assert!(!oldest.exists());
+        assert!(old.exists());
+        assert!(
+            fs::read_link(directory.path().join(".greptimedb.current"))
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_appender_keeps_oversized_active_file() {
+        let directory = TempDir::new().unwrap();
+        let opts = LoggingOptions {
+            dir: directory.path().display().to_string(),
+            ..Default::default()
+        };
+        let retention = DirectoryRetention::new(directory.path(), ReadableSize(1), 0).unwrap();
+        let mut appender = build_file_appender(&opts, LogFileKind::Default, Some(&retention));
+
+        retention.initialize();
+        appender.write_all(b"current").unwrap();
+
+        let active = fs::metadata(directory.path().join(".greptimedb.current")).unwrap();
+        assert!(active.len() > 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_retention_removes_closed_files() {
         let directory = TempDir::new().unwrap();
         let old = directory.path().join("greptimedb.2026-01-01-00");
