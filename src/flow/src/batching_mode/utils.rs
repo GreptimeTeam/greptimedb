@@ -547,7 +547,7 @@ pub fn analyze_incremental_aggregate_plan(
             merge_columns.push(IncrementalAggregateMergeColumn {
                 input_field_name: input_field_name.clone(),
                 output_field_name,
-                merge_op: merge_op.clone(),
+                merge_op,
             });
         }
     }

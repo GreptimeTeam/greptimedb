@@ -769,13 +769,12 @@ impl BatchingEngine {
         let persistence = if let Some(factory) = &self.persistence_factory {
             let table_info = table.table_info();
             let meta = &table_info.meta;
-            let effective_mode = if task.config.exact_sequence_range_required {
-                crate::IncrementalMode::SequenceRange
-            } else if task.config.batch_opts.experimental_enable_incremental_read
-                && task
-                    .sequence_range_capable()
-                    .await
-                    .is_ok_and(|capable| capable)
+            let effective_mode = if task.config.exact_sequence_range_required
+                || (task.config.batch_opts.experimental_enable_incremental_read
+                    && task
+                        .sequence_range_capable()
+                        .await
+                        .is_ok_and(|capable| capable))
             {
                 crate::IncrementalMode::SequenceRange
             } else {
