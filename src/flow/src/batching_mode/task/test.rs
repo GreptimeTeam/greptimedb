@@ -13,8 +13,6 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
@@ -39,18 +37,14 @@ use query::options::{
 use session::context::QueryContext;
 use snafu::ResultExt;
 use table::test_util::MemTable;
-use table::{Table, TableRef};
-use tokio::sync::Notify;
 
 use super::*;
-use crate::Result;
 use crate::batching_mode::checkpoint::{
     CHECKPOINT_DECISION_ADVANCE, CHECKPOINT_DECISION_FALLBACK, CHECKPOINT_REASON_NONE,
     FlowCheckpointDecision, FlowQueryFallbackReason,
 };
 use crate::batching_mode::eval_schedule::{FlowMissedTickPolicy, FlowScheduleConfig};
-use crate::batching_mode::persistence::{BatchingAttempt, BatchingPersistence, RestoreOutcome};
-use crate::batching_mode::state::{CheckpointMode, TaskStateCheckpointSnapshot};
+use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::time_window::find_time_window_expr;
 use crate::test_utils::create_test_query_engine;
 
@@ -92,6 +86,18 @@ async fn new_test_task_engine_and_plan_with_query_and_opts(
     sink_table: &str,
     batch_opts: Arc<BatchingModeOptions>,
 ) -> TestTaskParts {
+    new_test_task_engine_and_plan_with_query_and_opts_and_required(
+        query, sink_table, batch_opts, false,
+    )
+    .await
+}
+
+async fn new_test_task_engine_and_plan_with_query_and_opts_and_required(
+    query: &str,
+    sink_table: &str,
+    batch_opts: Arc<BatchingModeOptions>,
+    exact_sequence_range_required: bool,
+) -> TestTaskParts {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let plan = sql_to_df_plan(
@@ -104,29 +110,32 @@ async fn new_test_task_engine_and_plan_with_query_and_opts(
     .unwrap();
     let (_tx, rx) = tokio::sync::oneshot::channel();
 
-    let task = BatchingTask::try_new(TaskArgs {
-        flow_id: 1,
-        query,
-        plan: plan.clone(),
-        time_window_expr: None,
-        expire_after: None,
-        sink_table_name: [
-            "greptime".to_string(),
-            "public".to_string(),
-            sink_table.to_string(),
-        ],
-        source_table_names: vec![[
-            "greptime".to_string(),
-            "public".to_string(),
-            "numbers_with_ts".to_string(),
-        ]],
-        query_ctx: ctx,
-        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
-        shutdown_rx: rx,
-        batch_opts,
-        flow_eval_interval: None,
-        eval_schedule: None,
-    })
+    let task = BatchingTask::try_new_with_exact_sequence_range_required(
+        TaskArgs {
+            flow_id: 1,
+            query,
+            plan: plan.clone(),
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                sink_table.to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts,
+            flow_eval_interval: None,
+            eval_schedule: None,
+        },
+        exact_sequence_range_required,
+    )
     .unwrap();
 
     TestTaskParts {
@@ -393,50 +402,6 @@ fn dirty_marker() -> DirtyTimeWindows {
 
 fn flow_error_with_status(status_code: StatusCode) -> Error {
     Err::<(), _>(BoxedError::new(MockError::new(status_code)))
-        .context(crate::error::ExternalSnafu)
-        .unwrap_err()
-}
-
-/// Test-only error that carries a non-RequestOutdated status code but
-/// displays a stale-snapshot-fence marker string, simulating the real-world
-/// scenario where the structured status code is lost through frontend/client
-/// wrapping layers.
-#[derive(Debug)]
-struct StaleFenceTextError {
-    code: StatusCode,
-    message: String,
-}
-
-impl std::fmt::Display for StaleFenceTextError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for StaleFenceTextError {}
-
-impl common_error::ext::ErrorExt for StaleFenceTextError {
-    fn status_code(&self) -> StatusCode {
-        self.code
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl common_error::ext::StackError for StaleFenceTextError {
-    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
-    fn next(&self) -> Option<&dyn common_error::ext::StackError> {
-        None
-    }
-}
-
-fn flow_error_with_code_and_text(code: StatusCode, text: &str) -> Error {
-    let inner = StaleFenceTextError {
-        code,
-        message: text.to_string(),
-    };
-    Err::<(), _>(BoxedError::new(inner))
         .context(crate::error::ExternalSnafu)
         .unwrap_err()
 }
@@ -1453,78 +1418,6 @@ fn test_query_failure_reason_distinguishes_fenced_repair_stale_fence() {
     );
 }
 
-/// Wrapped errors carrying stale snapshot fence marker text in their
-/// Display/Debug chain should be classified as `SnapshotFenceExpired` on
-/// fenced repair coverage, even when the structured `StatusCode::RequestOutdated`
-/// was lost through client layering. This prevents an infinite retry loop
-/// where the fenced chunk re-sends the same stale `given_seq` every tick.
-#[test]
-fn test_query_failure_reason_text_fallback_stale_snapshot_fence() {
-    let high = BTreeMap::new();
-    let fenced = QueryCoverage::FencedRepairChunk { high: high.clone() };
-
-    // STALE_SNAPSHOT_FENCE marker with a non-RequestOutdated status code
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "gRPC error: STALE_SNAPSHOT_FENCE: snapshot upper bound stale, region: 1024/0",
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&err, &fenced),
-        FlowQueryFallbackReason::SnapshotFenceExpired
-    );
-
-    // REBIND_SNAPSHOT_FENCE marker
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "STALE_SNAPSHOT_FENCE ... retry_hint: REBIND_SNAPSHOT_FENCE",
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&err, &fenced),
-        FlowQueryFallbackReason::SnapshotFenceExpired
-    );
-
-    // snapshot upper bound stale marker (the natural-language fragment)
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "query failed: snapshot upper bound stale, consider rebinding",
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&err, &fenced),
-        FlowQueryFallbackReason::SnapshotFenceExpired
-    );
-
-    // Fenced coverage with a generic wrapped error (no stale-fence marker) →
-    // still QueryFailure
-    let generic_err =
-        flow_error_with_code_and_text(StatusCode::Internal, "some transient network error");
-    assert_eq!(
-        BatchingTask::query_failure_reason(&generic_err, &fenced),
-        FlowQueryFallbackReason::QueryFailure
-    );
-
-    // Non-fenced incremental coverage with stale-fence marker text must NOT
-    // classify as SnapshotFenceExpired; it should remain IncrementalQueryFailure.
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "STALE_SNAPSHOT_FENCE blob in unexpected context",
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&err, &QueryCoverage::IncrementalDelta),
-        FlowQueryFallbackReason::IncrementalQueryFailure
-    );
-
-    // Existing RequestOutdated behavior is unchanged.
-    let outdated_err = flow_error_with_status(StatusCode::RequestOutdated);
-    assert_eq!(
-        BatchingTask::query_failure_reason(&outdated_err, &fenced),
-        FlowQueryFallbackReason::SnapshotFenceExpired
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&outdated_err, &QueryCoverage::IncrementalDelta),
-        FlowQueryFallbackReason::StaleCursor
-    );
-}
-
 #[test]
 fn test_fenced_repair_coverage_produces_snapshot_seq_map_for_distributed_metadata_path() {
     // Covers the metadata boundary between QueryCoverage and the
@@ -1672,82 +1565,6 @@ fn test_fenced_repair_transient_non_stale_failure_retries_same_high() {
     );
 }
 
-/// When `query_failure_reason` classifies a wrapped error as
-/// `SnapshotFenceExpired` via the text-marker fallback (not via
-/// `StatusCode::RequestOutdated`), the state machine must still
-/// abandon the fenced repair and produce a `ScopedBaseRepair` plan
-/// next, exactly like the structured-code path.
-#[tokio::test]
-async fn test_text_fallback_stale_fence_produces_scoped_base_repair() {
-    let TestTaskParts {
-        task,
-        query_engine,
-        ..
-    } = new_time_window_test_task_with_query(
-        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
-    )
-    .await;
-    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
-    let filter = {
-        let mut state = task.state.write().unwrap();
-        state
-            .dirty_time_windows
-            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
-        state
-            .dirty_time_windows
-            .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
-        state.start_fenced_repair(high.clone()).unwrap();
-        next_fenced_repair_filter(&mut state, 1)
-    };
-
-    // Construct a wrapped error that hits the text fallback (non-RequestOutdated
-    // status code with STALE_SNAPSHOT_FENCE marker text).
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "STALE_SNAPSHOT_FENCE: snapshot upper bound stale, retry_hint: REBIND_SNAPSHOT_FENCE",
-    );
-    let coverage = QueryCoverage::FencedRepairChunk { high };
-    let reason = BatchingTask::query_failure_reason(&err, &coverage);
-    assert_eq!(reason, FlowQueryFallbackReason::SnapshotFenceExpired);
-
-    {
-        let mut state = task.state.write().unwrap();
-        let decision = BatchingTask::apply_query_failure_to_state(
-            &mut state,
-            std::time::Duration::from_millis(1),
-            &coverage,
-            reason,
-        );
-        assert_eq!(
-            decision,
-            Some(FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode: CheckpointMode::FullSnapshot,
-                reason: FlowQueryFallbackReason::SnapshotFenceExpired,
-            })
-        );
-        assert!(state.pending_fenced_repair().is_none());
-
-        // Simulate the outer execution failure restore for the in-flight chunk.
-        state.restore_scoped_windows(&filter);
-    }
-
-    let plan = task
-        .gen_query_with_time_window(
-            query_engine,
-            &aggregate_time_window_sink_schema(),
-            &[],
-            false,
-            Some(1),
-        )
-        .await
-        .unwrap()
-        .expect("text-fallback stale fence should restore dirty windows for a fresh scoped repair");
-    assert!(
-        matches!(plan.coverage, QueryCoverage::ScopedBaseRepair),
-        "next plan after text-fallback stale fence should be ScopedBaseRepair"
-    );
-}
-
 #[test]
 fn test_checkpoint_decision_labels_are_stable() {
     let advance = FlowCheckpointDecision::AdvancedIncremental {
@@ -1776,6 +1593,35 @@ fn test_checkpoint_decision_labels_are_stable() {
     assert_eq!(
         FlowQueryFallbackReason::QueryFailure.as_label(),
         "query_failure"
+    );
+}
+
+#[tokio::test]
+async fn test_exact_required_attempt_rejects_revoked_capability_without_extensions() {
+    let task = new_test_task_engine_and_plan_with_query_and_opts_and_required(
+        "SELECT number, ts FROM numbers_with_ts",
+        "exact_required_revoked",
+        incremental_batch_opts(),
+        true,
+    )
+    .await
+    .into_task_and_plan()
+    .0;
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    let checkpoints_before = task.state.read().unwrap().checkpoints().clone();
+
+    let err = task
+        .build_flow_query_extensions(true, true)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("requires exact sequence-range"));
+    assert_eq!(
+        task.state.read().unwrap().checkpoints(),
+        &checkpoints_before
     );
 }
 
@@ -2348,7 +2194,10 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         CheckpointMode::Incremental
     );
 
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
+        .await
+        .unwrap();
     assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
@@ -2425,6 +2274,7 @@ async fn test_unsafe_incremental_plan_skip_restores_dirty_without_query() {
 
     let result = task
         .execute_logical_plan_unlocked(
+            &query_engine,
             &Arc::new(frontend_client),
             &dml_plan,
             &dirty_restore,
@@ -2512,7 +2362,7 @@ async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_o
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
 
     let incremental_plan = task
-        .prepare_plan_for_incremental(&dml_plan)
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
         .await
         .unwrap()
         .expect("plain GROUP BY is incremental-safe without a rewrite");
@@ -2557,7 +2407,10 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
         .write()
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
+        .await
+        .unwrap();
     let incremental_safe = incremental_plan.is_some();
 
     assert!(incremental_safe);
@@ -2686,310 +2539,4 @@ async fn test_insert_plan_matching_failure_restores_consumed_dirty_marker() {
         state.dirty_time_windows.window_size(),
         std::time::Duration::from_secs(5)
     );
-}
-
-struct TestPersistence {
-    restores: AtomicUsize,
-    begins: AtomicUsize,
-    persists: AtomicUsize,
-    fail_persist: AtomicBool,
-}
-
-struct BlockingPersistence {
-    persists: AtomicUsize,
-    fail: AtomicBool,
-    started: Notify,
-    release: Notify,
-}
-
-#[async_trait::async_trait]
-impl BatchingPersistence for BlockingPersistence {
-    async fn restore(&self) -> Result<RestoreOutcome> {
-        Ok(RestoreOutcome::TrustedCheckpoint(BTreeMap::new()))
-    }
-
-    async fn begin_attempt(&self) -> Result<BatchingAttempt> {
-        Ok(BatchingAttempt {
-            ordinary_values: BTreeMap::new(),
-        })
-    }
-
-    async fn persist(
-        &self,
-        _attempt: BatchingAttempt,
-        _checkpoints: BTreeMap<u64, u64>,
-    ) -> Result<()> {
-        self.persists.fetch_add(1, Ordering::SeqCst);
-        self.started.notify_one();
-        self.release.notified().await;
-        if self.fail.load(Ordering::SeqCst) {
-            Err(crate::Error::External {
-                source: BoxedError::new(MockError::new(StatusCode::Internal)),
-                location: snafu::location!(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-}
-
-fn blocking_persistence(fail: bool) -> Arc<BlockingPersistence> {
-    Arc::new(BlockingPersistence {
-        persists: AtomicUsize::new(0),
-        fail: AtomicBool::new(fail),
-        started: Notify::new(),
-        release: Notify::new(),
-    })
-}
-
-fn install_persistence(task: &BatchingTask, persistence: Arc<BlockingPersistence>) {
-    *task.persistence.write().unwrap() = Some(persistence);
-}
-
-fn candidate_transaction_states(
-    task: &BatchingTask,
-) -> (TaskStateCheckpointSnapshot, TaskStateCheckpointSnapshot) {
-    let mut state = task.state.write().unwrap();
-    state.advance_checkpoints(HashMap::from([(1, 10)]));
-    state.request_full_repair();
-    let snapshot = state.checkpoint_snapshot();
-    let mut candidate = snapshot.clone();
-    candidate.checkpoint_mode = CheckpointMode::Incremental;
-    candidate.checkpoints = BTreeMap::from([(1, 20)]);
-    candidate.last_query_duration = Duration::from_millis(42);
-    candidate.last_exec_time_millis = Some(42);
-    state.restore_checkpoint_snapshot(snapshot.clone());
-    (snapshot, candidate)
-}
-
-fn test_attempt() -> BatchingAttempt {
-    BatchingAttempt {
-        ordinary_values: BTreeMap::new(),
-    }
-}
-
-fn assert_candidate_state(task: &BatchingTask) {
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoints(), &BTreeMap::from([(1, 20)]));
-    assert_eq!(state.last_query_duration(), Duration::from_millis(42));
-    assert!(state.last_execution_time_millis().is_some());
-}
-
-#[tokio::test]
-async fn test_checkpoint_persist_success_commits_candidate_after_release() {
-    let task = new_test_task_engine_and_plan_with_query(
-        "SELECT number, ts FROM numbers_with_ts",
-        "missing_sink",
-    )
-    .await
-    .task;
-    let persistence = blocking_persistence(false);
-    install_persistence(&task, persistence.clone());
-    let (snapshot, candidate) = candidate_transaction_states(&task);
-    let task_for_persist = task.clone();
-    let attempt = test_attempt();
-    let persist = tokio::spawn(async move {
-        task_for_persist
-            .persist_checkpoint_candidate(
-                snapshot.clone(),
-                candidate,
-                Some(&attempt),
-                DirtyRestore::Unscoped(DirtyTimeWindows::default()),
-            )
-            .await
-    });
-    persistence.started.notified().await;
-    {
-        let state = task.state.read().unwrap();
-        assert_eq!(state.checkpoints(), &BTreeMap::from([(1, 10)]));
-    }
-    persistence.release.notify_one();
-    persist.await.unwrap().unwrap();
-    assert_candidate_state(&task);
-    assert_eq!(persistence.persists.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn test_checkpoint_persist_error_restores_pre_state_and_unions_dirty_once() {
-    let task = new_test_task_engine_and_plan_with_query(
-        "SELECT number, ts FROM numbers_with_ts",
-        "missing_sink",
-    )
-    .await
-    .task;
-    let persistence = blocking_persistence(true);
-    install_persistence(&task, persistence.clone());
-    let (snapshot, candidate) = candidate_transaction_states(&task);
-    let detached = dirty_range(1, 2);
-    let live = dirty_range(3, 4);
-    let task_for_persist = task.clone();
-    let attempt = test_attempt();
-    let persist = tokio::spawn(async move {
-        task_for_persist
-            .persist_checkpoint_candidate(
-                snapshot,
-                candidate,
-                Some(&attempt),
-                DirtyRestore::Unscoped(detached),
-            )
-            .await
-    });
-    persistence.started.notified().await;
-    task.state
-        .write()
-        .unwrap()
-        .dirty_time_windows
-        .add_dirty_windows(&live);
-    persistence.release.notify_one();
-    assert!(persist.await.unwrap().is_err());
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoints(), &BTreeMap::from([(1, 10)]));
-    assert_eq!(state.dirty_time_windows.len(), 2);
-    assert_eq!(persistence.persists.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn test_full_repair_checkpoint_persist_handles_success_and_error() {
-    for fail in [false, true] {
-        let task = new_test_task_engine_and_plan_with_query(
-            "SELECT number, ts FROM numbers_with_ts",
-            "missing_sink",
-        )
-        .await
-        .task;
-        let persistence = blocking_persistence(fail);
-        install_persistence(&task, persistence.clone());
-        let (snapshot, candidate) = candidate_transaction_states(&task);
-        let dirty = dirty_range(1, 2);
-        let task_for_persist = task.clone();
-        let attempt = test_attempt();
-        let persist = tokio::spawn(async move {
-            task_for_persist
-                .persist_checkpoint_candidate(
-                    snapshot,
-                    candidate,
-                    Some(&attempt),
-                    DirtyRestore::FullRepair(dirty),
-                )
-                .await
-        });
-        persistence.started.notified().await;
-        task.state
-            .write()
-            .unwrap()
-            .dirty_time_windows
-            .add_dirty_windows(&dirty_range(1, 2));
-        persistence.release.notify_one();
-        let result = persist.await.unwrap();
-        assert_eq!(result.is_err(), fail);
-        let state = task.state.read().unwrap();
-        assert_eq!(state.dirty_time_windows.len(), 1);
-        assert_eq!(state.full_repair_required(), fail);
-        assert_eq!(persistence.persists.load(Ordering::SeqCst), 1);
-    }
-}
-
-#[async_trait::async_trait]
-impl BatchingPersistence for TestPersistence {
-    async fn restore(&self) -> Result<RestoreOutcome> {
-        self.restores.fetch_add(1, Ordering::SeqCst);
-        Ok(RestoreOutcome::TrustedCheckpoint(BTreeMap::from([(1, 2)])))
-    }
-    async fn begin_attempt(&self) -> Result<BatchingAttempt> {
-        self.begins.fetch_add(1, Ordering::SeqCst);
-        Ok(BatchingAttempt {
-            ordinary_values: BTreeMap::new(),
-        })
-    }
-    async fn persist(
-        &self,
-        _attempt: BatchingAttempt,
-        checkpoints: BTreeMap<u64, u64>,
-    ) -> Result<()> {
-        assert_eq!(checkpoints, BTreeMap::from([(1, 2)]));
-        self.persists.fetch_add(1, Ordering::SeqCst);
-        if self.fail_persist.load(Ordering::SeqCst) {
-            Err(crate::Error::External {
-                source: BoxedError::new(MockError::new(StatusCode::Internal)),
-                location: snafu::location!(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_persistence_restore_is_wired() {
-    let parts = new_test_task_engine_and_plan_with_query(
-        "SELECT number, ts FROM numbers_with_ts",
-        "missing_sink",
-    )
-    .await;
-    let state = Arc::new(TestPersistence {
-        restores: AtomicUsize::new(0),
-        begins: AtomicUsize::new(0),
-        persists: AtomicUsize::new(0),
-        fail_persist: AtomicBool::new(false),
-    });
-    let config = state.clone();
-    parts.task.set_persistence(Some(config)).await.unwrap();
-    assert_eq!(state.restores.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        parts.task.state.read().unwrap().checkpoints(),
-        &BTreeMap::from([(1, 2)])
-    );
-}
-
-#[tokio::test]
-async fn test_full_repair_restore_is_sticky_and_unfiltered() {
-    let parts = new_time_window_test_task_with_query(
-        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
-    )
-    .await;
-    // Use a persistence implementation whose restore requests a full repair.
-    struct FullRepairPersistence;
-    #[async_trait::async_trait]
-    impl BatchingPersistence for FullRepairPersistence {
-        async fn restore(&self) -> Result<RestoreOutcome> {
-            Ok(RestoreOutcome::FullRepair)
-        }
-        async fn begin_attempt(&self) -> Result<BatchingAttempt> {
-            Ok(BatchingAttempt {
-                ordinary_values: BTreeMap::new(),
-            })
-        }
-        async fn persist(
-            &self,
-            _attempt: BatchingAttempt,
-            _checkpoints: BTreeMap<u64, u64>,
-        ) -> Result<()> {
-            Ok(())
-        }
-    }
-    let config = Arc::new(FullRepairPersistence);
-    let sink = aggregate_time_window_sink_schema();
-    parts
-        .task
-        .state
-        .write()
-        .unwrap()
-        .dirty_time_windows
-        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
-    parts.task.set_persistence(Some(config)).await.unwrap();
-    let plan = parts
-        .task
-        .gen_query_with_time_window(parts.query_engine, &sink, &[], false, Some(1))
-        .await
-        .unwrap()
-        .expect("full repair should always produce a plan");
-
-    assert!(matches!(plan.coverage, QueryCoverage::UnfilteredFull));
-    assert!(matches!(plan.dirty_restore, DirtyRestore::FullRepair(_)));
-    let plan_text = plan.plan.to_string();
-    assert!(!plan_text.contains("Filter:"));
-    assert!(!plan_text.contains("TimestampMillisecond("));
-    // Full repair detaches the consumed dirty ownership from the live signal.
-    assert_eq!(parts.task.state.read().unwrap().dirty_time_windows.len(), 0);
-    assert!(parts.task.state.read().unwrap().full_repair_required());
 }

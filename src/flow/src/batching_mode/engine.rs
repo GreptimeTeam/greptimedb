@@ -21,7 +21,10 @@ use std::time::Duration;
 use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::{FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType};
+use common_meta::ddl::create_flow::{
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE, FlowType,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
@@ -488,21 +491,24 @@ impl BatchingEngine {
     fn batch_opts_for_flow_options(
         &self,
         flow_options: &HashMap<String, String>,
+        exact_sequence_range_required: bool,
     ) -> Result<Arc<BatchingModeOptions>, Error> {
         let mut batch_opts = (*self.batch_opts).clone();
         if let Some(enable_incremental_read) =
             flow_options.get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
         {
-            batch_opts.experimental_enable_incremental_read = enable_incremental_read
-                .parse::<bool>()
-                .map_err(|_| {
+            batch_opts.experimental_enable_incremental_read = if exact_sequence_range_required {
+                true
+            } else {
+                enable_incremental_read.parse::<bool>().map_err(|_| {
                     InvalidQuerySnafu {
                         reason: format!(
                             "Invalid flow option {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}: {enable_incremental_read}"
                         ),
                     }
                     .build()
-                })?;
+                })?
+            };
         }
 
         Ok(Arc::new(batch_opts))
@@ -625,8 +631,14 @@ impl BatchingEngine {
             }
         );
 
-        let batch_opts = self.batch_opts_for_flow_options(&flow_options)?;
-
+        // The meta layer validates this reserved sentinel before it reaches the
+        // flownode. Derive the requirement once and pass it directly to task
+        // config; query-context extensions are irrelevant.
+        let exact_sequence_range_required = flow_options
+            .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+            .is_some_and(|value| value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE);
+        let batch_opts =
+            self.batch_opts_for_flow_options(&flow_options, exact_sequence_range_required)?;
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
             // also check table option to see if ttl!=instant
@@ -728,23 +740,42 @@ impl BatchingEngine {
             eval_schedule,
         };
 
-        let task = BatchingTask::try_new(task_args)?;
+        let task = BatchingTask::try_new_with_exact_sequence_range_required(
+            task_args,
+            exact_sequence_range_required,
+        )?;
 
         let task_inner = task.clone();
         let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
 
+        if task.config.exact_sequence_range_required {
+            ensure!(
+                task.sequence_range_capable().await?,
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Flow {flow_id} requires exact sequence-range reads, but a source table lacks the Mito preserve_row_sequence capability"
+                    ),
+                }
+            );
+        }
+
         // Create the sink before configuring persistence. A persistence-backed sink may
         // contain ordinary metadata columns supplied by `begin_attempt`, so strict plan/schema
-        // validation is deferred to execution for that path. OSS flows without a factory keep
-        // the existing creation-time validation.
+        // validation is deferred to execution only when persistence is actually created. Flows
+        // without a created collaborator keep the existing creation-time validation.
         let table = task.check_or_create_sink_table(&engine, &frontend).await?;
 
         let persistence = if let Some(factory) = &self.persistence_factory {
             let table_info = table.table_info();
             let meta = &table_info.meta;
-            let effective_mode = if task.config.batch_opts.experimental_enable_incremental_read
-                && task.sequence_range_capable().await
+            let effective_mode = if task.config.exact_sequence_range_required {
+                crate::IncrementalMode::SequenceRange
+            } else if task.config.batch_opts.experimental_enable_incremental_read
+                && task
+                    .sequence_range_capable()
+                    .await
+                    .is_ok_and(|capable| capable)
             {
                 crate::IncrementalMode::SequenceRange
             } else {
@@ -782,9 +813,11 @@ impl BatchingEngine {
             };
             factory.create(context).await?
         } else {
-            task.validate_sink_table_schema(&engine).await?;
             None
         };
+        if persistence.is_none() {
+            task.validate_sink_table_schema(&engine).await?;
+        }
         task.set_persistence(persistence).await?;
 
         let (start_tx, start_rx) = oneshot::channel();
@@ -1118,17 +1151,24 @@ impl FlowEngine for BatchingEngine {
 #[cfg(test)]
 mod tests {
     use api::v1::flow::{DirtyWindowRequest, TimeRange};
-    use catalog::memory::new_memory_catalog_manager;
+    use catalog::RegisterTableRequest;
+    use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_recordbatch::RecordBatch;
     use common_time::timestamp::TimeUnit;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
     use query::options::QueryOptions;
     use session::context::QueryContext;
 
     use super::*;
+    use crate::batching_mode::persistence::{
+        BatchingAttempt, BatchingPersistence, Factory, FactoryPlugin, RestoreOutcome,
+    };
     use crate::test_utils::create_test_query_engine;
 
     struct DropNotify(Option<oneshot::Sender<()>>);
@@ -1138,6 +1178,43 @@ mod tests {
             if let Some(tx) = self.0.take() {
                 let _ = tx.send(());
             }
+        }
+    }
+
+    struct TestPersistenceFactory {
+        create_persistence: bool,
+    }
+
+    struct TestPersistence;
+
+    #[async_trait::async_trait]
+    impl BatchingPersistence for TestPersistence {
+        async fn restore(&self) -> crate::Result<RestoreOutcome> {
+            Ok(RestoreOutcome::TrustedCheckpoint(BTreeMap::new()))
+        }
+
+        async fn begin_attempt(&self) -> crate::Result<BatchingAttempt> {
+            Ok(BatchingAttempt::default())
+        }
+
+        async fn persist(
+            &self,
+            _attempt: BatchingAttempt,
+            _validated_checkpoints: BTreeMap<u64, u64>,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Factory for TestPersistenceFactory {
+        async fn create(
+            &self,
+            _context: PersistenceContext,
+        ) -> crate::Result<Option<Arc<dyn BatchingPersistence>>> {
+            Ok(self
+                .create_persistence
+                .then_some(Arc::new(TestPersistence) as Arc<dyn BatchingPersistence>))
         }
     }
 
@@ -1161,20 +1238,227 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn test_flow_option_overrides_incremental_read_switch() {
-        let engine = new_test_engine().await;
+    async fn new_test_engine_with_persistence(
+        persistence_factory: Option<FactoryPlugin>,
+    ) -> BatchingEngine {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        let flow_meta = Arc::new(FlowMetadataManager::new(kv_backend));
+        let query_engine = create_test_query_engine();
+        let catalog_manager = query_engine.engine_state().catalog_manager().clone();
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
 
-        let default_opts = engine.batch_opts_for_flow_options(&HashMap::new()).unwrap();
-        assert!(!default_opts.experimental_enable_incremental_read);
-
-        let enabled_opts = engine
-            .batch_opts_for_flow_options(&HashMap::from([(
-                FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
-                "true".to_string(),
-            )]))
+        let engine = BatchingEngine::new_with_persistence(
+            Arc::new(frontend_client),
+            query_engine,
+            flow_meta,
+            table_meta,
+            catalog_manager,
+            BatchingModeOptions::default(),
+            persistence_factory,
+        );
+        engine
+            .table_meta
+            .create_table_metadata(
+                new_test_table_info_with_name(1, "numbers_with_ts"),
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
             .unwrap();
-        assert!(enabled_opts.experimental_enable_incremental_read);
+        engine
+    }
+
+    fn register_sink_with_schema(engine: &BatchingEngine, name: &str, extended: bool) {
+        let mut columns = vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ];
+        let mut vectors: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice([1_u32])),
+            Arc::new(TimestampMillisecondVector::from_slice([0_i64])),
+        ];
+        if extended {
+            columns.push(ColumnSchema::new(
+                "checkpoint",
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ));
+            vectors.push(Arc::new(UInt32Vector::from_slice([1_u32])));
+        }
+        let schema = Arc::new(Schema::new(columns));
+        let recordbatch = RecordBatch::new(schema, vectors).unwrap();
+        let table = table::test_util::MemTable::table(name, recordbatch);
+        let request = RegisterTableRequest {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table_name: name.to_string(),
+            table_id: 9000,
+            table,
+        };
+        engine
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap()
+            .register_table_sync(request)
+            .unwrap();
+    }
+
+    fn flow_create_args(flow_id: FlowId, sink: &str) -> CreateFlowArgs {
+        CreateFlowArgs {
+            flow_id,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                sink.to_string(),
+            ],
+            source_table_ids: vec![1],
+            create_if_not_exists: false,
+            or_replace: false,
+            expire_after: None,
+            eval_interval: Some(10),
+            comment: None,
+            sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
+            flow_options: HashMap::new(),
+            query_ctx: Some(QueryContext::arc().as_ref().clone()),
+            eval_schedule: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_installed_persistence_factory_none_still_validates_sink_schema() {
+        let engine = new_test_engine_with_persistence(Some(FactoryPlugin(Arc::new(
+            TestPersistenceFactory {
+                create_persistence: false,
+            },
+        ))))
+        .await;
+        register_sink_with_schema(&engine, "sink_factory_none", true);
+
+        let result = engine
+            .create_flow_inner(flow_create_args(1, "sink_factory_none"))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "ordinary sink validation must reject mismatch"
+        );
+        assert!(!engine.flow_exist_inner(1).await);
+    }
+
+    #[tokio::test]
+    async fn test_matching_persistence_factory_allows_extended_sink_schema() {
+        let engine = new_test_engine_with_persistence(Some(FactoryPlugin(Arc::new(
+            TestPersistenceFactory {
+                create_persistence: true,
+            },
+        ))))
+        .await;
+        register_sink_with_schema(&engine, "sink_factory_some", true);
+
+        let result = engine
+            .create_flow_inner(flow_create_args(2, "sink_factory_some"))
+            .await
+            .unwrap();
+
+        assert_eq!(Some(2), result);
+        assert!(engine.flow_exist_inner(2).await);
+        engine.remove_flow_inner(2).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_no_persistence_factory_still_validates_sink_schema() {
+        let engine = new_test_engine_with_persistence(None).await;
+        register_sink_with_schema(&engine, "sink_no_factory", true);
+
+        let result = engine
+            .create_flow_inner(flow_create_args(3, "sink_no_factory"))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "ordinary sink validation must reject mismatch"
+        );
+        assert!(!engine.flow_exist_inner(3).await);
+    }
+
+    #[tokio::test]
+    async fn test_flow_option_parser_matrix() {
+        let engine = new_test_engine().await;
+        let cases = [
+            (None, false, false),
+            (Some("true"), true, false),
+            (Some("false"), false, false),
+            (
+                Some(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE),
+                true,
+                true,
+            ),
+            (Some("malformed"), false, false),
+        ];
+        for (value, enabled, required) in cases {
+            let options = value
+                .map(|value| {
+                    HashMap::from([(
+                        FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                        value.to_string(),
+                    )])
+                })
+                .unwrap_or_default();
+            let required_from_validated_sentinel = options
+                .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+                .is_some_and(|value| {
+                    value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE
+                });
+            match engine.batch_opts_for_flow_options(&options, required_from_validated_sentinel) {
+                Ok(opts) => {
+                    assert_eq!(opts.experimental_enable_incremental_read, enabled);
+                    assert_eq!(required_from_validated_sentinel, required);
+                }
+                Err(_) => assert!(!enabled && !required),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_forged_query_context_does_not_enable_exact_sequence_range() {
+        let engine = new_test_engine_with_persistence(Some(FactoryPlugin(Arc::new(
+            TestPersistenceFactory {
+                create_persistence: true,
+            },
+        ))))
+        .await;
+        register_sink_with_schema(&engine, "forged_query_context", true);
+        let mut args = flow_create_args(4, "forged_query_context");
+        let mut query_ctx = QueryContext::arc().as_ref().clone();
+        query_ctx.set_extension("__old_forged_required_extension", "true");
+        args.query_ctx = Some(query_ctx);
+
+        engine.create_flow_inner(args).await.unwrap();
+        let task = engine.runtime.read().await.tasks.get(&4).cloned().unwrap();
+        assert!(!task.config.exact_sequence_range_required);
+        engine.remove_flow_inner(4).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_exact_sequence_range_capability_is_checked_before_task_startup() {
+        let engine = new_test_engine_with_persistence(None).await;
+        let mut args = flow_create_args(5, "exact_requires_capability");
+        args.flow_options.insert(
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE.to_string(),
+        );
+
+        assert!(engine.create_flow_inner(args).await.is_err());
+        assert!(!engine.flow_exist_inner(5).await);
     }
 
     #[test]

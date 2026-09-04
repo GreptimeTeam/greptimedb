@@ -568,6 +568,24 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         }
     }
 
+    if let Some(value) = flow_task
+        .flow_options
+        .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+    {
+        if value != FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE {
+            value
+                .parse::<bool>()
+                .map_err(|_| {
+                    UnexpectedSnafu {
+                        err_msg: format!(
+                            "Invalid flow option {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}: {value}"
+                        ),
+                    }
+                    .build()
+                })?;
+        }
+    }
+
     defer_on_missing_source(flow_task)?;
     get_flow_type_from_options(flow_task)?;
     Ok(())
@@ -770,6 +788,9 @@ pub enum FlowType {
 
 pub const FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY: &str =
     "experimental_enable_incremental_read";
+/// Reserved internal value for Enterprise flows requiring exact sequence ranges.
+pub const FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE: &str =
+    "__greptime_internal_exact_sequence_range";
 
 impl FlowType {
     pub const BATCHING: &str = "batching";

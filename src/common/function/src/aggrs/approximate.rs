@@ -18,6 +18,7 @@ use datatypes::arrow::datatypes::DataType;
 use crate::aggrs::aggr_wrapper::DeltaMergeWrapper;
 use crate::function_registry::FunctionRegistry;
 
+pub mod avg;
 pub mod hll;
 pub mod uddsketch;
 pub mod welford;
@@ -26,6 +27,16 @@ pub(crate) struct ApproximateFunction;
 
 impl ApproximateFunction {
     pub fn register(registry: &FunctionRegistry) {
+        let avg_merge = avg::AvgAccumulator::merge_udf_impl();
+        registry.register_aggr(avg::AvgAccumulator::state_udf_impl());
+        registry.register_aggr(avg_merge.clone());
+        registry.register_aggr(AggregateUDF::new_from_impl(DeltaMergeWrapper::new(
+            avg_merge.clone(),
+            avg::AVG_STATE_NAME,
+            vec![DataType::Binary],
+            DataType::Binary,
+        )));
+
         let uddsketch_state = uddsketch::UddSketchState::state_udf_impl();
         let uddsketch_merge = uddsketch::UddSketchState::merge_udf_impl();
         let uddsketch_delta = AggregateUDF::new_from_impl(DeltaMergeWrapper::new(

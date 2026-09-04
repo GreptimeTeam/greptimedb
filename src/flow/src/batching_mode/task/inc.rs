@@ -18,6 +18,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_telemetry::tracing::warn;
 use datafusion_expr::{DmlStatement, LogicalPlan};
+use query::QueryEngineRef;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
     FLOW_SINK_TABLE_ID,
@@ -35,6 +36,9 @@ use crate::batching_mode::utils::{
     rewrite_incremental_aggregate_with_sink_merge,
 };
 use crate::error::{ExternalSnafu, UnexpectedSnafu};
+
+// Kept local until the query-side extension enum exposes the exact scan mode.
+const FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE: &str = "sequence_range";
 
 impl BatchingTask {
     async fn sink_table_id(&self) -> Result<TableId, Error> {
@@ -69,7 +73,7 @@ impl BatchingTask {
     /// table that cannot be resolved, is not the mito engine, or lacks the
     /// option — this returns `false` so the caller keeps the historical
     /// `memtable_only` mode instead of upgrading.
-    pub(crate) async fn sequence_range_capable(&self) -> bool {
+    pub(crate) async fn sequence_range_capable(&self) -> Result<bool, Error> {
         for name in &self.config.source_table_names {
             let table = match self
                 .config
@@ -79,23 +83,16 @@ impl BatchingTask {
             {
                 Ok(Some(table)) => table,
                 Ok(None) => {
-                    debug!(
-                        "Flow {} source table {} not found; retaining memtable_only incremental mode",
-                        self.config.flow_id,
-                        name.join(".")
-                    );
-                    return false;
+                    return Err(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} source table {} not found for sequence_range capability check",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    }
+                    .build());
                 }
-                Err(err) => {
-                    warn!(
-                        "Flow {} failed to resolve source table {} for sequence_range capability check; \
-                         retaining memtable_only incremental mode: {:?}",
-                        self.config.flow_id,
-                        name.join("."),
-                        err
-                    );
-                    return false;
-                }
+                Err(err) => Err(BoxedError::new(err)).context(ExternalSnafu)?,
             };
 
             let info = table.table_info();
@@ -107,10 +104,10 @@ impl BatchingTask {
                     .get(PRESERVE_ROW_SEQUENCE)
                     .is_some_and(|value| value.eq_ignore_ascii_case("true"));
             if !preserves {
-                return false;
+                return Ok(false);
             }
         }
-        !self.config.source_table_names.is_empty()
+        Ok(!self.config.source_table_names.is_empty())
     }
 
     /// For incremental-mode SQL queries, attempt to prepare an executable plan
@@ -126,6 +123,7 @@ impl BatchingTask {
     /// incremental safe without a rewrite, so they return `Some(original_plan)`.
     pub(super) async fn prepare_plan_for_incremental(
         &self,
+        engine: &QueryEngineRef,
         plan: &LogicalPlan,
     ) -> Result<Option<LogicalPlan>, Error> {
         let is_incremental_sql = {
@@ -208,6 +206,7 @@ impl BatchingTask {
         let rewritten_inner = match rewrite_incremental_aggregate_with_sink_merge(
             &inner_plan,
             &analysis,
+            engine,
             sink_table,
             &self.config.sink_table_name,
             None,
@@ -271,12 +270,42 @@ impl BatchingTask {
         };
 
         if let Some(checkpoints_json) = incremental_checkpoints_json {
+            // Select `sequence_range` only when every append-only source table
+            // proves the `preserve_row_sequence` capability; otherwise retain
+            // the historical `memtable_only` mode. The `sequence_range` scan
+            // keeps SSTs and reads the exact (checkpoint, scan-open snapshot]
+            // row-level delta; the engine fails closed when the capability
+            // does not hold at scan time.
+            let capable = match self.sequence_range_capable().await {
+                Ok(capable) => capable,
+                Err(err) => {
+                    if self.config.exact_sequence_range_required {
+                        return Err(err);
+                    }
+                    false
+                }
+            };
+            if self.config.exact_sequence_range_required && !capable {
+                return Err(UnexpectedSnafu {
+                    reason: format!(
+                        "Flow {} requires exact sequence-range reads, but source capability was revoked",
+                        self.config.flow_id
+                    ),
+                }
+                .build());
+            }
             let sink_table_id = self.sink_table_id().await?;
+            let incremental_mode = if capable {
+                debug!(
+                    "Flow {} selected sequence_range incremental mode",
+                    self.config.flow_id
+                );
+                FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE
+            } else {
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+            };
             extensions.push((FLOW_SINK_TABLE_ID, sink_table_id.to_string()));
-            extensions.push((
-                FLOW_INCREMENTAL_MODE,
-                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
-            ));
+            extensions.push((FLOW_INCREMENTAL_MODE, incremental_mode.to_string()));
             extensions.push((FLOW_INCREMENTAL_AFTER_SEQS, checkpoints_json));
         }
 

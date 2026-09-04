@@ -38,7 +38,10 @@ use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged, only_enables_skip_wal};
 use crate::ddl::comment_on::CommentOnProcedure;
 use crate::ddl::create_database::{CreateDatabaseMetadataCommitterRef, CreateDatabaseProcedure};
-use crate::ddl::create_flow::CreateFlowProcedure;
+use crate::ddl::create_flow::{
+    CreateFlowProcedure, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE,
+};
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::create_view::CreateViewProcedure;
@@ -112,6 +115,8 @@ pub struct DdlManager {
     trigger_ddl_manager: Option<TriggerDdlManagerRef>,
     #[cfg(feature = "enterprise")]
     create_flow_handler: Option<CreateFlowHandlerRef>,
+    #[cfg(feature = "enterprise")]
+    drop_flow_handler: Option<DropFlowHandlerRef>,
 }
 
 /// This trait is responsible for handling DDL tasks about triggers. e.g.,
@@ -159,6 +164,20 @@ pub trait CreateFlowHandler: Send + Sync {
 
 #[cfg(feature = "enterprise")]
 pub type CreateFlowHandlerRef = Arc<dyn CreateFlowHandler>;
+
+/// Hook for classifying and handling DROP FLOW requests.
+#[async_trait::async_trait]
+pub trait DropFlowHandler: Send + Sync {
+    async fn drop_flow(
+        &self,
+        drop_flow_task: DropFlowTask,
+        procedure_manager: ProcedureManagerRef,
+        ddl_context: DdlContext,
+        procedure_context: ProcedureContext,
+    ) -> Result<SubmitDdlTaskResponse>;
+}
+
+pub type DropFlowHandlerRef = Arc<dyn DropFlowHandler>;
 
 macro_rules! procedure_loader_entry {
     ($procedure:ident) => {
@@ -256,7 +275,15 @@ impl DdlManager {
             trigger_ddl_manager: None,
             #[cfg(feature = "enterprise")]
             create_flow_handler: None,
+            #[cfg(feature = "enterprise")]
+            drop_flow_handler: None,
         }
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_drop_flow_handler(mut self, drop_flow_handler: DropFlowHandlerRef) -> Self {
+        self.drop_flow_handler = Some(drop_flow_handler);
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -992,6 +1019,17 @@ impl DdlManager {
                     .await
                 }
                 DropFlow(drop_flow_task) => {
+                    #[cfg(feature = "enterprise")]
+                    if let Some(handler) = self.drop_flow_handler.as_ref() {
+                        return handler
+                            .drop_flow(
+                                drop_flow_task,
+                                self.procedure_manager.clone(),
+                                self.ddl_context.clone(),
+                                procedure_context,
+                            )
+                            .await;
+                    }
                     handle_drop_flow_task(self, drop_flow_task, procedure_context).await
                 }
                 CreateView(create_view_task) => {
@@ -1392,6 +1430,19 @@ async fn handle_create_flow_task(
     query_context: QueryContext,
     procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
+    if create_flow_task
+        .flow_options
+        .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+        .is_some_and(|value| value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE)
+    {
+        return error::UnexpectedSnafu {
+            err_msg: format!(
+                "reserved flow option value for {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY} is internal"
+            ),
+        }
+        .fail();
+    }
+
     #[cfg(feature = "enterprise")]
     if let Some(handler) = ddl_manager.create_flow_handler.as_ref() {
         return handler
@@ -1578,7 +1629,11 @@ mod tests {
     use crate::ddl::create_database::{
         AtomicCreateOutcome, CreateDatabaseMetadataCommitter, CreateDatabaseProcedure,
     };
-    use crate::ddl::create_flow::CreateFlowProcedure;
+    #[cfg(feature = "enterprise")]
+    use crate::ddl::create_flow::{
+        CreateFlowProcedure, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+        FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE,
+    };
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::flow_meta::FlowMetadataAllocator;
@@ -1899,6 +1954,32 @@ mod tests {
             procedure_manager,
             Arc::new(DummyRepartitionProcedureFactory),
         )
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_reserved_sequence_range_is_rejected_before_enterprise_handler() {
+        let handler = Arc::new(RecordingCreateFlowHandler::default());
+        let ddl_manager =
+            build_soft_drop_test_ddl_manager().with_create_flow_handler(handler.clone());
+        let mut task = test_create_flow_task();
+        task.flow_options.insert(
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE.to_string(),
+        );
+
+        let result = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task)),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(handler.tasks.lock().unwrap().is_empty());
     }
 
     #[cfg(feature = "enterprise")]
