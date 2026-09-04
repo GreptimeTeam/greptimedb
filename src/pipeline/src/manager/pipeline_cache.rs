@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_telemetry::debug;
 use datatypes::timestamp::TimestampNanosecond;
-use moka::sync::Cache;
+use moka::future::Cache;
 
-use crate::error::{MultiPipelineWithDiffSchemaSnafu, Result};
+use crate::error::{CacheLoadSnafu, MultiPipelineWithDiffSchemaSnafu, Result};
 use crate::etl::Pipeline;
 use crate::manager::PipelineVersion;
 use crate::table::EMPTY_SCHEMA_NAME;
@@ -32,6 +32,11 @@ const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
 
 /// Pipeline cache is located on a separate file on purpose,
 /// to encapsulate inner cache. Only public methods are exposed.
+///
+/// `pipelines` and `original_pipelines` are keyed by the *requested* schema so
+/// a lookup is a single key probe, as [`Cache::try_get_with`] requires;
+/// resolving it to a stored schema is the loader's job. `failover_cache` has no
+/// loader and keeps the stored-schema key.
 pub(crate) struct PipelineCache {
     pipelines: Cache<String, Arc<Pipeline>>,
     original_pipelines: Cache<String, PipelineContent>,
@@ -68,163 +73,242 @@ impl PipelineCache {
         }
     }
 
-    pub(crate) fn insert_pipeline_cache(
+    /// Concurrent misses on the same key share one `init` call.
+    pub(crate) async fn get_pipeline_with(
         &self,
         schema: &str,
         name: &str,
         version: PipelineVersion,
-        pipeline: Arc<Pipeline>,
-        with_latest: bool,
-    ) {
-        insert_cache_generic(
-            &self.pipelines,
-            schema,
-            name,
-            version,
-            pipeline.clone(),
-            with_latest,
-        );
+        init: impl Future<Output = Result<Arc<Pipeline>>>,
+    ) -> Result<Arc<Pipeline>> {
+        let key = generate_pipeline_cache_key(schema, name, version);
+        self.pipelines
+            .try_get_with(key, init)
+            .await
+            .map_err(|error| CacheLoadSnafu { error }.build())
     }
 
-    pub(crate) fn insert_pipeline_str_cache(&self, pipeline: &PipelineContent, with_latest: bool) {
-        let schema = pipeline.schema.as_str();
-        let name = pipeline.name.as_str();
-        let version = pipeline.version;
-        insert_cache_generic(
-            &self.original_pipelines,
-            schema,
-            name,
-            Some(version),
-            pipeline.clone(),
-            with_latest,
-        );
-        insert_cache_generic(
-            &self.failover_cache,
-            schema,
-            name,
-            Some(version),
-            pipeline.clone(),
-            with_latest,
-        );
-    }
-
-    pub(crate) fn get_pipeline_cache(
+    /// Concurrent misses on the same key share one `init` call.
+    pub(crate) async fn get_pipeline_str_with(
         &self,
         schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Option<Arc<Pipeline>>> {
-        get_cache_generic(&self.pipelines, schema, name, version)
+        init: impl Future<Output = Result<PipelineContent>>,
+    ) -> Result<PipelineContent> {
+        let key = generate_pipeline_cache_key(schema, name, version);
+        self.original_pipelines
+            .try_get_with(key, init)
+            .await
+            .map_err(|error| CacheLoadSnafu { error }.build())
     }
 
-    pub(crate) fn get_failover_cache(
+    /// Resolves across schemas, unlike the loaded caches: a pipeline stored
+    /// under the empty schema is reachable from any schema.
+    pub(crate) async fn get_failover_cache(
         &self,
         schema: &str,
         name: &str,
         version: PipelineVersion,
     ) -> Result<Option<PipelineContent>> {
-        get_cache_generic(&self.failover_cache, schema, name, version)
-    }
+        for key in [
+            generate_pipeline_cache_key(EMPTY_SCHEMA_NAME, name, version),
+            generate_pipeline_cache_key(schema, name, version),
+        ] {
+            if let Some(content) = self.failover_cache.get(&key).await {
+                return Ok(Some(content));
+            }
+        }
 
-    pub(crate) fn get_pipeline_str_cache(
-        &self,
-        schema: &str,
-        name: &str,
-        version: PipelineVersion,
-    ) -> Result<Option<PipelineContent>> {
-        get_cache_generic(&self.original_pipelines, schema, name, version)
-    }
-
-    // remove cache with version and latest in all schemas
-    pub(crate) fn remove_cache(&self, name: &str, version: PipelineVersion) {
-        let version_suffix = generate_pipeline_cache_key_suffix(name, version);
-        let latest_suffix = generate_pipeline_cache_key_suffix(name, None);
-
-        let ks = self
-            .pipelines
+        // Stored under some other schema; unambiguous only if exactly one has it.
+        let suffix = generate_pipeline_cache_key_suffix(name, version);
+        let mut found = self
+            .failover_cache
             .iter()
-            .filter_map(|(k, _)| {
-                if k.ends_with(&version_suffix) || k.ends_with(&latest_suffix) {
-                    Some(k.clone())
-                } else {
-                    None
-                }
-            })
+            .filter(|(k, _)| k.ends_with(&suffix))
             .collect::<Vec<_>>();
 
-        for k in ks {
-            let k = k.as_str();
-            self.pipelines.remove(k);
-            self.original_pipelines.remove(k);
-            self.failover_cache.remove(k);
-        }
-    }
-}
-
-fn insert_cache_generic<T: Clone + Send + Sync + 'static>(
-    cache: &Cache<String, T>,
-    schema: &str,
-    name: &str,
-    version: PipelineVersion,
-    value: T,
-    with_latest: bool,
-) {
-    let k = generate_pipeline_cache_key(schema, name, version);
-    cache.insert(k, value.clone());
-    if with_latest {
-        let k = generate_pipeline_cache_key(schema, name, None);
-        cache.insert(k, value);
-    }
-}
-
-fn get_cache_generic<T: Clone + Send + Sync + 'static>(
-    cache: &Cache<String, T>,
-    schema: &str,
-    name: &str,
-    version: PipelineVersion,
-) -> Result<Option<T>> {
-    // lets try empty schema first
-    let emp_key = generate_pipeline_cache_key(EMPTY_SCHEMA_NAME, name, version);
-    if let Some(value) = cache.get(&emp_key) {
-        return Ok(Some(value));
-    }
-    // use input schema
-    let schema_k = generate_pipeline_cache_key(schema, name, version);
-    if let Some(value) = cache.get(&schema_k) {
-        return Ok(Some(value));
-    }
-
-    // try all schemas
-    let suffix_key = generate_pipeline_cache_key_suffix(name, version);
-    let mut ks = cache
-        .iter()
-        .filter(|e| e.0.ends_with(&suffix_key))
-        .collect::<Vec<_>>();
-
-    match ks.len() {
-        0 => Ok(None),
-        1 => {
-            let (_, value) = ks.remove(0);
-            Ok(Some(value))
-        }
-        _ => {
-            debug!(
-                "caches keys: {:?}, emp key: {:?}, schema key: {:?}, suffix key: {:?}",
-                cache.iter().map(|e| e.0).collect::<Vec<_>>(),
-                emp_key,
-                schema_k,
-                suffix_key
-            );
-            MultiPipelineWithDiffSchemaSnafu {
+        match found.len() {
+            0 => Ok(None),
+            1 => Ok(Some(found.remove(0).1)),
+            _ => MultiPipelineWithDiffSchemaSnafu {
                 name: name.to_string(),
                 current_schema: schema.to_string(),
-                schemas: ks
+                schemas: found
                     .iter()
                     .filter_map(|(k, _)| k.split_once('/').map(|k| k.0))
                     .collect::<Vec<_>>()
                     .join(","),
             }
-            .fail()?
+            .fail(),
         }
+    }
+
+    pub(crate) async fn insert_failover_cache(&self, content: PipelineContent, with_latest: bool) {
+        let versioned =
+            generate_pipeline_cache_key(&content.schema, &content.name, Some(content.version));
+        let latest = generate_pipeline_cache_key(&content.schema, &content.name, None);
+
+        self.failover_cache.insert(versioned, content.clone()).await;
+        if with_latest {
+            self.failover_cache.insert(latest, content).await;
+        }
+    }
+
+    /// Dropping the stale `latest` aliases also clears the failover entries, so
+    /// the new version is written back: an outage before the first read-back
+    /// would otherwise have nothing to fall back on.
+    pub(crate) async fn on_pipeline_created(&self, content: PipelineContent) {
+        self.invalidate(&content.name, None).await;
+        self.insert_failover_cache(content, true).await;
+    }
+
+    /// Sweeps every schema and all three caches: the `latest` alias always,
+    /// plus `version` when given.
+    pub(crate) async fn invalidate(&self, name: &str, version: PipelineVersion) {
+        let mut suffixes = vec![generate_pipeline_cache_key_suffix(name, None)];
+        if version.is_some() {
+            suffixes.push(generate_pipeline_cache_key_suffix(name, version));
+        }
+
+        let ks = self
+            .pipelines
+            .iter()
+            .map(|(k, _)| k)
+            .chain(self.original_pipelines.iter().map(|(k, _)| k))
+            .chain(self.failover_cache.iter().map(|(k, _)| k))
+            .filter(|k| suffixes.iter().any(|suffix| k.ends_with(suffix)))
+            .collect::<Vec<_>>();
+
+        for k in ks {
+            let k = k.as_str();
+            self.pipelines.invalidate(k).await;
+            self.original_pipelines.invalidate(k).await;
+            self.failover_cache.invalidate(k).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::Barrier;
+
+    use super::*;
+
+    /// Stored under the empty schema, i.e. visible from every schema.
+    fn content_at(version: i64) -> PipelineContent {
+        PipelineContent {
+            name: "p".to_string(),
+            content: "transform:".to_string(),
+            version: TimestampNanosecond::new(version),
+            schema: EMPTY_SCHEMA_NAME.to_string(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_misses_run_one_loader() {
+        const CONCURRENCY: usize = 8;
+
+        let cache = Arc::new(PipelineCache::new());
+        let loads = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(CONCURRENCY));
+
+        let handles = (0..CONCURRENCY)
+            .map(|_| {
+                let (cache, loads, barrier) = (cache.clone(), loads.clone(), barrier.clone());
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    cache
+                        .get_pipeline_str_with("db", "p", None, async {
+                            loads.fetch_add(1, Ordering::SeqCst);
+                            // Hold the loader open so every caller is waiting on it.
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Ok(content_at(1))
+                        })
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            assert_eq!(handle.await.unwrap(), content_at(1));
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_drops_version_pinned_entry() {
+        let cache = PipelineCache::new();
+        let content = content_at(1);
+        let version = Some(content.version);
+
+        cache
+            .get_pipeline_str_with("db", "p", version, async { Ok(content.clone()) })
+            .await
+            .unwrap();
+
+        cache.invalidate("p", version).await;
+
+        let loads = AtomicUsize::new(0);
+        cache
+            .get_pipeline_str_with("db", "p", version, async {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok(content.clone())
+            })
+            .await
+            .unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_drops_stale_latest_and_primes_failover() {
+        let cache = PipelineCache::new();
+        let v2 = content_at(2);
+
+        cache
+            .get_pipeline_str_with("a", "p", None, async { Ok(content_at(1)) })
+            .await
+            .unwrap();
+        cache.insert_failover_cache(content_at(1), true).await;
+
+        cache.on_pipeline_created(v2.clone()).await;
+
+        let loads = AtomicUsize::new(0);
+        let cached = cache
+            .get_pipeline_str_with("a", "p", None, async {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok(v2.clone())
+            })
+            .await
+            .unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert_eq!(cached.version, v2.version);
+
+        let failover = cache.get_failover_cache("b", "p", None).await.unwrap();
+        assert_eq!(failover.map(|c| c.version), Some(v2.version));
+    }
+
+    #[tokio::test]
+    async fn test_failover_serves_global_pipeline_to_unwarmed_schema() {
+        let cache = PipelineCache::new();
+        let content = content_at(1);
+
+        cache.insert_failover_cache(content.clone(), true).await;
+
+        let found = cache.get_failover_cache("b", "p", None).await.unwrap();
+        assert_eq!(found, Some(content.clone()));
+
+        // A same-named pipeline under another schema must not shadow the global one.
+        let schema_local = PipelineContent {
+            schema: "x".to_string(),
+            ..content_at(2)
+        };
+        cache.insert_failover_cache(schema_local, true).await;
+
+        let found = cache.get_failover_cache("b", "p", None).await.unwrap();
+        assert_eq!(found, Some(content));
     }
 }

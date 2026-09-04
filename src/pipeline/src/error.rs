@@ -693,6 +693,15 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
+    /// `try_get_with` shares one loader across concurrent misses, so its error
+    /// arrives behind an `Arc`.
+    #[snafu(display("Failed to load pipeline into cache: {}", error))]
+    CacheLoad {
+        error: std::sync::Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("A valid table suffix template is required for tablesuffix section"))]
     RequiredTableSuffixTemplate,
 
@@ -881,6 +890,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            CacheLoad { error, .. } => error.status_code(),
             CastType { .. } => StatusCode::Unexpected,
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
