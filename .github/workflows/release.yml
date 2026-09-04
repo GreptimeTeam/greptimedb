@@ -715,7 +715,7 @@ jobs:
 
   bump-downstream-repo-versions:
     name: Bump downstream repo versions
-    if: ${{ github.event_name == 'schedule' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly')) }}
+    if: ${{ github.event_name == 'schedule' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly')) && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
