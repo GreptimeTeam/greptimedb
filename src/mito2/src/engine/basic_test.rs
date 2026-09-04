@@ -29,6 +29,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use futures::TryStreamExt;
 use itertools::Itertools;
+use parquet::basic::{Encoding, Type as PhysicalType};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
@@ -739,7 +740,9 @@ async fn test_engine_with_write_cache_with_format(flat_format: bool) {
     let engine = env.create_engine(mito_config).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let request = CreateRequestBuilder::new()
+        .insert_option("experimental_sst_float_field_encoding", "byte_stream_split")
+        .build();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -754,6 +757,38 @@ async fn test_engine_with_write_cache_with_format(flat_format: bool) {
     put_rows(&engine, region_id, rows).await;
 
     flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let file = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("write-cache flushed SST")
+        .clone();
+    let reader = region
+        .access_layer
+        .read_sst(file)
+        .build()
+        .await
+        .unwrap()
+        .expect("write-cache flushed SST reader");
+    assert!(
+        reader
+            .parquet_metadata()
+            .row_groups()
+            .iter()
+            .flat_map(|row_group| row_group.columns())
+            .any(|column| {
+                column.column_path().string() == "field_0"
+                    && column.column_type() == PhysicalType::DOUBLE
+                    && column
+                        .encodings()
+                        .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+            })
+    );
 
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).await.unwrap();
