@@ -746,7 +746,7 @@ impl BulkMemtable {
 
     /// Creates a new BulkMemtable with the given row group size and float encoding.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_row_group_size_and_encoding(
+    fn new_with_row_group_size_and_encoding(
         id: MemtableId,
         config: BulkMemtableConfig,
         metadata: RegionMetadataRef,

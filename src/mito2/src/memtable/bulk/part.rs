@@ -1310,7 +1310,7 @@ impl BulkPartEncoder {
         Self::new_with_float_field_encoding(metadata, row_group_size, FloatFieldEncoding::default())
     }
 
-    pub fn new_with_float_field_encoding(
+    pub(super) fn new_with_float_field_encoding(
         metadata: RegionMetadataRef,
         row_group_size: usize,
         float_field_encoding: FloatFieldEncoding,
