@@ -1626,7 +1626,7 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use mito_codec::row_converter::build_primary_key_codec;
-    use parquet::basic::{Encoding, PhysicalType};
+    use parquet::basic::{Encoding, Type as PhysicalType};
     use serde_json::json;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 
