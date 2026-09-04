@@ -106,6 +106,9 @@ on:
         default: false
 
 permissions:
+  # Load-bearing: every job, including ECS, gets this GITHUB_TOKEN.
+  # Do not grant issues or pull-requests write; candidate code could
+  # otherwise forge the HMAC admission marker on a victim PR.
   contents: read
 
 jobs:

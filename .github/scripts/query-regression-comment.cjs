@@ -14,6 +14,19 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+const MARKER_PREFIX = '<!-- query-regression-admission v1';
+const MARKER_SUFFIX = '-->';
+const ADMISSION_MAC_FIELDS = [
+  'run_id',
+  'pr_number',
+  'head_sha',
+  'head_repo',
+  'base_repo',
+  'candidate_sha',
+  'base_sha',
+];
 
 function skip(core, message) {
   core.info(message);
@@ -300,6 +313,111 @@ function renderSummaryTable(rows) {
   return details === '' ? table : `${table}\n\n${details}`;
 }
 
+function admissionMacMessage(identity) {
+  return ADMISSION_MAC_FIELDS.map(field => {
+    const value = String(identity[field] ?? '');
+    return field.endsWith('_sha') ? value.toLowerCase() : value;
+  }).join('|');
+}
+
+function admissionMac(secret, identity) {
+  return crypto.createHmac('sha256', secret).update(admissionMacMessage(identity)).digest('hex');
+}
+
+function verifyAdmissionMac(secret, identity, mac) {
+  if (!secret || !mac) {
+    return false;
+  }
+  const expected = admissionMac(secret, identity);
+  const actual = String(mac);
+  if (expected.length !== actual.length) {
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(actual, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+function formatAdmissionMarker(identity) {
+  return `${MARKER_PREFIX}\n${JSON.stringify(identity, Object.keys(identity).sort())}\n${MARKER_SUFFIX}\n`;
+}
+
+function parseAdmissionMarker(body) {
+  const start = String(body || '').indexOf(MARKER_PREFIX);
+  if (start < 0) {
+    return null;
+  }
+  const rest = String(body).slice(start + MARKER_PREFIX.length);
+  const end = rest.indexOf(MARKER_SUFFIX);
+  if (end < 0) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(rest.slice(0, end).trim());
+    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+function isAdmissionIdentity(payload) {
+  return ADMISSION_MAC_FIELDS.every(field => {
+    const value = payload?.[field];
+    return value !== undefined && value !== null && String(value) !== '';
+  });
+}
+
+async function loadAdmissionMarker(github, { owner, repo, prNumber, runId, secret }) {
+  const comments = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const { data } = await github.rest.issues.listComments({
+      owner,
+      repo,
+      issue_number: prNumber,
+      per_page: 100,
+      page,
+    });
+    comments.push(...data);
+    if (!Array.isArray(data) || data.length < 100) {
+      break;
+    }
+  }
+  let best = null;
+  for (const comment of comments) {
+    const payload = parseAdmissionMarker(comment.body);
+    if (!payload || !isAdmissionIdentity(payload)) {
+      continue;
+    }
+    if (Number(payload.run_id) !== Number(runId)) {
+      continue;
+    }
+    if (!verifyAdmissionMac(secret, payload, payload.mac)) {
+      continue;
+    }
+    const id = Number(comment.id);
+    if (best === null || id > best.id) {
+      best = { id, payload };
+    }
+  }
+  return best;
+}
+
+function identitiesMatch(admission, metadata) {
+  return ADMISSION_MAC_FIELDS.every(field => {
+    const left = String(admission[field] ?? '');
+    const right = String(metadata[field] ?? '');
+    if (field === 'pr_number' || field === 'run_id') {
+      return Number(left) === Number(right);
+    }
+    if (field.endsWith('_sha')) {
+      return left.toLowerCase() === right.toLowerCase();
+    }
+    return left === right;
+  });
+}
+
 module.exports = async function validateQueryRegressionComment({ github, context, core }) {
   const artifactDir = 'query-regression-comment';
   const admissionPath = path.join('query-regression-admission', 'query-regression-admission.json');
@@ -323,12 +441,10 @@ module.exports = async function validateQueryRegressionComment({ github, context
     return skip(core, 'Invalid admission or PR metadata JSON; skipping.');
   }
 
-  // Where to post comes from the ubuntu-latest admission job, not the ECS runner.
-  if (
-    Number(admission.pr_number) !== Number(metadata.pr_number) ||
-    String(admission.head_sha).toLowerCase() !== String(metadata.head_sha).toLowerCase()
-  ) {
-    return skip(core, 'Runner artifact identity does not match trusted admission; skipping.');
+  // Artifact identity is a lookup hint only. Candidate code on ECS shares this
+  // run and can overwrite artifacts; the signed PR comment is the source of truth.
+  if (!identitiesMatch(admission, metadata)) {
+    return skip(core, 'Runner artifact identity does not match admission artifact; skipping.');
   }
 
   const expectedRunId = Number(process.env.WORKFLOW_RUN_ID);
@@ -345,21 +461,64 @@ module.exports = async function validateQueryRegressionComment({ github, context
     return skip(core, 'Runner artifact does not match this workflow_run attempt; skipping.');
   }
 
+  const run = context.payload.workflow_run;
+  // Command-handler runs execute from repository_dispatch on the default
+  // branch, so workflow_run head SHA/repo are that commit, not the PR.
+  if (run.event !== 'repository_dispatch') {
+    return skip(core, `Workflow run event is ${run.event}, not repository_dispatch; skipping.`);
+  }
+
+  const hmacSecret = (process.env.QUERY_REGRESSION_ADMISSION_HMAC || '').trim();
+  if (!hmacSecret) {
+    return skip(core, 'QUERY_REGRESSION_ADMISSION_HMAC is unset; skipping sticky comment.');
+  }
+
+  const hintedPrNumber = Number(admission.pr_number);
+  if (!Number.isInteger(hintedPrNumber) || hintedPrNumber <= 0) {
+    return skip(core, 'Invalid PR number in admission artifact; skipping.');
+  }
+
+  let marker;
+  try {
+    marker = await loadAdmissionMarker(github, {
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      prNumber: hintedPrNumber,
+      runId: expectedRunId,
+      secret: hmacSecret,
+    });
+  } catch (error) {
+    core.warning(`Could not list admission markers on PR #${hintedPrNumber}: ${error.message}`);
+    return skip(core, `Could not list admission markers on PR #${hintedPrNumber}; skipping.`);
+  }
+  if (!marker) {
+    return skip(
+      core,
+      'No signed admission marker for this run on the hinted PR; skipping.',
+    );
+  }
+
+  admission = {
+    pr_number: marker.payload.pr_number,
+    head_sha: marker.payload.head_sha,
+    head_repo: marker.payload.head_repo,
+    base_repo: marker.payload.base_repo,
+    candidate_sha: marker.payload.candidate_sha,
+    base_sha: marker.payload.base_sha,
+    run_id: marker.payload.run_id,
+  };
+
+  if (!identitiesMatch(admission, metadata)) {
+    return skip(core, 'Runner artifact identity does not match signed admission marker; skipping.');
+  }
+
   if (admission.base_repo !== `${context.repo.owner}/${context.repo.repo}`) {
     return skip(core, `PR targets ${admission.base_repo}, not this repository; skipping.`);
   }
 
   const prNumber = Number(admission.pr_number);
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
-    return skip(core, 'Invalid PR number in trusted admission; skipping.');
-  }
-
-  const run = context.payload.workflow_run;
-  // Command-handler runs execute from repository_dispatch on the default
-  // branch, so workflow_run head SHA/repo are that commit, not the PR.
-  // Admission already snapshotted the PR into the artifact.
-  if (run.event !== 'repository_dispatch') {
-    return skip(core, `Workflow run event is ${run.event}, not repository_dispatch; skipping.`);
+    return skip(core, 'Invalid PR number in signed admission marker; skipping.');
   }
 
   let pull;
@@ -425,4 +584,11 @@ module.exports = async function validateQueryRegressionComment({ github, context
   core.setOutput('summary_path', summaryPath);
 };
 
-module.exports._test = { collectReportRows, renderSummaryTable };
+module.exports._test = {
+  collectReportRows,
+  renderSummaryTable,
+  admissionMac,
+  verifyAdmissionMac,
+  formatAdmissionMarker,
+  parseAdmissionMarker,
+};

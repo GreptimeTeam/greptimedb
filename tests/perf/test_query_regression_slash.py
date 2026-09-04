@@ -16,9 +16,12 @@
 """Coverage for PR comment admission of query-regression."""
 
 import importlib.util
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPTS_DIR = Path(__file__).parents[2] / ".github/scripts"
@@ -207,6 +210,74 @@ class CommentIdentityTest(unittest.TestCase):
         )
 
 
+class DispatchTrustTest(unittest.TestCase):
+    def test_accepts_github_actions_bot_sender(self) -> None:
+        self.assertEqual(slash.dispatch_sender_ok("github-actions[bot]"), "")
+        self.assertEqual(slash.dispatch_sender_ok("GitHub-Actions[bot]"), "")
+
+    def test_rejects_non_actions_sender(self) -> None:
+        self.assertEqual(
+            slash.dispatch_sender_ok("alice"),
+            "repository_dispatch sender is not github-actions[bot]",
+        )
+        self.assertEqual(
+            slash.dispatch_sender_ok(""),
+            "repository_dispatch sender is not github-actions[bot]",
+        )
+
+    def test_main_rejects_non_actions_sender_without_fetching(self) -> None:
+        def boom(*_args: object, **_kwargs: object) -> dict:
+            raise AssertionError("should not fetch when sender is untrusted")
+
+        with patch.object(slash, "fetch_comment", boom):
+            self.assertEqual(
+                slash.main(
+                    [
+                        "--repo",
+                        "o/r",
+                        "--token",
+                        "t",
+                        "--comment-id",
+                        "1",
+                        "--dispatch-sender",
+                        "alice",
+                    ]
+                ),
+                0,
+            )
+
+    def test_head_must_match_dispatcher_snapshot(self) -> None:
+        pull = pull_payload()
+        self.assertEqual(slash.dispatch_head_matches(pull, HEAD), "")
+        self.assertEqual(slash.dispatch_head_matches(pull, HEAD.upper()), "")
+        self.assertIn("changed", slash.dispatch_head_matches(pull, BASE))
+        self.assertIn("missing", slash.dispatch_head_matches(pull, "not-a-sha"))
+        self.assertIn("missing", slash.dispatch_head_matches(pull, ""))
+
+    def test_api_failure_writes_retry_reply_and_stays_red(self) -> None:
+        def boom(*_args: object, **_kwargs: object) -> dict:
+            raise SystemExit(
+                "GitHub API GET /repos/o/r/issues/comments/1 failed: HTTP 502: no"
+            )
+
+        with patch.object(slash, "fetch_comment", boom):
+            code = slash.main(
+                [
+                    "--repo",
+                    "o/r",
+                    "--token",
+                    "t",
+                    "--comment-id",
+                    "1",
+                    "--dispatch-sender",
+                    "github-actions[bot]",
+                    "--pr-number",
+                    "42",
+                ]
+            )
+        self.assertEqual(code, 1)
+
+
 class ParseAllowlistTest(unittest.TestCase):
     def test_splits_commas_whitespace_and_strips_at(self) -> None:
         self.assertEqual(
@@ -295,6 +366,90 @@ class AdmitPullTest(unittest.TestCase):
         self.assertTrue(decision.skip)
         self.assertIn("head repository", decision.reason)
         self.assertEqual(decision.pr_number, "42")
+
+
+class AdmissionMarkerTest(unittest.TestCase):
+    def identity(self) -> dict:
+        return {
+            "run_id": 123,
+            "pr_number": 42,
+            "head_sha": HEAD,
+            "head_repo": "alice/greptimedb",
+            "base_repo": "GreptimeTeam/greptimedb",
+            "candidate_sha": MERGE,
+            "base_sha": BASE,
+        }
+
+    def test_sign_and_verify_round_trip(self) -> None:
+        identity = self.identity()
+        mac = slash.sign_admission("secret", identity)
+        self.assertTrue(slash.verify_admission_mac("secret", identity, mac))
+        self.assertFalse(slash.verify_admission_mac("other", identity, mac))
+        tampered = {**identity, "pr_number": 99}
+        self.assertFalse(slash.verify_admission_mac("secret", tampered, mac))
+
+    def test_parse_ignores_surrounding_text(self) -> None:
+        identity = {**self.identity(), "mac": slash.sign_admission("secret", self.identity())}
+        parsed = slash.parse_admission_marker(f"noise\n{slash.format_admission_marker(identity)}trailing")
+        assert parsed is not None
+        self.assertEqual(parsed["pr_number"], 42)
+        self.assertTrue(slash.verify_admission_mac("secret", parsed, parsed["mac"]))
+
+    def test_missing_hmac_secret_fails_closed(self) -> None:
+        self.assertEqual(
+            slash.persist_admission_identity(
+                admit(),
+                token="t",
+                api_url="https://api.github.com",
+                repo="GreptimeTeam/greptimedb",
+                secret="",
+            ),
+            "QUERY_REGRESSION_ADMISSION_HMAC is unset",
+        )
+
+    def test_persist_posts_signed_marker(self) -> None:
+        posted: dict[str, object] = {}
+
+        def fake_request(
+            token: str,
+            api_url: str,
+            path: str,
+            *,
+            method: str = "GET",
+            payload: dict | None = None,
+        ) -> dict:
+            posted["method"] = method
+            posted["path"] = path
+            posted["payload"] = payload
+            return {"id": 7}
+
+        decision = admit()
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                with patch.dict(os.environ, {"GITHUB_RUN_ID": "99", "GITHUB_RUN_ATTEMPT": "1"}):
+                    with patch.object(slash, "github_request", fake_request):
+                        error = slash.persist_admission_identity(
+                            decision,
+                            token="t",
+                            api_url="https://api.github.com",
+                            repo="GreptimeTeam/greptimedb",
+                            secret="secret",
+                        )
+                self.assertEqual(error, "")
+                self.assertEqual(posted["method"], "POST")
+                self.assertEqual(
+                    posted["path"],
+                    "/repos/GreptimeTeam/greptimedb/issues/42/comments",
+                )
+                body = (posted["payload"] or {})["body"]  # type: ignore[index]
+                parsed = slash.parse_admission_marker(str(body))
+                assert parsed is not None
+                self.assertEqual(parsed["run_id"], 99)
+                self.assertTrue(slash.verify_admission_mac("secret", parsed, parsed["mac"]))
+            finally:
+                os.chdir(cwd)
 
 
 if __name__ == "__main__":

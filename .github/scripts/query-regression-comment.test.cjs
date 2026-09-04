@@ -5,7 +5,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const handler = require('./query-regression-comment.cjs');
-const { collectReportRows, renderSummaryTable } = handler._test;
+const {
+  collectReportRows,
+  renderSummaryTable,
+  admissionMac,
+  verifyAdmissionMac,
+  formatAdmissionMarker,
+  parseAdmissionMarker,
+} = handler._test;
+
+const HMAC_SECRET = 'test-admission-hmac';
 
 function report(name, measurements, thresholds = []) {
   return {
@@ -19,10 +28,41 @@ function report(name, measurements, thresholds = []) {
   };
 }
 
+function markerComment(identity, { id = 1, secret = HMAC_SECRET } = {}) {
+  const payload = { ...identity, mac: admissionMac(secret, identity) };
+  return { id, body: formatAdmissionMarker(payload) };
+}
+
+function githubApi({ identity, pull, comments }) {
+  return {
+    rest: {
+      issues: {
+        listComments: async () => ({ data: comments ?? [markerComment(identity)] }),
+      },
+      pulls: {
+        get: async () => ({
+          data: pull ?? {
+            state: 'open',
+            base: { repo: { full_name: identity.base_repo } },
+            head: { repo: { full_name: identity.head_repo }, sha: identity.head_sha },
+          },
+        }),
+      },
+    },
+  };
+}
+
 test('keeps the default export callable and exposes only the test seam', () => {
   assert.equal(typeof handler, 'function');
   assert.equal(handler.constructor.name, 'AsyncFunction');
-  assert.deepEqual(Object.keys(handler._test).sort(), ['collectReportRows', 'renderSummaryTable']);
+  assert.deepEqual(Object.keys(handler._test).sort(), [
+    'admissionMac',
+    'collectReportRows',
+    'formatAdmissionMarker',
+    'parseAdmissionMarker',
+    'renderSummaryTable',
+    'verifyAdmissionMac',
+  ]);
 });
 
 test('renders every case in one summary table without per-case separators', () => {
@@ -309,6 +349,7 @@ test('posts a comment-command report without treating workflow_run as the PR hea
   const originalCwd = process.cwd();
   const originalRunId = process.env.WORKFLOW_RUN_ID;
   const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const originalHmac = process.env.QUERY_REGRESSION_ADMISSION_HMAC;
   const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
   const artifactDir = path.join(temporaryDir, 'query-regression-comment');
   const outputs = new Map();
@@ -336,6 +377,7 @@ test('posts a comment-command report without treating workflow_run as the PR hea
     process.chdir(temporaryDir);
     process.env.WORKFLOW_RUN_ID = '202';
     process.env.WORKFLOW_RUN_ATTEMPT = '1';
+    process.env.QUERY_REGRESSION_ADMISSION_HMAC = HMAC_SECRET;
 
     await handler({
       core: {
@@ -354,19 +396,7 @@ test('posts a comment-command report without treating workflow_run as the PR hea
           },
         },
       },
-      github: {
-        rest: {
-          pulls: {
-            get: async () => ({
-              data: {
-                state: 'open',
-                base: { repo: { full_name: 'owner/repo' } },
-                head: { repo: { full_name: 'fork/repo' }, sha: 'pr-head-sha' },
-              },
-            }),
-          },
-        },
-      },
+      github: githubApi({ identity: metadata }),
     });
 
     assert.equal(outputs.get('should_post'), 'true');
@@ -377,6 +407,8 @@ test('posts a comment-command report without treating workflow_run as the PR hea
     else process.env.WORKFLOW_RUN_ID = originalRunId;
     if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
     else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    if (originalHmac === undefined) delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+    else process.env.QUERY_REGRESSION_ADMISSION_HMAC = originalHmac;
     fs.rmSync(temporaryDir, { recursive: true, force: true });
   }
 });
@@ -450,6 +482,7 @@ test('writes the explicit no-report summary without an empty table', async () =>
   const originalCwd = process.cwd();
   const originalRunId = process.env.WORKFLOW_RUN_ID;
   const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const originalHmac = process.env.QUERY_REGRESSION_ADMISSION_HMAC;
   const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
   const artifactDir = path.join(temporaryDir, 'query-regression-comment');
   const outputs = new Map();
@@ -477,6 +510,7 @@ test('writes the explicit no-report summary without an empty table', async () =>
     process.chdir(temporaryDir);
     process.env.WORKFLOW_RUN_ID = '101';
     process.env.WORKFLOW_RUN_ATTEMPT = '1';
+    process.env.QUERY_REGRESSION_ADMISSION_HMAC = HMAC_SECRET;
 
     await handler({
       core: {
@@ -495,19 +529,7 @@ test('writes the explicit no-report summary without an empty table', async () =>
           },
         },
       },
-      github: {
-        rest: {
-          pulls: {
-            get: async () => ({
-              data: {
-                state: 'open',
-                base: { repo: { full_name: 'owner/repo' } },
-                head: { repo: { full_name: 'fork/repo' }, sha: 'head-sha' },
-              },
-            }),
-          },
-        },
-      },
+      github: githubApi({ identity: metadata }),
     });
 
     const summary = fs.readFileSync(path.join(artifactDir, 'query-regression-summary.md'), 'utf8');
@@ -520,6 +542,8 @@ test('writes the explicit no-report summary without an empty table', async () =>
     else process.env.WORKFLOW_RUN_ID = originalRunId;
     if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
     else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    if (originalHmac === undefined) delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+    else process.env.QUERY_REGRESSION_ADMISSION_HMAC = originalHmac;
     fs.rmSync(temporaryDir, { recursive: true, force: true });
   }
 });
@@ -579,7 +603,7 @@ test('skips when the runner artifact forges a different PR number', async () => 
     });
 
     assert.equal(outputs.get('should_post'), 'false');
-    assert.match(infos.join('\n'), /does not match trusted admission/);
+    assert.match(infos.join('\n'), /does not match admission artifact/);
   } finally {
     process.chdir(originalCwd);
     if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
@@ -594,6 +618,7 @@ test('posts after Re-run failed jobs when admission stays on attempt 1', async (
   const originalCwd = process.cwd();
   const originalRunId = process.env.WORKFLOW_RUN_ID;
   const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const originalHmac = process.env.QUERY_REGRESSION_ADMISSION_HMAC;
   const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
   const artifactDir = path.join(temporaryDir, 'query-regression-comment');
   const outputs = new Map();
@@ -625,6 +650,7 @@ test('posts after Re-run failed jobs when admission stays on attempt 1', async (
     process.chdir(temporaryDir);
     process.env.WORKFLOW_RUN_ID = '505';
     process.env.WORKFLOW_RUN_ATTEMPT = '2';
+    process.env.QUERY_REGRESSION_ADMISSION_HMAC = HMAC_SECRET;
 
     await handler({
       core: {
@@ -643,19 +669,7 @@ test('posts after Re-run failed jobs when admission stays on attempt 1', async (
           },
         },
       },
-      github: {
-        rest: {
-          pulls: {
-            get: async () => ({
-              data: {
-                state: 'open',
-                base: { repo: { full_name: 'owner/repo' } },
-                head: { repo: { full_name: 'fork/repo' }, sha: 'pr-head-sha' },
-              },
-            }),
-          },
-        },
-      },
+      github: githubApi({ identity: admission }),
     });
 
     assert.equal(outputs.get('should_post'), 'true');
@@ -666,6 +680,8 @@ test('posts after Re-run failed jobs when admission stays on attempt 1', async (
     else process.env.WORKFLOW_RUN_ID = originalRunId;
     if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
     else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    if (originalHmac === undefined) delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+    else process.env.QUERY_REGRESSION_ADMISSION_HMAC = originalHmac;
     fs.rmSync(temporaryDir, { recursive: true, force: true });
   }
 });
@@ -741,6 +757,7 @@ test('skips when the current PR head repository is missing', async () => {
   const originalCwd = process.cwd();
   const originalRunId = process.env.WORKFLOW_RUN_ID;
   const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const originalHmac = process.env.QUERY_REGRESSION_ADMISSION_HMAC;
   const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
   const artifactDir = path.join(temporaryDir, 'query-regression-comment');
   const outputs = new Map();
@@ -769,6 +786,7 @@ test('skips when the current PR head repository is missing', async () => {
     process.chdir(temporaryDir);
     process.env.WORKFLOW_RUN_ID = '707';
     process.env.WORKFLOW_RUN_ATTEMPT = '1';
+    process.env.QUERY_REGRESSION_ADMISSION_HMAC = HMAC_SECRET;
 
     await handler({
       core: {
@@ -787,19 +805,14 @@ test('skips when the current PR head repository is missing', async () => {
           },
         },
       },
-      github: {
-        rest: {
-          pulls: {
-            get: async () => ({
-              data: {
-                state: 'open',
-                base: { repo: { full_name: 'owner/repo' } },
-                head: { repo: null, sha: 'pr-head-sha' },
-              },
-            }),
-          },
+      github: githubApi({
+        identity: metadata,
+        pull: {
+          state: 'open',
+          base: { repo: { full_name: 'owner/repo' } },
+          head: { repo: null, sha: 'pr-head-sha' },
         },
-      },
+      }),
     });
 
     assert.equal(outputs.get('should_post'), 'false');
@@ -810,6 +823,231 @@ test('skips when the current PR head repository is missing', async () => {
     else process.env.WORKFLOW_RUN_ID = originalRunId;
     if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
     else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    if (originalHmac === undefined) delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+    else process.env.QUERY_REGRESSION_ADMISSION_HMAC = originalHmac;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});
+
+test('signs and verifies admission markers', () => {
+  const identity = {
+    run_id: 808,
+    pr_number: 42,
+    head_sha: 'HEADSHA',
+    head_repo: 'fork/repo',
+    base_repo: 'owner/repo',
+    candidate_sha: 'MERGESHA',
+    base_sha: 'BASESHA',
+  };
+  const mac = admissionMac(HMAC_SECRET, identity);
+  assert.equal(verifyAdmissionMac(HMAC_SECRET, identity, mac), true);
+  assert.equal(verifyAdmissionMac('other', identity, mac), false);
+  assert.equal(verifyAdmissionMac(HMAC_SECRET, { ...identity, pr_number: 99 }, mac), false);
+  const parsed = parseAdmissionMarker(`noise\n${formatAdmissionMarker({ ...identity, mac })}\n`);
+  assert.equal(parsed.pr_number, 42);
+  assert.equal(verifyAdmissionMac(HMAC_SECRET, parsed, parsed.mac), true);
+});
+
+test('skips when the HMAC secret is unset', async () => {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const originalHmac = process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+  const infos = [];
+
+  try {
+    fs.mkdirSync(artifactDir);
+    const metadata = {
+      run_id: 808,
+      run_attempt: 1,
+      base_repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'pr-head-sha',
+      head_repo: 'fork/repo',
+      candidate_sha: 'merge-sha',
+      base_sha: 'base-sha',
+    };
+    fs.mkdirSync(path.join(temporaryDir, 'query-regression-admission'));
+    fs.writeFileSync(
+      path.join(temporaryDir, 'query-regression-admission', 'query-regression-admission.json'),
+      JSON.stringify(metadata),
+    );
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify(metadata));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = '808';
+    process.env.WORKFLOW_RUN_ATTEMPT = '1';
+    delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+
+    await handler({
+      core: {
+        info(message) { infos.push(message); },
+        warning() {},
+        setOutput(name, value) { outputs.set(name, value); },
+      },
+      context: {
+        repo: { owner: 'owner', repo: 'repo' },
+        payload: {
+          workflow_run: {
+            event: 'repository_dispatch',
+            head_sha: 'default-branch-sha',
+            head_repository: { full_name: 'owner/repo' },
+            pull_requests: [],
+          },
+        },
+      },
+      github: githubApi({ identity: metadata }),
+    });
+
+    assert.equal(outputs.get('should_post'), 'false');
+    assert.match(infos.join('\n'), /QUERY_REGRESSION_ADMISSION_HMAC is unset/);
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    if (originalHmac === undefined) delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+    else process.env.QUERY_REGRESSION_ADMISSION_HMAC = originalHmac;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});
+
+test('skips when the hinted PR has no signed marker for this run', async () => {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const originalHmac = process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+  const infos = [];
+
+  try {
+    fs.mkdirSync(artifactDir);
+    const metadata = {
+      run_id: 909,
+      run_attempt: 1,
+      base_repo: 'owner/repo',
+      pr_number: 99,
+      head_sha: 'pr-head-sha',
+      head_repo: 'fork/repo',
+      candidate_sha: 'merge-sha',
+      base_sha: 'base-sha',
+    };
+    fs.mkdirSync(path.join(temporaryDir, 'query-regression-admission'));
+    fs.writeFileSync(
+      path.join(temporaryDir, 'query-regression-admission', 'query-regression-admission.json'),
+      JSON.stringify(metadata),
+    );
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify(metadata));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = '909';
+    process.env.WORKFLOW_RUN_ATTEMPT = '1';
+    process.env.QUERY_REGRESSION_ADMISSION_HMAC = HMAC_SECRET;
+
+    await handler({
+      core: {
+        info(message) { infos.push(message); },
+        warning() {},
+        setOutput(name, value) { outputs.set(name, value); },
+      },
+      context: {
+        repo: { owner: 'owner', repo: 'repo' },
+        payload: {
+          workflow_run: {
+            event: 'repository_dispatch',
+            head_sha: 'default-branch-sha',
+            head_repository: { full_name: 'owner/repo' },
+            pull_requests: [],
+          },
+        },
+      },
+      github: githubApi({ identity: metadata, comments: [{ id: 1, body: 'unrelated' }] }),
+    });
+
+    assert.equal(outputs.get('should_post'), 'false');
+    assert.match(infos.join('\n'), /No signed admission marker/);
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    if (originalHmac === undefined) delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+    else process.env.QUERY_REGRESSION_ADMISSION_HMAC = originalHmac;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});
+
+test('skips a marker whose HMAC does not match', async () => {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const originalHmac = process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+  const infos = [];
+
+  try {
+    fs.mkdirSync(artifactDir);
+    const metadata = {
+      run_id: 910,
+      run_attempt: 1,
+      base_repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'pr-head-sha',
+      head_repo: 'fork/repo',
+      candidate_sha: 'merge-sha',
+      base_sha: 'base-sha',
+    };
+    fs.mkdirSync(path.join(temporaryDir, 'query-regression-admission'));
+    fs.writeFileSync(
+      path.join(temporaryDir, 'query-regression-admission', 'query-regression-admission.json'),
+      JSON.stringify(metadata),
+    );
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify(metadata));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = '910';
+    process.env.WORKFLOW_RUN_ATTEMPT = '1';
+    process.env.QUERY_REGRESSION_ADMISSION_HMAC = HMAC_SECRET;
+
+    await handler({
+      core: {
+        info(message) { infos.push(message); },
+        warning() {},
+        setOutput(name, value) { outputs.set(name, value); },
+      },
+      context: {
+        repo: { owner: 'owner', repo: 'repo' },
+        payload: {
+          workflow_run: {
+            event: 'repository_dispatch',
+            head_sha: 'default-branch-sha',
+            head_repository: { full_name: 'owner/repo' },
+            pull_requests: [],
+          },
+        },
+      },
+      github: githubApi({
+        identity: metadata,
+        comments: [markerComment(metadata, { secret: 'forged-secret' })],
+      }),
+    });
+
+    assert.equal(outputs.get('should_post'), 'false');
+    assert.match(infos.join('\n'), /No signed admission marker/);
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    if (originalHmac === undefined) delete process.env.QUERY_REGRESSION_ADMISSION_HMAC;
+    else process.env.QUERY_REGRESSION_ADMISSION_HMAC = originalHmac;
     fs.rmSync(temporaryDir, { recursive: true, force: true });
   }
 });

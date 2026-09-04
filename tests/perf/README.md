@@ -404,10 +404,14 @@ Comment admission is two workflows. `slash-command-dispatch.yml` uses
 [peter-evans/slash-command-dispatch](https://github.com/peter-evans/slash-command-dispatch)
 to parse the first line of a PR comment and, for `/query-regression`,
 `repository_dispatch` a payload with the comment, actor, args, and PR number.
-`query-regression-slash.yml` handles that event: it re-checks
+`query-regression-slash.yml` handles that event: it requires the dispatch
+sender to be `github-actions[bot]`, re-checks
 `QUERY_REGRESSION_COMMENT_ALLOWLIST` (comma/whitespace-separated GitHub logins)
-and repository `admin` permission, snapshots merge/head/base SHAs, and calls
-the reusable workflow. Same-repo dispatch uses `github.token` with
+and repository `admin` permission, requires the current PR head to match the
+head SHA peter-evans snapshotted at comment time, then snapshots
+merge/head/base SHAs and calls the reusable workflow. If the head moved while
+the handler was queued, admission denies and asks for another
+`/query-regression`. Same-repo dispatch uses `github.token` with
 `contents: write`; GitHub starts the handler for `GITHUB_TOKEN`-created
 `repository_dispatch` events. The handler runs on the default branch, so it
 has secrets even for fork PRs. A later head
@@ -417,12 +421,13 @@ in the dispatcher and add a `repository_dispatch` handler.
 The main report artifact uploads only aggregate/per-target JSON reports,
 component logs, and `query-regression-summary.md` with seven-day retention;
 fixture data, SSTs, and cluster state are excluded. PR runs also upload a
-runner comment artifact with reports. The ubuntu-latest admission job uploads
-a separate `query-regression-admission` identity; the sticky-comment workflow
-posts only if that identity matches the runner artifact, so untrusted candidate
-code cannot retarget the report to another PR. The workflow writes the Markdown
-summary to the workflow step summary and updates a sticky PR comment through
-the trusted follow-up workflow.
+runner comment artifact with reports. The ubuntu-latest admission job posts a
+hidden HMAC-signed marker comment on the admitted PR (`QUERY_REGRESSION_ADMISSION_HMAC`)
+and uploads `query-regression-admission` as a lookup hint. The sticky-comment
+workflow verifies that marker before posting; the ECS job cannot forge it
+because it has neither `issues` write nor the HMAC secret. The workflow writes
+the Markdown summary to the workflow step summary and updates a sticky PR
+comment through the trusted follow-up workflow.
 
 ## Built-in cases
 

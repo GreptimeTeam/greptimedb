@@ -16,14 +16,21 @@
 """Admit a dispatched `/query-regression` command as a query-regression run.
 
 slash-command-dispatch owns comment parsing and admin permission. This script
-re-fetches the triggering comment by id (so a forged repository_dispatch
-payload cannot spoof the actor or PR), then validates case args, the
+requires the dispatch sender to be github-actions[bot], re-fetches the
+triggering comment by id (so a forged repository_dispatch payload cannot
+spoof the actor or PR), requires the current PR head to match the
+dispatcher-snapshotted head SHA, then validates case args, the
 QUERY_REGRESSION_COMMENT_ALLOWLIST subset, and the PR's current merge commit.
+On admit it posts a hidden HMAC-signed marker comment
+(QUERY_REGRESSION_ADMISSION_HMAC) that the sticky-comment workflow verifies;
+the ECS job cannot forge that marker.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -38,6 +45,7 @@ from typing import Any
 
 COMMAND = "/query-regression"
 ALLOWED_PERMISSIONS = frozenset({"admin"})
+ALLOWED_DISPATCH_SENDERS = frozenset({"github-actions[bot]"})
 FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 CASE_TOKEN = re.compile(r"^(?:all|heavy|tests/perf/query_cases/[A-Za-z0-9_][A-Za-z0-9_./-]*)$")
 COMMAND_LINE = re.compile(rf"^{re.escape(COMMAND)}(?:\s+(.*))?$")
@@ -123,6 +131,62 @@ def nested_str(payload: Any, *keys: str) -> str:
     return str(current)
 
 
+MARKER_PREFIX = "<!-- query-regression-admission v1"
+MARKER_SUFFIX = "-->"
+
+
+def admission_mac_message(identity: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(identity["run_id"]),
+            str(identity["pr_number"]),
+            str(identity["head_sha"]).lower(),
+            str(identity["head_repo"]),
+            str(identity["base_repo"]),
+            str(identity["candidate_sha"]).lower(),
+            str(identity["base_sha"]).lower(),
+        ]
+    )
+
+
+def sign_admission(secret: str, identity: dict[str, Any]) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        admission_mac_message(identity).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_admission_mac(secret: str, identity: dict[str, Any], mac: str) -> bool:
+    if not secret or not mac:
+        return False
+    expected = sign_admission(secret, identity)
+    try:
+        return hmac.compare_digest(expected, mac)
+    except (TypeError, ValueError):
+        return False
+
+
+def format_admission_marker(identity: dict[str, Any]) -> str:
+    body = json.dumps(identity, sort_keys=True)
+    return f"{MARKER_PREFIX}\n{body}\n{MARKER_SUFFIX}\n"
+
+
+def parse_admission_marker(body: str) -> dict[str, Any] | None:
+    start = (body or "").find(MARKER_PREFIX)
+    if start < 0:
+        return None
+    rest = body[start + len(MARKER_PREFIX) :]
+    end = rest.find(MARKER_SUFFIX)
+    if end < 0:
+        return None
+    try:
+        payload = json.loads(rest[:end].strip())
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def parse_github_id(value: str) -> int | None:
     stripped = (value or "").strip()
     if not stripped.isdigit():
@@ -131,24 +195,41 @@ def parse_github_id(value: str) -> int | None:
     return number if number > 0 else None
 
 
-def github_get(token: str, api_url: str, path: str) -> dict[str, Any]:
+def github_request(
+    token: str,
+    api_url: str,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if data is not None:
+        headers["Content-Type"] = "application/json"
     request = urllib.request.Request(
         f"{api_url.rstrip('/')}{path}",
-        method="GET",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        method=method,
+        data=data,
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", "replace")
         raise SystemExit(
-            f"GitHub API GET {path} failed: HTTP {error.code}: {body}"
+            f"GitHub API {method} {path} failed: HTTP {error.code}: {body}"
         ) from error
+
+
+def github_get(token: str, api_url: str, path: str) -> dict[str, Any]:
+    return github_request(token, api_url, path)
 
 
 def fetch_comment(token: str, api_url: str, repo: str, comment_id: int) -> dict[str, Any]:
@@ -206,6 +287,25 @@ def payload_matches_comment(
         return payload_command.error
     if payload_command.case != identity.command.case:
         return "payload command args do not match comment"
+    return ""
+
+
+def dispatch_sender_ok(sender: str) -> str:
+    """Empty if repository_dispatch came from Actions; otherwise a deny reason."""
+    login = (sender or "").strip().lstrip("@").lower()
+    if login not in ALLOWED_DISPATCH_SENDERS:
+        return "repository_dispatch sender is not github-actions[bot]"
+    return ""
+
+
+def dispatch_head_matches(pull: dict[str, Any], snapshot_sha: str) -> str:
+    """Empty if the current PR head is the dispatcher snapshot; otherwise a deny reason."""
+    snapshot = (snapshot_sha or "").strip().lower()
+    if not is_full_sha(snapshot):
+        return "dispatch payload is missing an immutable PR head SHA"
+    current = nested_str(pull, "head", "sha").lower()
+    if current != snapshot:
+        return "PR head changed since the slash command was dispatched"
     return ""
 
 
@@ -386,15 +486,25 @@ def write_outputs(decision: Decision) -> None:
         print(f"{key}={value}")
 
 
-def write_admission_identity(decision: Decision) -> None:
-    """Persist PR identity from the trusted admission job for the comment workflow."""
+def build_admission_identity(decision: Decision) -> dict[str, Any] | None:
+    """PR identity from the trusted admission job. MAC is added at persist time."""
     if decision.skip:
-        return
+        return None
     run_id = parse_github_id(os.environ.get("GITHUB_RUN_ID") or "")
     pr_number = parse_github_id(decision.pr_number)
     if run_id is None or pr_number is None:
-        return
-    payload = {
+        return None
+    if not all(
+        [
+            decision.head_sha,
+            decision.head_repo,
+            decision.base_repo,
+            decision.candidate_sha,
+            decision.base_sha,
+        ]
+    ):
+        return None
+    return {
         "pr_number": pr_number,
         "head_sha": decision.head_sha,
         "head_repo": decision.head_repo,
@@ -404,9 +514,46 @@ def write_admission_identity(decision: Decision) -> None:
         "run_id": run_id,
         "run_attempt": parse_github_id(os.environ.get("GITHUB_RUN_ATTEMPT") or "1") or 1,
     }
+
+
+def post_admission_marker(
+    token: str,
+    api_url: str,
+    repo: str,
+    identity: dict[str, Any],
+) -> None:
+    """Hide a signed identity on the admitted PR. ECS cannot forge this."""
+    github_request(
+        token,
+        api_url,
+        f"/repos/{repo}/issues/{identity['pr_number']}/comments",
+        method="POST",
+        payload={"body": format_admission_marker(identity)},
+    )
+
+
+def persist_admission_identity(
+    decision: Decision,
+    *,
+    token: str,
+    api_url: str,
+    repo: str,
+    secret: str,
+) -> str:
+    """Write the lookup artifact and post the HMAC marker. Empty string on success."""
+    if decision.skip:
+        return ""
+    if not secret.strip():
+        return "QUERY_REGRESSION_ADMISSION_HMAC is unset"
+    identity = build_admission_identity(decision)
+    if identity is None:
+        return "could not persist admission identity"
+    payload = {**identity, "mac": sign_admission(secret, identity)}
     with open("query-regression-admission.json", "w", encoding="utf-8") as handle:
         json.dump(payload, handle, sort_keys=True)
         handle.write("\n")
+    post_admission_marker(token, api_url, repo, payload)
+    return ""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -425,16 +572,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--allowlist",
         default=os.environ.get("QUERY_REGRESSION_COMMENT_ALLOWLIST") or "",
     )
+    parser.add_argument(
+        "--dispatch-sender",
+        default=os.environ.get("DISPATCH_SENDER") or "",
+    )
+    parser.add_argument(
+        "--dispatch-head-sha",
+        default=os.environ.get("DISPATCH_HEAD_SHA") or "",
+    )
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    comment_id = parse_github_id(str(args.comment_id))
-    if not args.repo or not args.token or comment_id is None:
-        print("--repo, --token, and a numeric --comment-id are required.", file=sys.stderr)
-        return 2
-
+def admit_dispatched_command(args: argparse.Namespace, comment_id: int) -> int:
     comment = fetch_comment(args.token, args.api_url, args.repo, comment_id)
     identity = identity_from_comment(comment, args.repo)
     pr_number = str(identity.pr_number or args.pr_number or "")
@@ -466,6 +615,20 @@ def main(argv: list[str] | None = None) -> int:
     allowlist = parse_allowlist(args.allowlist)
     permission = fetch_permission(args.token, args.api_url, args.repo, identity.actor)
     pull = fetch_pull(args.token, args.api_url, args.repo, identity.pr_number)
+    head_mismatch = dispatch_head_matches(pull, args.dispatch_head_sha)
+    if head_mismatch:
+        write_outputs(
+            deny(
+                head_mismatch,
+                reply=(
+                    "Query regression command ignored: the PR head changed since the "
+                    "command was dispatched. Review the current revision and comment "
+                    "`/query-regression` again."
+                ),
+                pr_number=str(identity.pr_number),
+            )
+        )
+        return 0
     decision = admit_pull(
         pull,
         actor=identity.actor,
@@ -475,9 +638,56 @@ def main(argv: list[str] | None = None) -> int:
         expected_repo=args.repo,
         pr_number=str(identity.pr_number),
     )
+    if not decision.skip:
+        persist_error = persist_admission_identity(
+            decision,
+            token=args.token,
+            api_url=args.api_url,
+            repo=args.repo,
+            secret=os.environ.get("QUERY_REGRESSION_ADMISSION_HMAC") or "",
+        )
+        if persist_error:
+            write_outputs(
+                deny(
+                    persist_error,
+                    reply=f"Query regression command ignored: {persist_error}.",
+                    pr_number=decision.pr_number,
+                )
+            )
+            print(persist_error, file=sys.stderr)
+            return 1
     write_outputs(decision)
-    write_admission_identity(decision)
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    comment_id = parse_github_id(str(args.comment_id))
+    if not args.repo or not args.token or comment_id is None:
+        print("--repo, --token, and a numeric --comment-id are required.", file=sys.stderr)
+        return 2
+
+    sender_error = dispatch_sender_ok(args.dispatch_sender)
+    if sender_error:
+        # Do not reply: the payload PR number is untrusted when the sender is not Actions.
+        write_outputs(deny(sender_error))
+        return 0
+
+    try:
+        return admit_dispatched_command(args, comment_id)
+    except SystemExit as error:
+        write_outputs(
+            deny(
+                f"admission failed: {error}",
+                reply=(
+                    "Query regression command ignored: GitHub API error while "
+                    "admitting; please retry."
+                ),
+                pr_number=str(args.pr_number or ""),
+            )
+        )
+        print(error, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

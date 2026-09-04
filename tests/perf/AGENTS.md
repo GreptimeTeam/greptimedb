@@ -23,12 +23,15 @@
 - PR comment admission is two workflows: `slash-command-dispatch.yml`
   (peter-evans/slash-command-dispatch) decides whether a `/command` should
   run and `repository_dispatch`es payload context; `query-regression-slash.yml`
-  handles `/query-regression` (allowlist, merge SHA, reusable call). Keep
-  case-arg validation in `.github/scripts/query-regression-slash.py`. The
-  admission job on ubuntu-latest uploads `query-regression-admission`; the
-  sticky-comment workflow requires it to match the runner artifact before
-  posting. There is no PR-label trigger. To add another command, list it in
-  the dispatcher and add a `repository_dispatch` handler.
+  handles `/query-regression` (allowlist, dispatcher head SHA, merge SHA,
+  reusable call). Keep case-arg validation and dispatch-sender/head checks in
+  `.github/scripts/query-regression-slash.py`. The
+  admission job on ubuntu-latest posts a hidden HMAC-signed marker comment on
+  the admitted PR and uploads `query-regression-admission` as a lookup hint.
+  The sticky-comment workflow verifies that marker (`QUERY_REGRESSION_ADMISSION_HMAC`,
+  never referenced from `query-regression.yml`) before posting. There is no
+  PR-label trigger. To add another command, list it in the dispatcher and add
+  a `repository_dispatch` handler.
 - The case DSL is not required to keep compatibility inside this PR. When the
   DSL changes, update TOML cases, the outer lifecycle script, Rust helpers, and
   docs together.

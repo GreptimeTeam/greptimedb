@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   actions: read
+  issues: read
   pull-requests: write
 
 jobs:
@@ -87,6 +88,7 @@ jobs:
         env:
           WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
           WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          QUERY_REGRESSION_ADMISSION_HMAC: ${{ secrets.QUERY_REGRESSION_ADMISSION_HMAC }}
         with:
           script: |
             const validate = require('./.github/scripts/query-regression-comment.cjs');

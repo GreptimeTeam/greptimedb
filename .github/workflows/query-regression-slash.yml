@@ -1,10 +1,10 @@
 name: Query Regression Command
 
 # Handler for `/query-regression`, dispatched by slash-command-dispatch.yml.
-# The payload has the comment, actor, args, and PR number; this workflow
-# re-fetches the comment by id as the source of truth, cross-checks the
-# payload, re-fetches the PR, admits an allowlisted admin, snapshots
-# merge/head/base SHAs, and calls the reusable Query Regression workflow.
+# Requires github-actions[bot] as the dispatch sender, re-fetches the
+# comment by id, requires the current PR head to match the dispatcher
+# snapshot, admits an allowlisted admin, snapshots merge/head/base SHAs,
+# and calls the reusable Query Regression workflow.
 
 on:
   repository_dispatch:
@@ -46,7 +46,12 @@ jobs:
           COMMENT_ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
           COMMAND_ARGS: ${{ github.event.client_payload.slash_command.args.unnamed.all || '' }}
           PR_NUMBER: ${{ github.event.client_payload.github.payload.issue.number }}
+          DISPATCH_SENDER: ${{ github.event.sender.login }}
+          DISPATCH_HEAD_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
           QUERY_REGRESSION_COMMENT_ALLOWLIST: ${{ vars.QUERY_REGRESSION_COMMENT_ALLOWLIST }}
+          # Never reference this secret in query-regression.yml: the ECS job
+          # would inherit it and could forge the admission marker.
+          QUERY_REGRESSION_ADMISSION_HMAC: ${{ secrets.QUERY_REGRESSION_ADMISSION_HMAC }}
         run: python3 .github/scripts/query-regression-slash.py
 
       - name: Summarize admission
@@ -87,7 +92,7 @@ jobs:
           overwrite: true
 
       - name: Reply with admission result
-        if: ${{ steps.admit.outputs.reply != '' }}
+        if: ${{ !cancelled() && steps.admit.outputs.reply != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPLY: ${{ steps.admit.outputs.reply }}
@@ -101,6 +106,8 @@ jobs:
     needs: [parse]
     if: ${{ needs.parse.outputs.skip == 'false' && needs.parse.outputs.candidate_sha != '' }}
     uses: ./.github/workflows/query-regression.yml
+    # inherit is for Aliyun/GH PAT used by provision/teardown. Do not
+    # reference QUERY_REGRESSION_ADMISSION_HMAC in the reusable workflow.
     secrets: inherit
     with:
       case: ${{ needs.parse.outputs.case }}

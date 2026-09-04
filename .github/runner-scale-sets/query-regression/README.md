@@ -45,6 +45,7 @@ Configuration lives in repository variables/secrets:
 | --- | --- | --- |
 | secret | `ALICLOUD_ECS_ACCESS_KEY_ID` / `ALICLOUD_ECS_ACCESS_KEY_SECRET` | RAM user scoped to ECS RunInstances/DeleteInstances/Describe*/CreateImage/RunCommand. Used only by provision/teardown jobs on `ubuntu-latest`; never reaches the ECS instance. |
 | secret | `GH_PERSONAL_ACCESS_TOKEN` | Creates the short-lived runner registration token (shared with the jsonbench EC2 path). Slash-command-dispatch uses `github.token` with `contents: write` for same-repo `repository_dispatch`. |
+| secret | `QUERY_REGRESSION_ADMISSION_HMAC` | HMAC-SHA256 key for the hidden admission marker comment. Injected only into the ubuntu-latest parse job and the sticky-comment workflow. Never reference it in `query-regression.yml` (the ECS job would inherit it). Empty fails closed: admit refuses, comments are skipped. |
 | vars | `ALIYUN_ECS_REGION_ID` / `ALIYUN_ECS_VSWITCH_ID` / `ALIYUN_ECS_SECURITY_GROUP_ID` | Network placement. The security group should allow egress only; no inbound rules are needed. The vSwitch pins the zone. |
 | vars | `ALIYUN_ECS_INSTANCE_TYPE` | Dedicated (non-burstable, non-shared) instance family. Prefer 32 GiB (e.g. `ecs.g8i.2xlarge`); `ecs.c9i.2xlarge` is 8c16g and nightly thin-LTO of greptime peaks above that. Both base and candidate clusters run on the same machine, so noisy neighbors break thresholds. |
 | vars | `QUERY_REGRESSION_ECS_IMAGE_ID` | Custom image built by `ecs-image/build-ecs-image.py`. |
@@ -111,22 +112,28 @@ six routine default cases; `/query-regression heavy` runs only the
 high-cardinality `prom_remote_write_7913` remote-write case.
 `slash-command-dispatch.yml` (`issue_comment` on the default branch) parses
 the command and `repository_dispatch`es; `query-regression-slash.yml` admits
-the revision so secrets work for fork PRs. It snapshots merge, head, and base
-SHAs at admission. A queued job fetches that immutable event merge SHA
+the revision so secrets work for fork PRs. Dispatch must come from
+`github-actions[bot]`. The handler requires the current PR head to equal the
+head SHA snapshotted in that dispatch (comment time, not handler start). If
+the head moved while queued, admission denies; comment `/query-regression`
+again after reviewing the new revision. It then snapshots merge, head, and
+base SHAs at admission. A queued job fetches that immutable event merge SHA
 directly, verifies it is a two-parent merge whose parents include the
 snapshotted head exactly once, and uses its other parent as the actual base
-build revision. The ubuntu-latest admission job also uploads a
-`query-regression-admission` artifact; the sticky-comment workflow will not
-post unless that identity matches the runner-produced metadata, so untrusted
-candidate code cannot retarget the report to another PR. The snapshotted event
-base is retained for audit only, so a difference from the merge's non-head
+build revision. The ubuntu-latest admission job posts a hidden HMAC-signed
+marker comment on the admitted PR and uploads `query-regression-admission` as
+a lookup hint. The sticky-comment workflow verifies that marker (and that the
+runner artifact matches it) before posting. Candidate code on ECS shares the
+run and can overwrite artifacts, but it cannot forge the marker: the reusable
+workflow's `GITHUB_TOKEN` is `contents: read` only, and
+`QUERY_REGRESSION_ADMISSION_HMAC` is never referenced there so it never
+reaches ECS. The snapshotted event base is retained for audit only, so a
+difference from the merge's non-head
 parent is not a failure. The job never
 follows a newer mutable PR merge ref. An unavailable event merge, or one that
-does not contain exactly one snapshotted head parent, fails closed. A later
-PR head change does not retarget an already queued run: it may execute only
-its previously trusted event revision if that revision remains fetchable. To
-run the new revision, the maintainer must review it and comment
-`/query-regression` again; cancel the old run if it is no longer wanted.
+does not contain exactly one snapshotted head parent, fails closed. An
+already-admitted run is not retargeted by a later push; cancel it if it is no
+longer wanted.
 
 The commenter must be in `QUERY_REGRESSION_COMMENT_ALLOWLIST` and have
 repository `admin` permission.
