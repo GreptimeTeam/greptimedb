@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use arrow_schema::{
-    ArrowError, DataType, DataType as ArrowDataType, Field, Schema as ArrowSchema,
+    ArrowError, DataType as ArrowDataType, Field, Schema as ArrowSchema,
     SchemaRef as ArrowSchemaRef, SortOptions,
 };
 use async_stream::stream;
@@ -42,14 +42,12 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
-use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_common::stats::Precision;
+use datafusion_common::{Column as ColumnExpr, DFSchemaRef, DataFusionError, Result, Statistics};
+use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
-use datatypes::extension::json::{
-    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
-    is_legacy_json2_extension_type,
-};
+use datatypes::extension::json::is_any_json_extension_type;
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -79,6 +77,50 @@ use crate::region_query::RegionQueryHandlerRef;
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
+}
+
+/// Returns a deterministic upper bound on rows emitted by the remote plan for one region.
+///
+/// Only explicit caps and row-non-increasing wrappers are followed. Nodes that may multiply
+/// rows fail open, so the result remains a sound upper bound.
+fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
+    match plan {
+        LogicalPlan::Limit(limit) => {
+            let input_bound = remote_plan_row_bound(&limit.input);
+            match limit.get_fetch_type() {
+                Ok(FetchType::Literal(Some(fetch))) => {
+                    Some(input_bound.map_or(fetch, |bound| bound.min(fetch)))
+                }
+                _ => input_bound,
+            }
+        }
+        LogicalPlan::Sort(sort) => {
+            let input_bound = remote_plan_row_bound(&sort.input);
+            sort.fetch
+                .map(|fetch| input_bound.map_or(fetch, |bound| bound.min(fetch)))
+                .or(input_bound)
+        }
+        LogicalPlan::Projection(projection) => remote_plan_row_bound(&projection.input),
+        LogicalPlan::Filter(filter) => remote_plan_row_bound(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => remote_plan_row_bound(&alias.input),
+        LogicalPlan::Window(window) => remote_plan_row_bound(&window.input),
+        LogicalPlan::Repartition(repartition) => remote_plan_row_bound(&repartition.input),
+        LogicalPlan::Distinct(distinct) => remote_plan_row_bound(distinct.input()),
+        LogicalPlan::Aggregate(aggregate) => {
+            if aggregate
+                .group_expr
+                .iter()
+                .any(|expr| matches!(expr, Expr::GroupingSet(_)))
+            {
+                None
+            } else if aggregate.group_expr.is_empty() {
+                Some(1)
+            } else {
+                remote_plan_row_bound(&aggregate.input)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
@@ -232,15 +274,53 @@ fn query_context_for_remote_dyn_filter_region(
     query_context_with_initial_dyn_filter_regs(query_ctx, region_id, captured_dyn_filters)
 }
 
-#[derive(Debug, Hash, PartialOrd, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
     /// In logical plan phase it only contains one input
     input: LogicalPlan,
+    /// Schema exposed to the local stage.
+    output_schema: DFSchemaRef,
     /// If this plan is a placeholder
     is_placeholder: bool,
     partition_cols: AliasMapping,
     /// Assigned after dist-plan rewriting so rewriters only deal with plan shape.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
+}
+
+impl PartialOrd for MergeScanLogicalPlan {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let Self {
+            input,
+            output_schema,
+            is_placeholder,
+            partition_cols,
+            remote_dyn_filter_producer_id,
+        } = self;
+        let Self {
+            input: other_input,
+            output_schema: other_output_schema,
+            is_placeholder: other_is_placeholder,
+            partition_cols: other_partition_cols,
+            remote_dyn_filter_producer_id: other_remote_dyn_filter_producer_id,
+        } = other;
+
+        let ordering = (
+            input,
+            is_placeholder,
+            partition_cols,
+            remote_dyn_filter_producer_id,
+        )
+            .partial_cmp(&(
+                other_input,
+                other_is_placeholder,
+                other_partition_cols,
+                other_remote_dyn_filter_producer_id,
+            ));
+        match ordering {
+            Some(std::cmp::Ordering::Equal) if output_schema != other_output_schema => None,
+            ordering => ordering,
+        }
+    }
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -255,7 +335,7 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
     }
 
     fn schema(&self) -> &datafusion_common::DFSchemaRef {
-        self.input.schema()
+        &self.output_schema
     }
 
     // Prevent further optimization
@@ -281,13 +361,21 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
+    /// Creates a merge scan with the input plan's schema.
     pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
         Self {
+            output_schema: input.schema().clone(),
             input,
             is_placeholder,
             partition_cols,
             remote_dyn_filter_producer_id: None,
         }
+    }
+
+    /// Replaces the schema exposed to the local stage.
+    pub(crate) fn with_output_schema(mut self, output_schema: DFSchemaRef) -> Self {
+        self.output_schema = output_schema;
+        self
     }
 
     pub(crate) fn with_remote_dyn_filter_producer_id(
@@ -373,7 +461,11 @@ impl MergeScanExec {
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
-        let arrow_schema = maybe_amend_json2_field(arrow_schema);
+        // JSON2 schemas are concretized by the analyzer before physical planning.
+        // Keep the selected boundary schema unchanged here so the physical plan,
+        // remote batches, and local consumers share the same contract.
+        let arrow_schema = Arc::new(arrow_schema.clone());
+        let output_partition_count = Self::output_partition_count(regions.len(), target_partition);
 
         // States the output ordering of the plan.
         //
@@ -383,7 +475,7 @@ impl MergeScanExec {
         //
         // Otherwise, we need to use the default ordering.
         let eq_properties = if let LogicalPlan::Sort(sort) = &plan
-            && target_partition >= regions.len()
+            && output_partition_count >= regions.len()
         {
             let lex_ordering = sort
                 .expr
@@ -422,7 +514,7 @@ impl MergeScanExec {
                 }
             })
             .collect();
-        let partitioning = Partitioning::Hash(partition_exprs, target_partition);
+        let partitioning = Partitioning::Hash(partition_exprs, output_partition_count);
 
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
@@ -449,6 +541,25 @@ impl MergeScanExec {
         })
     }
 
+    /// Conservative row-count upper bound for all selected regions.
+    fn estimated_num_rows(&self) -> Precision<usize> {
+        if self.regions.is_empty() {
+            return Precision::Inexact(0);
+        }
+
+        let Some(rows_per_region) = remote_plan_row_bound(&self.plan) else {
+            return Precision::Absent;
+        };
+        rows_per_region
+            .checked_mul(self.regions.len())
+            .map_or(Precision::Absent, Precision::Inexact)
+    }
+
+    /// Number of partitions populated by the region striping in [`Self::to_stream`].
+    fn output_partition_count(num_regions: usize, target_partition: usize) -> usize {
+        num_regions.max(1).min(target_partition.max(1))
+    }
+
     pub fn to_stream(
         &self,
         context: Arc<TaskContext>,
@@ -463,7 +574,8 @@ impl MergeScanExec {
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
-        let target_partition = self.target_partition;
+        let target_partition =
+            Self::output_partition_count(self.regions.len(), self.target_partition);
         let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
         let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
             self.captured_remote_dyn_filters()
@@ -769,7 +881,7 @@ impl MergeScanExec {
             metric: self.metric.clone(),
             properties: Arc::new(PlanProperties::new(
                 self.properties.eq_properties.clone(),
-                Partitioning::Hash(overlaps, self.target_partition),
+                Partitioning::Hash(overlaps, self.partition_count()),
                 self.properties.emission_type,
                 self.properties.boundedness,
             )),
@@ -820,7 +932,7 @@ impl MergeScanExec {
     }
 
     pub fn partition_count(&self) -> usize {
-        self.target_partition
+        Self::output_partition_count(self.regions.len(), self.target_partition)
     }
 
     pub fn region_count(&self) -> usize {
@@ -835,41 +947,6 @@ impl MergeScanExec {
             .cloned()
             .collect()
     }
-}
-
-// If the schema has JSON2 field, AND the field is of empty Struct datatype, amend it with Binary
-// datatype.
-// This is a very hacky way to make it possible to query the whole JSON2 column. Because when
-// querying a whole JSON2 column, like in the SQL `select * from ...`, we can't concretize the JSON2
-// datatype from the query. Hence, the JSON2 datatype remains what in the column schema, i.e., empty
-// Struct. An empty Struct is not alignable like any other concretized JSON2 datatypes, so to make
-// the query work, we amend(rewrite) it to Binary datatype.
-// Why the Binary datatype? Because underlying the scan and projection stage, the JSON2 data are
-// variant shape, will be all converted to bytes.
-// Anyway, this is not clean nor elegant. TODO(LFC) Maybe make it into some plan analyzer rule?
-fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
-    let schema = schema.clone();
-    let mut new_fields = Vec::with_capacity(schema.fields().len());
-    for field in schema.fields().iter() {
-        let new_field = if is_json2_extension_type(field)
-            && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
-        {
-            let is_legacy_json2 = is_legacy_json2_extension_type(field);
-            let mut new_field = field.as_ref().clone();
-            new_field.set_data_type(DataType::Binary);
-            if is_legacy_json2 {
-                new_field = new_field.with_extension_type(Json2ExtensionType::default());
-            }
-            Arc::new(new_field)
-        } else {
-            field.clone()
-        };
-        new_fields.push(new_field);
-    }
-    Arc::new(ArrowSchema::new_with_metadata(
-        new_fields,
-        schema.metadata().clone(),
-    ))
 }
 
 #[cfg(test)]
@@ -1085,6 +1162,16 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+        if partition.is_some() {
+            return Ok(Statistics::new_unknown(&self.arrow_schema));
+        }
+
+        let mut statistics = Statistics::new_unknown(&self.arrow_schema);
+        statistics.num_rows = self.estimated_num_rows();
+        Ok(statistics)
+    }
+
     fn name(&self) -> &str {
         "MergeScanExec"
     }
@@ -1231,10 +1318,7 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
-    use arrow_schema::extension::{
-        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
-    };
-    use arrow_schema::{DataType as TestArrowDataType, Field, Fields};
+    use arrow_schema::{DataType as TestArrowDataType, Field};
     use async_trait::async_trait;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
@@ -1303,6 +1387,30 @@ mod tests {
         .unwrap()
     }
 
+    fn merge_scan_exec_with_plan(
+        regions: Vec<RegionId>,
+        plan: LogicalPlan,
+        target_partition: usize,
+    ) -> MergeScanExec {
+        let session_state = SessionStateBuilder::new().build();
+        let schema = plan.schema().as_arrow().clone();
+
+        MergeScanExec::new(
+            &session_state,
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+            target_partition,
+            AliasMapping::new(),
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
     async fn collect_merge_scan(
         exec: MergeScanExec,
     ) -> datafusion_common::Result<Vec<DfRecordBatch>> {
@@ -1326,43 +1434,6 @@ mod tests {
             );
         }
         metadata
-    }
-
-    #[test]
-    fn test_amend_legacy_json2_field_preserves_json2_identity() {
-        let field = Field::new("j", TestArrowDataType::Struct(Fields::empty()), true)
-            .with_metadata(StdHashMap::from([
-                (
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    "greptime.json".to_string(),
-                ),
-                (
-                    EXTENSION_TYPE_METADATA_KEY.to_string(),
-                    serde_json::json!({
-                        "json_structure_settings": { "Structured": null }
-                    })
-                    .to_string(),
-                ),
-            ]));
-
-        let legacy_schema = ArrowSchema::new(vec![field]);
-        let amended = maybe_amend_json2_field(&legacy_schema);
-        let amended_field = amended.field(0);
-        assert_eq!(&TestArrowDataType::Binary, amended_field.data_type());
-        assert_eq!(
-            Some(Json2ExtensionType::NAME),
-            amended_field.extension_type_name()
-        );
-        assert!(is_json2_extension_type(amended_field));
-
-        // The remote wire schema is Binary, while the legacy advertised schema
-        // still carries the greptime.json identity. MergeScan must accept the
-        // amended JSON2 field as the corresponding remote column.
-        let wire_schema = ArrowSchema::new(vec![
-            Field::new("j", TestArrowDataType::Binary, true)
-                .with_metadata(legacy_schema.field(0).metadata().clone()),
-        ]);
-        assert!(validate_remote_schema(&wire_schema, amended.as_ref(), "legacy json2").is_ok());
     }
 
     #[test]
@@ -1880,6 +1951,118 @@ mod tests {
         let exec = merge_scan_exec_with_sorted_input(3, 4);
 
         assert!(exec.properties().output_ordering().is_some());
+    }
+
+    #[test]
+    fn merge_scan_reports_populated_partition_count() {
+        let cases = [(0, 10, 1), (1, 10, 1), (3, 2, 2), (5, 10, 5), (3, 0, 1)];
+
+        for (region_count, target, expected) in cases {
+            let exec = merge_scan_exec_with_sorted_input(region_count, target);
+            assert_eq!(exec.partition_count(), expected);
+            assert_eq!(
+                exec.properties().output_partitioning().partition_count(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn merge_scan_reports_only_deterministic_plan_bounds() {
+        use datafusion::functions_aggregate::expr_fn::count;
+        use datafusion_expr::GroupingSet;
+
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let limited = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), limited, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(100)
+        );
+
+        let large_bound = i32::MAX as usize + 1;
+        let large_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(large_bound))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(vec![RegionId::new(1024, 1)], large_limit, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(large_bound)
+        );
+
+        let uncapped = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), uncapped.clone(), 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
+        assert_eq!(
+            merge_scan_exec_with_plan(Vec::new(), uncapped, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(0)
+        );
+
+        let global_aggregate = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(0))
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), global_aggregate, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(2)
+        );
+
+        let grouping_sets = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .aggregate(
+                vec![Expr::GroupingSet(GroupingSet::GroupingSets(vec![
+                    vec![],
+                    vec![col("col")],
+                ]))],
+                Vec::<Expr>::new(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions, grouping_sets, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
     }
 
     #[test]
