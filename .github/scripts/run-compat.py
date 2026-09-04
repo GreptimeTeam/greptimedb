@@ -37,6 +37,7 @@ from pathlib import Path
 
 
 VERSION_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+PARQUET_FOOTER_CASE_FILTER = "^parquet_copy_footer_compatibility$"
 
 
 def parse_args() -> argparse.Namespace:
@@ -201,6 +202,22 @@ def run_for_version(
         preserve_state=preserve_state,
     )
 
+    parquet_base_command = [
+        *base_command,
+        "--topology",
+        "standalone",
+        "--test-filter",
+        PARQUET_FOOTER_CASE_FILTER,
+        "--expect-cases",
+        "1",
+    ]
+    run_compat(
+        base_command=parquet_base_command,
+        preview_title=f"Preview {from_version} -> current (standalone Parquet footer)",
+        compatibility_title=f"Compatibility {from_version} -> current (standalone Parquet footer)",
+        preserve_state=preserve_state,
+    )
+
 
 def run_downgrade_for_version(
     *,
@@ -231,6 +248,27 @@ def run_downgrade_for_version(
             compatibility_title=f"Compatibility current -> {to_version} ({topology})",
             preserve_state=preserve_state,
         )
+
+    parquet_base_command = [
+        str(runner),
+        "compat",
+        "--from-bins-dir",
+        str(current_bins_dir),
+        "--to-version",
+        to_version,
+        "--topology",
+        "standalone",
+        "--test-filter",
+        PARQUET_FOOTER_CASE_FILTER,
+        "--expect-cases",
+        "1",
+    ]
+    run_compat(
+        base_command=parquet_base_command,
+        preview_title=f"Preview current -> {to_version} (standalone Parquet footer)",
+        compatibility_title=f"Compatibility current -> {to_version} (standalone Parquet footer)",
+        preserve_state=preserve_state,
+    )
 
 
 def main() -> int:

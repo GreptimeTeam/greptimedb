@@ -1,0 +1,9 @@
+name = "parquet_copy_footer_compatibility"
+reason = "Verify both directions: current imports legacy Parquet without greptime.table_name, and v1.1.4 imports current Parquet with the footer key."
+introduced_by = "PR #8766"
+topologies = ["standalone"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["copy", "parquet"]
+owner = "query"
+namespace = "parquet_copy_footer_compatibility"
