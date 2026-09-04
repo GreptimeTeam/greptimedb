@@ -26,7 +26,7 @@ use sqlparser::ast::{ColumnDef, DataType, Expr, Ident, ObjectName, TableConstrai
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::statements::OptionMap;
-use crate::statements::create::Partitions;
+use crate::statements::create::{Json2Options, Partitions};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterTable {
@@ -86,6 +86,7 @@ pub enum AlterTableOperation {
     ModifyColumnType {
         column_name: Ident,
         target_type: DataType,
+        json2_options: Option<Json2Options>,
     },
     /// `SET <table attrs key> = <table attr value>`
     SetTableOptions {
@@ -256,8 +257,13 @@ impl Display for AlterTableOperation {
             AlterTableOperation::ModifyColumnType {
                 column_name,
                 target_type,
+                json2_options,
             } => {
-                write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)
+                write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)?;
+                if let Some(options) = json2_options {
+                    write!(f, "{options}")?;
+                }
+                Ok(())
             }
             AlterTableOperation::SetTableOptions { options } => {
                 let kvs = options
