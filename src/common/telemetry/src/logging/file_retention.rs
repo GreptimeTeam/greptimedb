@@ -57,7 +57,8 @@ impl LogFileKind {
         [Self::SlowQuery, Self::Error, Self::Default]
             .into_iter()
             .find_map(|kind| {
-                name.strip_prefix(&format!("{}.", kind.prefix()))
+                name.strip_prefix(kind.prefix())
+                    .and_then(|suffix| suffix.strip_prefix('.'))
                     .filter(|suffix| Self::is_hourly_suffix(suffix))
                     .map(|_| kind)
             })
