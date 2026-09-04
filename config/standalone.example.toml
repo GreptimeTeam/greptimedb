@@ -956,6 +956,11 @@ default_ratio = 1.0
 ## @toml2docs:none-default
 #+ tokio_console_addr = "127.0.0.1"
 
+## The pipeline options.
+[pipeline]
+## Time to live of the local pipeline cache. Default is `10s`.
+cache_ttl = "10s"
+
 ## Configuration options for the event recorder.
 [event_recorder]
 ## TTL for the events table that will be used to store the events. Default is `90d`.

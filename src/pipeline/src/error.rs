@@ -699,6 +699,15 @@ pub enum Error {
         location: Location,
     },
 
+    /// Concurrent cache misses on the same key share a single loader, so the
+    /// loader's error is shared behind an `Arc` and cannot be unwrapped.
+    #[snafu(display("Failed to load pipeline into cache: {}", error))]
+    CacheLoad {
+        error: std::sync::Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect record batch"))]
     CollectRecords {
         #[snafu(implicit)]
@@ -895,6 +904,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            CacheLoad { error, .. } => error.status_code(),
             CastType { .. } => StatusCode::Unexpected,
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
