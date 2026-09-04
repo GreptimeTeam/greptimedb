@@ -31,12 +31,10 @@ const PIPELINES_CACHE_SIZE: u64 = 10000;
 /// Pipeline cache is located on a separate file on purpose,
 /// to encapsulate inner cache. Only public methods are exposed.
 ///
-/// The two loaded caches are keyed by the *requested* schema rather than the
-/// schema the pipeline is stored under, so a lookup is a single key probe and
-/// can be served by [`Cache::try_get_with`]. Resolving which stored schema a
-/// request maps to happens in the loader, which is the authoritative path.
-/// `failover_cache` has no loader and so keeps the stored-schema key; see
-/// [`PipelineCache::get_failover_cache`].
+/// `pipelines` and `original_pipelines` are keyed by the *requested* schema so
+/// a lookup is a single key probe, as [`Cache::try_get_with`] requires;
+/// resolving it to a stored schema is the loader's job. `failover_cache` has no
+/// loader and keeps the stored-schema key.
 pub(crate) struct PipelineCache {
     pipelines: Cache<String, Arc<Pipeline>>,
     original_pipelines: Cache<String, PipelineContent>,
@@ -73,8 +71,7 @@ impl PipelineCache {
         }
     }
 
-    /// Get the compiled pipeline, running `init` only on a miss. Concurrent
-    /// misses on the same key share one `init` call.
+    /// Concurrent misses on the same key share one `init` call.
     pub(crate) async fn get_pipeline_with(
         &self,
         schema: &str,
@@ -89,8 +86,7 @@ impl PipelineCache {
             .map_err(|error| CacheLoadSnafu { error }.build())
     }
 
-    /// Get the pipeline definition, running `init` only on a miss. Concurrent
-    /// misses on the same key share one `init` call.
+    /// Concurrent misses on the same key share one `init` call.
     pub(crate) async fn get_pipeline_str_with(
         &self,
         schema: &str,
@@ -105,11 +101,8 @@ impl PipelineCache {
             .map_err(|error| CacheLoadSnafu { error }.build())
     }
 
-    /// The failover cache is not subject to the single-key model of
-    /// [`Cache::try_get_with`], so it stays keyed by the schema the pipeline is
-    /// stored under. A pipeline stored under the empty schema is therefore
-    /// reachable from any schema, even one that never loaded it before the
-    /// pipeline table became unavailable.
+    /// Resolves across schemas, unlike the loaded caches: a pipeline stored
+    /// under the empty schema is reachable from any schema.
     pub(crate) async fn get_failover_cache(
         &self,
         schema: &str,
@@ -125,8 +118,7 @@ impl PipelineCache {
             }
         }
 
-        // The pipeline may be stored under some other schema. That is
-        // unambiguous only if exactly one such schema has it.
+        // Stored under some other schema; unambiguous only if exactly one has it.
         let suffix = generate_pipeline_cache_key_suffix(name, version);
         let mut found = self
             .failover_cache
@@ -161,12 +153,16 @@ impl PipelineCache {
         }
     }
 
-    /// Drop cached entries for `name` across all schemas and all three caches:
-    /// the `latest` alias always, plus `version` when given.
-    ///
-    /// Creating a pipeline passes `None`: the new version supersedes whatever
-    /// `latest` resolved to, and a schema that had already cached an older
-    /// version would otherwise keep transforming data with it until expiry.
+    /// Dropping the stale `latest` aliases also clears the failover entries, so
+    /// the new version is written back: an outage before the first read-back
+    /// would otherwise have nothing to fall back on.
+    pub(crate) async fn on_pipeline_created(&self, content: PipelineContent) {
+        self.invalidate(&content.name, None).await;
+        self.insert_failover_cache(content, true).await;
+    }
+
+    /// Sweeps every schema and all three caches: the `latest` alias always,
+    /// plus `version` when given.
     pub(crate) async fn invalidate(&self, name: &str, version: PipelineVersion) {
         let mut suffixes = vec![generate_pipeline_cache_key_suffix(name, None)];
         if version.is_some() {
@@ -199,7 +195,7 @@ mod tests {
 
     use super::*;
 
-    /// A pipeline stored under the empty schema, i.e. visible from every schema.
+    /// Stored under the empty schema, i.e. visible from every schema.
     fn content_at(version: i64) -> PipelineContent {
         PipelineContent {
             name: "p".to_string(),
@@ -241,8 +237,6 @@ mod tests {
         assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
-    /// Deleting a specific version must drop the version-pinned key, not just
-    /// the `latest` alias.
     #[tokio::test]
     async fn test_delete_drops_version_pinned_entry() {
         let cache = PipelineCache::new(Duration::from_secs(60));
@@ -267,11 +261,8 @@ mod tests {
         assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
-    /// The `latest` sweep must reach every schema, not just the one that
-    /// triggered it, and must cover `original_pipelines` — where an entry read
-    /// through `get_pipeline_str` lives alone.
     #[tokio::test]
-    async fn test_invalidate_latest_sweeps_all_schemas() {
+    async fn test_create_drops_stale_latest_and_primes_failover() {
         let cache = PipelineCache::new(Duration::from_secs(60));
         let v2 = content_at(2);
 
@@ -279,8 +270,9 @@ mod tests {
             .get_pipeline_str_with("a", "p", None, async { Ok(content_at(1)) })
             .await
             .unwrap();
+        cache.insert_failover_cache(content_at(1), true).await;
 
-        cache.invalidate("p", None).await;
+        cache.on_pipeline_created(v2.clone()).await;
 
         let loads = AtomicUsize::new(0);
         let cached = cache
@@ -292,11 +284,11 @@ mod tests {
             .unwrap();
         assert_eq!(loads.load(Ordering::SeqCst), 1);
         assert_eq!(cached.version, v2.version);
+
+        let failover = cache.get_failover_cache("b", "p", None).await.unwrap();
+        assert_eq!(failover.map(|c| c.version), Some(v2.version));
     }
 
-    /// A pipeline stored under the empty schema is global. Once any schema has
-    /// loaded it, a schema reaching it for the first time while the pipeline
-    /// table is down must still be served from the failover cache.
     #[tokio::test]
     async fn test_failover_serves_global_pipeline_to_unwarmed_schema() {
         let cache = PipelineCache::new(Duration::from_secs(60));
@@ -307,8 +299,7 @@ mod tests {
         let found = cache.get_failover_cache("b", "p", None).await.unwrap();
         assert_eq!(found, Some(content.clone()));
 
-        // A same-named pipeline stored under some other schema must not make the
-        // lookup ambiguous: the global one wins.
+        // A same-named pipeline under another schema must not shadow the global one.
         let schema_local = PipelineContent {
             schema: "x".to_string(),
             ..content_at(2)

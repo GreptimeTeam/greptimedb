@@ -699,8 +699,8 @@ pub enum Error {
         location: Location,
     },
 
-    /// Concurrent cache misses on the same key share a single loader, so the
-    /// loader's error is shared behind an `Arc` and cannot be unwrapped.
+    /// `try_get_with` shares one loader across concurrent misses, so its error
+    /// arrives behind an `Arc`.
     #[snafu(display("Failed to load pipeline into cache: {}", error))]
     CacheLoad {
         error: std::sync::Arc<Error>,

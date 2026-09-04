@@ -379,7 +379,14 @@ impl PipelineTable {
             .insert_pipeline_to_pipeline_table(name, content_type, pipeline)
             .await?;
 
-        self.cache.invalidate(name, None).await;
+        self.cache
+            .on_pipeline_created(PipelineContent {
+                name: name.to_string(),
+                content: pipeline.to_string(),
+                version: TimestampNanosecond(version),
+                schema: EMPTY_SCHEMA_NAME.to_string(),
+            })
+            .await;
 
         Ok((version, compiled_pipeline))
     }
@@ -447,7 +454,6 @@ impl PipelineTable {
             output
         );
 
-        // remove cache with version and latest
         self.cache.invalidate(name, version).await;
 
         Ok(Some(()))

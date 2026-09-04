@@ -10806,7 +10806,6 @@ dependencies = [
  "sql",
  "table",
  "tokio",
- "toml 0.8.23",
  "urlencoding",
  "vrl",
  "yaml-rust",
