@@ -71,9 +71,7 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
-use crate::sst::parquet::{
-    PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding,
-};
+use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 

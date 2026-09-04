@@ -33,8 +33,7 @@ use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
 use store_api::mito_engine_options::{
-    COMPACTION_OVERRIDE, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, FloatFieldEncoding,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+    COMPACTION_OVERRIDE, FloatFieldEncoding, MAX_ROW_GROUP_ROW_COUNT_LIMIT,
 };
 use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
@@ -279,9 +278,7 @@ impl RegionOptions {
             sst_format = Some(FormatType::Flat);
         }
 
-        let float_field_encoding = options
-            .float_field_encoding
-            .unwrap_or_default();
+        let float_field_encoding = options.float_field_encoding.unwrap_or_default();
 
         let compaction_override_flag = options_map
             .get(COMPACTION_OVERRIDE)
@@ -598,7 +595,9 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_wal::options::KafkaWalOptions;
-    use store_api::mito_engine_options::{SKIP_WAL_KEY, WRITE_BUFFER_SIZE_KEY};
+    use store_api::mito_engine_options::{
+        EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, SKIP_WAL_KEY, WRITE_BUFFER_SIZE_KEY,
+    };
 
     use super::*;
 

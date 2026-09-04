@@ -554,8 +554,11 @@ where
                 .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
                 .set_column_dictionary_enabled(ts_col, false)
                 .set_column_compression(op_type_col, Compression::UNCOMPRESSED);
-            let props_builder =
-                apply_float_field_encoding(props_builder, &self.metadata, opts.float_field_encoding);
+            let props_builder = apply_float_field_encoding(
+                props_builder,
+                &self.metadata,
+                opts.float_field_encoding,
+            );
             let writer_props = props_builder.build();
 
             let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(

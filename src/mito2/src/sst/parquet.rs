@@ -17,12 +17,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use common_base::readable_size::ReadableSize;
 use datatypes::json::JsonSettings;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterPropertiesBuilder;
 use parquet::schema::types::ColumnPath;
-use store_api::metadata::{RegionMetadataRef, SemanticType};
+use store_api::metadata::RegionMetadataRef;
 use store_api::mito_engine_options::FloatFieldEncoding;
 use store_api::storage::{ColumnId, FileId};
 
@@ -180,8 +181,8 @@ mod tests {
     use parquet::file::properties::WriterProperties;
     use parquet::schema::types::ColumnPath;
     use store_api::codec::PrimaryKeyEncoding;
-    use store_api::mito_engine_options::FloatFieldEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
+    use store_api::mito_engine_options::FloatFieldEncoding;
     use store_api::region_request::PathType;
     use store_api::storage::{ColumnSchema, RegionId};
     use table::predicate::Predicate;
@@ -278,32 +279,65 @@ mod tests {
             Field::new("f64", DataType::Float64, true),
             Field::new("tag", DataType::Float32, true),
             Field::new("i32", DataType::Int32, true),
-            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
         ]));
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(Float32Array::from(f32_values.to_vec())) as ArrayRef,
                 Arc::new(Float64Array::from(f64_values.to_vec())) as ArrayRef,
-                Arc::new(Float32Array::from(vec![Some(1.0), None, Some(-0.0), Some(2.0), Some(3.0), Some(4.0), None])),
-                Arc::new(Int32Array::from(vec![Some(1), None, Some(3), Some(4), Some(5), Some(6), None])),
+                Arc::new(Float32Array::from(vec![
+                    Some(1.0),
+                    None,
+                    Some(-0.0),
+                    Some(2.0),
+                    Some(3.0),
+                    Some(4.0),
+                    None,
+                ])),
+                Arc::new(Int32Array::from(vec![
+                    Some(1),
+                    None,
+                    Some(3),
+                    Some(4),
+                    Some(5),
+                    Some(6),
+                    None,
+                ])),
                 Arc::new(TimestampMillisecondArray::from_iter_values(0..7)),
             ],
         )
         .unwrap();
 
         let path = |name: &str| ColumnPath::new(vec![name.to_string()]);
-        let bss = apply_float_field_encoding(WriterProperties::builder(), &metadata,
-            FloatFieldEncoding::ByteStreamSplit);
-        assert_eq!(Some(Encoding::BYTE_STREAM_SPLIT), bss.clone().build().encoding(&path("f32")));
-        assert_eq!(Some(Encoding::BYTE_STREAM_SPLIT), bss.clone().build().encoding(&path("f64")));
+        let bss = apply_float_field_encoding(
+            WriterProperties::builder(),
+            &metadata,
+            FloatFieldEncoding::ByteStreamSplit,
+        );
+        assert_eq!(
+            Some(Encoding::BYTE_STREAM_SPLIT),
+            bss.clone().build().encoding(&path("f32"))
+        );
+        assert_eq!(
+            Some(Encoding::BYTE_STREAM_SPLIT),
+            bss.clone().build().encoding(&path("f64"))
+        );
         assert!(!bss.clone().build().dictionary_enabled(&path("f32")));
         assert!(!bss.clone().build().dictionary_enabled(&path("f64")));
         assert_eq!(None, bss.clone().build().encoding(&path("i32")));
         assert!(bss.clone().build().dictionary_enabled(&path("tag")));
 
-        let default = apply_float_field_encoding(WriterProperties::builder().set_encoding(Encoding::PLAIN),
-            &metadata, FloatFieldEncoding::Default).build();
+        let default = apply_float_field_encoding(
+            WriterProperties::builder().set_encoding(Encoding::PLAIN),
+            &metadata,
+            FloatFieldEncoding::Default,
+        )
+        .build();
         assert_eq!(Some(Encoding::PLAIN), default.encoding(&path("f32")));
         assert!(default.dictionary_enabled(&path("f32")));
         assert!(default.dictionary_enabled(&path("f64")));
@@ -313,15 +347,32 @@ mod tests {
         writer.write(&batch).unwrap();
         let footer = writer.finish().unwrap();
         for name in ["f32", "f64"] {
-            let column = footer.row_groups()[0].columns().iter()
-                .find(|column| column.column_path().string() == name).unwrap();
-            assert!(column.encodings().any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT));
+            let column = footer.row_groups()[0]
+                .columns()
+                .iter()
+                .find(|column| column.column_path().string() == name)
+                .unwrap();
+            assert!(
+                column
+                    .encodings()
+                    .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+            );
         }
         let mut reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
-            .unwrap().build().unwrap();
+            .unwrap()
+            .build()
+            .unwrap();
         let actual = reader.next().unwrap().unwrap();
-        let actual_f32 = actual.column(0).as_any().downcast_ref::<Float32Array>().unwrap();
-        let actual_f64 = actual.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let actual_f32 = actual
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        let actual_f64 = actual
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
         for (index, value) in f32_values.into_iter().enumerate() {
             assert_eq!(value.is_none(), actual_f32.is_null(index));
             if let Some(value) = value {

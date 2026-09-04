@@ -775,11 +775,10 @@ mod tests {
                 .get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING),
             Some(&"byte_stream_split".to_string())
         );
-        assert!(TableOptions::try_from_iter([(
-            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
-            "invalid",
-        )])
-        .is_err());
+        assert!(
+            TableOptions::try_from_iter([(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "invalid",)])
+                .is_err()
+        );
     }
 
     #[test]
