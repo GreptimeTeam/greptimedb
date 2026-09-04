@@ -54,6 +54,10 @@ lazy_static! {
         "greptime_logstore_op_elapsed",
         "logstore operation elapsed",
         &[LOGSTORE_LABEL, OPTYPE_LABEL],
+        vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+            45.0, 60.0,
+        ],
     )
     .unwrap();
     /// Timer of the append_batch operation on the kafka logstore.
@@ -85,4 +89,24 @@ lazy_static! {
         &[LOGSTORE_LABEL, PARTITION_LABEL],
     )
     .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use prometheus::core::Collector;
+
+    use super::*;
+
+    #[test]
+    fn test_logstore_op_elapsed_buckets() {
+        for metric in METRIC_LOGSTORE_OP_ELAPSED.collect()[0].get_metric() {
+            let upper_bounds = metric
+                .get_histogram()
+                .get_bucket()
+                .iter()
+                .map(|bucket| bucket.get_upper_bound())
+                .collect::<Vec<_>>();
+            assert_eq!(LOGSTORE_OP_ELAPSED_BUCKETS, upper_bounds.as_slice());
+        }
+    }
 }

@@ -12671,7 +12671,7 @@ dependencies = [
 [[package]]
 name = "rskafka"
 version = "0.6.0"
-source = "git+https://github.com/GreptimeTeam/rskafka.git?rev=f5688f83e7da591cda3f2674c2408b4c0ed4ed50#f5688f83e7da591cda3f2674c2408b4c0ed4ed50"
+source = "git+https://github.com/GreptimeTeam/rskafka.git?rev=ba4db85a69312a231a22e8d96e67d8a4207862a3#ba4db85a69312a231a22e8d96e67d8a4207862a3"
 dependencies = [
  "bytes",
  "chrono",
