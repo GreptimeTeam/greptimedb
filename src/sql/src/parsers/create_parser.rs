@@ -325,11 +325,55 @@ impl<'a> ParserContext<'a> {
             None
         };
 
-        let eval_interval = if self
-            .parser
-            .consume_tokens(&[Token::make_keyword("EVAL"), Token::make_keyword("INTERVAL")])
-        {
-            Some(self.parse_interval_no_month("EVAL INTERVAL")?)
+        let (eval_interval, eval_interval_has_fractional_secs) =
+            if self.consume_eval_pair("INTERVAL") {
+                let (secs, has_fractional) =
+                    self.parse_interval_no_month_whole_secs("EVAL INTERVAL")?;
+                (Some(secs), has_fractional)
+            } else {
+                (None, false)
+            };
+
+        // `EVAL OFFSET` is only legal together with `EVAL INTERVAL`. The phase
+        // offset must be a whole number of seconds; when an offset is present
+        // the interval must also be whole seconds (never silently truncated).
+        let eval_offset = if self.consume_eval_pair("OFFSET") {
+            let Some(eval_interval) = eval_interval else {
+                return InvalidIntervalSnafu {
+                    reason: "EVAL OFFSET requires EVAL INTERVAL to be specified".to_string(),
+                }
+                .fail();
+            };
+            let (offset_secs, has_fractional) =
+                self.parse_interval_no_month_whole_secs("EVAL OFFSET")?;
+            if has_fractional {
+                return InvalidIntervalSnafu {
+                    reason: "EVAL OFFSET must be a whole number of seconds".to_string(),
+                }
+                .fail();
+            }
+            if eval_interval_has_fractional_secs {
+                return InvalidIntervalSnafu {
+                    reason: "EVAL INTERVAL must be a whole number of seconds when EVAL OFFSET is specified"
+                        .to_string(),
+                }
+                .fail();
+            }
+            if !(0..eval_interval).contains(&offset_secs) {
+                return InvalidIntervalSnafu {
+                    reason: format!(
+                        "EVAL OFFSET must be in range [0, EVAL INTERVAL), got {offset_secs} seconds with EVAL INTERVAL {eval_interval} seconds"
+                    ),
+                }
+                .fail();
+            }
+            // Canonicalize a zero offset to `None` (the default epoch-anchored
+            // schedule) so that parse/display/reparse round-trips are stable.
+            if offset_secs == 0 {
+                None
+            } else {
+                Some(offset_secs)
+            }
         } else {
             None
         };
@@ -372,6 +416,7 @@ impl<'a> ParserContext<'a> {
             if_not_exists,
             expire_after,
             eval_interval,
+            eval_offset,
             comment,
             flow_options: flow_option_map(flow_options),
             query,
@@ -437,6 +482,15 @@ impl<'a> ParserContext<'a> {
 
     /// Parse the interval expr to duration in seconds.
     fn parse_interval_no_month(&mut self, context: &str) -> Result<i64> {
+        Ok(self.parse_interval_no_month_whole_secs(context)?.0)
+    }
+
+    /// Parses an interval that must not contain months and returns the total
+    /// whole seconds together with whether the interval contains a sub-second
+    /// fraction. Whole seconds are computed by truncating the nanosecond part;
+    /// callers that require exact whole-second precision (e.g. `EVAL OFFSET`)
+    /// must reject `has_fractional_secs`.
+    fn parse_interval_no_month_whole_secs(&mut self, context: &str) -> Result<(i64, bool)> {
         let interval = self.parse_interval_month_day_nano()?.0;
         if interval.months != 0 {
             return InvalidIntervalSnafu {
@@ -444,13 +498,30 @@ impl<'a> ParserContext<'a> {
             }
             .fail();
         }
-        Ok(
-            interval.nanoseconds / 1_000_000_000
-                + interval.days as i64 * 60 * 60 * 24
-                + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
-                                                                       // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
-                                                                       // which we use in database to parse i.e. ttl interval and many other intervals
-        )
+        let has_fractional_secs = interval.nanoseconds % 1_000_000_000 != 0;
+        let whole_secs = interval.nanoseconds / 1_000_000_000 + interval.days as i64 * 60 * 60 * 24;
+        Ok((whole_secs, has_fractional_secs))
+    }
+
+    /// Consumes an `EVAL <keyword>` token pair case-insensitively.
+    ///
+    /// `EVAL` is not a sqlparser keyword, so a plain
+    /// `consume_tokens([Token::make_keyword("EVAL"), ...])` comparison would be
+    /// case-sensitive on the word value and reject lower-case `eval interval`.
+    fn consume_eval_pair(&mut self, second: &str) -> bool {
+        let matches = matches!(
+            (
+                &self.parser.peek_token().token,
+                &self.parser.peek_nth_token(1).token,
+            ),
+            (Token::Word(w1), Token::Word(w2))
+                if w1.value.eq_ignore_ascii_case("EVAL") && w2.value.eq_ignore_ascii_case(second)
+        );
+        if matches {
+            self.parser.next_token();
+            self.parser.next_token();
+        }
+        matches
     }
 
     /// Parse interval expr to [`IntervalMonthDayNano`].
@@ -1721,6 +1792,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 if_not_exists: expected.if_not_exists,
                 expire_after: expected.expire_after,
                 eval_interval: None,
+                eval_offset: None,
                 comment: expected.comment,
                 flow_options: expected.flow_options,
                 // ignore query parse result
@@ -1766,6 +1838,9 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
             /// Duration in seconds as `i64`
             /// If not set, flow will be evaluated based on time window size and other args.
             pub eval_interval: Option<i64>,
+            /// Phase offset of the flow evaluation schedule within `eval_interval`.
+            /// Duration in seconds as `i64`.
+            pub eval_offset: Option<i64>,
             /// Comment string
             pub comment: Option<String>,
             /// Flow creation options
@@ -1792,6 +1867,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     eval_interval: None,
+                    eval_offset: None,
                     comment: Some("test comment".to_string()),
                     flow_options: OptionMap::default(),
                 },
@@ -1814,6 +1890,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     eval_interval: None,
+                    eval_offset: None,
                     comment: Some("test comment".to_string()),
                     flow_options: OptionMap::default(),
                 },
@@ -1837,6 +1914,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     eval_interval: Some(10),
+                    eval_offset: None,
                     comment: Some("test comment".to_string()),
                     flow_options: OptionMap::default(),
                 },
@@ -1860,6 +1938,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     eval_interval: Some(10),
+                    eval_offset: None,
                     comment: Some("test comment".to_string()),
                     flow_options: OptionMap::default(),
                 },
@@ -1883,6 +1962,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: false,
                     expire_after: Some(2 * 86400 + 3600 + 2 * 60),
                     eval_interval: None,
+                    eval_offset: None,
                     comment: None,
                     flow_options: OptionMap::default(),
                 },
@@ -1905,6 +1985,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: false,
                     expire_after: None,
                     eval_interval: Some(10),
+                    eval_offset: None,
                     comment: None,
                     flow_options: string_option_map([
                         ("defer_on_missing_source", "true"),
@@ -1924,6 +2005,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 if_not_exists: expected.if_not_exists,
                 expire_after: expected.expire_after,
                 eval_interval: expected.eval_interval,
+                eval_offset: expected.eval_offset,
                 comment: expected.comment,
                 flow_options: expected.flow_options,
                 // ignore query parse result
@@ -1935,6 +2017,142 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
             let recreated = parse_create_flow(&show_create);
             assert_eq!(recreated, expected, "input sql is:\n{show_create}");
         }
+    }
+
+    #[test]
+    fn test_parse_create_flow_with_eval_offset() {
+        use pretty_assertions::assert_eq;
+        fn parse_create_flow(sql: &str) -> CreateFlow {
+            let stmts = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(1, stmts.len());
+            match &stmts[0] {
+                Statement::CreateFlow(c) => c.clone(),
+                _ => panic!("{:?}", stmts[0]),
+            }
+        }
+        let sql = r#"
+CREATE FLOW task_1
+SINK TO schema_1.table_1
+EVAL INTERVAL '1 hour'
+EVAL OFFSET '2 minutes'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let create_task = parse_create_flow(sql);
+        assert_eq!(create_task.eval_interval, Some(3600));
+        assert_eq!(create_task.eval_offset, Some(120));
+        let show_create = create_task.to_string();
+        assert!(
+            show_create.contains("EVAL OFFSET '120 s'"),
+            "unexpected display:\n{show_create}"
+        );
+        let recreated = parse_create_flow(&show_create);
+        assert_eq!(recreated, create_task, "input sql is:\n{show_create}");
+
+        let sql = r#"
+create flow task_2
+sink to schema_1.table_1
+eval interval '1h'
+eval offset '2m'
+as
+select max(c1), min(c2) from schema_2.table_2;"#;
+        let create_task = parse_create_flow(sql);
+        assert_eq!(create_task.eval_interval, Some(3600));
+        assert_eq!(create_task.eval_offset, Some(120));
+
+        // zero offset is canonicalized to `None` and omitted on display
+        let sql = r#"
+CREATE FLOW task_3
+SINK TO schema_1.table_1
+EVAL INTERVAL '1 hour'
+EVAL OFFSET '0 seconds'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let create_task = parse_create_flow(sql);
+        assert_eq!(create_task.eval_interval, Some(3600));
+        assert_eq!(create_task.eval_offset, None);
+        assert!(
+            !create_task.to_string().contains("EVAL OFFSET"),
+            "zero offset should be omitted on display"
+        );
+
+        let sql = r#"
+CREATE FLOW task_4
+SINK TO schema_1.table_1
+EVAL OFFSET '2 minutes'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("EVAL OFFSET requires EVAL INTERVAL"),
+            "unexpected error: {err}"
+        );
+
+        for (offset, interval) in [
+            ("-1 seconds", "1 hour"),
+            ("1 hour", "1 hour"),
+            ("2 hours", "1 hour"),
+        ] {
+            let sql = format!(
+                r#"
+CREATE FLOW task_invalid
+SINK TO schema_1.table_1
+EVAL INTERVAL '{interval}'
+EVAL OFFSET '{offset}'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#
+            );
+            let err = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("EVAL OFFSET must be in range"),
+                "unexpected error for offset {offset}: {err}"
+            );
+        }
+
+        let sql = r#"
+CREATE FLOW task_fractional_offset
+SINK TO schema_1.table_1
+EVAL INTERVAL '1 hour'
+EVAL OFFSET '1.5 seconds'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("EVAL OFFSET must be a whole number of seconds"),
+            "unexpected error: {err}"
+        );
+
+        let sql = r#"
+CREATE FLOW task_fractional_interval
+SINK TO schema_1.table_1
+EVAL INTERVAL '1.5 seconds'
+EVAL OFFSET '1 second'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("EVAL INTERVAL must be a whole number of seconds"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

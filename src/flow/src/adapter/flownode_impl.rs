@@ -387,7 +387,9 @@ impl FlowDualEngine {
                         comment: Some(info.comment().clone()),
                         sql: info.raw_sql().clone(),
                         flow_options: info.options().clone(),
-                        eval_schedule: effective_eval_schedule_from_flow_info(&info),
+                        eval_schedule: effective_eval_schedule_from_flow_info(&info)
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?,
                         query_ctx: info
                             .query_context()
                             .clone()

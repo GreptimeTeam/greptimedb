@@ -6,9 +6,9 @@ CREATE TABLE distinct_basic (
     TIME INDEX(ts)
 )WITH ('ttl' = 'instant');
 
--- should fallback to streaming mode
+-- should fallback to streaming mode when there is no EVAL INTERVAL
 -- SQLNESS REPLACE id=\d+ id=REDACTED
-CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
 SELECT
     DISTINCT number as dis
 FROM
@@ -62,6 +62,27 @@ SELECT number FROM distinct_basic;
 DROP FLOW test_distinct_basic;
 DROP TABLE distinct_basic;
 DROP TABLE out_distinct_basic;
+
+-- test ttl = instant with EVAL INTERVAL must be rejected
+-- since the batching scheduler cannot read instant-TTL source tables and the
+-- streaming engine cannot honor the schedule
+CREATE TABLE distinct_basic (
+    "number" INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+)WITH ('ttl' = 'instant');
+
+-- SQLNESS REPLACE id=\d+ id=REDACTED
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
+SELECT
+    DISTINCT number as dis
+FROM
+    distinct_basic;
+
+SELECT count(*) FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'test_distinct_basic';
+
+DROP TABLE distinct_basic;
 
 -- test ttl = 5s
 CREATE TABLE distinct_basic (

@@ -16,7 +16,7 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{FlowType, effective_eval_schedule_from_flow_info};
 use common_meta::key::FlowId;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowInfoValue;
@@ -168,6 +168,11 @@ impl InformationSchemaFlows {
             if_not_exists: true,
             expire_after: flow_info.expire_after(),
             eval_interval: flow_info.eval_interval(),
+            eval_offset: effective_eval_schedule_from_flow_info(flow_info)
+                .map_err(BoxedError::new)
+                .context(InternalSnafu)?
+                .map(|schedule| schedule.anchor_secs)
+                .filter(|anchor_secs| *anchor_secs != 0),
             comment,
             flow_options: sql::statements::OptionMap::from_filtered_string_map(
                 flow_info.options(),
@@ -462,5 +467,99 @@ impl DfPartitionStream for InformationSchemaFlows {
                     .map_err(Into::into)
             }),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use common_meta::key::flow::flow_info::{FlowMissedTickPolicy, FlowScheduleConfig, FlowStatus};
+    use sql::parser::ParseOptions;
+    use table::table_name::TableName;
+
+    use super::*;
+
+    fn flow_info_for_show_create(
+        raw_sql: &str,
+        eval_interval_secs: Option<i64>,
+        anchor_secs: i64,
+        options: HashMap<String, String>,
+    ) -> FlowInfoValue {
+        let created_time = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        FlowInfoValue {
+            source_table_ids: vec![],
+            all_source_table_names: vec![],
+            unresolved_source_table_names: vec![],
+            sink_table_name: TableName::new("greptime", "public", "sink"),
+            flownode_ids: BTreeMap::new(),
+            catalog_name: "greptime".to_string(),
+            query_context: None,
+            flow_name: "my_flow".to_string(),
+            raw_sql: raw_sql.to_string(),
+            expire_after: None,
+            eval_interval_secs,
+            comment: String::new(),
+            options,
+            status: FlowStatus::Active,
+            created_time,
+            updated_time: created_time,
+            eval_schedule: eval_interval_secs.map(|interval| FlowScheduleConfig {
+                anchor_secs,
+                start_secs: anchor_secs + interval,
+                missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
+                catchup_max_runs: 3,
+                catchup_max_lag_secs: 300,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_generate_show_create_flow_with_eval_offset() {
+        // `raw_sql` stores only the query part (the `AS` clause).
+        let raw_sql = "SELECT max(c1) FROM public.src";
+        let flow_info = flow_info_for_show_create(raw_sql, Some(3600), 120, HashMap::new());
+        let sql = InformationSchemaFlows::generate_show_create_flow(&flow_info).unwrap();
+        assert!(
+            sql.contains("EVAL OFFSET '120 s'"),
+            "EVAL OFFSET must be emitted, got:\n{sql}"
+        );
+        assert!(
+            !sql.contains("__greptime_internal_eval_offset_secs"),
+            "internal key must be absent, got:\n{sql}"
+        );
+
+        let stmts = ParserContext::create_with_dialect(
+            &sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let Statement::CreateFlow(reparsed) = &stmts[0] else {
+            panic!("unexpected stmt: {:?}", stmts[0]);
+        };
+        assert_eq!(reparsed.eval_interval, Some(3600));
+        assert_eq!(reparsed.eval_offset, Some(120));
+    }
+
+    #[test]
+    fn test_generate_show_create_flow_omits_zero_offset() {
+        let raw_sql = "SELECT max(c1) FROM public.src";
+        let flow_info = flow_info_for_show_create(raw_sql, Some(3600), 0, HashMap::new());
+        let sql = InformationSchemaFlows::generate_show_create_flow(&flow_info).unwrap();
+        assert!(
+            !sql.contains("EVAL OFFSET"),
+            "zero offset must be omitted, got:\n{sql}"
+        );
+        let stmts = ParserContext::create_with_dialect(
+            &sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let Statement::CreateFlow(reparsed) = &stmts[0] else {
+            panic!("unexpected stmt: {:?}", stmts[0]);
+        };
+        assert_eq!(reparsed.eval_offset, None);
     }
 }

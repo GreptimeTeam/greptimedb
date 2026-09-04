@@ -1098,6 +1098,7 @@ pub fn to_create_flow_task_expr(
 
     let eval_interval = create_flow.eval_interval;
 
+    let flow_options = stringify_flow_options(create_flow.flow_options)?;
     Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
         flow_name: sanitize_flow_name(create_flow.flow_name)?,
@@ -1109,7 +1110,7 @@ pub fn to_create_flow_task_expr(
         eval_interval: eval_interval.map(|seconds| api::v1::EvalInterval { seconds }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
-        flow_options: stringify_flow_options(create_flow.flow_options)?,
+        flow_options,
     })
 }
 
