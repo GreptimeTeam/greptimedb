@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
+use catalog::{DeregisterTableRequest, RegisterTableRequest};
 use client::OutputWithMetrics;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
@@ -31,11 +31,13 @@ use datatypes::vectors::{
 };
 use pretty_assertions::assert_eq;
 use query::options::{
-    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, FLOW_SCHEDULED_TIME_MILLIS,
-    QueryOptions,
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
+use table::Table;
+use table::metadata::FilterPushDownType;
 use table::test_util::MemTable;
 
 use super::*;
@@ -392,6 +394,62 @@ fn register_auto_created_aggregate_sink(query_engine: &QueryEngineRef, table_nam
         .downcast_ref::<MemoryCatalogManager>()
         .unwrap();
     memory_catalog.register_table_sync(request).unwrap();
+}
+
+async fn configure_source_capability(
+    query_engine: &QueryEngineRef,
+    engine: &str,
+    preserve_row_sequence: bool,
+) {
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let source = catalog_manager
+        .table(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            "numbers_with_ts",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut info = (*source.table_info()).clone();
+    info.meta.engine = engine.to_string();
+    if preserve_row_sequence {
+        info.meta
+            .options
+            .extra_options
+            .insert("preserve_row_sequence".to_string(), "true".to_string());
+    } else {
+        info.meta
+            .options
+            .extra_options
+            .remove("preserve_row_sequence");
+    }
+    let source = Arc::new(Table::new(
+        Arc::new(info),
+        FilterPushDownType::Unsupported,
+        source.data_source(),
+    ));
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog
+        .deregister_table_sync(DeregisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers_with_ts".to_string(),
+        })
+        .unwrap();
+    memory_catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers_with_ts".to_string(),
+            table_id: source.table_info().table_id(),
+            table: source,
+        })
+        .unwrap();
 }
 
 fn dirty_marker() -> DirtyTimeWindows {
@@ -1622,6 +1680,72 @@ async fn test_exact_required_attempt_rejects_revoked_capability_without_extensio
     assert_eq!(
         task.state.read().unwrap().checkpoints(),
         &checkpoints_before
+    );
+}
+
+#[tokio::test]
+async fn test_sequence_range_producer_emits_capable_source_extensions() {
+    let parts = new_test_task_engine_and_plan_with_query_and_opts_and_required(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+        incremental_batch_opts(),
+        true,
+    )
+    .await;
+    configure_source_capability(&parts.query_engine, "mito", true).await;
+    let task = parts.task;
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1024_u64, 10_u64), (2048_u64, 20_u64)]));
+
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+
+    assert_eq!(
+        extensions,
+        vec![
+            ("flow.return_region_seq", "true".to_string()),
+            (FLOW_SINK_TABLE_ID, "1".to_string()),
+            (FLOW_INCREMENTAL_MODE, "sequence_range".to_string()),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS,
+                serde_json::json!({"1024": 10, "2048": 20}).to_string(),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_sequence_range_producer_keeps_memtable_only_for_non_mito_source() {
+    let parts = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+        incremental_batch_opts(),
+    )
+    .await;
+    configure_source_capability(&parts.query_engine, "file", true).await;
+    let task = parts.task;
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1024_u64, 10_u64)]));
+
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+
+    assert_eq!(
+        extensions,
+        vec![
+            ("flow.return_region_seq", "true".to_string()),
+            (FLOW_SINK_TABLE_ID, "1".to_string()),
+            (
+                FLOW_INCREMENTAL_MODE,
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS,
+                serde_json::json!({"1024": 10}).to_string(),
+            ),
+        ]
     );
 }
 
