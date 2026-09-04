@@ -5596,6 +5596,7 @@ version = "1.3.0"
 dependencies = [
  "api",
  "arc-swap",
+ "arrow-flight",
  "async-stream",
  "async-trait",
  "auth",

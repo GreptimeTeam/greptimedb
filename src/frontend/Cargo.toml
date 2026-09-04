@@ -88,6 +88,7 @@ tonic.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+arrow-flight.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 datatypes.workspace = true
