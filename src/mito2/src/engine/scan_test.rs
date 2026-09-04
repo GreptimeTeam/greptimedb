@@ -16,9 +16,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use api::helper::encode_json_value;
+use api::v1::Rows;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
 use arrow_schema::extension::ExtensionType;
 use common_base::readable_size::ReadableSize;
 use common_error::ext::{ErrorExt, WhateverResult};
@@ -28,7 +28,7 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
-use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType, UInt64Type};
+use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
 use datatypes::json::value::JsonValue;
@@ -38,8 +38,7 @@ use datatypes::vectors::json::array::JsonArray;
 use futures::TryStreamExt;
 use serde_json::json;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
-use store_api::region_request::{RegionCompactRequest, RegionPutRequest, RegionRequest};
-use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+use store_api::region_request::{RegionCompactRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
 
 use crate::config::MitoConfig;
@@ -47,7 +46,6 @@ use crate::error::Error;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
 use crate::test_util;
-use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
 
 #[tokio::test]
