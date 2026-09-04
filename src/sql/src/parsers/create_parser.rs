@@ -24,6 +24,7 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
+pub(crate) use json::parse_json2_type_and_options;
 pub use json::parse_json2_type_hint_path;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::{
@@ -784,7 +785,9 @@ impl<'a> ParserContext<'a> {
 
         let data_type =
             if let Some((data_type, options)) = json::parse_json2_type_and_options(parser)? {
-                extensions.json2_options = options;
+                extensions.json2_options = options.filter(|options| {
+                    options.max_auto_expanded_paths.is_some() || !options.type_hints.is_empty()
+                });
                 data_type
             } else {
                 parser.parse_data_type().context(SyntaxSnafu)?

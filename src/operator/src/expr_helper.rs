@@ -826,7 +826,14 @@ pub(crate) fn to_alter_table_expr(
         AlterTableOperation::ModifyColumnType {
             column_name,
             target_type,
+            json2_options,
         } => {
+            if json2_options.is_some() {
+                return NotSupportedSnafu {
+                    feat: "ALTER TABLE MODIFY COLUMN with JSON2 options",
+                }
+                .fail();
+            }
             let target_type =
                 sql_data_type_to_concrete_data_type(&target_type).context(ParseSqlSnafu)?;
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
@@ -1742,6 +1749,27 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             modify_column_type.target_type
         );
         assert!(modify_column_type.target_type_extension.is_none());
+    }
+
+    #[test]
+    fn test_alter_json2_is_not_supported() {
+        let sql = "ALTER TABLE monitor MODIFY COLUMN payload JSON2 (service STRING);";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+        let err = to_alter_table_expr(alter_table, &QueryContext::arc()).unwrap_err();
+
+        assert!(matches!(err, crate::error::Error::NotSupported { .. }));
+        assert_eq!(
+            "Not supported: ALTER TABLE MODIFY COLUMN with JSON2 options",
+            err.to_string()
+        );
     }
 
     #[test]
