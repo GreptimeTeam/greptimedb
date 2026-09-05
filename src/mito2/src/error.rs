@@ -1227,6 +1227,14 @@ pub enum Error {
     ))]
     IncompatibleWalProviderChange { global: String, region: String },
 
+    #[snafu(display("Failed to resolve WAL provider for region {region_id}"))]
+    ResolveWalProvider {
+        region_id: RegionId,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Expected mito manifest info"))]
     MitoManifestInfo {
         #[snafu(implicit)]
@@ -1613,6 +1621,8 @@ impl ErrorExt for Error {
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
 
+            ResolveWalProvider { source, .. } => source.status_code(),
+
             ScanSeries { source, .. } => source.status_code(),
 
             ScanMultiTimes { .. } => StatusCode::InvalidArguments,
@@ -1663,6 +1673,7 @@ impl ErrorExt for Error {
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
             | FetchManifests { source, .. }
+            | ResolveWalProvider { source, .. }
             | External { source, .. } => source.retry_hint(),
 
             OpenRegion { source, .. }
@@ -1721,6 +1732,16 @@ mod tests {
     use snafu::IntoError;
 
     use super::*;
+
+    #[test]
+    fn test_resolve_wal_provider_preserves_source_retry_hint() {
+        let region_id = RegionId::new(1, 1);
+        let source = RegionBusySnafu { region_id }.build();
+        let error = ResolveWalProviderSnafu { region_id }.into_error(BoxedError::new(source));
+
+        assert_eq!(StatusCode::RegionBusy, error.status_code());
+        assert_eq!(RetryHint::Retryable, error.retry_hint());
+    }
 
     #[test]
     fn test_manifest_update_persistence() {

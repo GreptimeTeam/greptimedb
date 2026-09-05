@@ -21,13 +21,14 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 use common_error::ext::ErrorExt;
+use common_wal::options::WalOptions;
 use entry::Entry;
 use futures::Stream;
 
 pub type SendableEntryStream<'a, I, E> = Pin<Box<dyn Stream<Item = Result<Vec<I>, E>> + Send + 'a>>;
 
 pub use crate::logstore::entry::Id as EntryId;
-use crate::logstore::provider::Provider;
+use crate::logstore::provider::{ExternalProvider, Provider};
 use crate::storage::RegionId;
 
 // The information used to locate WAL index for the specified region.
@@ -53,6 +54,32 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
+
+    /// Resolves the provider used by Mito for a region owned by an external log
+    /// store.
+    ///
+    /// Mito uses the returned provider when creating or reopening a region,
+    /// replaying its WAL, and performing offline cleanup. The provider identity
+    /// and its local or remote WAL semantics must remain stable while the region's
+    /// WAL data exists; otherwise replay and obsolete operations may target
+    /// different namespaces or use inconsistent recovery semantics.
+    ///
+    /// Resolution order:
+    /// - Mito does not call this method for [`WalOptions::Noop`].
+    /// - `Ok(Some(_))` overrides the built-in Raft Engine or Kafka provider.
+    /// - `Ok(None)` delegates to the built-in provider resolution.
+    /// - `Err(_)` aborts the operation. In particular, `create_or_open` does not
+    ///   fall back to creating a new region after provider resolution fails.
+    ///
+    /// This synchronous method is called from async worker paths. It must be
+    /// inexpensive and must not perform blocking I/O.
+    fn resolve_provider(
+        &self,
+        _region_id: RegionId,
+        _wal_options: &WalOptions,
+    ) -> Result<Option<ExternalProvider>, Self::Error> {
+        Ok(None)
+    }
 
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.

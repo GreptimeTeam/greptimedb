@@ -21,6 +21,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use arrow_schema::extension::ExtensionType;
+use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info, warn};
 use common_wal::options::WalOptions;
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
@@ -88,10 +89,20 @@ const PARQUET_META_PRELOAD_CONCURRENCY: usize = 8;
 static PARQUET_META_PRELOAD_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(PARQUET_META_PRELOAD_CONCURRENCY));
 
-fn initial_pruned_entry_id(wal_options: &WalOptions) -> EntryId {
-    match wal_options {
-        WalOptions::Kafka(options) => options.initial_pruned_entry_id.unwrap_or(0),
-        WalOptions::RaftEngine | WalOptions::Noop => 0,
+fn matching_wal_entry_reader(
+    wal_entry_reader: Option<(Provider, Box<dyn WalEntryReader>)>,
+    provider: &Provider,
+) -> Option<Box<dyn WalEntryReader>> {
+    wal_entry_reader
+        .and_then(|(reader_provider, reader)| (reader_provider == *provider).then_some(reader))
+}
+
+fn initial_pruned_entry_id(provider: &Provider, wal_options: &WalOptions) -> EntryId {
+    match (provider, wal_options) {
+        (Provider::Kafka(_), WalOptions::Kafka(options)) => {
+            options.initial_pruned_entry_id.unwrap_or(0)
+        }
+        _ => 0,
     }
 }
 
@@ -158,7 +169,7 @@ pub(crate) struct RegionOpener {
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
     stats: ManifestStats,
-    wal_entry_reader: Option<Box<dyn WalEntryReader>>,
+    wal_entry_reader: Option<(Provider, Box<dyn WalEntryReader>)>,
     replay_checkpoint: Option<u64>,
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
@@ -250,7 +261,7 @@ impl RegionOpener {
     /// constructing a new one from scratch.
     pub(crate) fn wal_entry_reader(
         mut self,
-        wal_entry_reader: Option<Box<dyn WalEntryReader>>,
+        wal_entry_reader: Option<(Provider, Box<dyn WalEntryReader>)>,
     ) -> Self {
         self.wal_entry_reader = wal_entry_reader;
         self
@@ -338,17 +349,18 @@ impl RegionOpener {
                     region_dir, self.region_id
                 );
             }
-            Err(e) => {
+            Err(e) if can_fallback_to_create(&e) => {
                 warn!(e;
                     "Failed to open region {} before creating it, region_dir: {}",
                     self.region_id, region_dir
                 );
             }
+            Err(e) => return Err(e),
         }
         // Safety: must be set before calling this method.
         let mut options = self.options.take().unwrap();
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
-        let provider = self.provider::<S>(&options.wal_options)?;
+        let provider = self.provider(wal, &options.wal_options)?;
         let metadata = Arc::new(metadata);
         // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
@@ -372,10 +384,10 @@ impl RegionOpener {
             .and_then(|cm| cm.write_cache())
             .and_then(|wc| wc.manifest_cache());
         // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
-        // Kafka WAL allocation also carries the topic's pruned entry id as a create-time hint.
+        // A resolved Kafka provider also carries the topic's pruned entry id as a create-time hint.
         let flushed_entry_id = provider
             .initial_flushed_entry_id::<S>(wal.store())
-            .max(initial_pruned_entry_id(&options.wal_options));
+            .max(initial_pruned_entry_id(&provider, &options.wal_options));
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
             flushed_entry_id,
@@ -474,8 +486,8 @@ impl RegionOpener {
         Ok(region)
     }
 
-    fn provider<S: LogStore>(&self, wal_options: &WalOptions) -> Result<Provider> {
-        provider_from_wal_options::<S>(self.region_id, wal_options)
+    fn provider<S: LogStore>(&self, wal: &Wal<S>, wal_options: &WalOptions) -> Result<Provider> {
+        provider_for_log_store(wal.store().as_ref(), self.region_id, wal_options)
     }
 
     /// Tries to open the region and returns `None` if the region directory is empty.
@@ -519,10 +531,8 @@ impl RegionOpener {
         ensure_json2_not_use_time_series_memtable(&metadata, &region_options)?;
 
         let region_id = self.region_id;
-        let provider = self.provider::<S>(&region_options.wal_options)?;
-        let wal_entry_reader = self
-            .wal_entry_reader
-            .take()
+        let provider = self.provider(wal, &region_options.wal_options)?;
+        let wal_entry_reader = matching_wal_entry_reader(self.wal_entry_reader.take(), &provider)
             .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id, None));
         let on_region_opened = wal.on_region_opened();
         let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
@@ -673,7 +683,31 @@ impl RegionOpener {
     }
 }
 
-pub(crate) fn provider_from_wal_options<S: LogStore>(
+fn can_fallback_to_create(error: &error::Error) -> bool {
+    !matches!(error, error::Error::ResolveWalProvider { .. })
+}
+
+pub(crate) fn provider_for_log_store<S: LogStore>(
+    store: &S,
+    region_id: RegionId,
+    wal_options: &WalOptions,
+) -> Result<Provider> {
+    if matches!(wal_options, WalOptions::Noop) {
+        return Ok(Provider::noop_provider());
+    }
+
+    if let Some(provider) = store
+        .resolve_provider(region_id, wal_options)
+        .map_err(BoxedError::new)
+        .with_context(|_| error::ResolveWalProviderSnafu { region_id })?
+    {
+        return Ok(Provider::external(provider));
+    }
+
+    provider_from_wal_options::<S>(region_id, wal_options)
+}
+
+fn provider_from_wal_options<S: LogStore>(
     region_id: RegionId,
     wal_options: &WalOptions,
 ) -> Result<Provider> {
@@ -1358,6 +1392,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arrow_schema::extension::ExtensionType;
     use common_base::readable_size::ReadableSize;
@@ -1377,12 +1412,18 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
+    use store_api::logstore::entry::Entry;
+    use store_api::logstore::provider::{ExternalProvider, Provider};
+    use store_api::logstore::{
+        AppendBatchResponse, EntryId, LogStore, SendableEntryStream, WalIndex,
+    };
     use store_api::metadata::RegionMetadataBuilder;
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        initial_pruned_entry_id, maybe_upgrade_json2_layout, preload_parquet_meta_cache_for_files,
+        can_fallback_to_create, initial_pruned_entry_id, matching_wal_entry_reader,
+        maybe_upgrade_json2_layout, preload_parquet_meta_cache_for_files, provider_for_log_store,
         sanitize_region_options, supports_open_region_object_storage_requirement,
     };
     use crate::cache::CacheManager;
@@ -1395,6 +1436,129 @@ mod tests {
     use crate::sst::parquet::PARQUET_METADATA_KEY;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::sst_region_metadata;
+    use crate::wal::entry_reader::NoopEntryReader;
+
+    #[derive(Debug)]
+    struct ExternalLogStore {
+        inner: log_store::noop::log_store::NoopLogStore,
+        resolve_calls: AtomicUsize,
+        fail_resolution: bool,
+        remote_wal: bool,
+        latest_entry_id: EntryId,
+    }
+
+    impl ExternalLogStore {
+        fn new() -> Self {
+            Self {
+                inner: log_store::noop::log_store::NoopLogStore,
+                resolve_calls: AtomicUsize::new(0),
+                fail_resolution: false,
+                remote_wal: false,
+                latest_entry_id: 0,
+            }
+        }
+
+        fn with_wal_semantics(remote_wal: bool, latest_entry_id: EntryId) -> Self {
+            Self {
+                remote_wal,
+                latest_entry_id,
+                ..Self::new()
+            }
+        }
+
+        fn with_resolution_error() -> Self {
+            Self {
+                fail_resolution: true,
+                ..Self::new()
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LogStore for ExternalLogStore {
+        type Error = <log_store::noop::log_store::NoopLogStore as LogStore>::Error;
+
+        async fn stop(&self) -> Result<(), Self::Error> {
+            self.inner.stop().await
+        }
+
+        fn resolve_provider(
+            &self,
+            region_id: RegionId,
+            _wal_options: &WalOptions,
+        ) -> Result<Option<ExternalProvider>, Self::Error> {
+            self.resolve_calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_resolution {
+                return log_store::error::IllegalStateSnafu.fail();
+            }
+            let backend = "test-external";
+            let namespace = region_id.as_u64().to_string();
+            Ok(Some(if self.remote_wal {
+                ExternalProvider::remote(backend, namespace)
+            } else {
+                ExternalProvider::local(backend, namespace)
+            }))
+        }
+
+        async fn append_batch(
+            &self,
+            entries: Vec<Entry>,
+        ) -> Result<AppendBatchResponse, Self::Error> {
+            self.inner.append_batch(entries).await
+        }
+
+        async fn read(
+            &self,
+            provider: &Provider,
+            entry_id: EntryId,
+            index: Option<WalIndex>,
+        ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error> {
+            self.inner.read(provider, entry_id, index).await
+        }
+
+        async fn create_namespace(&self, provider: &Provider) -> Result<(), Self::Error> {
+            self.inner.create_namespace(provider).await
+        }
+
+        async fn delete_namespace(&self, provider: &Provider) -> Result<(), Self::Error> {
+            self.inner.delete_namespace(provider).await
+        }
+
+        async fn list_namespaces(&self) -> Result<Vec<Provider>, Self::Error> {
+            self.inner.list_namespaces().await
+        }
+
+        async fn obsolete(
+            &self,
+            provider: &Provider,
+            region_id: RegionId,
+            entry_id: EntryId,
+        ) -> Result<(), Self::Error> {
+            self.inner.obsolete(provider, region_id, entry_id).await
+        }
+
+        async fn obsolete_all(
+            &self,
+            provider: &Provider,
+            region_id: RegionId,
+        ) -> Result<(), Self::Error> {
+            self.inner.obsolete_all(provider, region_id).await
+        }
+
+        fn entry(
+            &self,
+            data: Vec<u8>,
+            entry_id: EntryId,
+            region_id: RegionId,
+            provider: &Provider,
+        ) -> Result<Entry, Self::Error> {
+            self.inner.entry(data, entry_id, region_id, provider)
+        }
+
+        fn latest_entry_id(&self, _provider: &Provider) -> Result<EntryId, Self::Error> {
+            Ok(self.latest_entry_id)
+        }
+    }
 
     fn build_test_manifest(sst_format: FormatType) -> RegionManifest {
         RegionManifest {
@@ -1420,21 +1584,121 @@ mod tests {
 
     #[test]
     fn test_initial_pruned_entry_id() {
-        assert_eq!(0, initial_pruned_entry_id(&WalOptions::RaftEngine));
-        assert_eq!(0, initial_pruned_entry_id(&WalOptions::Noop));
+        let kafka_provider = Provider::kafka_provider("test_topic".to_string());
         assert_eq!(
             0,
-            initial_pruned_entry_id(&WalOptions::Kafka(KafkaWalOptions::new(
-                "test_topic".to_string()
-            )))
+            initial_pruned_entry_id(&kafka_provider, &WalOptions::RaftEngine)
         );
         assert_eq!(
-            42,
-            initial_pruned_entry_id(&WalOptions::Kafka(KafkaWalOptions {
-                topic: "test_topic".to_string(),
-                initial_pruned_entry_id: Some(42),
-            }))
+            0,
+            initial_pruned_entry_id(&Provider::noop_provider(), &WalOptions::Noop)
         );
+        assert_eq!(
+            0,
+            initial_pruned_entry_id(
+                &kafka_provider,
+                &WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string()))
+            )
+        );
+        let kafka_options = WalOptions::Kafka(KafkaWalOptions {
+            topic: "test_topic".to_string(),
+            initial_pruned_entry_id: Some(42),
+        });
+        assert_eq!(42, initial_pruned_entry_id(&kafka_provider, &kafka_options));
+        assert_eq!(
+            0,
+            initial_pruned_entry_id(
+                &Provider::external(ExternalProvider::remote("test-external", "namespace")),
+                &kafka_options,
+            )
+        );
+    }
+
+    #[test]
+    fn test_external_provider_precedes_builtin_fallback() {
+        let region_id = RegionId::new(1, 2);
+        let store = ExternalLogStore::new();
+
+        let provider = provider_for_log_store(&store, region_id, &WalOptions::RaftEngine).unwrap();
+
+        assert_eq!(
+            Provider::external(ExternalProvider::local(
+                "test-external",
+                region_id.as_u64().to_string(),
+            )),
+            provider
+        );
+        assert_eq!(1, store.resolve_calls.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_external_provider_initial_flushed_entry_id() {
+        let region_id = RegionId::new(1, 2);
+        let local_store = ExternalLogStore::with_wal_semantics(false, 42);
+        let local_provider =
+            provider_for_log_store(&local_store, region_id, &WalOptions::RaftEngine).unwrap();
+        assert_eq!(0, local_provider.initial_flushed_entry_id(&local_store));
+
+        let remote_store = ExternalLogStore::with_wal_semantics(true, 42);
+        let remote_provider =
+            provider_for_log_store(&remote_store, region_id, &WalOptions::RaftEngine).unwrap();
+        assert_eq!(42, remote_provider.initial_flushed_entry_id(&remote_store));
+    }
+
+    #[test]
+    fn test_batch_wal_reader_requires_resolved_provider() {
+        let region_id = RegionId::new(1, 2);
+        let external = provider_for_log_store(
+            &ExternalLogStore::new(),
+            region_id,
+            &WalOptions::Kafka(KafkaWalOptions::new("topic".to_string())),
+        )
+        .unwrap();
+        let kafka = Provider::kafka_provider("topic".to_string());
+
+        assert!(
+            matching_wal_entry_reader(Some((kafka, Box::new(NoopEntryReader))), &external)
+                .is_none()
+        );
+        assert!(
+            matching_wal_entry_reader(
+                Some((external.clone(), Box::new(NoopEntryReader))),
+                &external,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn test_builtin_store_uses_wal_options_fallback() {
+        let region_id = RegionId::new(1, 2);
+        let store = log_store::noop::log_store::NoopLogStore;
+
+        let provider = provider_for_log_store(&store, region_id, &WalOptions::RaftEngine).unwrap();
+
+        assert_eq!(Provider::raft_engine_provider(region_id.as_u64()), provider);
+    }
+
+    #[test]
+    fn test_noop_wal_options_precede_external_resolution() {
+        let region_id = RegionId::new(1, 2);
+        let store = ExternalLogStore::new();
+
+        let provider = provider_for_log_store(&store, region_id, &WalOptions::Noop).unwrap();
+
+        assert_eq!(Provider::Noop, provider);
+        assert_eq!(0, store.resolve_calls.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_provider_resolution_error_cannot_fallback_to_create() {
+        let region_id = RegionId::new(1, 2);
+        let store = ExternalLogStore::with_resolution_error();
+
+        let error = provider_for_log_store(&store, region_id, &WalOptions::RaftEngine).unwrap_err();
+
+        assert!(!can_fallback_to_create(&error));
+        assert_eq!(1, store.resolve_calls.load(Ordering::Relaxed));
     }
 
     #[test]
