@@ -1914,6 +1914,16 @@ mod tests {
     }
 
     #[test]
+    fn test_set_database_option_rejects_invalid_inactive_window_l1_merge_trigger() {
+        let option = PbOption {
+            key: "compaction.twcs.inactive_window.l1_merge_trigger".to_string(),
+            value: "1".to_string(),
+        };
+
+        assert!(SetDatabaseOption::try_from(option).is_err());
+    }
+
+    #[test]
     fn test_basic_ser_de_create_table_task() {
         let schema = SchemaBuilder::default().build().unwrap();
         let table_info = test_table_info(1025, "foo", "bar", "baz", Arc::new(schema));

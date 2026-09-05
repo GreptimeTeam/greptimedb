@@ -44,6 +44,12 @@ ALTER DATABASE alter_database SET 'compaction.twcs.trigger_file_num'='8';
 
 ALTER DATABASE alter_database SET 'compaction.twcs.active_window.trigger_file_num'='16';
 
+ALTER DATABASE alter_database SET 'compaction.twcs.active_window.l1_merge_trigger'='12';
+
+ALTER DATABASE alter_database SET 'compaction.twcs.inactive_window.trigger_file_num'='6';
+
+ALTER DATABASE alter_database SET 'compaction.twcs.inactive_window.l1_merge_trigger'='10';
+
 SHOW CREATE DATABASE alter_database;
 
 -- SQLNESS ARG restart=true
@@ -63,6 +69,12 @@ SHOW CREATE DATABASE alter_database;
 SHOW CREATE DATABASE alter_database;
 
 ALTER DATABASE alter_database UNSET 'compaction.twcs.trigger_file_num';
+
+ALTER DATABASE alter_database UNSET 'compaction.twcs.active_window.l1_merge_trigger';
+
+ALTER DATABASE alter_database UNSET 'compaction.twcs.inactive_window.trigger_file_num';
+
+ALTER DATABASE alter_database UNSET 'compaction.twcs.inactive_window.l1_merge_trigger';
 
 SHOW CREATE DATABASE alter_database;
 

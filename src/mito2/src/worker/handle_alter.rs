@@ -467,6 +467,24 @@ fn set_twcs_options(
             );
             options.inactive_window_trigger_file_num = files;
         }
+        mito_engine_options::TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER => {
+            let files = parse_usize_with_default(
+                key,
+                value,
+                default_option.inactive_window_l1_merge_trigger,
+            )?;
+            ensure!(
+                files >= 2,
+                InvalidSetRegionOptionRequestSnafu { key, value }
+            );
+            log_option_update(
+                region_id,
+                key,
+                options.inactive_window_l1_merge_trigger,
+                files,
+            );
+            options.inactive_window_l1_merge_trigger = files;
+        }
         mito_engine_options::TWCS_MAX_OUTPUT_FILE_SIZE => {
             let size = if value.is_empty() {
                 default_option.max_output_file_size
@@ -614,9 +632,18 @@ mod tests {
             region_id,
         )
         .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+            "12",
+            region_id,
+        )
+        .unwrap();
         assert_eq!(8, options.trigger_file_num);
         assert_eq!(16, options.active_window_l1_merge_trigger);
         assert_eq!(3, options.inactive_window_trigger_file_num);
+        assert_eq!(12, options.inactive_window_l1_merge_trigger);
 
         set_twcs_options(
             &mut options,
@@ -642,6 +669,14 @@ mod tests {
             region_id,
         )
         .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+            "",
+            region_id,
+        )
+        .unwrap();
         assert_eq!(defaults, options);
     }
 
@@ -662,12 +697,18 @@ mod tests {
     }
 
     #[test]
-    fn test_set_twcs_active_window_l1_merge_trigger_rejects_one() {
-        let mut options = TwcsOptions::default();
-        let defaults = options.clone();
-        let key = "compaction.twcs.active_window.l1_merge_trigger";
-
-        assert!(set_twcs_options(&mut options, &defaults, key, "1", RegionId::new(1, 1)).is_err());
+    fn test_set_twcs_l1_merge_triggers_reject_one() {
+        let defaults = TwcsOptions::default();
+        for key in [
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+        ] {
+            let mut options = TwcsOptions::default();
+            assert!(
+                set_twcs_options(&mut options, &defaults, key, "1", RegionId::new(1, 1)).is_err(),
+                "{key}"
+            );
+        }
     }
 
     #[test]

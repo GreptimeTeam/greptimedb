@@ -1587,6 +1587,13 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .is_err()
         );
+
+        let sql =
+            "CREATE DATABASE invalid WITH ('compaction.twcs.inactive_window.l1_merge_trigger'='1')";
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
     }
 
     #[test]

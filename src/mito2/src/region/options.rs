@@ -179,6 +179,12 @@ impl RegionOptions {
                 reason: "active_window.l1_merge_trigger must be at least 2",
             }
         );
+        ensure!(
+            options.inactive_window_l1_merge_trigger >= 2,
+            InvalidRegionOptionsSnafu {
+                reason: "inactive_window.l1_merge_trigger must be at least 2",
+            }
+        );
         Ok(())
     }
 
@@ -391,6 +397,10 @@ pub struct TwcsOptions {
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "inactive_window.trigger_file_num")]
     pub inactive_window_trigger_file_num: usize,
+    /// Minimum L1 file num to trigger a compaction in an inactive window.
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "inactive_window.l1_merge_trigger")]
+    pub inactive_window_l1_merge_trigger: usize,
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
@@ -426,6 +436,7 @@ impl Default for TwcsOptions {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window: None,
             max_output_file_size: Some(ReadableSize::mb(512)),
             remote_compaction: false,
@@ -723,6 +734,7 @@ mod tests {
             ("compaction.twcs.active_window.trigger_file_num", "8"),
             ("compaction.twcs.active_window.l1_merge_trigger", "16"),
             ("compaction.twcs.inactive_window.trigger_file_num", "2"),
+            ("compaction.twcs.inactive_window.l1_merge_trigger", "12"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
         ]);
@@ -732,6 +744,7 @@ mod tests {
                 trigger_file_num: 8,
                 active_window_l1_merge_trigger: 16,
                 inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 12,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
             }),
@@ -766,6 +779,28 @@ mod tests {
     fn test_active_window_l1_merge_trigger_below_two_is_rejected() {
         let map = make_map(&[
             ("compaction.twcs.active_window.l1_merge_trigger", "1"),
+            ("compaction.type", "twcs"),
+        ]);
+
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_inactive_window_l1_merge_trigger_defaults_to_eight() {
+        let value = serde_json::to_value(TwcsOptions::default()).unwrap();
+        assert_eq!(
+            Some("8"),
+            value
+                .get("inactive_window.l1_merge_trigger")
+                .and_then(|value| value.as_str())
+        );
+    }
+
+    #[test]
+    fn test_inactive_window_l1_merge_trigger_below_two_is_rejected() {
+        let map = make_map(&[
+            ("compaction.twcs.inactive_window.l1_merge_trigger", "1"),
             ("compaction.type", "twcs"),
         ]);
 
@@ -1039,6 +1074,7 @@ mod tests {
                 trigger_file_num: 8,
                 active_window_l1_merge_trigger: 8,
                 inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: Some(ReadableSize::gb(1)),
                 remote_compaction: false,
@@ -1101,6 +1137,7 @@ mod tests {
                 trigger_file_num: 8,
                 active_window_l1_merge_trigger: 8,
                 inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: None,
                 remote_compaction: false,
@@ -1137,6 +1174,7 @@ mod tests {
         assert!(!got.preserve_row_sequence);
         let CompactionOptions::Twcs(twcs) = got.compaction;
         assert_eq!(8, twcs.active_window_l1_merge_trigger);
+        assert_eq!(8, twcs.inactive_window_l1_merge_trigger);
 
         let default_json = serde_json::to_value(RegionOptions::default()).unwrap();
         assert!(default_json.get(WRITE_BUFFER_SIZE_KEY).is_none());
@@ -1176,6 +1214,7 @@ mod tests {
                 trigger_file_num: 8,
                 active_window_l1_merge_trigger: 8,
                 inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: Some(ReadableSize::mb(7)),
                 remote_compaction: false,

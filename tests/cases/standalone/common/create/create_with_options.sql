@@ -67,6 +67,25 @@ with(
 
 drop table test_mito_options;
 
+create table if not exists test_window_compaction_options(
+    host string,
+    ts timestamp,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+engine=mito
+with(
+    'compaction.type'='twcs',
+    'compaction.twcs.active_window.trigger_file_num'='4',
+    'compaction.twcs.active_window.l1_merge_trigger'='8',
+    'compaction.twcs.inactive_window.trigger_file_num'='3',
+    'compaction.twcs.inactive_window.l1_merge_trigger'='12'
+);
+
+show create table test_window_compaction_options;
+
+drop table test_window_compaction_options;
+
 create table if not exists test_compaction_override_without_type(
     host string,
     ts timestamp,

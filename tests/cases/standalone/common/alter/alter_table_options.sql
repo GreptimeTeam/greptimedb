@@ -58,6 +58,8 @@ ALTER TABLE ato SET 'compaction.twcs.active_window.l1_merge_trigger'='8';
 
 ALTER TABLE ato SET 'compaction.twcs.inactive_window.trigger_file_num'='1';
 
+ALTER TABLE ato SET 'compaction.twcs.inactive_window.l1_merge_trigger'='12';
+
 SHOW CREATE TABLE ato;
 
 -- SQLNESS ARG restart=true
@@ -68,6 +70,8 @@ ALTER TABLE ato UNSET 'compaction.twcs.active_window.trigger_file_num';
 ALTER TABLE ato UNSET 'compaction.twcs.active_window.l1_merge_trigger';
 
 ALTER TABLE ato UNSET 'compaction.twcs.inactive_window.trigger_file_num';
+
+ALTER TABLE ato UNSET 'compaction.twcs.inactive_window.l1_merge_trigger';
 
 SHOW CREATE TABLE ato;
 

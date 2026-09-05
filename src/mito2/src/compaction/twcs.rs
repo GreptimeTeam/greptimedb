@@ -72,6 +72,8 @@ pub struct TwcsPicker {
     pub active_window_l1_merge_trigger: usize,
     /// Minimum file num to trigger a compaction in an inactive window.
     pub inactive_window_trigger_file_num: usize,
+    /// Minimum L1 file num to trigger a compaction in an inactive window.
+    pub inactive_window_l1_merge_trigger: usize,
     /// Compaction time window in seconds.
     pub time_window_seconds: Option<i64>,
     /// Max allowed compaction output file size. The picker also uses it to predict
@@ -165,10 +167,6 @@ impl TwcsPicker {
         windows: &BTreeMap<i64, Window>,
     ) -> (Vec<FileHandle>, bool) {
         let is_active_window = active_window == Some(files.time_window);
-        if !is_active_window && files.files.len() < self.inactive_window_trigger_file_num {
-            return (vec![], false);
-        }
-
         let window = &files.time_window;
         let mut files_to_merge: Vec<_> = files.files().cloned().collect();
 
@@ -196,6 +194,12 @@ impl TwcsPicker {
             .partition(|file| file.level() == 0);
         let num_l0_files = l0_files.len();
         let num_l1_files = l1_files.len();
+        if !is_active_window
+            && files.files.len() < self.inactive_window_trigger_file_num
+            && num_l1_files < self.inactive_window_l1_merge_trigger
+        {
+            return (vec![], false);
+        }
         // Keep fresh L0 data and compacted L1 data in separate tasks whenever either
         // level can trigger compaction on its own. This prevents each L0 batch from
         // pulling the previous L1 output into another rewrite.
@@ -217,7 +221,10 @@ impl TwcsPicker {
             pick_inactive_window_files(
                 l0_files,
                 l1_files,
-                self.inactive_window_trigger_file_num,
+                InactiveWindowTriggers {
+                    l0_file_num: self.inactive_window_trigger_file_num,
+                    l1_file_num: self.inactive_window_l1_merge_trigger,
+                },
                 self.max_output_file_size,
             )
         };
@@ -247,27 +254,34 @@ impl TwcsPicker {
 /// The window no longer receives fresh writes (late arrivals aside), so it
 /// should converge, but merging must stay within a bounded rewrite cost:
 ///
-/// 1. Same as active windows, a level reaching `trigger_file_num` is compacted
-///    on its own to avoid chained L1 rewrites.
-/// 2. Balanced single-level picks converge each level separately.
+/// 1. Same as active windows, a level reaching its trigger is compacted on its
+///    own to avoid chained L1 rewrites.
+/// 2. Balanced L0 picks below the trigger continue converging without pulling
+///    L1 files into the rewrite.
 /// 3. A mixed merge may bypass the balance checks, but only when the total
 ///    rewrite fits in the output file budget, bounding write amplification.
 /// 4. Last resort: converge L0 files among themselves regardless of balance.
 ///    The rewrite is bounded by the L0 bytes and leaves large compacted files
 ///    untouched. If nothing qualifies, the window is left as-is.
+#[derive(Debug, Clone, Copy)]
+struct InactiveWindowTriggers {
+    l0_file_num: usize,
+    l1_file_num: usize,
+}
+
 fn pick_inactive_window_files(
     l0_files: Vec<FileHandle>,
     l1_files: Vec<FileHandle>,
-    trigger_file_num: usize,
+    triggers: InactiveWindowTriggers,
     max_output_file_size: Option<u64>,
 ) -> (Vec<FileHandle>, usize) {
-    if l0_files.len() >= trigger_file_num {
+    if l0_files.len() >= triggers.l0_file_num {
         let pick = pick_candidate_files(l0_files.clone(), max_output_file_size, pick_count_first);
         if !pick.0.is_empty() {
             return pick;
         }
     }
-    if l1_files.len() >= trigger_file_num {
+    if l1_files.len() >= triggers.l1_file_num {
         let pick = pick_candidate_files(l1_files.clone(), max_output_file_size, pick_count_first);
         if !pick.0.is_empty() {
             return pick;
@@ -278,11 +292,6 @@ fn pick_inactive_window_files(
     if !pick.0.is_empty() {
         return pick;
     }
-    let pick = pick_candidate_files(l1_files.clone(), max_output_file_size, pick_count_first);
-    if !pick.0.is_empty() {
-        return pick;
-    }
-
     let mut all_files = l0_files.clone();
     all_files.extend(l1_files);
     let pick = pick_candidate_files(all_files, max_output_file_size, pick_mixed_within_budget);
@@ -994,6 +1003,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1055,6 +1065,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3600),
             max_output_file_size: None,
             append_mode: false,
@@ -1511,6 +1522,7 @@ mod tests {
                 trigger_file_num: 2,
                 active_window_l1_merge_trigger: 8,
                 inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 2,
                 time_window_seconds: None,
                 max_output_file_size: None,
                 append_mode: false,
@@ -1661,6 +1673,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: None,
             max_output_file_size: None,
             append_mode: false,
@@ -1731,6 +1744,7 @@ mod tests {
             trigger_file_num: 4, // High enough to prevent runs in first window
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1778,6 +1792,7 @@ mod tests {
             trigger_file_num: 2,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: Some(1000),
             append_mode: true,
@@ -1811,6 +1826,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(1),
             max_output_file_size: Some(1_000),
             append_mode: true,
@@ -1855,6 +1871,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1881,6 +1898,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1927,6 +1945,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -1978,6 +1997,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -2024,6 +2044,7 @@ mod tests {
             trigger_file_num: num_files,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: num_files,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -2072,6 +2093,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3600),
             max_output_file_size: None,
             append_mode: false,
@@ -2120,6 +2142,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3600),
             max_output_file_size: Some(1024 * 1024 * 1024),
             append_mode: false,
@@ -2153,6 +2176,7 @@ mod tests {
             trigger_file_num: 2,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -2216,6 +2240,7 @@ mod tests {
             trigger_file_num: 2,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
@@ -2253,6 +2278,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
@@ -2269,6 +2295,102 @@ mod tests {
         assert_eq!(2, output[0].inputs.len());
     }
 
+    #[test]
+    fn test_inactive_window_l1_trigger_is_independent_of_l0_trigger() {
+        let l0_files = (0..6)
+            .map(|idx| {
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    idx * 20,
+                    idx * 20 + 10,
+                    0,
+                    idx as u64 + 1,
+                    10,
+                )
+            })
+            .collect();
+        let l1_files = (0..2)
+            .map(|idx| {
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    idx * 20,
+                    idx * 20 + 10,
+                    1,
+                    idx as u64 + 10,
+                    10,
+                )
+            })
+            .collect();
+
+        let (inputs, _) = pick_inactive_window_files(
+            l0_files,
+            l1_files,
+            InactiveWindowTriggers {
+                l0_file_num: 8,
+                l1_file_num: 2,
+            },
+            None,
+        );
+
+        assert_eq!(2, inputs.len());
+        assert!(inputs.iter().all(|file| file.level() == 1));
+    }
+
+    #[test]
+    fn test_inactive_window_does_not_fallback_to_l1_below_trigger() {
+        let l1_files = (0..2)
+            .map(|idx| {
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    idx * 20,
+                    idx * 20 + 10,
+                    1,
+                    idx as u64 + 1,
+                    10,
+                )
+            })
+            .collect();
+
+        let (inputs, _) = pick_inactive_window_files(
+            vec![],
+            l1_files,
+            InactiveWindowTriggers {
+                l0_file_num: 2,
+                l1_file_num: 8,
+            },
+            None,
+        );
+
+        assert!(inputs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_inactive_window_requires_a_level_trigger_before_mixed_fallback() {
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 1, 2, 10),
+        ];
+        let windows = assign_to_windows(files.iter(), 100);
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            active_window_l1_merge_trigger: 8,
+            inactive_window_trigger_file_num: 8,
+            inactive_window_l1_merge_trigger: 2,
+            time_window_seconds: Some(100),
+            max_output_file_size: Some(1_000),
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(100), None)
+            .await
+            .unwrap();
+
+        assert!(output.is_empty());
+    }
+
     #[tokio::test]
     async fn test_count_first_prefers_more_files_over_smaller_overlap() {
         let files = [
@@ -2282,6 +2404,7 @@ mod tests {
             trigger_file_num: 2,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
@@ -2310,6 +2433,7 @@ mod tests {
             trigger_file_num: 3,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 3,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
@@ -2337,6 +2461,7 @@ mod tests {
             trigger_file_num: 3,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 3,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
@@ -2379,6 +2504,7 @@ mod tests {
             trigger_file_num: 2,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(1000),
             max_output_file_size: None,
             append_mode: false,
@@ -2560,6 +2686,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 4,
             time_window_seconds: Some(1),
             max_output_file_size: None,
             append_mode: false,
@@ -2610,6 +2737,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(1),
             max_output_file_size: None,
             append_mode: false,
@@ -2646,6 +2774,7 @@ mod tests {
             trigger_file_num: 16,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(1),
             max_output_file_size: None,
             append_mode: false,
@@ -2695,6 +2824,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 4,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(1),
             max_output_file_size: Some(512),
             append_mode: false,
@@ -2723,6 +2853,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: Some(2_000),
             append_mode: false,
@@ -2753,6 +2884,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: Some(100_000),
             append_mode: false,
@@ -2783,6 +2915,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: Some(100_000),
             append_mode: false,
@@ -2813,6 +2946,7 @@ mod tests {
             trigger_file_num: 4,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: Some(1_000_000),
             append_mode: false,
@@ -3012,6 +3146,7 @@ mod tests {
             trigger_file_num: 3,
             active_window_l1_merge_trigger: 8,
             inactive_window_trigger_file_num: 3,
+            inactive_window_l1_merge_trigger: 8,
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
