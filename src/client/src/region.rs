@@ -47,7 +47,7 @@ use crate::error::{
     self, FlightGetSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
     MissingFieldSnafu, Result, ServerSnafu,
 };
-use crate::flight::{FlightMessageKind, FlightMessageReader, decode_flight_data};
+use crate::flight::{FlightMessageReader, decode_flight_data};
 use crate::{Client, metrics};
 
 const FLIGHT_DO_GET_TIMEOUT: Duration = Duration::from_secs(10);
@@ -235,9 +235,7 @@ where
             "poll_flight_data_stream"
         ));
 
-        let mut stream_ended = false;
-
-        while !stream_ended {
+        loop {
             let flight_message = match reader.read_next().await {
                 Ok(Some(message)) => message,
                 Ok(None) => break,
@@ -250,59 +248,27 @@ where
 
             match flight_message {
                 FlightMessage::RecordBatch(record_batch) => {
-                    let result_to_yield =
-                        RecordBatch::from_df_record_batch(schema_cloned.clone(), record_batch);
-
-                    // Metrics follow a batch so MergeScan can observe them before yielding it.
-                    match reader.peek_next_message_kind().await {
-                        Ok(Some(FlightMessageKind::Metrics)) => {
-                            let metrics_message = match reader.read_next().await {
-                                Ok(Some(FlightMessage::Metrics(metrics))) => metrics,
-                                Ok(Some(_) | None) => {
-                                    yield IllegalFlightMessagesSnafu {
-                                        reason: "Flight stream changed after peek",
-                                    }
-                                    .fail()
-                                    .map_err(BoxedError::new)
-                                    .context(ExternalSnafu);
-                                    break;
-                                }
-                                Err(error) => {
-                                    yield Err(BoxedError::new(flight_stream_error(
-                                        &stream_addr,
-                                        error,
-                                    )))
-                                    .context(ExternalSnafu);
-                                    break;
-                                }
-                            };
-                            let metrics = serde_json::from_str(&metrics_message).ok().map(Arc::new);
-                            metrics_ref.swap(metrics);
-                        }
-                        Ok(Some(FlightMessageKind::RecordBatch)) => {}
-                        Ok(Some(FlightMessageKind::Schema | FlightMessageKind::AffectedRows)) => {
-                            yield IllegalFlightMessagesSnafu {
-                                reason: "A RecordBatch message can only be succeeded by a Metrics message or another RecordBatch message"
-                            }
-                            .fail()
-                            .map_err(BoxedError::new)
-                            .context(ExternalSnafu);
-                            break;
-                        }
-                        Ok(None) => stream_ended = true,
-                        Err(error) => {
-                            yield Err(BoxedError::new(flight_stream_error(&stream_addr, error)))
-                                .context(ExternalSnafu);
-                            break;
-                        }
-                    }
-
-                    yield Ok(result_to_yield);
+                    // Deliver each batch immediately. In particular, do not
+                    // wait for a possible following Metrics message; it is
+                    // consumed on the next poll of this stream.
+                    yield Ok(RecordBatch::from_df_record_batch(
+                        schema_cloned.clone(),
+                        record_batch,
+                    ));
                 }
                 FlightMessage::Metrics(s) => {
                     // Metrics may arrive before the next RecordBatch.
-                    let m = serde_json::from_str(&s).ok().map(Arc::new);
-                    metrics_ref.swap(m);
+                    match serde_json::from_str(&s) {
+                        Ok(metrics) => {
+                            metrics_ref.swap(Some(Arc::new(metrics)));
+                        }
+                        Err(error) => {
+                            common_telemetry::warn!(
+                                "Failed to decode region Flight metrics: {}",
+                                error
+                            );
+                        }
+                    }
                     continue;
                 }
                 _ => {
@@ -600,7 +566,34 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_record_batch_stream_updates_following_metrics_before_yielding_batch() {
+    async fn test_record_batch_is_yielded_without_waiting_for_next_message() {
+        let schema = test_schema();
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
+        )
+        .unwrap();
+
+        let messages = stream::iter(vec![
+            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+            Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+        ])
+        .chain(stream::pending::<Result<FlightMessage>>());
+        let mut recordbatches =
+            recordbatches_from_flight_message_stream("test-peer".to_string(), messages)
+                .await
+                .unwrap();
+
+        let batch = tokio::time::timeout(Duration::from_secs(1), recordbatches.next())
+            .await
+            .expect("the first batch must not wait for lookahead")
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.num_rows(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_region_metrics_are_non_fatal() {
         let schema = test_schema();
         let batch = RecordBatch::new(
             schema.clone(),
@@ -611,23 +604,19 @@ mod test {
             "test-peer".to_string(),
             stream::iter(vec![
                 Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::Metrics("{not-json}".to_string())),
                 Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
-                Ok(FlightMessage::Metrics(test_metrics_json())),
             ]),
         )
         .await
         .unwrap();
 
-        let batch = recordbatches.next().await.unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 1);
-
-        let metrics = recordbatches.metrics().unwrap();
-        assert_eq!(metrics.elapsed_compute, 7);
+        assert_eq!(recordbatches.next().await.unwrap().unwrap().num_rows(), 1);
         assert!(recordbatches.next().await.is_none());
     }
 
     #[tokio::test]
-    async fn test_record_batch_stream_preserves_peeked_record_batch() {
+    async fn test_record_batch_stream_preserves_following_record_batch() {
         let schema = test_schema();
         let first_batch = RecordBatch::new(
             schema.clone(),
