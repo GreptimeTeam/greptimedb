@@ -2317,6 +2317,7 @@ read_preference = "Leader"
 
 [logging]
 max_log_files = 720
+max_log_dir_size = "0KiB"
 append_stdout = true
 enable_file_logging = true
 enable_otlp_tracing = false

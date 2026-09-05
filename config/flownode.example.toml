@@ -123,6 +123,10 @@ log_format = "text"
 ## The maximum amount of log files.
 max_log_files = 720
 
+## The maximum total size of managed log files in `dir`.
+## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+max_log_dir_size = "0B"
+
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"
 

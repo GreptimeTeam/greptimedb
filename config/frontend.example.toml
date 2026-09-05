@@ -375,6 +375,10 @@ log_format = "text"
 ## The maximum amount of log files.
 max_log_files = 720
 
+## The maximum total size of managed log files in `dir`.
+## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+max_log_dir_size = "0B"
+
 ## Whether to enable per-region metrics.
 ## Default to false.
 enable_per_region_metrics = false

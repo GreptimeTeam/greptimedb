@@ -13,13 +13,17 @@
 // limitations under the License.
 
 //! logging stuffs, inspired by databend
+mod file_retention;
+
 use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_base::serde::empty_string_as_default;
+use file_retention::{DirectoryRetention, LogFileKind, build_file_appender};
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
@@ -31,7 +35,6 @@ use serde::{Deserialize, Serialize};
 use tracing::callsite;
 use tracing::metadata::LevelFilter;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
 use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
@@ -253,6 +256,9 @@ pub struct LoggingOptions {
     /// The maximum number of log files set by default.
     pub max_log_files: usize,
 
+    /// The maximum total size of managed log files in `dir`. Zero disables size-based retention.
+    pub max_log_dir_size: ReadableSize,
+
     /// Whether to append logs to stdout. Default is true.
     pub append_stdout: bool,
 
@@ -365,6 +371,7 @@ impl Default for LoggingOptions {
             enable_file_logging: true,
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
+            max_log_dir_size: ReadableSize::default(),
             otlp_export_protocol: None,
             otlp_headers: HashMap::new(),
             enable_per_region_metrics: false,
@@ -461,19 +468,16 @@ pub fn init_global_logging(
 
         let file_logging_enabled = opts.enable_file_logging && !opts.dir.is_empty();
 
+        let retention = file_logging_enabled
+            .then(|| {
+                DirectoryRetention::new(opts.dir.clone(), opts.max_log_dir_size, opts.max_log_files)
+            })
+            .flatten();
+
         // Configure the file logging layer with rolling policy.
         let file_logging_layer = if file_logging_enabled {
-            let rolling_appender = RollingFileAppender::builder()
-                .rotation(Rotation::HOURLY)
-                .filename_prefix("greptimedb")
-                .max_log_files(opts.max_log_files)
-                .build(&opts.dir)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "initializing rolling file appender at {} failed: {}",
-                        &opts.dir, e
-                    )
-                });
+            let rolling_appender =
+                build_file_appender(opts, LogFileKind::Default, retention.as_ref());
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -494,17 +498,8 @@ pub fn init_global_logging(
 
         // Configure the error file logging layer with rolling policy.
         let err_file_logging_layer = if file_logging_enabled {
-            let rolling_appender = RollingFileAppender::builder()
-                .rotation(Rotation::HOURLY)
-                .filename_prefix("greptimedb-err")
-                .max_log_files(opts.max_log_files)
-                .build(&opts.dir)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "initializing rolling file appender at {} failed: {}",
-                        &opts.dir, e
-                    )
-                });
+            let rolling_appender =
+                build_file_appender(opts, LogFileKind::Error, retention.as_ref());
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -530,7 +525,12 @@ pub fn init_global_logging(
             None
         };
 
-        let slow_query_logging_layer = build_slow_query_logger(opts, slow_query_opts, &mut guards);
+        let slow_query_logging_layer =
+            build_slow_query_logger(opts, slow_query_opts, retention.as_ref(), &mut guards);
+
+        if let Some(retention) = &retention {
+            retention.initialize();
+        }
 
         // resolve log level settings from:
         // - options from command line or config files
@@ -709,6 +709,7 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
 fn build_slow_query_logger<S>(
     opts: &LoggingOptions,
     slow_query_opts: Option<&SlowQueryOptions>,
+    retention: Option<&DirectoryRetention>,
     guards: &mut Vec<WorkerGuard>,
 ) -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>>
 where
@@ -723,17 +724,7 @@ where
             && slow_query_opts.enable
             && slow_query_opts.record_type == SlowQueriesRecordType::Log
         {
-            let rolling_appender = RollingFileAppender::builder()
-                .rotation(Rotation::HOURLY)
-                .filename_prefix("greptimedb-slow-queries")
-                .max_log_files(opts.max_log_files)
-                .build(&opts.dir)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "initializing rolling file appender at {} failed: {}",
-                        &opts.dir, e
-                    )
-                });
+            let rolling_appender = build_file_appender(opts, LogFileKind::SlowQuery, retention);
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -793,6 +784,14 @@ mod tests {
         let opts: LoggingOptions = serde_json::from_str(json).unwrap();
 
         assert!(!opts.enable_file_logging);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_max_log_dir_size() {
+        let json = r#"{"max_log_dir_size": "1MiB"}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        assert_eq!(opts.max_log_dir_size, ReadableSize::mb(1));
     }
 
     #[test]
@@ -888,6 +887,10 @@ mod tests {
         let mut max_log_files = base.clone();
         max_log_files.max_log_files += 1;
         assert_ne!(base, max_log_files);
+
+        let mut max_log_dir_size = base.clone();
+        max_log_dir_size.max_log_dir_size = ReadableSize::mb(1);
+        assert_ne!(base, max_log_dir_size);
 
         let mut otlp_export_protocol = base.clone();
         otlp_export_protocol.otlp_export_protocol = Some(OtlpExportProtocol::Http);
