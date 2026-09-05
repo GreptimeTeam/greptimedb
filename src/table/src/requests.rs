@@ -39,8 +39,9 @@ use store_api::mito_engine_options::{
     APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD,
     MEMTABLE_BULK_ENCODE_ROW_THRESHOLD, MEMTABLE_BULK_MAX_MERGE_GROUPS,
     MEMTABLE_BULK_MERGE_THRESHOLD, MEMTABLE_TYPE, MERGE_MODE_KEY, SST_FORMAT_KEY,
-    TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
-    is_mito_engine_option_key,
+    TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_FALLBACK_TO_LOCAL, TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
@@ -118,6 +119,9 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     set.insert(TWCS_FALLBACK_TO_LOCAL);
     set.insert(TWCS_TIME_WINDOW);
     set.insert(TWCS_TRIGGER_FILE_NUM);
+    set.insert(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
+    set.insert(TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER);
+    set.insert(TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM);
     set.insert(TWCS_MAX_OUTPUT_FILE_SIZE);
     set.insert(SST_FORMAT_KEY);
     set
@@ -126,6 +130,14 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
 /// Returns true if the `key` is a valid key for database.
 pub fn validate_database_option(key: &str) -> bool {
     VALID_DB_OPT_KEYS.contains(&key)
+}
+
+/// Returns true if the value is valid for the database option.
+pub fn validate_database_option_value(key: &str, value: Option<&str>) -> bool {
+    key != TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER
+        || value
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|files| files >= 2)
 }
 
 /// Returns true if the `key` is a valid key for any engine or storage.
@@ -748,7 +760,24 @@ mod tests {
             MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD
         ));
         assert!(validate_database_option(MEMTABLE_BULK_MAX_MERGE_GROUPS));
+        assert!(validate_database_option(
+            "compaction.twcs.active_window.trigger_file_num"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.active_window.l1_merge_trigger"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.inactive_window.trigger_file_num"
+        ));
         assert!(!validate_database_option("foo"));
+        assert!(validate_database_option_value(
+            TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
+            Some("2")
+        ));
+        assert!(!validate_database_option_value(
+            TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
+            Some("1")
+        ));
     }
 
     #[test]

@@ -57,7 +57,9 @@ use crate::metrics;
 use crate::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
     MAX_ROW_GROUP_ROW_COUNT_LIMIT, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
-    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
+    TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1480,9 +1482,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
 
                 Ok(Self::Ttl(Some(ttl)))
             }
-            TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
-                Ok(Self::Twsc(key.clone(), value.clone()))
-            }
+            TWCS_TRIGGER_FILE_NUM
+            | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
+            | TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER
+            | TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM
+            | TWCS_MAX_OUTPUT_FILE_SIZE
+            | TWCS_TIME_WINDOW => Ok(Self::Twsc(key.clone(), value.clone())),
             SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
             APPEND_MODE_KEY => {
                 let append_mode = value
@@ -1529,6 +1534,15 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::TwcsTriggerFileNum => {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
+            UnsetRegionOption::TwcsActiveWindowTriggerFileNum => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsActiveWindowL1MergeTrigger => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsInactiveWindowTriggerFileNum => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
             UnsetRegionOption::TwcsMaxOutputFileSize => {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
@@ -1550,6 +1564,9 @@ impl TryFrom<&str> for UnsetRegionOption {
             TTL_KEY => Ok(Self::Ttl),
             WRITE_BUFFER_SIZE_KEY => Ok(Self::WriteBufferSize),
             TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
+            TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM => Ok(Self::TwcsActiveWindowTriggerFileNum),
+            TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER => Ok(Self::TwcsActiveWindowL1MergeTrigger),
+            TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM => Ok(Self::TwcsInactiveWindowTriggerFileNum),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
@@ -1561,11 +1578,14 @@ impl TryFrom<&str> for UnsetRegionOption {
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum UnsetRegionOption {
     TwcsTriggerFileNum,
+    TwcsActiveWindowTriggerFileNum,
+    TwcsInactiveWindowTriggerFileNum,
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
     MaxRowGroupRowCount,
     WriteBufferSize,
+    TwcsActiveWindowL1MergeTrigger,
 }
 
 impl UnsetRegionOption {
@@ -1574,6 +1594,9 @@ impl UnsetRegionOption {
             Self::Ttl => TTL_KEY,
             Self::WriteBufferSize => WRITE_BUFFER_SIZE_KEY,
             Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
+            Self::TwcsActiveWindowTriggerFileNum => TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+            Self::TwcsActiveWindowL1MergeTrigger => TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
+            Self::TwcsInactiveWindowTriggerFileNum => TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
             Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
@@ -1983,6 +2006,49 @@ mod tests {
             UnsetRegionOption::MaxRowGroupRowCount,
             UnsetRegionOption::try_from(MAX_ROW_GROUP_ROW_COUNT).unwrap()
         );
+    }
+
+    #[test]
+    fn test_set_twcs_window_trigger_options_try_from() {
+        for key in [
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "compaction.twcs.inactive_window.trigger_file_num",
+        ] {
+            let option = PbOption {
+                key: key.to_string(),
+                value: "8".to_string(),
+            };
+            assert_eq!(
+                SetRegionOption::Twsc(key.to_string(), "8".to_string()),
+                SetRegionOption::try_from(&option).unwrap(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unset_twcs_window_trigger_options_try_from() {
+        for (key, expected) in [
+            (
+                "compaction.twcs.active_window.trigger_file_num",
+                UnsetRegionOption::TwcsActiveWindowTriggerFileNum,
+            ),
+            (
+                "compaction.twcs.active_window.l1_merge_trigger",
+                UnsetRegionOption::TwcsActiveWindowL1MergeTrigger,
+            ),
+            (
+                "compaction.twcs.inactive_window.trigger_file_num",
+                UnsetRegionOption::TwcsInactiveWindowTriggerFileNum,
+            ),
+        ] {
+            assert_eq!(expected, UnsetRegionOption::try_from(key).unwrap());
+            assert_eq!(
+                SetRegionOption::Twsc(key.to_string(), String::new()),
+                SetRegionOption::from(&expected)
+            );
+        }
     }
 
     #[test]

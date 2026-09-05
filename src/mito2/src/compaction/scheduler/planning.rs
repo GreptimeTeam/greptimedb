@@ -203,11 +203,14 @@ impl CompactionScheduler {
             )
         });
 
+        // Avoid queuing serial outputs from a stale snapshot. Repicking after each
+        // batch lets newly flushed L0 files outrank L1 work that has not started.
+        let max_picker_outputs = max_background_compactions.min(request.max_parallelism.max(1));
         let picker = new_picker(
             &options,
             &dynamic_compaction_opts,
             request.current_version.options.append_mode,
-            Some(max_background_compactions),
+            Some(max_picker_outputs),
             time_range,
         );
         let region_id = request.region_id();

@@ -35,7 +35,7 @@ use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Word};
-use table::requests::validate_database_option;
+use table::requests::{validate_database_option, validate_database_option_value};
 
 use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
@@ -223,9 +223,10 @@ impl<'a> ParserContext<'a> {
             .map(parse_option_string)
             .collect::<Result<HashMap<String, OptionValue>>>()?;
 
-        for key in options.keys() {
+        for (key, value) in &options {
             ensure!(
-                validate_database_option(key),
+                validate_database_option(key)
+                    && validate_database_option_value(key, value.as_string()),
                 InvalidDatabaseOptionSnafu { key: key.clone() }
             );
         }
@@ -1508,6 +1509,13 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        let sql =
+            "CREATE DATABASE invalid WITH ('compaction.twcs.active_window.l1_merge_trigger'='1')";
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
     }
 
     #[test]

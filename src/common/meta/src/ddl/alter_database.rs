@@ -20,6 +20,7 @@ use common_procedure::{
 use common_telemetry::tracing::info;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
+use store_api::mito_engine_options::{TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM};
 use strum::AsRefStr;
 
 use crate::cache_invalidator::Context;
@@ -39,6 +40,14 @@ pub struct AlterDatabaseProcedure {
     pub data: AlterDatabaseData,
 }
 
+fn twcs_trigger_alias(key: &str) -> Option<&'static str> {
+    match key {
+        TWCS_TRIGGER_FILE_NUM => Some(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM),
+        TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM => Some(TWCS_TRIGGER_FILE_NUM),
+        _ => None,
+    }
+}
+
 fn build_new_schema_value(
     mut value: SchemaNameValue,
     alter_kind: &AlterDatabaseKind,
@@ -51,6 +60,9 @@ fn build_new_schema_value(
                         value.ttl = Some(*ttl);
                     }
                     SetDatabaseOption::Other(key, val) => {
+                        if let Some(alias) = twcs_trigger_alias(key) {
+                            value.extra_options.remove(alias);
+                        }
                         value.extra_options.insert(key.clone(), val.clone());
                     }
                 }
@@ -62,6 +74,9 @@ fn build_new_schema_value(
                     UnsetDatabaseOption::Ttl => value.ttl = None,
                     UnsetDatabaseOption::Other(key) => {
                         value.extra_options.remove(key);
+                        if let Some(alias) = twcs_trigger_alias(key) {
+                            value.extra_options.remove(alias);
+                        }
                     }
                 }
             }
@@ -235,6 +250,10 @@ impl AlterDatabaseData {
 mod tests {
     use std::time::Duration;
 
+    use store_api::mito_engine_options::{
+        TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
+    };
+
     use crate::ddl::alter_database::build_new_schema_value;
     use crate::key::schema_name::SchemaNameValue;
     use crate::rpc::ddl::{
@@ -296,5 +315,59 @@ mod tests {
                 .get("compaction.twcs.time_window"),
             Some(&"1d".to_string())
         );
+    }
+
+    #[test]
+    fn test_set_twcs_trigger_removes_other_alias() {
+        for (key, alias) in [
+            (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM),
+            (TWCS_TRIGGER_FILE_NUM, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM),
+        ] {
+            let mut current_schema_value = SchemaNameValue::default();
+            current_schema_value
+                .extra_options
+                .insert(alias.to_string(), "8".to_string());
+            let set = AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions(vec![
+                SetDatabaseOption::Other(key.to_string(), "16".to_string()),
+            ]));
+
+            let new_schema_value = build_new_schema_value(current_schema_value, &set).unwrap();
+
+            assert_eq!(
+                new_schema_value.extra_options.get(key).map(String::as_str),
+                Some("16")
+            );
+            assert!(!new_schema_value.extra_options.contains_key(alias));
+        }
+    }
+
+    #[test]
+    fn test_unset_twcs_trigger_removes_both_aliases() {
+        for key in [TWCS_TRIGGER_FILE_NUM, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM] {
+            let mut current_schema_value = SchemaNameValue::default();
+            current_schema_value
+                .extra_options
+                .insert(TWCS_TRIGGER_FILE_NUM.to_string(), "8".to_string());
+            current_schema_value.extra_options.insert(
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "16".to_string(),
+            );
+            let unset = AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions(vec![
+                UnsetDatabaseOption::Other(key.to_string()),
+            ]));
+
+            let new_schema_value = build_new_schema_value(current_schema_value, &unset).unwrap();
+
+            assert!(
+                !new_schema_value
+                    .extra_options
+                    .contains_key(TWCS_TRIGGER_FILE_NUM)
+            );
+            assert!(
+                !new_schema_value
+                    .extra_options
+                    .contains_key(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM)
+            );
+        }
     }
 }

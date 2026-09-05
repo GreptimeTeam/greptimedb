@@ -37,6 +37,15 @@ pub const COMPACTION_OVERRIDE: &str = "compaction.override";
 pub const COMPACTION_TYPE_TWCS: &str = "twcs";
 /// Option key for twcs min file num to trigger a compaction.
 pub const TWCS_TRIGGER_FILE_NUM: &str = "compaction.twcs.trigger_file_num";
+/// Option key for twcs min file num to trigger compaction in the active window.
+pub const TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM: &str =
+    "compaction.twcs.active_window.trigger_file_num";
+/// Option key for the active-window L1 safety compaction threshold.
+pub const TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER: &str =
+    "compaction.twcs.active_window.l1_merge_trigger";
+/// Option key for twcs min file num to trigger compaction in an inactive window.
+pub const TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM: &str =
+    "compaction.twcs.inactive_window.trigger_file_num";
 /// Option key for twcs max output file size.
 pub const TWCS_MAX_OUTPUT_FILE_SIZE: &str = "compaction.twcs.max_output_file_size";
 /// Option key for twcs time window.
@@ -83,6 +92,9 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         COMPACTION_TYPE,
         COMPACTION_OVERRIDE,
         TWCS_TRIGGER_FILE_NUM,
+        TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+        TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
+        TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
         TWCS_MAX_OUTPUT_FILE_SIZE,
         TWCS_TIME_WINDOW,
         TWCS_REMOTE_COMPACTION,
@@ -121,6 +133,15 @@ mod tests {
         assert!(is_mito_engine_option_key("compaction.override"));
         assert!(is_mito_engine_option_key(
             "compaction.twcs.trigger_file_num"
+        ));
+        assert!(is_mito_engine_option_key(
+            "compaction.twcs.active_window.trigger_file_num"
+        ));
+        assert!(is_mito_engine_option_key(
+            "compaction.twcs.active_window.l1_merge_trigger"
+        ));
+        assert!(is_mito_engine_option_key(
+            "compaction.twcs.inactive_window.trigger_file_num"
         ));
         assert!(is_mito_engine_option_key("compaction.twcs.time_window"));
         assert!(is_mito_engine_option_key("storage"));
