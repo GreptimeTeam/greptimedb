@@ -218,6 +218,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("JSON number out of supported range: {}", value))]
+    JsonNumberOutOfRange {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid JSON2 layout: {reason}"))]
     InvalidJson2Layout {
         reason: String,
@@ -355,6 +362,7 @@ impl ErrorExt for Error {
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
+            | JsonNumberOutOfRange { .. }
             | InvalidJson2Layout { .. }
             | InvalidJson2Settings { .. }
             | InvalidJsonb { .. }
