@@ -79,24 +79,8 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
         let mut stream = reader.read(ns, start_id)?;
 
         let stream = stream! {
-            let mut buffered_entry: Option<Entry> = None;
             while let Some(next_entry) = stream.next().await {
-                match buffered_entry.take() {
-                    Some(entry) => {
-                        if entry.is_complete() {
-                            yield decode_raw_entry(entry);
-                        } else {
-                            warn!("Ignoring incomplete entry: {}", entry);
-                        }
-                        buffered_entry = Some(next_entry?);
-                    },
-                    None => {
-                        buffered_entry = Some(next_entry?);
-                    }
-                };
-            }
-            if let Some(entry) = buffered_entry {
-                // Ignores tail corrupted data.
+                let entry = next_entry?;
                 if entry.is_complete() {
                     yield decode_raw_entry(entry);
                 } else {
@@ -112,15 +96,54 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
 #[cfg(test)]
 mod tests {
 
+    use std::time::Duration;
+
     use api::v1::{Mutation, OpType, WalEntry};
-    use futures::TryStreamExt;
+    use futures::{StreamExt, TryStreamExt, stream};
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader};
     use store_api::logstore::provider::Provider;
     use store_api::storage::RegionId;
 
+    use crate::error::Result;
     use crate::test_util::wal_util::MockRawEntryStream;
+    use crate::wal::EntryId;
     use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
+    use crate::wal::raw_entry_reader::{EntryStream, RawEntryReader};
+
+    struct LiveRawEntryReader {
+        entry: Entry,
+    }
+
+    impl RawEntryReader for LiveRawEntryReader {
+        fn read(&self, _ns: &Provider, _start_id: EntryId) -> Result<EntryStream<'static>> {
+            let stream = stream::iter([Ok(self.entry.clone())]).chain(stream::pending());
+            Ok(stream.boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delivers_complete_entry_while_stream_is_alive() {
+        let provider = Provider::kafka_provider("my_topic".to_string());
+        let wal_entry = WalEntry::default();
+        let raw_entry_reader = LiveRawEntryReader {
+            entry: Entry::Naive(store_api::logstore::entry::NaiveEntry {
+                provider: provider.clone(),
+                region_id: RegionId::new(1, 1),
+                entry_id: 1,
+                data: wal_entry.encode_to_vec(),
+            }),
+        };
+        let mut reader = LogStoreEntryReader::new(raw_entry_reader);
+        let mut entries = reader.read(&provider, 0).unwrap();
+
+        let entry = tokio::time::timeout(Duration::from_secs(1), entries.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry, (1, wal_entry));
+    }
 
     #[tokio::test]
     async fn test_tail_corrupted_stream() {
