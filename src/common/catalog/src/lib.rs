@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use consts::DEFAULT_CATALOG_NAME;
+use consts::{DEFAULT_CATALOG_NAME, system_schema_name};
 
 pub mod consts;
 
@@ -74,14 +74,25 @@ pub fn parse_catalog_and_schema_from_db_string(db: &str) -> (String, String) {
 pub fn parse_optional_catalog_and_schema_from_db_string(db: &str) -> (Option<String>, String) {
     let parts = db.splitn(2, '-').collect::<Vec<&str>>();
     if parts.len() == 2 {
-        (Some(parts[0].to_string()), parts[1].to_string())
+        (
+            Some(parts[0].to_string()),
+            canonicalize_schema_name(parts[1]),
+        )
     } else {
-        (None, db.to_string())
+        (None, canonicalize_schema_name(db))
     }
+}
+
+/// A database name taken from a protocol never reaches the SQL parser, which is what
+/// lowercases unquoted identifiers, so system schemas are folded here instead.
+fn canonicalize_schema_name(schema: &str) -> String {
+    system_schema_name(schema).unwrap_or(schema).to_string()
 }
 
 #[cfg(test)]
 mod tests {
+    use consts::{INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME};
+
     use super::*;
 
     #[test]
@@ -125,6 +136,19 @@ mod tests {
         assert_eq!(
             (Some("catalog".to_string()), "schema1-schema2".to_string()),
             parse_optional_catalog_and_schema_from_db_string("catalog-schema1-schema2")
+        );
+    }
+
+    #[test]
+    fn test_parse_system_schema_ignores_case() {
+        assert_eq!(
+            (None, INFORMATION_SCHEMA_NAME.to_string()),
+            parse_optional_catalog_and_schema_from_db_string("INFORMATION_SCHEMA")
+        );
+
+        assert_eq!(
+            (Some("CATALOG".to_string()), PG_CATALOG_NAME.to_string()),
+            parse_optional_catalog_and_schema_from_db_string("CATALOG-Pg_Catalog")
         );
     }
 }
