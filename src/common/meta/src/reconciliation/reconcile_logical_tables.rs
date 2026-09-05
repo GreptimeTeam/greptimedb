@@ -19,7 +19,6 @@ pub(crate) mod resolve_table_metadatas;
 pub(crate) mod update_table_infos;
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt::Debug;
 
 use async_trait::async_trait;
@@ -31,7 +30,7 @@ use common_procedure::{
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
-use store_api::storage::{RegionNumber, TableId};
+use store_api::storage::TableId;
 use table::metadata::TableInfo;
 use table::table_name::TableName;
 
@@ -55,109 +54,6 @@ pub struct ReconcileLogicalTablesContext {
     pub cache_invalidator: CacheInvalidatorRef,
     pub persistent_ctx: PersistentContext,
     pub volatile_ctx: VolatileContext,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum LogicalTablesPhase {
-    Start,
-    ResolveTableMetadatas,
-    ReconcileRegions,
-    UpdateTableInfos,
-}
-
-impl LogicalTablesPhase {
-    const fn as_event_value(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::ResolveTableMetadatas => "resolve_table_metadatas",
-            Self::ReconcileRegions => "reconcile_regions",
-            Self::UpdateTableInfos => "update_table_infos",
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct ReconcileLogicalTablesResultSummary {
-    metadata_consistent_table_count: usize,
-    metadata_inconsistent_table_count: usize,
-    missing_region_table_count: usize,
-    resolved_column_count: usize,
-    scanned_region_count: usize,
-    created_region_table_count: usize,
-    created_region_count: usize,
-    updated_table_info_count: usize,
-    last_completed_phase: Option<LogicalTablesPhase>,
-}
-
-impl ReconcileLogicalTablesResultSummary {
-    fn mark_start_completed(&mut self) {
-        self.last_completed_phase = Some(LogicalTablesPhase::Start);
-    }
-
-    fn begin_resolution(&mut self) {
-        self.metadata_consistent_table_count = 0;
-        self.metadata_inconsistent_table_count = 0;
-        self.missing_region_table_count = 0;
-        self.resolved_column_count = 0;
-        self.scanned_region_count = 0;
-        self.created_region_table_count = 0;
-        self.created_region_count = 0;
-        self.updated_table_info_count = 0;
-        self.last_completed_phase = Some(LogicalTablesPhase::Start);
-    }
-
-    fn record_scanned_regions(&mut self, count: usize) {
-        self.scanned_region_count += count;
-    }
-
-    fn record_missing_region_table(&mut self) {
-        self.missing_region_table_count += 1;
-    }
-
-    fn record_consistent_table(&mut self, resolved_column_count: usize) {
-        self.metadata_consistent_table_count += 1;
-        self.resolved_column_count += resolved_column_count;
-    }
-
-    fn record_inconsistent_table(&mut self) {
-        self.metadata_inconsistent_table_count += 1;
-    }
-
-    fn mark_resolution_completed(&mut self) {
-        self.last_completed_phase = Some(LogicalTablesPhase::ResolveTableMetadatas);
-    }
-
-    fn begin_region_reconciliation(&mut self) {
-        self.updated_table_info_count = 0;
-        self.last_completed_phase = Some(LogicalTablesPhase::ResolveTableMetadatas);
-    }
-
-    fn mark_regions_reconciled(&mut self) {
-        self.last_completed_phase = Some(LogicalTablesPhase::ReconcileRegions);
-    }
-
-    fn record_created_regions(&mut self, table_count: usize, region_count: usize) {
-        self.created_region_table_count += table_count;
-        self.created_region_count += region_count;
-    }
-
-    fn begin_table_info_update(&mut self) {
-        self.updated_table_info_count = 0;
-        self.last_completed_phase = Some(LogicalTablesPhase::ReconcileRegions);
-    }
-
-    fn record_updated_table_infos(&mut self, count: usize) {
-        self.updated_table_info_count += count;
-    }
-
-    fn mark_table_info_update_completed(&mut self) {
-        self.last_completed_phase = Some(LogicalTablesPhase::UpdateTableInfos);
-    }
-
-    fn last_completed_phase(&self) -> Option<&'static str> {
-        self.last_completed_phase
-            .map(LogicalTablesPhase::as_event_value)
-    }
 }
 
 impl ReconcileLogicalTablesContext {
@@ -245,8 +141,6 @@ impl PersistentContext {
 #[derive(Default)]
 pub(crate) struct VolatileContext {
     pub(crate) metrics: ReconcileLogicalTableMetrics,
-    result_summary: ReconcileLogicalTablesResultSummary,
-    missing_regions_by_table: HashMap<TableId, Vec<RegionNumber>>,
 }
 
 pub struct ReconcileLogicalTablesProcedure {
@@ -370,16 +264,13 @@ impl Procedure for ReconcileLogicalTablesProcedure {
         }
 
         let persistent_ctx = &self.context.persistent_ctx;
-        let result_summary = &self.context.volatile_ctx.result_summary;
         let locators = Self::event_locators(persistent_ctx);
         let event = match ctx.trigger {
             EventTrigger::Submitted => {
                 ReconcileLogicalTablesEvent::submitted(locators, persistent_ctx.is_subprocedure)
             }
-            EventTrigger::Succeeded => Self::result_event(locators, result_summary, true),
-            EventTrigger::Failed | EventTrigger::Poisoned => {
-                Self::result_event(locators, result_summary, false)
-            }
+            EventTrigger::Succeeded => self.result_event(locators, true),
+            EventTrigger::Failed | EventTrigger::Poisoned => self.result_event(locators, false),
             _ => ReconcileLogicalTablesEvent::lifecycle(locators),
         };
         Some(Box::new(event))
@@ -405,22 +296,19 @@ impl ReconcileLogicalTablesProcedure {
     }
 
     fn result_event(
+        &self,
         locators: Vec<ReconciliationLocator>,
-        summary: &ReconcileLogicalTablesResultSummary,
         complete: bool,
     ) -> ReconcileLogicalTablesEvent {
+        let metrics = self.context.metrics();
         ReconcileLogicalTablesEvent::result(
             locators,
             complete,
-            summary.metadata_consistent_table_count,
-            summary.metadata_inconsistent_table_count,
-            summary.missing_region_table_count,
-            summary.resolved_column_count,
-            summary.scanned_region_count,
-            summary.created_region_table_count,
-            summary.created_region_count,
-            summary.updated_table_info_count,
-            summary.last_completed_phase(),
+            self.context.persistent_ctx.logical_table_ids.len(),
+            metrics.column_metadata_consistent_count,
+            metrics.column_metadata_inconsistent_count,
+            metrics.create_tables_count,
+            metrics.update_table_info_count,
         )
     }
 }
@@ -446,31 +334,17 @@ pub(crate) trait State: Sync + Send + Debug {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use api::region::RegionResponse;
-    use api::v1::region::region_request::Body;
     use api::v1::value::ValueData;
     use common_event_recorder::{EventTypeFilter, EventTypeFilterRef};
     use common_procedure::{
         ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
         RetryPhase,
     };
-    use common_procedure_test::MockContextProvider;
     use serde_json::{Value, json};
-    use store_api::metadata::RegionMetadata;
-    use store_api::storage::RegionId;
-    use tokio::sync::mpsc;
 
     use super::*;
-    use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
-    use crate::error;
-    use crate::key::table_route::PhysicalTableRouteValue;
-    use crate::key::test_utils::new_test_table_info_with_name;
-    use crate::peer::Peer;
     use crate::reconciliation::event::RECONCILE_TABLE_EVENT_TYPE;
-    use crate::reconciliation::reconcile_logical_tables::reconcile_regions::ReconcileRegions;
-    use crate::rpc::router::{Region, RegionRoute};
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
     struct LogicalTablesEventHarness {
@@ -565,7 +439,7 @@ mod tests {
     fn logical_table_non_terminal_lifecycle_events_have_null_payloads() {
         let events = LogicalTablesEventHarness::all();
         let mut procedure = test_procedure(true);
-        procedure.context.volatile_ctx.result_summary = populated_summary();
+        procedure.context.volatile_ctx.metrics = populated_metrics();
 
         for trigger in [
             EventTrigger::Recovered,
@@ -591,10 +465,10 @@ mod tests {
     }
 
     #[test]
-    fn logical_table_terminal_events_report_bounded_results() {
+    fn logical_table_terminal_events_report_existing_state_and_metrics() {
         let events = LogicalTablesEventHarness::all();
         let mut procedure = test_procedure(true);
-        procedure.context.volatile_ctx.result_summary = populated_summary();
+        procedure.context.volatile_ctx.metrics = populated_metrics();
 
         for (trigger, complete) in [
             (EventTrigger::Succeeded, true),
@@ -633,18 +507,29 @@ mod tests {
     }
 
     #[test]
-    fn logical_table_result_summary_is_not_persisted() {
+    fn logical_table_recovery_preserves_locators_and_resets_metrics() {
         let events = LogicalTablesEventHarness::all();
         let mut procedure = test_procedure(false);
-        procedure.context.volatile_ctx.result_summary = populated_summary();
-        let value: Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
-        assert!(value["persistent_ctx"].get("result_summary").is_none());
+        procedure.context.volatile_ctx.metrics = populated_metrics();
+        let original_dump = procedure.dump().unwrap();
+        procedure.context.volatile_ctx.metrics = ReconcileLogicalTableMetrics::default();
+        assert_eq!(procedure.dump().unwrap(), original_dump);
 
-        let loaded = ReconcileLogicalTablesProcedure::from_json(
-            test_context(),
-            &serde_json::to_string(&value).unwrap(),
-        )
-        .unwrap();
+        let loaded =
+            ReconcileLogicalTablesProcedure::from_json(test_context(), &original_dump).unwrap();
+        assert_eq!(loaded.dump().unwrap(), original_dump);
+        assert_eq!(
+            events
+                .event(&loaded, EventTrigger::Recovered)
+                .unwrap()
+                .extra_rows()
+                .unwrap(),
+            events
+                .event(&procedure, EventTrigger::Submitted)
+                .unwrap()
+                .extra_rows()
+                .unwrap(),
+        );
         assert_eq!(
             events
                 .event(&loaded, EventTrigger::Succeeded)
@@ -654,294 +539,44 @@ mod tests {
             json!({
                 "version": 1,
                 "complete": true,
-                "processed_table_count": 0,
+                "processed_table_count": 2,
                 "metadata_consistent_table_count": 0,
                 "metadata_inconsistent_table_count": 0,
-                "missing_region_table_count": 0,
-                "resolved_column_count": 0,
-                "scanned_region_count": 0,
-                "created_region_table_count": 0,
-                "created_region_count": 0,
-                "updated_table_info_count": 0,
-                "last_completed_phase": null,
+                "create_table_count": 0,
+                "update_table_info_count": 0,
             })
         );
     }
 
     #[test]
-    fn logical_table_partial_summary_preserves_completed_work_without_advancing_phases() {
-        let events = LogicalTablesEventHarness::all();
-        let mut procedure = test_procedure(false);
-        let summary = &mut procedure.context.volatile_ctx.result_summary;
-        summary.mark_start_completed();
-        summary.begin_resolution();
-        summary.record_scanned_regions(2);
-        summary.record_missing_region_table();
-        summary.record_consistent_table(3);
+    fn logical_table_failure_before_resolution_reports_requested_tables() {
+        let procedure = test_procedure(false);
+        let payload = LogicalTablesEventHarness::all()
+            .event(&procedure, EventTrigger::Failed)
+            .unwrap()
+            .json_payload()
+            .unwrap();
         assert_eq!(
-            events
-                .event(&procedure, EventTrigger::Failed)
-                .unwrap()
-                .json_payload()
-                .unwrap(),
-            json!({
-                "version": 1,
-                "complete": false,
-                "processed_table_count": 2,
-                "metadata_consistent_table_count": 1,
-                "metadata_inconsistent_table_count": 0,
-                "missing_region_table_count": 1,
-                "resolved_column_count": 3,
-                "scanned_region_count": 2,
-                "created_region_table_count": 0,
-                "created_region_count": 0,
-                "updated_table_info_count": 0,
-                "last_completed_phase": "start",
-            })
-        );
-    }
-
-    #[test]
-    fn logical_table_summary_accumulates_committed_table_info_chunks() {
-        let mut summary = ReconcileLogicalTablesResultSummary::default();
-        summary.mark_regions_reconciled();
-        summary.begin_table_info_update();
-        summary.record_updated_table_infos(2);
-        summary.record_updated_table_infos(1);
-
-        assert_eq!(summary.updated_table_info_count, 3);
-        assert_eq!(
-            summary.last_completed_phase(),
-            Some(LogicalTablesPhase::ReconcileRegions.as_event_value())
-        );
-    }
-
-    #[tokio::test]
-    async fn logical_table_region_progress_accumulates_across_retry() {
-        let (tx, _rx) = mpsc::channel(8);
-        let fail_region_two = Arc::new(AtomicBool::new(true));
-        let handler_fail_region_two = fail_region_two.clone();
-        let handler = DatanodeWatcher::new(tx).with_handler(move |_peer, request| {
-            match request.body.as_ref().unwrap() {
-                Body::Creates(request) => {
-                    assert_eq!(request.requests.len(), 1);
-                    let region_number =
-                        RegionId::from_u64(request.requests[0].region_id).region_number();
-                    if region_number == 2 && handler_fail_region_two.swap(false, Ordering::SeqCst) {
-                        error::UnexpectedSnafu {
-                            err_msg: "mock error",
-                        }
-                        .fail()
-                    } else {
-                        Ok(RegionResponse::new(0))
-                    }
-                }
-                _ => unreachable!(),
-            }
-        });
-        let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(handler)));
-        let context = Context {
-            node_manager: ddl_context.node_manager,
-            table_metadata_manager: ddl_context.table_metadata_manager,
-            cache_invalidator: ddl_context.cache_invalidator,
-        };
-        let mut procedure = ReconcileLogicalTablesProcedure::new(
-            context,
-            42,
-            TableName::new("greptime", "public", "physical_metrics"),
-            vec![
-                (43, TableName::new("greptime", "public", "cpu")),
-                (44, TableName::new("greptime", "public", "memory")),
-            ],
-            false,
-        );
-        procedure.context.persistent_ctx.create_tables = vec![
-            (43, new_test_table_info_with_name(43, "cpu")),
-            (44, new_test_table_info_with_name(44, "memory")),
-        ];
-        procedure.context.persistent_ctx.physical_table_route =
-            Some(PhysicalTableRouteValue::new(vec![
-                RegionRoute {
-                    region: Region::new_test(store_api::storage::RegionId::new(42, 1)),
-                    leader_peer: Some(Peer::empty(1)),
-                    ..Default::default()
-                },
-                RegionRoute {
-                    region: Region::new_test(store_api::storage::RegionId::new(42, 2)),
-                    leader_peer: Some(Peer::empty(1)),
-                    ..Default::default()
-                },
-            ]));
-        let summary = &mut procedure.context.volatile_ctx.result_summary;
-        summary.mark_start_completed();
-        summary.record_scanned_regions(4);
-        summary.record_missing_region_table();
-        summary.record_missing_region_table();
-        summary.mark_resolution_completed();
-        procedure
-            .context
-            .volatile_ctx
-            .missing_regions_by_table
-            .insert(43, vec![1]);
-        procedure
-            .context
-            .volatile_ctx
-            .missing_regions_by_table
-            .insert(44, vec![1, 2]);
-        procedure.state = Box::new(ReconcileRegions);
-
-        let procedure_ctx = ProcedureContext {
-            procedure_id: ProcedureId::random(),
-            provider: Arc::new(MockContextProvider::default()),
-            event_context: None,
-        };
-        assert!(procedure.execute(&procedure_ctx).await.is_err());
-        assert!(
-            procedure
-                .context
-                .volatile_ctx
-                .missing_regions_by_table
-                .get(&43)
-                .is_some_and(Vec::is_empty)
-        );
-        assert_eq!(
-            procedure
-                .context
-                .volatile_ctx
-                .missing_regions_by_table
-                .get(&44)
-                .map(Vec::as_slice),
-            Some(&[2][..])
-        );
-
-        assert_eq!(
-            LogicalTablesEventHarness::all()
-                .event(&procedure, EventTrigger::Failed)
-                .unwrap()
-                .json_payload()
-                .unwrap(),
+            payload,
             json!({
                 "version": 1,
                 "complete": false,
                 "processed_table_count": 2,
                 "metadata_consistent_table_count": 0,
                 "metadata_inconsistent_table_count": 0,
-                "missing_region_table_count": 2,
-                "resolved_column_count": 0,
-                "scanned_region_count": 4,
-                "created_region_table_count": 1,
-                "created_region_count": 2,
-                "updated_table_info_count": 0,
-                "last_completed_phase": "resolve_table_metadatas",
-            })
-        );
-
-        procedure.execute(&procedure_ctx).await.unwrap();
-        assert!(
-            procedure
-                .context
-                .volatile_ctx
-                .missing_regions_by_table
-                .is_empty()
-        );
-        assert_eq!(
-            LogicalTablesEventHarness::all()
-                .event(&procedure, EventTrigger::Succeeded)
-                .unwrap()
-                .json_payload()
-                .unwrap(),
-            json!({
-                "version": 1,
-                "complete": true,
-                "processed_table_count": 2,
-                "metadata_consistent_table_count": 0,
-                "metadata_inconsistent_table_count": 0,
-                "missing_region_table_count": 2,
-                "resolved_column_count": 0,
-                "scanned_region_count": 4,
-                "created_region_table_count": 2,
-                "created_region_count": 3,
-                "updated_table_info_count": 0,
-                "last_completed_phase": "reconcile_regions",
+                "create_table_count": 0,
+                "update_table_info_count": 0,
             })
         );
     }
 
-    #[tokio::test]
-    async fn logical_table_region_reconciliation_rebuilds_missing_regions_after_recovery() {
-        let mut procedure = ReconcileLogicalTablesProcedure::new(
-            test_context(),
-            42,
-            TableName::new("greptime", "public", "physical_metrics"),
-            vec![(43, TableName::new("greptime", "public", "cpu"))],
-            false,
-        );
-        procedure.context.persistent_ctx.create_tables =
-            vec![(43, new_test_table_info_with_name(43, "cpu"))];
-        procedure.context.persistent_ctx.physical_table_route =
-            Some(PhysicalTableRouteValue::new(vec![RegionRoute {
-                region: Region::new_test(RegionId::new(42, 1)),
-                leader_peer: Some(Peer::empty(1)),
-                ..Default::default()
-            }]));
-        procedure.state = Box::new(ReconcileRegions);
-        let dumped = procedure.dump().unwrap();
-
-        let (tx, _rx) = mpsc::channel(4);
-        let handler = DatanodeWatcher::new(tx).with_handler(|_peer, request| {
-            match request.body.as_ref().unwrap() {
-                Body::ListMetadata(request) => Ok(RegionResponse::from_metadata(
-                    serde_json::to_vec(&vec![None::<RegionMetadata>; request.region_ids.len()])
-                        .unwrap(),
-                )),
-                Body::Creates(_) => Ok(RegionResponse::new(0)),
-                _ => unreachable!(),
-            }
-        });
-        let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(handler)));
-        let context = Context {
-            node_manager: ddl_context.node_manager,
-            table_metadata_manager: ddl_context.table_metadata_manager,
-            cache_invalidator: ddl_context.cache_invalidator,
-        };
-        let mut recovered = ReconcileLogicalTablesProcedure::from_json(context, &dumped).unwrap();
-        let procedure_ctx = ProcedureContext {
-            procedure_id: ProcedureId::random(),
-            provider: Arc::new(MockContextProvider::default()),
-            event_context: None,
-        };
-
-        recovered.execute(&procedure_ctx).await.unwrap();
-
-        let summary = &recovered.context.volatile_ctx.result_summary;
-        assert_eq!(summary.scanned_region_count, 1);
-        assert_eq!(summary.created_region_table_count, 1);
-        assert_eq!(summary.created_region_count, 1);
-        assert_eq!(
-            summary.last_completed_phase(),
-            Some(LogicalTablesPhase::ReconcileRegions.as_event_value())
-        );
-        assert!(recovered.context.persistent_ctx.create_tables.is_empty());
-        assert!(
-            recovered
-                .context
-                .volatile_ctx
-                .missing_regions_by_table
-                .is_empty()
-        );
-    }
-
-    fn populated_summary() -> ReconcileLogicalTablesResultSummary {
-        ReconcileLogicalTablesResultSummary {
-            metadata_consistent_table_count: 3,
-            metadata_inconsistent_table_count: 1,
-            missing_region_table_count: 2,
-            resolved_column_count: 12,
-            scanned_region_count: 18,
-            created_region_table_count: 2,
-            created_region_count: 6,
-            updated_table_info_count: 1,
-            last_completed_phase: Some(LogicalTablesPhase::UpdateTableInfos),
+    fn populated_metrics() -> ReconcileLogicalTableMetrics {
+        ReconcileLogicalTableMetrics {
+            column_metadata_consistent_count: 3,
+            column_metadata_inconsistent_count: 1,
+            create_tables_count: 2,
+            update_table_info_count: 4,
+            ..Default::default()
         }
     }
 
@@ -949,16 +584,11 @@ mod tests {
         json!({
             "version": 1,
             "complete": complete,
-            "processed_table_count": 6,
+            "processed_table_count": 2,
             "metadata_consistent_table_count": 3,
             "metadata_inconsistent_table_count": 1,
-            "missing_region_table_count": 2,
-            "resolved_column_count": 12,
-            "scanned_region_count": 18,
-            "created_region_table_count": 2,
-            "created_region_count": 6,
-            "updated_table_info_count": 1,
-            "last_completed_phase": "update_table_infos",
+            "create_table_count": 2,
+            "update_table_info_count": 4,
         })
     }
 

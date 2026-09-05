@@ -246,13 +246,8 @@ async fn test_logical_table_reconciliation_events() {
              AND json_get_int(payload, 'processed_table_count') = 2 \
              AND json_get_int(payload, 'metadata_consistent_table_count') = 2 \
              AND json_get_int(payload, 'metadata_inconsistent_table_count') = 0 \
-             AND json_get_int(payload, 'missing_region_table_count') = 0 \
-             AND json_get_int(payload, 'resolved_column_count') = 6 \
-             AND json_get_int(payload, 'scanned_region_count') = 2 \
-             AND json_get_int(payload, 'created_region_table_count') = 0 \
-             AND json_get_int(payload, 'created_region_count') = 0 \
-             AND json_get_int(payload, 'updated_table_info_count') = 0 \
-             AND json_get_string(payload, 'last_completed_phase') = 'update_table_infos'"
+             AND json_get_int(payload, 'create_table_count') = 0 \
+             AND json_get_int(payload, 'update_table_info_count') = 0"
         ),
         "\
 +---------+

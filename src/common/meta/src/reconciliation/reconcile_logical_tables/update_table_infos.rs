@@ -26,7 +26,7 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context as CacheContext;
 use crate::ddl::utils::table_info::{
-    batch_update_table_info_values_with_progress, get_all_table_info_values_by_table_ids,
+    batch_update_table_info_values, get_all_table_info_values_by_table_ids,
 };
 use crate::error::Result;
 use crate::instruction::CacheIdent;
@@ -45,11 +45,7 @@ impl State for UpdateTableInfos {
         ctx: &mut ReconcileLogicalTablesContext,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        ctx.volatile_ctx.result_summary.begin_table_info_update();
         if ctx.persistent_ctx.update_table_infos.is_empty() {
-            ctx.volatile_ctx
-                .result_summary
-                .mark_table_info_update_completed();
             return Ok((Box::new(ReconciliationEnd), Status::executing(false)));
         }
 
@@ -98,15 +94,11 @@ impl State for UpdateTableInfos {
             table_info_values_to_update.push((table_info_value, new_table_info));
         }
         let table_id = ctx.table_id();
+        let table_name = ctx.table_name();
+
         let updated_table_info_num = table_info_values_to_update.len();
-        let table_metadata_manager = ctx.table_metadata_manager.clone();
-        let result_summary = &mut ctx.volatile_ctx.result_summary;
-        batch_update_table_info_values_with_progress(
-            &table_metadata_manager,
-            table_info_values_to_update,
-            |updated_count| result_summary.record_updated_table_infos(updated_count),
-        )
-        .await?;
+        batch_update_table_info_values(&ctx.table_metadata_manager, table_info_values_to_update)
+            .await?;
 
         info!(
             "Updated table infos for logical tables: {:?}, physical table: {}, table_id: {}",
@@ -116,7 +108,7 @@ impl State for UpdateTableInfos {
                 .map(|(table_id, _)| table_id)
                 .collect::<Vec<_>>(),
             table_id,
-            ctx.table_name(),
+            table_name,
         );
 
         let cache_ctx = CacheContext {
@@ -125,15 +117,10 @@ impl State for UpdateTableInfos {
                 table_id
             )),
         };
-        let idents =
-            Self::build_cache_ident_keys(table_id, ctx.table_name(), &table_ids, &table_names);
+        let idents = Self::build_cache_ident_keys(table_id, table_name, &table_ids, &table_names);
         ctx.cache_invalidator
             .invalidate(&cache_ctx, &idents)
             .await?;
-
-        ctx.volatile_ctx
-            .result_summary
-            .mark_table_info_update_completed();
 
         ctx.persistent_ctx.update_table_infos.clear();
         // Update metrics.

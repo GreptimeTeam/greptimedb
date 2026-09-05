@@ -233,16 +233,13 @@ struct LogicalTablesSubmittedPayload {
 struct LogicalTablesResultPayload {
     version: u8,
     complete: bool,
+    /// Number of logical tables in the request, not a count of completed repairs.
     processed_table_count: usize,
     metadata_consistent_table_count: usize,
     metadata_inconsistent_table_count: usize,
-    missing_region_table_count: usize,
-    resolved_column_count: usize,
-    scanned_region_count: usize,
-    created_region_table_count: usize,
-    created_region_count: usize,
-    updated_table_info_count: usize,
-    last_completed_phase: Option<&'static str>,
+    /// Tables identified for creation by the existing resolution metrics.
+    create_table_count: usize,
+    update_table_info_count: usize,
 }
 
 /// Event representation for logical table reconciliation.
@@ -268,20 +265,18 @@ impl ReconcileLogicalTablesEvent {
         }
     }
 
-    /// Builds a terminal event from the bounded logical table result summary.
-    #[allow(clippy::too_many_arguments)]
+    /// Builds a terminal event from persistent table IDs and existing volatile metrics.
+    ///
+    /// Metrics are best-effort observations from the current process. They reset on recovery
+    /// and do not account for every partial region or table-info update.
     pub(crate) fn result(
         locators: Vec<ReconciliationLocator>,
         complete: bool,
+        processed_table_count: usize,
         metadata_consistent_table_count: usize,
         metadata_inconsistent_table_count: usize,
-        missing_region_table_count: usize,
-        resolved_column_count: usize,
-        scanned_region_count: usize,
-        created_region_table_count: usize,
-        created_region_count: usize,
-        updated_table_info_count: usize,
-        last_completed_phase: Option<&'static str>,
+        create_table_count: usize,
+        update_table_info_count: usize,
     ) -> Self {
         Self {
             locators,
@@ -289,18 +284,11 @@ impl ReconcileLogicalTablesEvent {
                 LogicalTablesResultPayload {
                     version: PAYLOAD_VERSION,
                     complete,
-                    processed_table_count: metadata_consistent_table_count
-                        + metadata_inconsistent_table_count
-                        + missing_region_table_count,
+                    processed_table_count,
                     metadata_consistent_table_count,
                     metadata_inconsistent_table_count,
-                    missing_region_table_count,
-                    resolved_column_count,
-                    scanned_region_count,
-                    created_region_table_count,
-                    created_region_count,
-                    updated_table_info_count,
-                    last_completed_phase,
+                    create_table_count,
+                    update_table_info_count,
                 },
             )),
         }
@@ -535,31 +523,22 @@ mod tests {
                 "greptime", "public", "cpu", 43, 42,
             )],
             true,
-            3,
             1,
-            2,
-            12,
-            18,
-            2,
-            6,
+            0,
+            0,
             1,
-            Some("update_table_infos"),
+            0,
         );
         assert_eq!(
             logical_tables.json_payload().unwrap(),
             json!({
                 "version": 1,
                 "complete": true,
-                "processed_table_count": 6,
-                "metadata_consistent_table_count": 3,
-                "metadata_inconsistent_table_count": 1,
-                "missing_region_table_count": 2,
-                "resolved_column_count": 12,
-                "scanned_region_count": 18,
-                "created_region_table_count": 2,
-                "created_region_count": 6,
-                "updated_table_info_count": 1,
-                "last_completed_phase": "update_table_infos",
+                "processed_table_count": 1,
+                "metadata_consistent_table_count": 0,
+                "metadata_inconsistent_table_count": 0,
+                "create_table_count": 1,
+                "update_table_info_count": 0,
             })
         );
     }

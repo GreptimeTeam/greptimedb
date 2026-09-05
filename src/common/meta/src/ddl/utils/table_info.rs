@@ -77,16 +77,6 @@ pub(crate) async fn batch_update_table_info_values(
     table_metadata_manager: &TableMetadataManager,
     table_info_values: Vec<(DeserializedValueWithBytes<TableInfoValue>, TableInfo)>,
 ) -> Result<()> {
-    batch_update_table_info_values_with_progress(table_metadata_manager, table_info_values, |_| {})
-        .await
-}
-
-/// Batch updates the table info values and reports each committed chunk.
-pub(crate) async fn batch_update_table_info_values_with_progress(
-    table_metadata_manager: &TableMetadataManager,
-    table_info_values: Vec<(DeserializedValueWithBytes<TableInfoValue>, TableInfo)>,
-    mut on_chunk_updated: impl FnMut(usize),
-) -> Result<()> {
     let chunk_size = table_metadata_manager.batch_update_table_info_value_chunk_size();
     if table_info_values.len() > chunk_size {
         let chunks = table_info_values
@@ -96,18 +86,14 @@ pub(crate) async fn batch_update_table_info_values_with_progress(
             .map(|check| check.collect::<Vec<_>>())
             .collect::<Vec<_>>();
         for chunk in chunks {
-            let chunk_len = chunk.len();
             table_metadata_manager
                 .batch_update_table_info_values(chunk)
                 .await?;
-            on_chunk_updated(chunk_len);
         }
     } else {
-        let updated_count = table_info_values.len();
         table_metadata_manager
             .batch_update_table_info_values(table_info_values)
             .await?;
-        on_chunk_updated(updated_count);
     }
 
     Ok(())

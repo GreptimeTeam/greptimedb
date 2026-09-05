@@ -24,21 +24,15 @@ use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::metadata::TableInfo;
 
-use crate::ddl::utils::region_metadata_lister::RegionMetadataLister;
 use crate::ddl::utils::{add_peer_context_if_needed, region_storage_path};
 use crate::ddl::{CreateRequestBuilder, build_template_from_raw_table_info};
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::reconciliation::reconcile_logical_tables::update_table_infos::UpdateTableInfos;
 use crate::reconciliation::reconcile_logical_tables::{ReconcileLogicalTablesContext, State};
 use crate::rpc::router::{find_leaders, region_distribution};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReconcileRegions;
-
-struct PreparedCreateRequest {
-    request_builder: CreateRequestBuilder,
-    partition_exprs: HashMap<RegionNumber, String>,
-}
 
 #[async_trait::async_trait]
 #[typetag::serde]
@@ -48,40 +42,20 @@ impl State for ReconcileRegions {
         ctx: &mut ReconcileLogicalTablesContext,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        ctx.volatile_ctx
-            .result_summary
-            .begin_region_reconciliation();
         if ctx.persistent_ctx.create_tables.is_empty() {
-            ctx.volatile_ctx.result_summary.mark_regions_reconciled();
             return Ok((Box::new(UpdateTableInfos), Status::executing(false)));
         }
 
         // Safety: previous steps ensure the physical table route is set.
-        let region_routes = ctx
+        let region_routes = &ctx
             .persistent_ctx
             .physical_table_route
             .as_ref()
             .unwrap()
-            .region_routes
-            .clone();
+            .region_routes;
 
-        let missing_regions_by_table = self.missing_regions_by_table(ctx, &region_routes).await?;
-        let mut missing_tables_by_region = HashMap::<RegionNumber, Vec<TableId>>::new();
-        for (table_id, region_numbers) in &missing_regions_by_table {
-            for region_number in region_numbers {
-                missing_tables_by_region
-                    .entry(*region_number)
-                    .or_default()
-                    .push(*table_id);
-            }
-        }
-
-        let prepared_requests = self.prepare_create_requests(ctx)?;
-        let table_name = ctx.table_name();
-        let storage_path = region_storage_path(&table_name.catalog_name, &table_name.schema_name);
-
-        let region_distribution = region_distribution(&region_routes);
-        let leaders = find_leaders(&region_routes)
+        let region_distribution = region_distribution(region_routes);
+        let leaders = find_leaders(region_routes)
             .into_iter()
             .map(|p| (p.id, p))
             .collect::<HashMap<_, _>>();
@@ -92,87 +66,20 @@ impl State for ReconcileRegions {
             }
             // Safety: It contains all leaders in the region routes.
             let peer = leaders.get(&datanode_id).unwrap().clone();
-            let mut requests = Vec::new();
-            for region_number in region_role_set.leader_regions {
-                let Some(table_ids) = missing_tables_by_region.get(&region_number) else {
-                    continue;
-                };
-                for table_id in table_ids {
-                    let Some(prepared_request) = prepared_requests.get(table_id) else {
-                        return error::UnexpectedSnafu {
-                            err_msg: format!(
-                                "Missing prepared request for logical table {table_id}"
-                            ),
-                        }
-                        .fail();
-                    };
-                    requests.push((
-                        self.make_request(
-                            region_number,
-                            *table_id,
-                            &storage_path,
-                            prepared_request,
-                        )?,
-                        *table_id,
-                        region_number,
-                    ));
-                }
-            }
-            if requests.is_empty() {
-                continue;
-            }
+            let request = self.make_request(&region_role_set.leader_regions, ctx)?;
             let requester = ctx.node_manager.datanode(&peer).await;
             create_table_tasks.push(async move {
-                let mut created_regions = Vec::new();
-                for (request, table_id, region_number) in requests {
-                    if let Err(error) = requester
-                        .handle(request)
-                        .await
-                        .map_err(add_peer_context_if_needed(peer.clone()))
-                    {
-                        return (created_regions, Err(error));
-                    }
-                    created_regions.push((table_id, region_number));
-                }
-                (created_regions, Ok(()))
+                requester
+                    .handle(request)
+                    .await
+                    .map_err(add_peer_context_if_needed(peer))
             });
         }
 
-        let results = future::join_all(create_table_tasks).await;
-        let mut successful_regions_by_table = HashMap::<TableId, usize>::new();
-        let mut first_error = None;
-        let mut created_regions = Vec::new();
-        for (task_created_regions, result) in results {
-            for (table_id, _) in &task_created_regions {
-                *successful_regions_by_table.entry(*table_id).or_default() += 1;
-            }
-            created_regions.extend(task_created_regions);
-            if first_error.is_none() {
-                first_error = result.err();
-            }
-        }
-        let created_region_count = successful_regions_by_table.values().sum();
-        let created_region_table_count = missing_regions_by_table
-            .iter()
-            .filter(|(table_id, region_numbers)| {
-                successful_regions_by_table
-                    .get(table_id)
-                    .is_some_and(|count| *count == region_numbers.len())
-            })
-            .count();
-        ctx.volatile_ctx
-            .result_summary
-            .record_created_regions(created_region_table_count, created_region_count);
-        for (table_id, region_number) in created_regions {
-            if let Some(region_numbers) =
-                ctx.volatile_ctx.missing_regions_by_table.get_mut(&table_id)
-            {
-                region_numbers.retain(|number| *number != region_number);
-            }
-        }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
+        future::join_all(create_table_tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         let table_id = ctx.table_id();
         let table_name = ctx.table_name();
         info!(
@@ -185,8 +92,6 @@ impl State for ReconcileRegions {
             table_id,
             table_name
         );
-        ctx.volatile_ctx.result_summary.mark_regions_reconciled();
-        ctx.volatile_ctx.missing_regions_by_table.clear();
         ctx.persistent_ctx.create_tables.clear();
         return Ok((Box::new(UpdateTableInfos), Status::executing(true)));
     }
@@ -199,90 +104,42 @@ impl State for ReconcileRegions {
 impl ReconcileRegions {
     fn make_request(
         &self,
-        region_number: RegionNumber,
-        table_id: TableId,
-        storage_path: &str,
-        prepared_request: &PreparedCreateRequest,
+        region_numbers: &[u32],
+        ctx: &ReconcileLogicalTablesContext,
     ) -> Result<RegionRequest> {
-        let region_id = RegionId::new(table_id, region_number);
-        let request = prepared_request.request_builder.build_one(
-            region_id,
-            storage_path.to_string(),
-            &HashMap::new(),
-            &prepared_request.partition_exprs,
-        )?;
+        let physical_table_id = ctx.table_id();
+        let table_name = ctx.table_name();
+        let create_tables = &ctx.persistent_ctx.create_tables;
+
+        let mut requests = Vec::with_capacity(region_numbers.len() * create_tables.len());
+
+        for (table_id, table_info) in create_tables {
+            let request_builder =
+                create_region_request_from_raw_table_info(table_info, physical_table_id)?;
+            let storage_path =
+                region_storage_path(&table_name.catalog_name, &table_name.schema_name);
+            let partition_exprs = prepare_partition_exprs(ctx, *table_id);
+
+            for region_number in region_numbers {
+                let region_id = RegionId::new(*table_id, *region_number);
+
+                let one_region_request = request_builder.build_one(
+                    region_id,
+                    storage_path.clone(),
+                    &HashMap::new(),
+                    &partition_exprs,
+                )?;
+                requests.push(one_region_request);
+            }
+        }
 
         Ok(RegionRequest {
             header: Some(RegionRequestHeader {
                 tracing_context: TracingContext::from_current_span().to_w3c(),
                 ..Default::default()
             }),
-            body: Some(region_request::Body::Creates(CreateRequests {
-                requests: vec![request],
-            })),
+            body: Some(region_request::Body::Creates(CreateRequests { requests })),
         })
-    }
-
-    fn prepare_create_requests(
-        &self,
-        ctx: &ReconcileLogicalTablesContext,
-    ) -> Result<HashMap<TableId, PreparedCreateRequest>> {
-        let physical_table_id = ctx.table_id();
-        ctx.persistent_ctx
-            .create_tables
-            .iter()
-            .map(|(table_id, table_info)| {
-                Ok((
-                    *table_id,
-                    PreparedCreateRequest {
-                        request_builder: create_region_request_from_raw_table_info(
-                            table_info,
-                            physical_table_id,
-                        )?,
-                        partition_exprs: prepare_partition_exprs(ctx, *table_id),
-                    },
-                ))
-            })
-            .collect()
-    }
-
-    async fn missing_regions_by_table(
-        &self,
-        ctx: &mut ReconcileLogicalTablesContext,
-        region_routes: &[crate::rpc::router::RegionRoute],
-    ) -> Result<HashMap<TableId, Vec<RegionNumber>>> {
-        let table_ids = ctx
-            .persistent_ctx
-            .create_tables
-            .iter()
-            .map(|(table_id, _)| *table_id)
-            .collect::<Vec<_>>();
-        if table_ids.iter().all(|table_id| {
-            ctx.volatile_ctx
-                .missing_regions_by_table
-                .contains_key(table_id)
-        }) {
-            return Ok(ctx.volatile_ctx.missing_regions_by_table.clone());
-        }
-
-        let lister = RegionMetadataLister::new(ctx.node_manager.clone());
-        ctx.volatile_ctx.missing_regions_by_table.clear();
-        for table_id in table_ids {
-            let region_metadatas = lister.list_with_ids(table_id, region_routes).await?;
-            ctx.volatile_ctx
-                .result_summary
-                .record_scanned_regions(region_metadatas.len());
-            let missing_regions = region_metadatas
-                .into_iter()
-                .filter_map(|(region_id, metadata)| {
-                    metadata.is_none().then_some(region_id.region_number())
-                })
-                .collect::<Vec<_>>();
-            ctx.volatile_ctx
-                .missing_regions_by_table
-                .insert(table_id, missing_regions);
-        }
-        Ok(ctx.volatile_ctx.missing_regions_by_table.clone())
     }
 }
 

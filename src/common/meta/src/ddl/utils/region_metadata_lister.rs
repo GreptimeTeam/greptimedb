@@ -44,20 +44,6 @@ impl RegionMetadataLister {
         table_id: TableId,
         region_routes: &[RegionRoute],
     ) -> Result<Vec<Option<RegionMetadata>>> {
-        Ok(self
-            .list_with_ids(table_id, region_routes)
-            .await?
-            .into_iter()
-            .map(|(_, metadata)| metadata)
-            .collect())
-    }
-
-    /// Collects the region metadata together with the requested region IDs.
-    pub async fn list_with_ids(
-        &self,
-        table_id: TableId,
-        region_routes: &[RegionRoute],
-    ) -> Result<Vec<(RegionId, Option<RegionMetadata>)>> {
         let region_distribution = region_distribution(region_routes);
         let leaders = find_leaders(region_routes)
             .into_iter()
@@ -82,35 +68,31 @@ impl RegionMetadataLister {
             let region_ids = region_role_set
                 .leader_regions
                 .iter()
-                .map(|r| RegionId::new(table_id, *r))
-                .collect::<Vec<_>>();
-            let request = Self::build_list_metadata_request(
-                region_ids
-                    .iter()
-                    .map(|region_id| region_id.as_u64())
-                    .collect(),
-            );
+                .map(|r| RegionId::new(table_id, *r).as_u64())
+                .collect();
+            let request = Self::build_list_metadata_request(region_ids);
 
             let peer = peer.clone();
             list_metadata_tasks.push(async move {
-                let response = requester
+                requester
                     .handle(request)
                     .await
-                    .map_err(add_peer_context_if_needed(peer))?;
-                Ok::<_, crate::error::Error>((region_ids, response))
+                    .map_err(add_peer_context_if_needed(peer))
             });
         }
 
         let results = join_all(list_metadata_tasks)
             .await
             .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|r| r.metadata);
 
         let mut output = Vec::with_capacity(total_num_region);
-        for (region_ids, result) in results {
+        for result in results {
             let region_metadatas: Vec<Option<RegionMetadata>> =
-                serde_json::from_slice(&result.metadata).context(DecodeJsonSnafu)?;
-            output.extend(region_ids.into_iter().zip(region_metadatas));
+                serde_json::from_slice(&result).context(DecodeJsonSnafu)?;
+            output.extend(region_metadatas);
         }
 
         Ok(output)
@@ -259,45 +241,5 @@ mod tests {
         assert_eq!(region_metadatas.len(), 2);
         assert_eq!(region_metadatas[0], None);
         assert_eq!(region_metadatas[1], Some(region_metadata));
-    }
-
-    #[tokio::test]
-    async fn test_list_region_metadata_with_ids() {
-        let region_metadata =
-            build_region_metadata(RegionId::new(1024, 1), &test_column_metadatas(&["tag_0"]));
-        let handler = ListMetadataDatanodeHandler::new(HashMap::from([
-            (RegionId::new(1024, 0), None),
-            (RegionId::new(1024, 1), Some(region_metadata.clone())),
-        ]));
-        let node_manager = Arc::new(MockDatanodeManager::new(handler));
-        let lister = RegionMetadataLister::new(node_manager);
-        let region_routes = vec![
-            RegionRoute {
-                region: Region::new_test(RegionId::new(1024, 0)),
-                leader_peer: Some(Peer::empty(1)),
-                follower_peers: vec![],
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            },
-            RegionRoute {
-                region: Region::new_test(RegionId::new(1024, 1)),
-                leader_peer: Some(Peer::empty(3)),
-                follower_peers: vec![],
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            },
-        ];
-
-        let mut region_metadatas = lister.list_with_ids(1024, &region_routes).await.unwrap();
-        region_metadatas.sort_unstable_by_key(|(region_id, _)| *region_id);
-        assert_eq!(
-            region_metadatas,
-            vec![
-                (RegionId::new(1024, 0), None),
-                (RegionId::new(1024, 1), Some(region_metadata)),
-            ]
-        );
     }
 }
