@@ -371,6 +371,8 @@ struct FlowScanDecision {
     memtable_max_sequence: Option<u64>,
     /// Whether to skip SST files for memtable-only incremental source scans.
     skip_sst_files: bool,
+    /// Whether this source scan must enforce the exact sequence range.
+    exact_sequence_range: bool,
 }
 
 impl FlowScanDecision {
@@ -381,6 +383,7 @@ impl FlowScanDecision {
             memtable_min_sequence: None,
             memtable_max_sequence: None,
             skip_sst_files: false,
+            exact_sequence_range: false,
         }
     }
 }
@@ -395,6 +398,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             memtable_min_sequence: None,
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
             skip_sst_files: false,
+            exact_sequence_range: false,
         });
     };
 
@@ -437,6 +441,8 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         memtable_min_sequence,
         memtable_max_sequence,
         skip_sst_files,
+        exact_sequence_range: apply_incremental
+            && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange),
     })
 }
 
@@ -449,11 +455,12 @@ fn build_scan_request(
     // time. A later scan may still refresh `memtable_max_sequence` if another source scan
     // has bound a snapshot into `query_ctx` after this provider was created.
     ScanRequest {
-        sst_min_sequence: (!decision.is_sink_scan)
+        sst_min_sequence: (!decision.is_sink_scan && !decision.exact_sequence_range)
             .then(|| query_ctx.sst_min_sequence(region_id.as_u64()))
             .flatten(),
         skip_sst_files: decision.skip_sst_files,
         snapshot_on_scan: decision.snapshot_on_scan,
+        exact_sequence_range: decision.exact_sequence_range,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
         ..Default::default()
@@ -650,8 +657,8 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::options::{
-        FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_RETURN_REGION_SEQ,
-        FLOW_SINK_TABLE_ID,
+        FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
+        FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
     };
 
     fn test_region_id() -> RegionId {
@@ -744,6 +751,64 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_request_from_sequence_range_context_uses_exact_source_scan() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, region_id.as_u64()),
+                ),
+            ]))
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                42_u64,
+            )]))))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                7_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(request.exact_sequence_range);
+        assert!(!request.skip_sst_files);
+        assert_eq!(request.memtable_min_sequence, Some(10));
+        assert_eq!(request.memtable_max_sequence, Some(42));
+        assert_eq!(request.sst_min_sequence, None);
+    }
+
+    #[test]
+    fn test_scan_request_from_sequence_range_context_binds_snapshot_on_scan() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, region_id.as_u64()),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(request.exact_sequence_range);
+        assert!(request.snapshot_on_scan);
+        assert_eq!(request.memtable_min_sequence, Some(10));
+        assert_eq!(request.memtable_max_sequence, None);
+        assert!(!request.skip_sst_files);
+    }
+
+    #[test]
     fn test_scan_request_from_query_context_keeps_snapshot_fields() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
@@ -814,6 +879,32 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_cached_snapshot_to_request_preserves_exact_sequence_range() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                10_u64,
+            )]))))
+            .build();
+        let mut request = ScanRequest {
+            memtable_min_sequence: Some(10),
+            snapshot_on_scan: true,
+            exact_sequence_range: true,
+            ..Default::default()
+        };
+
+        apply_cached_snapshot_to_request(&query_ctx, region_id, false, &mut request);
+
+        assert_eq!(request.memtable_min_sequence, Some(10));
+        assert_eq!(request.memtable_max_sequence, Some(10));
+        assert!(request.exact_sequence_range);
+        assert!(!request.skip_sst_files);
+        assert_eq!(request.sst_min_sequence, None);
+        assert!(!request.snapshot_on_scan);
+    }
+
+    #[test]
     fn test_apply_cached_snapshot_to_request_skips_sink_scan() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
@@ -880,6 +971,44 @@ mod tests {
         assert_eq!(request.memtable_min_sequence, Some(55));
         assert_eq!(request.sst_min_sequence, None);
         assert!(request.skip_sst_files);
+        assert!(!request.exact_sequence_range);
+    }
+
+    #[test]
+    fn test_scan_request_from_sequence_range_context_excludes_sink_scan() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":55}}"#, region_id.as_u64()),
+                ),
+                (
+                    FLOW_SINK_TABLE_ID.to_string(),
+                    region_id.table_id().to_string(),
+                ),
+            ]))
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                88_u64,
+            )]))))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                77_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(!request.exact_sequence_range);
+        assert!(!request.skip_sst_files);
+        assert_eq!(request.memtable_min_sequence, None);
+        assert_eq!(request.memtable_max_sequence, None);
+        assert_eq!(request.sst_min_sequence, None);
     }
 
     #[test]
@@ -936,6 +1065,27 @@ mod tests {
 
         let err = scan_request_from_query_context(region_id, &query_ctx).unwrap_err();
         assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
+    }
+
+    #[test]
+    fn test_scan_request_from_sequence_range_rejects_missing_source_bound() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    r#"{"9":55}"#.to_string(),
+                ),
+            ]))
+            .build();
+
+        let err = scan_request_from_query_context(region_id, &query_ctx).unwrap_err();
+        assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     }
 
     #[test]

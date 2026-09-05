@@ -57,6 +57,7 @@ use tonic::{Request, Response, Status};
 use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
 use crate::adapter::{FlowStreamingEngineRef, create_worker};
 use crate::batching_mode::engine::BatchingEngine;
+use crate::batching_mode::persistence::FactoryPlugin;
 use crate::error::{
     CacheRequiredSnafu, DatafusionSnafu, ExternalSnafu, ListFlowsSnafu, ParseAddrSnafu,
     ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu, to_status_with_last_err,
@@ -404,13 +405,14 @@ impl FlownodeBuilder {
             self.build_manager(query_engine_factory.query_engine())
                 .await?,
         );
-        let batching = Arc::new(BatchingEngine::new(
+        let batching = Arc::new(BatchingEngine::new_with_persistence(
             self.frontend_client.clone(),
             query_engine_factory.query_engine(),
             self.flow_metadata_manager.clone(),
             self.table_meta.clone(),
             self.catalog_manager.clone(),
             self.opts.flow.batching_mode.clone(),
+            self.plugins.get::<FactoryPlugin>(),
         ));
         let dual = Arc::new(FlowDualEngine::new(
             manager.clone(),

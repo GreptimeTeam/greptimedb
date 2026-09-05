@@ -43,7 +43,12 @@ mod test_utils;
 
 pub use adapter::flownode_impl::FlowDualEngineRef;
 pub use adapter::{FlowConfig, FlowStreamingEngineRef, StreamingEngine};
+pub use batching_mode::IncrementalMode;
 pub use batching_mode::frontend_client::{FrontendClient, GrpcQueryHandlerWithBoxedError};
+pub use batching_mode::persistence::{
+    BatchingAttempt, BatchingMetadataColumn, BatchingPersistence, BatchingQueryExecutor, Factory,
+    FactoryPlugin, PersistenceContext, RestoreOutcome, SinkLayout,
+};
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
 pub use server::{

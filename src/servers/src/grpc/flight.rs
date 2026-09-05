@@ -632,7 +632,10 @@ fn output_to_flight_record_batch_source(
 
 #[cfg(test)]
 mod tests {
-    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
+    use query::options::{
+        FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_RETURN_REGION_SEQ,
+        FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, FlowIncrementalMode,
+    };
     use tonic::metadata::{AsciiMetadataValue, MetadataMap};
 
     use super::*;
@@ -678,6 +681,47 @@ mod tests {
             query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
             Some("1700000000000")
         );
+    }
+
+    #[test]
+    fn test_flow_extensions_forward_sequence_range_to_query_context() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from(
+                r#"[["flow.return_region_seq","true"],["flow.incremental_mode","sequence_range"],["flow.incremental_after_seqs","{\"1\":10,\"2\":20}"],["flow.sink_table_id","42"]]"#,
+            )
+            .unwrap(),
+        );
+
+        let flow_extensions = extract_flow_extensions(&metadata).unwrap();
+        let query_ctx =
+            create_query_context(Channel::Grpc, None, flow_extensions, HashMap::new()).unwrap();
+        let parsed =
+            query::options::FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            parsed.incremental_mode,
+            Some(FlowIncrementalMode::SequenceRange)
+        );
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([(1, 10), (2, 20)]))
+        );
+        assert!(parsed.return_region_seq);
+        assert_eq!(parsed.sink_table_id, Some(42));
+        assert_eq!(
+            query_ctx.extension(FLOW_INCREMENTAL_MODE),
+            Some("sequence_range")
+        );
+        assert_eq!(
+            query_ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS),
+            Some(r#"{"1":10,"2":20}"#)
+        );
+        assert_eq!(query_ctx.extension(FLOW_RETURN_REGION_SEQ), Some("true"));
+        assert_eq!(query_ctx.extension(FLOW_SINK_TABLE_ID), Some("42"));
     }
 
     #[test]

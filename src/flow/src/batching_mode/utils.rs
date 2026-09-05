@@ -14,13 +14,14 @@
 
 //! some utils for helping with batching mode
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_function::aggrs::aggr_wrapper::get_aggr_func;
 use common_telemetry::debug;
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::Expr;
@@ -36,6 +37,7 @@ use datafusion_expr::{
     Distinct, ExprSchemable, JoinType, LogicalPlan, LogicalPlanBuilder, Operator, Projection, and,
     binary_expr, bitwise_and, bitwise_or, bitwise_xor, is_null, or, when,
 };
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use query::QueryEngineRef;
@@ -66,6 +68,9 @@ mod test;
 /// `max(numbers_with_ts.number)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalAggregateMergeColumn {
+    /// Delta-plan field containing the aggregate result/state column. Repeated
+    /// projections intentionally share this field while using distinct outputs.
+    pub input_field_name: String,
     /// Final output/sink field name for the aggregate result/state column.
     ///
     pub output_field_name: String,
@@ -73,9 +78,10 @@ pub struct IncrementalAggregateMergeColumn {
 }
 
 impl IncrementalAggregateMergeColumn {
-    /// Create a new merge column.
+    /// Create a new merge column whose delta and output fields have the same name.
     pub fn new(output_field_name: String, merge_op: IncrementalAggregateMergeOp) -> Self {
         Self {
+            input_field_name: output_field_name.clone(),
             output_field_name,
             merge_op,
         }
@@ -92,6 +98,7 @@ pub enum IncrementalAggregateMergeOp {
     BitAnd,
     BitOr,
     BitXor,
+    AvgDeltaMerge,
 }
 
 /// Analysis result for an incremental aggregate plan.
@@ -111,24 +118,6 @@ pub struct IncrementalAggregateAnalysis {
     /// Final output field order from the original aggregate plan.
     pub output_field_names: Vec<String>,
     pub unsupported_exprs: Vec<String>,
-}
-
-/// Recursively find all `Expr::Column` names inside an expression tree.
-/// Only recurses into wrappers that are merge-transparent.
-/// Non-transparent wrappers (e.g., `ScalarFunction`, `Negative`, `Cast`) are
-/// intentionally not recursed into since their merge semantics would be
-/// incorrect.
-///
-/// `Cast`/`TryCast` are intentionally opaque: merging already-casted aggregate
-/// outputs is not generally equivalent to casting the final merged aggregate.
-fn find_column_names(expr: &Expr, names: &mut Vec<String>) {
-    match expr {
-        Expr::Column(col) => {
-            names.push(col.name.clone());
-        }
-        Expr::Alias(alias) => find_column_names(&alias.expr, names),
-        _ => {}
-    }
 }
 
 fn unqualified_col(name: impl Into<String>) -> Expr {
@@ -230,8 +219,10 @@ fn check_input_plan_shape(plan: &LogicalPlan) -> Result<(), String> {
 #[derive(Debug, Default)]
 struct OutputProjectionInfo {
     has_top_level_projection: bool,
+    /// Aggregate expression name and projected output field, in projection order.
+    aggregate_outputs: Vec<(String, String)>,
+    /// Original single-instance resolver mapping, retained for compatibility.
     output_aliases: HashMap<String, String>,
-    duplicate_aggregate_aliases: BTreeSet<String>,
     literal_columns: HashSet<String>,
     output_field_names: Vec<String>,
 }
@@ -270,41 +261,36 @@ fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
         for expr in &projection.expr {
             match expr {
                 Expr::Alias(alias) => {
-                    // Alias resolution has three cases:
-                    // - 0 Column refs (e.g., literal `42 AS lit`): record literal output
-                    // - 1 Column ref: record the mapping (e.g., `sum(x) AS total`)
-                    // - >1 Column refs (e.g., `COALESCE(sum(x), sum(y))`):
-                    //   skip — ambiguous merge semantics
+                    // Only a direct aggregate output column has the same
+                    // merge semantics as the original resolver. In particular,
+                    // do not mine aggregate columns through CAST/TryCast or
+                    // other output wrappers.
                     let alias_name = alias.name.clone();
-                    let mut col_names = Vec::new();
-                    find_column_names(&alias.expr, &mut col_names);
-                    match col_names.len() {
-                        0 if is_passthrough_output_column(&alias_name, alias.expr.as_ref()) => {
-                            projection_info.literal_columns.insert(alias_name);
-                        }
-                        1 => {
-                            if let Some(col_name) = col_names.into_iter().next() {
-                                if let Some(existing_alias) = output_aliases.get(&col_name) {
-                                    if existing_alias != &alias_name {
-                                        projection_info.duplicate_aggregate_aliases.insert(format!(
-                                            "same aggregate output {col_name} is used by multiple aliases: {existing_alias}, {alias_name}"
-                                        ));
-                                    }
-                                } else {
-                                    output_aliases.insert(col_name, alias_name);
-                                }
-                            }
-                        }
-                        _ => {}
+                    if let Expr::Column(column) = alias.expr.as_ref() {
+                        output_aliases
+                            .entry(column.name.clone())
+                            .or_insert_with(|| alias_name.clone());
+                        projection_info
+                            .aggregate_outputs
+                            .push((column.name.clone(), alias_name));
+                    } else if let Expr::Alias(inner_alias) = alias.expr.as_ref()
+                        && inner_alias.name.eq_ignore_ascii_case("count(*)")
+                        && let Expr::Column(column) = inner_alias.expr.as_ref()
+                    {
+                        output_aliases
+                            .entry(column.name.clone())
+                            .or_insert_with(|| alias_name.clone());
+                        projection_info
+                            .aggregate_outputs
+                            .push((column.name.clone(), alias_name));
+                    } else if is_passthrough_output_column(&alias_name, alias.expr.as_ref()) {
+                        projection_info.literal_columns.insert(alias_name);
                     }
-
-                    // If >1 column references detected (e.g., COALESCE(sum(x), sum(y))),
-                    // intentionally skip alias mapping — the merge semantics are ambiguous.
                 }
                 Expr::Column(col) => {
-                    output_aliases
-                        .entry(col.name.clone())
-                        .or_insert(col.name.clone());
+                    projection_info
+                        .aggregate_outputs
+                        .push((col.name.clone(), col.name.clone()));
                 }
                 Expr::Literal(_, _) => {
                     projection_info
@@ -348,7 +334,10 @@ fn is_literal_or_cast_literal(expr: &Expr) -> bool {
     }
 }
 
-fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateMergeOp, String> {
+fn merge_op_for_aggregate_expr(
+    aggr_expr: &Expr,
+    input_schema: &DFSchema,
+) -> Result<IncrementalAggregateMergeOp, String> {
     let Some(aggr_func) = get_aggr_func(aggr_expr) else {
         return Err(aggr_expr.to_string());
     };
@@ -371,28 +360,50 @@ fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateM
         "bit_and" => Ok(IncrementalAggregateMergeOp::BitAnd),
         "bit_or" => Ok(IncrementalAggregateMergeOp::BitOr),
         "bit_xor" => Ok(IncrementalAggregateMergeOp::BitXor),
+        "avg_state" => match aggr_func.params.args.as_slice() {
+            [_] => Ok(IncrementalAggregateMergeOp::AvgDeltaMerge),
+            _ => Err(aggr_expr.to_string()),
+        },
+        "avg_merge" => match aggr_func.params.args.as_slice() {
+            [arg] if arg.get_type(input_schema).ok() == Some(ArrowDataType::Binary) => {
+                Ok(IncrementalAggregateMergeOp::AvgDeltaMerge)
+            }
+            _ => Err(aggr_expr.to_string()),
+        },
         _ => Err(aggr_expr.to_string()),
     }
 }
 
-fn resolve_aggregate_output_field_name(
+fn resolve_aggregate_output_fields(
     aggr_expr: &Expr,
     projection_info: &OutputProjectionInfo,
     output_field_name_set: &HashSet<String>,
-) -> Option<String> {
+) -> Vec<(String, String)> {
     // qualified_name() returns (Option<String>, String) where the second
     // element is the unqualified column/alias name. This relies on
     // DataFusion's internal naming convention: aggregate expressions
-    // emit a column named after the aggregate itself (e.g. "SUM(x)"),
-    // which matches what the projection aliases reference.
+    // emit a column named after the aggregate itself (e.g. "SUM(x)").
+    // Keep every matching projection occurrence because DataFusion can share
+    // one aggregate input field for identical expressions.
     let raw_name = aggr_expr.qualified_name().1;
-    if let Some(alias) = projection_info.output_aliases.get(&raw_name) {
-        Some(alias.clone())
-    } else if !projection_info.has_top_level_projection && output_field_name_set.contains(&raw_name)
-    {
-        Some(raw_name)
+    if projection_info.has_top_level_projection {
+        let outputs = projection_info
+            .aggregate_outputs
+            .iter()
+            .filter(|(input_name, _)| input_name == &raw_name)
+            .cloned()
+            .collect::<Vec<_>>();
+        if outputs.len() > 1 {
+            outputs
+        } else if let Some(alias) = projection_info.output_aliases.get(&raw_name) {
+            vec![(raw_name, alias.clone())]
+        } else {
+            outputs
+        }
+    } else if output_field_name_set.contains(&raw_name) {
+        vec![(raw_name.clone(), raw_name)]
     } else {
-        None
+        vec![]
     }
 }
 
@@ -478,7 +489,6 @@ pub fn analyze_incremental_aggregate_plan(
                 .map(|name| format!("duplicate output field name: {name}"))
                 .collect::<Vec<_>>();
             unsupported_exprs.push(reason);
-            unsupported_exprs.extend(projection_info.duplicate_aggregate_aliases.iter().cloned());
             return Ok(Some(IncrementalAggregateAnalysis {
                 group_key_names,
                 merge_columns: vec![],
@@ -512,27 +522,48 @@ pub fn analyze_incremental_aggregate_plan(
         aggregate,
         &group_key_names,
     ));
-    unsupported_exprs.extend(projection_info.duplicate_aggregate_aliases.iter().cloned());
     for aggr_expr in aggr_exprs {
-        let merge_op = match merge_op_for_aggregate_expr(&aggr_expr) {
+        let merge_op = match merge_op_for_aggregate_expr(&aggr_expr, aggregate.input.schema()) {
             Ok(merge_op) => merge_op,
             Err(reason) => {
                 unsupported_exprs.push(reason);
                 continue;
             }
         };
-        let Some(output_field_name) = resolve_aggregate_output_field_name(
-            &aggr_expr,
-            &projection_info,
-            &output_field_name_set,
-        ) else {
+        let aggregate_outputs =
+            resolve_aggregate_output_fields(&aggr_expr, &projection_info, &output_field_name_set);
+        if aggregate_outputs.is_empty() {
             unsupported_exprs.push(aggr_expr.to_string());
             continue;
+        }
+        let Some((_, input_field_name)) = aggregate_outputs.first() else {
+            continue;
         };
-        merge_columns.push(IncrementalAggregateMergeColumn::new(
-            output_field_name,
-            merge_op,
-        ));
+        // The old single-alias resolver selected the projected output name as
+        // the delta field. Keep that exact field for the shared input and only
+        // vary the final sink/output alias for repeated projections.
+        let input_field_name = input_field_name.clone();
+        for (_, output_field_name) in aggregate_outputs {
+            merge_columns.push(IncrementalAggregateMergeColumn {
+                input_field_name: input_field_name.clone(),
+                output_field_name,
+                merge_op,
+            });
+        }
+    }
+    if projection_info.has_top_level_projection {
+        let output_positions = projection_info
+            .output_field_names
+            .iter()
+            .enumerate()
+            .map(|(position, name)| (name.as_str(), position))
+            .collect::<HashMap<_, _>>();
+        merge_columns.sort_by_key(|column| {
+            output_positions
+                .get(column.output_field_name.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
     }
     unsupported_exprs.extend(
         find_uncovered_output_fields(&projection_info, &group_key_names, &merge_columns)
@@ -591,6 +622,7 @@ pub fn analyze_incremental_aggregate_plan(
 pub async fn rewrite_incremental_aggregate_with_sink_merge(
     delta_plan: &LogicalPlan,
     analysis: &IncrementalAggregateAnalysis,
+    engine: &QueryEngineRef,
     sink_table: TableRef,
     sink_table_name: &TableName,
     sink_dirty_filter: Option<Expr>,
@@ -625,6 +657,10 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
     let delta_alias = "__flow_delta";
     let sink_alias = "__flow_sink";
 
+    let state_merge = analysis
+        .merge_columns
+        .iter()
+        .any(|column| matches!(column.merge_op, IncrementalAggregateMergeOp::AvgDeltaMerge));
     let mut selected_columns = analysis.group_key_names.clone();
     selected_columns.extend(
         analysis
@@ -632,8 +668,18 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
             .iter()
             .map(|c| c.output_field_name.clone()),
     );
-    let mut delta_selected_columns = selected_columns.clone();
+    let mut selected_column_names = HashSet::new();
+    selected_columns.retain(|name| selected_column_names.insert(name.clone()));
+    let mut delta_selected_columns = analysis.group_key_names.clone();
+    delta_selected_columns.extend(
+        analysis
+            .merge_columns
+            .iter()
+            .map(|c| c.input_field_name.clone()),
+    );
     delta_selected_columns.extend(analysis.literal_columns.iter().cloned());
+    let mut delta_selected_column_names = HashSet::new();
+    delta_selected_columns.retain(|name| delta_selected_column_names.insert(name.clone()));
 
     let delta_selected_exprs = delta_selected_columns
         .iter()
@@ -721,7 +767,6 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
             .map(|c| qualified_column(sink_alias, c))
             .collect::<Vec<_>>(),
     );
-
     let joined = LogicalPlanBuilder::from(delta_selected)
         .join_detailed(
             sink_selected,
@@ -746,21 +791,28 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
         .iter()
         .map(|c| (&c.output_field_name, c))
         .collect::<HashMap<_, _>>();
-
     let mut projection_exprs = Vec::with_capacity(analysis.output_field_names.len());
+    let mut group_exprs = Vec::new();
+    let mut state_aggr_exprs = Vec::new();
     for output_field_name in &analysis.output_field_names {
         if group_key_names.contains(output_field_name)
             || literal_columns.contains(output_field_name)
         {
-            projection_exprs.push(
-                qualified_col(delta_alias, output_field_name.clone()).alias(output_field_name),
-            );
+            let expr =
+                qualified_col(delta_alias, output_field_name.clone()).alias(output_field_name);
+            projection_exprs.push(expr.clone());
+            group_exprs.push(expr);
         } else if let Some(merge_col) = merge_columns.get(output_field_name) {
-            projection_exprs.push(build_left_join_merge_expr(
-                delta_alias,
-                sink_alias,
-                merge_col,
-            )?);
+            if matches!(
+                merge_col.merge_op,
+                IncrementalAggregateMergeOp::AvgDeltaMerge
+            ) {
+                state_aggr_exprs.push(build_state_delta_merge_expr(engine, merge_col)?);
+            } else {
+                let expr = build_left_join_merge_expr(delta_alias, sink_alias, merge_col)?;
+                projection_exprs.push(expr.clone());
+                group_exprs.push(expr);
+            }
         } else {
             return InvalidQuerySnafu {
                 reason: format!(
@@ -771,15 +823,72 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
         }
     }
 
-    LogicalPlanBuilder::from(joined)
-        .project(projection_exprs)
-        .with_context(|_| DatafusionSnafu {
-            context: "Failed to build projection merge plan for incremental sink merge".to_string(),
-        })?
-        .build()
-        .with_context(|_| DatafusionSnafu {
-            context: "Failed to finalize incremental aggregate sink merge plan".to_string(),
+    if state_merge {
+        let aggregated = LogicalPlanBuilder::from(joined)
+            .aggregate(group_exprs, state_aggr_exprs)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to aggregate state delta merge plan".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build state delta merge plan".to_string(),
+            })?;
+        let output_exprs = analysis
+            .output_field_names
+            .iter()
+            .cloned()
+            .map(unqualified_col)
+            .collect::<Vec<_>>();
+        LogicalPlanBuilder::from(aggregated)
+            .project(output_exprs)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to project state delta merge plan".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to finalize incremental aggregate sink merge plan".to_string(),
+            })
+    } else {
+        LogicalPlanBuilder::from(joined)
+            .project(projection_exprs)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build projection merge plan for incremental sink merge"
+                    .to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to finalize incremental aggregate sink merge plan".to_string(),
+            })
+    }
+}
+
+fn build_state_delta_merge_expr(
+    engine: &QueryEngineRef,
+    merge_col: &IncrementalAggregateMergeColumn,
+) -> Result<Expr, Error> {
+    let Some(udaf) = engine
+        .engine_state()
+        .aggr_function("__avg_state_delta_merge")
+        .or_else(|| {
+            engine
+                .engine_state()
+                .session_state()
+                .aggregate_functions()
+                .get("__avg_state_delta_merge")
+                .map(|udaf| udaf.as_ref().clone())
         })
+    else {
+        return InvalidQuerySnafu {
+            reason: "Aggregate function __avg_state_delta_merge is not registered".to_string(),
+        }
+        .fail();
+    };
+    Ok(udaf
+        .call(vec![
+            qualified_col("__flow_delta", merge_col.input_field_name.clone()),
+            qualified_col("__flow_sink", merge_col.output_field_name.clone()),
+        ])
+        .alias(merge_col.output_field_name.clone()))
 }
 
 fn build_left_join_merge_expr(
@@ -787,7 +896,7 @@ fn build_left_join_merge_expr(
     sink_alias: &str,
     merge_col: &IncrementalAggregateMergeColumn,
 ) -> Result<Expr, Error> {
-    let left = qualified_col(delta_alias, merge_col.output_field_name.clone());
+    let left = qualified_col(delta_alias, merge_col.input_field_name.clone());
     let right = qualified_col(sink_alias, merge_col.output_field_name.clone());
     let merged = match merge_col.merge_op {
         IncrementalAggregateMergeOp::Sum => when(is_null(left.clone()), right.clone())
@@ -838,6 +947,12 @@ fn build_left_join_merge_expr(
             .with_context(|_| DatafusionSnafu {
                 context: "Failed to build BIT_XOR merge expression".to_string(),
             })?,
+        IncrementalAggregateMergeOp::AvgDeltaMerge => {
+            return InvalidQuerySnafu {
+                reason: "state aggregate must be built with its delta UDAF".to_string(),
+            }
+            .fail();
+        }
     };
     Ok(merged.alias(merge_col.output_field_name.clone()))
 }
@@ -951,12 +1066,34 @@ pub(crate) async fn gen_plan_with_matching_schema(
     primary_key_indices: &[usize],
     allow_partial: bool,
 ) -> Result<LogicalPlan, Error> {
+    gen_plan_with_matching_schema_and_values(
+        sql,
+        query_ctx,
+        engine,
+        sink_table_schema,
+        primary_key_indices,
+        allow_partial,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn gen_plan_with_matching_schema_and_values(
+    sql: &str,
+    query_ctx: QueryContextRef,
+    engine: QueryEngineRef,
+    sink_table_schema: SchemaRef,
+    primary_key_indices: &[usize],
+    allow_partial: bool,
+    ordinary_values: Option<&BTreeMap<String, ScalarValue>>,
+) -> Result<LogicalPlan, Error> {
     let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), sql, false).await?;
 
-    let mut add_auto_column = ColumnMatcherRewriter::new(
+    let mut add_auto_column = ColumnMatcherRewriter::new_with_values(
         sink_table_schema,
         primary_key_indices.to_vec(),
         allow_partial,
+        ordinary_values.cloned().unwrap_or_default(),
     );
     let plan = plan
         .clone()
@@ -1096,15 +1233,26 @@ pub struct ColumnMatcherRewriter {
     pub is_rewritten: bool,
     pub primary_key_indices: Vec<usize>,
     pub allow_partial: bool,
+    pub ordinary_values: BTreeMap<String, ScalarValue>,
 }
 
 impl ColumnMatcherRewriter {
     pub fn new(schema: SchemaRef, primary_key_indices: Vec<usize>, allow_partial: bool) -> Self {
+        Self::new_with_values(schema, primary_key_indices, allow_partial, BTreeMap::new())
+    }
+
+    pub fn new_with_values(
+        schema: SchemaRef,
+        primary_key_indices: Vec<usize>,
+        allow_partial: bool,
+        ordinary_values: BTreeMap<String, ScalarValue>,
+    ) -> Self {
         Self {
             schema,
             is_rewritten: false,
             primary_key_indices,
             allow_partial,
+            ordinary_values,
         }
     }
 
@@ -1114,39 +1262,68 @@ impl ColumnMatcherRewriter {
         mut exprs: Vec<Expr>,
         input_schema: &DFSchema,
     ) -> DfResult<Vec<Expr>> {
+        let original_exprs = exprs.clone();
+        self.validate_ordinary_values(&original_exprs)?;
+        let original_names = original_exprs
+            .iter()
+            .map(|expr| expr.qualified_name().1)
+            .collect::<Vec<_>>();
+        let duplicated_output_names = duplicate_names(&original_names);
+        if !duplicated_output_names.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "Flow output schema contains duplicate column(s) {:?}. {}",
+                duplicated_output_names,
+                format_flow_sink_schema_mismatch(&original_exprs, self.schema.as_ref())
+            )));
+        }
+
         if self.allow_partial {
+            // Partial matching is intentionally name-based. Ordinary values are injected before
+            // it so they follow the same direct partial path as the other supplied columns.
+            for (idx, column) in self.schema.column_schemas().iter().enumerate() {
+                if let Some(value) = self.ordinary_values.get(&column.name) {
+                    exprs.insert(
+                        idx.min(exprs.len()),
+                        datafusion_expr::lit(value.clone()).alias(column.name.clone()),
+                    );
+                }
+            }
             return self.modify_project_exprs_with_partial(exprs);
         }
 
-        let original_exprs = exprs.clone();
-
-        let all_names = self
+        // Ordinary values are persistence-owned columns, not flow outputs. Remove them from the
+        // effective sink sequence while deciding whether the existing auto-column rules apply.
+        // This keeps those columns from hiding an auto-created update_at column that precedes them.
+        let effective_sink_columns = self
             .schema
             .column_schemas()
             .iter()
-            .map(|c| c.name.clone())
-            .collect::<BTreeSet<_>>();
-        // add columns if have different column count
+            .enumerate()
+            .filter(|(_, column)| !self.ordinary_values.contains_key(&column.name))
+            .collect::<Vec<_>>();
         let query_col_cnt = exprs.len();
-        let table_col_cnt = self.schema.column_schemas().len();
-        debug!("query_col_cnt={query_col_cnt}, table_col_cnt={table_col_cnt}");
+        let effective_sink_col_cnt = effective_sink_columns.len();
+        debug!("query_col_cnt={query_col_cnt}, effective_sink_col_cnt={effective_sink_col_cnt}");
 
         let placeholder_ts_expr =
             datafusion::logical_expr::lit(ScalarValue::TimestampMillisecond(Some(0), None))
                 .alias(AUTO_CREATED_PLACEHOLDER_TS_COL);
 
-        if query_col_cnt == table_col_cnt {
-            // still need to add alias, see below
-        } else if query_col_cnt + 1 == table_col_cnt {
-            let last_col_schema = self.schema.column_schemas().last().unwrap();
+        if query_col_cnt == effective_sink_col_cnt {
+            // still need to add aliases, see below
+        } else if query_col_cnt + 1 == effective_sink_col_cnt {
+            let (_, last_col_schema) = effective_sink_columns.last().unwrap();
 
-            // if time index column is auto created add it
             if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
-                && self.schema.timestamp_index() == Some(table_col_cnt - 1)
+                && self.schema.timestamp_index()
+                    == Some(
+                        self.schema
+                            .column_index_by_name(&last_col_schema.name)
+                            .unwrap(),
+                    )
             {
                 exprs.push(placeholder_ts_expr);
             } else if last_col_schema.data_type.is_timestamp() {
-                // is the update at column
                 exprs.push(datafusion::prelude::now().alias(&last_col_schema.name));
             } else {
                 return Err(DataFusionError::Plan(format_flow_sink_schema_mismatch(
@@ -1154,10 +1331,11 @@ impl ColumnMatcherRewriter {
                     self.schema.as_ref(),
                 )));
             }
-        } else if query_col_cnt + 2 == table_col_cnt {
-            let mut col_iter = self.schema.column_schemas().iter().rev();
-            let last_col_schema = col_iter.next().unwrap();
-            let second_last_col_schema = col_iter.next().unwrap();
+        } else if query_col_cnt + 2 == effective_sink_col_cnt {
+            let (_, last_col_schema) = effective_sink_columns.last().unwrap();
+            let (_, second_last_col_schema) = effective_sink_columns
+                .get(effective_sink_col_cnt - 2)
+                .unwrap();
             if second_last_col_schema.data_type.is_timestamp() {
                 exprs.push(datafusion::prelude::now().alias(&second_last_col_schema.name));
             } else {
@@ -1168,7 +1346,12 @@ impl ColumnMatcherRewriter {
             }
 
             if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
-                && self.schema.timestamp_index() == Some(table_col_cnt - 1)
+                && self.schema.timestamp_index()
+                    == Some(
+                        self.schema
+                            .column_index_by_name(&last_col_schema.name)
+                            .unwrap(),
+                    )
             {
                 exprs.push(placeholder_ts_expr);
             } else {
@@ -1184,7 +1367,74 @@ impl ColumnMatcherRewriter {
             )));
         }
 
-        self.match_extra_output_columns(exprs, input_schema, &original_exprs, &all_names)
+        let exprs = self.match_extra_output_columns(
+            exprs,
+            input_schema,
+            &original_exprs,
+            &effective_sink_columns,
+        )?;
+
+        // Put persistence-owned values back at their physical sink positions only after matching
+        // flow expressions against the effective sequence.
+        let mut exprs = exprs;
+        for (idx, column) in self.schema.column_schemas().iter().enumerate() {
+            if let Some(value) = self.ordinary_values.get(&column.name) {
+                exprs.insert(
+                    idx.min(exprs.len()),
+                    datafusion_expr::lit(value.clone()).alias(column.name.clone()),
+                );
+            }
+        }
+        self.order_by_sink_schema(exprs, &original_exprs)
+    }
+
+    fn order_by_sink_schema(
+        &self,
+        exprs: Vec<Expr>,
+        original_exprs: &[Expr],
+    ) -> DfResult<Vec<Expr>> {
+        let mut by_name = exprs
+            .into_iter()
+            .map(|expr| (expr.qualified_name().1, expr))
+            .collect::<HashMap<_, _>>();
+        let mut ordered = Vec::with_capacity(self.schema.column_schemas().len());
+        for column in self.schema.column_schemas() {
+            if let Some(expr) = by_name.remove(&column.name) {
+                ordered.push(expr);
+            }
+        }
+        if !by_name.is_empty() || ordered.len() != self.schema.column_schemas().len() {
+            return Err(DataFusionError::Plan(format_flow_sink_schema_mismatch(
+                original_exprs,
+                self.schema.as_ref(),
+            )));
+        }
+        Ok(ordered)
+    }
+
+    fn validate_ordinary_values(&self, output_exprs: &[Expr]) -> DfResult<()> {
+        let output_names = output_exprs
+            .iter()
+            .map(|expr| expr.qualified_name().1)
+            .collect::<HashSet<_>>();
+        for (name, value) in &self.ordinary_values {
+            let Some(column) = self.schema.column_schema_by_name(name) else {
+                return Err(DataFusionError::Plan(format!(
+                    "Configured batching metadata column {name} does not exist in sink schema"
+                )));
+            };
+            if output_names.contains(name) {
+                return Err(DataFusionError::Plan(format!(
+                    "Configured batching metadata column {name} collides with a flow output"
+                )));
+            }
+            if value.data_type() != column.data_type.as_arrow_type() {
+                return Err(DataFusionError::Plan(format!(
+                    "Configured batching metadata column {name} has incompatible type"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Match flow output columns whose names are not in the sink schema by the same position only.
@@ -1202,24 +1452,28 @@ impl ColumnMatcherRewriter {
         mut exprs: Vec<Expr>,
         input_schema: &DFSchema,
         original_exprs: &[Expr],
-        all_names: &BTreeSet<String>,
+        effective_sink_columns: &[(usize, &ColumnSchema)],
     ) -> DfResult<Vec<Expr>> {
         let mut output_names = exprs
             .iter()
             .map(|expr| expr.qualified_name().1)
             .collect::<Vec<_>>();
+        let sink_names = effective_sink_columns
+            .iter()
+            .map(|(_, column)| column.name.as_str())
+            .collect::<HashSet<_>>();
         let output_name_set = output_names.iter().cloned().collect::<BTreeSet<_>>();
         let extra_expr_indices = output_names
             .iter()
             .enumerate()
-            .filter_map(|(idx, name)| (!all_names.contains(name)).then_some(idx))
+            .filter_map(|(idx, name)| (!sink_names.contains(name.as_str())).then_some(idx))
             .collect::<Vec<_>>();
-        let missing_sink_indices = self
-            .schema
-            .column_schemas()
+        let missing_sink_indices = effective_sink_columns
             .iter()
             .enumerate()
-            .filter_map(|(idx, column)| (!output_name_set.contains(&column.name)).then_some(idx))
+            .filter_map(|(idx, (_, column))| {
+                (!output_name_set.contains(&column.name)).then_some(idx)
+            })
             .collect::<Vec<_>>();
 
         if extra_expr_indices.is_empty() && missing_sink_indices.is_empty() {
@@ -1242,7 +1496,7 @@ impl ColumnMatcherRewriter {
                 )));
             }
 
-            let target_col_schema = &self.schema.column_schemas()[expr_idx];
+            let (_, target_col_schema) = effective_sink_columns[expr_idx];
             let expr_type =
                 ConcreteDataType::from_arrow_type(&exprs[expr_idx].get_type(input_schema)?);
             if is_obviously_incompatible_positional_match(&expr_type, &target_col_schema.data_type)
