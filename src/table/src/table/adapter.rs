@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
-use common_query::stream::StreamScanAdapter;
+use common_query::stream::{StreamFactoryRef, StreamScanAdapter};
 use common_recordbatch::OrderOption;
 use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef as DfSchemaRef};
 use datafusion::catalog::Session;
@@ -29,8 +29,10 @@ use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
 use datatypes::types::json_type::JsonNativeType;
+use snafu::ResultExt;
 use store_api::storage::{ScanRequest, VectorSearchRequest};
 
+use crate::error::TablesRecordBatchSnafu;
 use crate::table::{TableRef, TableType};
 
 /// Adapt greptime's [TableRef] to DataFusion's [TableProvider].
@@ -169,7 +171,7 @@ impl TableProvider for DfTableProviderAdapter {
             return Ok(plan);
         }
 
-        let stream = self.table.scan_to_stream(request).await?;
+        let stream = self.table.scan_to_stream(request.clone()).await?;
 
         // build sort physical expr
         let schema = stream.schema();
@@ -187,8 +189,20 @@ impl TableProvider for DfTableProviderAdapter {
                 .collect::<Vec<_>>()
         });
 
+        // The stream above is single-use, and a recursive CTE re-executes its
+        // recursive term on every iteration.
+        let data_source = self.table.data_source();
+        let stream_factory: StreamFactoryRef = Arc::new(move || {
+            let stream = data_source
+                .get_stream(request.clone())
+                .context(TablesRecordBatchSnafu)?;
+            Ok(stream)
+        });
+
         Ok(Arc::new(
-            StreamScanAdapter::new(stream).with_output_ordering(sort_expr),
+            StreamScanAdapter::new(stream)
+                .with_output_ordering(sort_expr)
+                .with_stream_factory(stream_factory),
         ))
     }
 
