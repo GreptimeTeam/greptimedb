@@ -260,16 +260,6 @@ impl ScalarVectorBuilder for NullVectorBuilder {
     }
 }
 
-pub(crate) fn replicate_null(vector: &NullVector, offsets: &[usize]) -> VectorRef {
-    assert_eq!(offsets.len(), vector.len());
-
-    if offsets.is_empty() {
-        return vector.slice(0, 0);
-    }
-
-    Arc::new(NullVector::new(*offsets.last().unwrap()))
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json;
@@ -290,7 +280,6 @@ mod tests {
         assert_eq!(vector2.null_count(), 16);
 
         assert_eq!("NullVector", v.vector_type_name());
-        assert!(!v.is_const());
         assert!(v.validity().is_all_null());
         assert!(v.only_null());
 

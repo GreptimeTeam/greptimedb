@@ -14,13 +14,43 @@
 
 use std::fmt;
 
+use common_query::error::Result;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow::datatypes::DataType;
+use datatypes::prelude::{Scalar, ScalarVector, VectorRef};
 use datatypes::vectors::{Helper, Vector};
 
 use crate::function::{Function, extract_args};
-use crate::scalars::expression::{EvalContext, scalar_binary_op};
+use crate::scalars::expression::EvalContext;
+
+fn scalar_binary_op<L: Scalar, R: Scalar, O: Scalar, F>(
+    l: &VectorRef,
+    r: &VectorRef,
+    f: F,
+    ctx: &mut EvalContext,
+) -> Result<<O as Scalar>::VectorType>
+where
+    F: Fn(Option<L::RefType<'_>>, Option<R::RefType<'_>>, &mut EvalContext) -> Option<O>,
+{
+    debug_assert!(
+        l.len() == r.len(),
+        "Size of vectors must match to apply binary expression"
+    );
+
+    let left: &<L as Scalar>::VectorType = unsafe { Helper::static_cast(l) };
+    let right: &<R as Scalar>::VectorType = unsafe { Helper::static_cast(r) };
+    let result = <O as Scalar>::VectorType::from_owned_iterator(
+        left.iter_data()
+            .zip(right.iter_data())
+            .map(|(a, b)| f(a, b, ctx)),
+    );
+
+    if let Some(error) = ctx.error.take() {
+        return Err(error);
+    }
+    Ok(result)
+}
 
 #[derive(Clone)]
 pub(crate) struct TestAndFunction {

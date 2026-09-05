@@ -43,8 +43,7 @@ mod tests {
     use crate::types::{LogicalPrimitiveType, WrapperType};
     use crate::vectors::operations::VectorOp;
     use crate::vectors::{
-        BooleanVector, ConstantVector, Int32Vector, NullVector, PrimitiveVector, StringVector,
-        UInt32Vector,
+        BooleanVector, Int32Vector, NullVector, PrimitiveVector, StringVector, UInt32Vector,
     };
 
     fn check_take_primitive<T>(
@@ -117,29 +116,6 @@ mod tests {
             from_native
         );
         take_time_like_test!(TimestampNanosecondVector, TimestampNanosecond, from_native);
-    }
-
-    fn check_take_constant(expect_length: usize, input_length: usize, indices: &[u32]) {
-        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice([111])), input_length);
-        let indices = UInt32Vector::from_slice(indices);
-        let out = v.take(&indices).unwrap();
-
-        assert!(out.is_const());
-        assert_eq!(expect_length, out.len());
-    }
-
-    #[test]
-    fn test_take_constant() {
-        check_take_constant(2, 5, &[3, 4]);
-        check_take_constant(3, 10, &[1, 2, 3]);
-        check_take_constant(4, 10, &[1, 5, 3, 6]);
-        check_take_constant(5, 10, &[1, 9, 8, 7, 3]);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_take_constant_out_of_index() {
-        check_take_constant(2, 5, &[3, 5]);
     }
 
     #[test]
