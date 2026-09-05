@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["concretize_json2_schema"],"struct":["JsonSchemaConcretizeRule"]};

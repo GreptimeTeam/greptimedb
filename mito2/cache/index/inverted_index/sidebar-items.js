@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INDEX_TYPE_INVERTED_INDEX"],"fn":["inverted_index_content_weight","inverted_index_metadata_weight"],"struct":["CachedInvertedIndexBlobReader"],"type":["InvertedIndexCache","InvertedIndexCacheRef"]};

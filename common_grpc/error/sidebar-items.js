@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"fn":["retry_hint_from_arrow_error"],"struct":["ArrowSnafu","ConversionSnafu","CreateChannelSnafu","DecodeFlightDataSnafu","FileWatchSnafu","InvalidConfigFilePathSnafu","InvalidFlightDataSnafu","InvalidTlsConfigSnafu","NotSupportedSnafu","SerdeJsonSnafu","TypeMismatchSnafu"],"type":["Result"]};

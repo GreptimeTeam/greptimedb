@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["GetCommand"],"struct":["GetKeyCommand","GetKeyTool","GetTableCommand","GetTableTool"]};

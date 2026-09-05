@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["OperationType","WriteType"],"fn":["clean_dir","new_fs_cache_store"],"struct":["AccessLayer","Metrics","RegionFilePathFactory","SstWriteRequest","TempFileCleaner","WriteCachePathProvider"],"trait":["FilePathProvider"],"type":["AccessLayerRef","SstInfoArray"]};

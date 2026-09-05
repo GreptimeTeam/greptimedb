@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SKIP_BAD_RECORDS_BATCH_SIZE"],"fn":["is_skippable_arrow_error","parse_bool","stream_to_csv","tolerant_csv_stream","tolerant_csv_stream_from_reader"],"struct":["CsvFormat"]};

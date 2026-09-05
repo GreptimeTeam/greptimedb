@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PasswordVerifier","PgAuthInfo"],"fn":["authenticate_with_credential","load_credential_from_file","parse_credential_line","pg_scram_unsupported_users","postgres_auth_info_with_credential","warn_if_pg_scram_disabled"],"mod":["static_user_provider","watch_file_user_provider"],"trait":["UserProvider"],"type":["UserInfoMap"]};

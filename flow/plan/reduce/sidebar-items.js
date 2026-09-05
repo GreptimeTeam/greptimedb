@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ReducePlan"],"struct":["AccumulablePlan","AggrWithIndex","KeyValPlan"]};

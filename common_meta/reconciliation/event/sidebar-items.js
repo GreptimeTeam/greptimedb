@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PAYLOAD_VERSION","RECONCILE_TABLE_EVENT_TYPE"],"enum":["ReconciliationEventType","ReconciliationPayload"],"fn":["nullable_table_id","resolve_strategy_name"],"struct":["ReconciliationEvent","ReconciliationLocator","TableResultPayload","TableSubmittedPayload"]};

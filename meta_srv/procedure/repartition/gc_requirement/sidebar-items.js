@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REPARTITION_GC_REQUIREMENT_VALUE"],"struct":["RepartitionGcRequirementManager"],"type":["RepartitionGcRequirementManagerRef"]};

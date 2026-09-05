@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["format_prometheus_sample_value","merge_annotations","prometheus_native_histogram"],"struct":["PromSeriesSamples","PrometheusJsonResponse"]};

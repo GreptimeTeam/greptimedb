@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["trace_permission_targets"],"mod":["trace_ingest","trace_semconv","trace_types"]};

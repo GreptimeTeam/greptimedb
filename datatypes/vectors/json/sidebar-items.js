@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["json2_physical_data_type"],"mod":["array","builder","variant"]};

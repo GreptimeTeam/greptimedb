@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROCESSOR_URL_ENCODING"],"enum":["Method"],"struct":["UrlEncodingProcessor"]};

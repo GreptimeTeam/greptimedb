@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MutableStringArrayData","StringArrayData","StringIter"],"struct":["StringVector","StringVectorBuilder"]};

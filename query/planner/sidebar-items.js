@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["normalize_field_access_after_subscript"],"struct":["DfLogicalPlanner"],"trait":["LogicalPlanner"]};

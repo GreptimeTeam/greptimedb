@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_TS_COLUMN","METRIC_SERIES_ID_BATCH_SIZE","MIN_TS_COLUMN","ROW_COUNT_COLUMN"],"fn":["series_index_schema"],"mod":["searcher","writer"],"struct":["MetricSeriesId","SeriesIndexSearcher","SeriesIndexWriter","SeriesIndexWriterMetrics","SeriesIndexWriterOptions"],"type":["MetricSeriesIdStream"]};
