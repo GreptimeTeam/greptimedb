@@ -941,14 +941,25 @@ fn start_worker(
     flush_semaphore: Arc<Semaphore>,
 ) {
     tokio::spawn(async move {
-        let mut batch = None;
-        let mut interval = tokio::time::interval(flush_interval);
+        let mut batch: Option<PendingBatch> = None;
         let mut shutdown_rx = shutdown.subscribe();
         let idle_deadline = tokio::time::Instant::now() + worker_idle_timeout;
         let idle_timer = tokio::time::sleep_until(idle_deadline);
         tokio::pin!(idle_timer);
 
         loop {
+            // Anchor the flush deadline to the batch's creation time rather than
+            // to a worker-aligned tick. A batch created at any point between two
+            // ticks used to wait for the next tick — up to almost 2× the flush
+            // interval after its creation — before its flush even started (#8641).
+            // Anchoring on `created_at` makes the queueing delay a stable
+            // `flush_interval` and, being recomputed every iteration from the
+            // batch's original creation time, does not slide as new submissions
+            // arrive.
+            let flush_deadline = batch
+                .as_ref()
+                .map(|batch| tokio::time::Instant::from(batch.created_at) + flush_interval);
+
             tokio::select! {
                 cmd = rx.recv() => {
                     match cmd {
@@ -1014,19 +1025,24 @@ fn start_worker(
                     );
                     break;
                 }
-                _ = interval.tick() => {
-                    if batch
-                        .as_ref()
-                        .is_some_and(|batch| batch.created_at.elapsed() >= flush_interval)
-                        && let Some(flush) = drain_batch(&mut batch) {
-                            spawn_flush(
-                                flush,
-                                partition_manager.clone(),
-                                node_manager.clone(),
-                                catalog_manager.clone(),
-                                flow_notification_tx.clone(),
-                                flush_semaphore.clone(),
-                            ).await;
+                _ = async {
+                    match flush_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        // No batch pending: stay inactive until a submission
+                        // creates one, at which point the loop top re-arms the
+                        // deadline from its creation time.
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(flush) = drain_batch(&mut batch) {
+                        spawn_flush(
+                            flush,
+                            partition_manager.clone(),
+                            node_manager.clone(),
+                            catalog_manager.clone(),
+                            flow_notification_tx.clone(),
+                            flush_semaphore.clone(),
+                        ).await;
                     }
                 }
                 _ = shutdown_rx.recv() => {
