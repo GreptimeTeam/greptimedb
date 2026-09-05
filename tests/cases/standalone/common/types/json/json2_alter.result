@@ -1,0 +1,51 @@
+CREATE TABLE application_logs (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2;
+
+Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2 ();
+
+Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2 (
+        max_auto_expanded_paths = 2000
+    );
+
+Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2 (
+        trace_id STRING,
+        user.id STRING NOT NULL,
+        user.name STRING DEFAULT 'anonymous',
+        request_id STRING INVERTED INDEX
+    );
+
+Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2 (
+        max_auto_expanded_paths = 2000,
+        trace_id STRING,
+        user.id STRING NOT NULL,
+        user.name STRING DEFAULT 'anonymous',
+        request_id STRING INVERTED INDEX
+    );
+
+Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2
+
+DROP TABLE application_logs;
+
+Affected Rows: 0
+

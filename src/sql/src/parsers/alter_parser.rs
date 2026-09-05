@@ -29,7 +29,7 @@ use sqlparser::tokenizer::{Token, TokenWithSpan};
 use crate::ast::ObjectNamePartExt;
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
-use crate::parsers::create_parser::INVERTED;
+use crate::parsers::create_parser::{INVERTED, parse_json2_type_and_options};
 use crate::parsers::utils::{
     parse_with_options, validate_column_fulltext_create_option,
     validate_column_skipping_index_create_option,
@@ -462,10 +462,19 @@ impl ParserContext<'_> {
                         .context(error::SyntaxSnafu)?;
                     self.parse_alter_table_drop_default(column_name)
                 } else {
-                    let data_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
+                    let (data_type, json2_options) =
+                        if let Some(json2) = parse_json2_type_and_options(&mut self.parser)? {
+                            json2
+                        } else {
+                            (
+                                self.parser.parse_data_type().context(error::SyntaxSnafu)?,
+                                None,
+                            )
+                        };
                     Ok(AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type: data_type,
+                        json2_options,
                     })
                 }
             }
@@ -1537,15 +1546,77 @@ ALTER TABLE metrics REPARTITION
                     AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
+                        json2_options,
                     } => {
                         assert_eq!("a", column_name.value);
                         assert_eq!(DataType::String(None), *target_type);
+                        assert!(json2_options.is_none());
                     }
                     _ => unreachable!(),
                 }
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_parse_alter_json2() {
+        let sql = r#"ALTER TABLE application_logs
+MODIFY COLUMN attrs JSON2 (
+    max_auto_expanded_paths = 2000,
+    trace_id STRING,
+    user.id STRING NOT NULL,
+    user.name STRING DEFAULT 'anonymous',
+    request_id STRING INVERTED INDEX
+)"#;
+        let mut statements =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        let Statement::AlterTable(alter_table) = statements.remove(0) else {
+            unreachable!()
+        };
+        let AlterTableOperation::ModifyColumnType {
+            column_name,
+            target_type,
+            json2_options: Some(options),
+        } = alter_table.alter_operation()
+        else {
+            unreachable!()
+        };
+
+        assert_eq!("attrs", column_name.value);
+        assert_eq!("JSON2", target_type.to_string());
+        assert_eq!(Some(2000), options.max_auto_expanded_paths);
+        assert_eq!(4, options.type_hints.len());
+        assert_eq!(vec!["user", "id"], options.type_hints[1].path);
+        assert!(!options.type_hints[1].nullable);
+        assert!(options.type_hints[2].default.is_some());
+        assert!(options.type_hints[3].inverted_index);
+
+        let formatted = alter_table.to_string();
+        let reparsed = ParserContext::create_with_dialect(
+            &formatted,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(Statement::AlterTable(alter_table), reparsed[0]);
+
+        let mut empty = ParserContext::create_with_dialect(
+            "ALTER TABLE application_logs MODIFY COLUMN attrs JSON2 ()",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let Statement::AlterTable(empty) = empty.remove(0) else {
+            unreachable!()
+        };
+        let AlterTableOperation::ModifyColumnType { json2_options, .. } = empty.alter_operation()
+        else {
+            unreachable!()
+        };
+        assert!(json2_options.is_none());
     }
 
     #[test]
@@ -1571,9 +1642,11 @@ ALTER TABLE metrics REPARTITION
                     AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
+                        json2_options,
                     } => {
                         assert_eq!("a", column_name.value);
                         assert_eq!(DataType::MediumText, *target_type);
+                        assert!(json2_options.is_none());
                     }
                     _ => unreachable!(),
                 }
@@ -1602,9 +1675,11 @@ ALTER TABLE metrics REPARTITION
                     AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
+                        json2_options,
                     } => {
                         assert_eq!("a", column_name.value);
                         assert!(matches!(target_type, DataType::Timestamp(Some(6), _)));
+                        assert!(json2_options.is_none());
                     }
                     _ => unreachable!(),
                 }
