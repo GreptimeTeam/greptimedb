@@ -288,6 +288,9 @@ pub struct BatchBuilder {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
 
+    /// Index of the internal primary key column, if present.
+    primary_key_column_idx: Option<usize>,
+
     /// Maintain a list of [`RecordBatch`] and their corresponding stream
     batches: Vec<(usize, RecordBatch)>,
 
@@ -302,8 +305,12 @@ pub struct BatchBuilder {
 impl BatchBuilder {
     /// Create a new [`BatchBuilder`] with the provided `stream_count` and `batch_size`
     pub fn new(schema: SchemaRef, stream_count: usize, batch_size: usize) -> Self {
+        let primary_key_column_idx = (schema.fields.len() >= 3)
+            .then(|| primary_key_column_index(schema.fields.len()))
+            .filter(|&column_idx| schema.field(column_idx).name() == PRIMARY_KEY_COLUMN_NAME);
         Self {
             schema,
+            primary_key_column_idx,
             batches: Vec::with_capacity(stream_count * 2),
             cursors: vec![BatchCursor::default(); stream_count],
             indices: Vec::with_capacity(batch_size),
@@ -355,9 +362,6 @@ impl BatchBuilder {
 
         check_interleave_overflow(&self.batches, &self.schema, &self.indices)?;
 
-        let primary_key_column_idx = (self.schema.fields.len() >= 3)
-            .then(|| primary_key_column_index(self.schema.fields.len()))
-            .filter(|&column_idx| self.schema.field(column_idx).name() == PRIMARY_KEY_COLUMN_NAME);
         let columns = (0..self.schema.fields.len())
             .map(|column_idx| {
                 let arrays: Vec<_> = self
@@ -365,7 +369,7 @@ impl BatchBuilder {
                     .iter()
                     .map(|(_, batch)| batch.column(column_idx).as_ref())
                     .collect();
-                if Some(column_idx) == primary_key_column_idx {
+                if Some(column_idx) == self.primary_key_column_idx {
                     interleave_primary_key(&arrays, &self.indices).context(ComputeArrowSnafu)
                 } else {
                     interleave(&arrays, &self.indices).context(ComputeArrowSnafu)
