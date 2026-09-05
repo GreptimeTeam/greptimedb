@@ -131,6 +131,11 @@ harness = false
 required-features = ["testing"]
 
 [[bench]]
+name = "bench_flat_merge"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
 name = "simple_bulk_memtable"
 harness = false
 required-features = ["test"]

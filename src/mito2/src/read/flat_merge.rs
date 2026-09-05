@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_telemetry::debug;
-use datatypes::arrow::array::{Array, AsArray, Int64Array, UInt64Array};
+use datatypes::arrow::array::{
+    Array, ArrayRef, AsArray, BinaryBuilder, Int64Array, UInt32Array, UInt64Array,
+};
 use datatypes::arrow::compute::interleave;
 use datatypes::arrow::datatypes::{ArrowNativeType, BinaryType, DataType, SchemaRef, Utf8Type};
 use datatypes::arrow::error::ArrowError;
@@ -30,6 +35,7 @@ use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
@@ -94,6 +100,97 @@ fn check_interleave_overflow(
         }
     }
     Ok(())
+}
+
+/// Interleaves the non-null internal primary-key column from globally sorted rows.
+fn interleave_primary_key(
+    arrays: &[&dyn Array],
+    indices: &[(usize, usize)],
+) -> std::result::Result<ArrayRef, ArrowError> {
+    if arrays.is_empty() {
+        return Err(ArrowError::InvalidArgumentError(
+            "interleave requires input of at least one array".to_string(),
+        ));
+    }
+
+    let dictionaries = arrays
+        .iter()
+        .map(|array| {
+            let dictionary = array
+                .as_any()
+                .downcast_ref::<PrimaryKeyArray>()
+                .ok_or_else(|| {
+                    ArrowError::CastError(format!(
+                        "expected Dictionary(UInt32, Binary) primary key, got {}",
+                        array.data_type()
+                    ))
+                })?;
+            let values = dictionary
+                .values()
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| {
+                    ArrowError::CastError(format!(
+                        "expected Binary primary-key dictionary values, got {}",
+                        dictionary.values().data_type()
+                    ))
+                })?;
+            Ok((dictionary, values))
+        })
+        .collect::<std::result::Result<Vec<_>, ArrowError>>()?;
+
+    let mut keys = Vec::with_capacity(indices.len());
+    let mut values = BinaryBuilder::with_capacity(indices.len(), 0);
+    let mut previous_primary_key = None;
+    let mut current_key = 0;
+    let mut num_dictionary_values = 0_usize;
+    let mut value_bytes = 0_usize;
+
+    for &(array_idx, row_idx) in indices {
+        let (dictionary, dictionary_values) = dictionaries.get(array_idx).ok_or_else(|| {
+            ArrowError::InvalidArgumentError(format!(
+                "primary-key source index {array_idx} is out of bounds for {} arrays",
+                dictionaries.len()
+            ))
+        })?;
+        if row_idx >= dictionary.len() {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "primary-key row index {row_idx} is out of bounds for array of length {}",
+                dictionary.len()
+            )));
+        }
+        let source_key = dictionary.key(row_idx).ok_or_else(|| {
+            ArrowError::InvalidArgumentError(
+                "internal primary-key dictionary contains a null key".to_string(),
+            )
+        })?;
+        if dictionary_values.is_null(source_key) {
+            return Err(ArrowError::InvalidArgumentError(
+                "internal primary-key dictionary contains a null dictionary value".to_string(),
+            ));
+        }
+        let primary_key = dictionary_values.value(source_key);
+
+        if previous_primary_key != Some(primary_key) {
+            current_key = u32::try_from(num_dictionary_values)
+                .map_err(|_| ArrowError::DictionaryKeyOverflowError)?;
+            value_bytes = value_bytes.checked_add(primary_key.len()).ok_or_else(|| {
+                ArrowError::ArithmeticOverflow(
+                    "primary-key dictionary value length overflow".to_string(),
+                )
+            })?;
+            if value_bytes > i32::MAX as usize {
+                return Err(ArrowError::OffsetOverflowError(value_bytes));
+            }
+            values.append_value(primary_key);
+            num_dictionary_values += 1;
+            previous_primary_key = Some(primary_key);
+        }
+        keys.push(current_key);
+    }
+
+    let dictionary = PrimaryKeyArray::try_new(UInt32Array::from(keys), Arc::new(values.finish()))?;
+    Ok(Arc::new(dictionary))
 }
 
 /// Keeps track of the current position in a batch
@@ -191,6 +288,9 @@ pub struct BatchBuilder {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
 
+    /// Index of the internal primary key column, if present.
+    primary_key_column_idx: Option<usize>,
+
     /// Maintain a list of [`RecordBatch`] and their corresponding stream
     batches: Vec<(usize, RecordBatch)>,
 
@@ -205,8 +305,12 @@ pub struct BatchBuilder {
 impl BatchBuilder {
     /// Create a new [`BatchBuilder`] with the provided `stream_count` and `batch_size`
     pub fn new(schema: SchemaRef, stream_count: usize, batch_size: usize) -> Self {
+        let primary_key_column_idx = (schema.fields.len() >= 3)
+            .then(|| primary_key_column_index(schema.fields.len()))
+            .filter(|&column_idx| schema.field(column_idx).name() == PRIMARY_KEY_COLUMN_NAME);
         Self {
             schema,
+            primary_key_column_idx,
             batches: Vec::with_capacity(stream_count * 2),
             cursors: vec![BatchCursor::default(); stream_count],
             indices: Vec::with_capacity(batch_size),
@@ -265,7 +369,11 @@ impl BatchBuilder {
                     .iter()
                     .map(|(_, batch)| batch.column(column_idx).as_ref())
                     .collect();
-                interleave(&arrays, &self.indices).context(ComputeArrowSnafu)
+                if Some(column_idx) == self.primary_key_column_idx {
+                    interleave_primary_key(&arrays, &self.indices).context(ComputeArrowSnafu)
+                } else {
+                    interleave(&arrays, &self.indices).context(ComputeArrowSnafu)
+                }
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -322,6 +430,199 @@ impl BatchBuilder {
     }
 }
 
+/// Sentinel for an empty slot in a [TournamentTree].
+const EMPTY_SLOT: usize = usize::MAX;
+
+/// A tournament tree over a fixed set of slots.
+///
+/// Each node occupies one slot; a slot is empty while its node is not in the
+/// tree (i.e. it is in the cold heap or reached EOF). An empty slot always
+/// loses a match. The number of leaves is padded to a power of two; leaves
+/// beyond the capacity never participate, so the tree works for arbitrary
+/// capacities.
+///
+/// Invariant: every internal tree node caches the champion (hottest slot, per
+/// `Ord`) of its subtree, so the root always holds the hottest occupied slot
+/// and updating a leaf only requires recomputing the ~log2(capacity) internal
+/// nodes on its path to the root. We cache champions ("winner tree") so that
+/// each internal node is a pure function of its children — insertion, removal
+/// and mutation share one replay path — and the runner-up is directly
+/// available from the sibling champions on the winner's path, which the
+/// hot/cold transition check needs after mutating the winner in place.
+struct TournamentTree<T> {
+    /// Slot storage, one slot per node. `None` means the slot is empty.
+    nodes: Vec<Option<T>>,
+    /// Tree of champions: `tree[i]` is the slot index of the champion of the
+    /// subtree rooted at `i` (or [EMPTY_SLOT]). Leaves for slot `s` live at
+    /// index `leaves + s`; the root is index 1.
+    tree: Vec<usize>,
+    /// Number of occupied slots.
+    len: usize,
+    /// Number of leaves, padded to a power of two.
+    leaves: usize,
+    /// Cached `(winner slot, second-best slot)`, with [EMPTY_SLOT] standing
+    /// for no second-best. Invalidated by [TournamentTree::replay], the single
+    /// choke point of every structural change (push, pop, winner replay).
+    ///
+    /// While the tree is structurally unchanged and the winner keeps its slot
+    /// the cache stays valid: only the winner's node may be mutated in place
+    /// and the second-best slot is never the winner's slot, so the cached
+    /// slot's node is untouched.
+    second_best_cache: Option<(usize, usize)>,
+}
+
+impl<T: Ord> TournamentTree<T> {
+    fn with_capacity(capacity: usize) -> Self {
+        let leaves = capacity.next_power_of_two().max(1);
+        let mut nodes = Vec::new();
+        nodes.resize_with(capacity, || None);
+        Self {
+            nodes,
+            tree: vec![EMPTY_SLOT; leaves * 2],
+            len: 0,
+            leaves,
+            second_best_cache: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns the winner (greatest element among occupied slots).
+    fn peek(&self) -> Option<&T> {
+        self.winner_slot()
+            .and_then(|slot| self.nodes[slot].as_ref())
+    }
+
+    /// Returns the winner mutably. Call [TournamentTree::replay_winner] after
+    /// mutating it, or remove it with `pop()` if it reached EOF or moved cold.
+    fn winner_mut(&mut self) -> Option<&mut T> {
+        let slot = self.winner_slot()?;
+        self.nodes[slot].as_mut()
+    }
+
+    /// Returns the second greatest element among occupied slots.
+    ///
+    /// The runner-up is the champion of one of the sibling subtrees on the
+    /// winner's path to the root.
+    #[cfg(test)]
+    fn second_best(&mut self) -> Option<&T> {
+        let slot = self.second_best_slot()?;
+        Some(self.nodes[slot].as_ref().unwrap())
+    }
+
+    /// Returns the winner and the second greatest element among occupied slots.
+    fn winner_and_second_best(&mut self) -> (Option<&T>, Option<&T>) {
+        let second = self.second_best_slot();
+        let winner = self.winner_slot();
+        (
+            winner.map(|slot| self.nodes[slot].as_ref().unwrap()),
+            second.map(|slot| self.nodes[slot].as_ref().unwrap()),
+        )
+    }
+
+    /// Inserts `value` into a free slot and replays its path to the root.
+    ///
+    /// Scans for a free slot instead of keeping a free list to keep the tree
+    /// cheap to construct. This is O(capacity), but pushes only happen on
+    /// batch transitions, never per row.
+    ///
+    /// # Panics
+    /// Panics if the tree is full.
+    fn push(&mut self, value: T) {
+        let slot = self
+            .nodes
+            .iter()
+            .position(Option::is_none)
+            .expect("tournament tree is full");
+        self.nodes[slot] = Some(value);
+        self.tree[self.leaves + slot] = slot;
+        self.len += 1;
+        self.replay(slot);
+    }
+
+    /// Removes and returns the winner, leaving its slot empty.
+    fn pop(&mut self) -> Option<T> {
+        let slot = self.winner_slot()?;
+        let value = self.nodes[slot].take();
+        debug_assert!(value.is_some());
+        self.tree[self.leaves + slot] = EMPTY_SLOT;
+        self.len -= 1;
+        self.replay(slot);
+        value
+    }
+
+    /// Replays the winner's path after its value was mutated in place.
+    fn replay_winner(&mut self) {
+        if let Some(slot) = self.winner_slot() {
+            self.replay(slot);
+        }
+    }
+
+    /// Returns the slot of the champion at the root, if any slot is occupied.
+    fn winner_slot(&self) -> Option<usize> {
+        (self.tree[1] != EMPTY_SLOT).then_some(self.tree[1])
+    }
+
+    /// Returns the slot of the second greatest element among occupied slots.
+    fn second_best_slot(&mut self) -> Option<usize> {
+        let winner = self.winner_slot()?;
+        if let Some((cached_winner, cached)) = self.second_best_cache
+            && cached_winner == winner
+        {
+            return (cached != EMPTY_SLOT).then_some(cached);
+        }
+        let second = self.compute_second_best_slot(winner).unwrap_or(EMPTY_SLOT);
+        self.second_best_cache = Some((winner, second));
+        (second != EMPTY_SLOT).then_some(second)
+    }
+
+    /// Scans the champions of the sibling subtrees on `winner`'s path to the
+    /// root for the hottest one.
+    fn compute_second_best_slot(&self, winner: usize) -> Option<usize> {
+        let mut node = self.leaves + winner;
+        let mut best = EMPTY_SLOT;
+        while node > 1 {
+            let challenger = self.tree[node ^ 1];
+            if self.wins(challenger, best) {
+                best = challenger;
+            }
+            node /= 2;
+        }
+        (best != EMPTY_SLOT).then_some(best)
+    }
+
+    /// Returns true if slot `a` wins its match against slot `b`, i.e. `a` is
+    /// the greater element. An occupied slot always beats an empty slot
+    /// ([EMPTY_SLOT] or a slot whose node was removed).
+    fn wins(&self, a: usize, b: usize) -> bool {
+        match (self.nodes.get(a), self.nodes.get(b)) {
+            (Some(Some(x)), Some(Some(y))) => x >= y,
+            (Some(Some(_)), _) => true,
+            _ => false,
+        }
+    }
+
+    /// Recomputes the internal nodes on the path from `slot`'s leaf to the
+    /// root (~log2(capacity) comparisons).
+    fn replay(&mut self, slot: usize) {
+        debug_assert!(slot < self.nodes.len());
+        self.second_best_cache = None;
+        let mut node = (self.leaves + slot) / 2;
+        while node > 0 {
+            let left = self.tree[node * 2];
+            let right = self.tree[node * 2 + 1];
+            self.tree[node] = if self.wins(left, right) { left } else { right };
+            node /= 2;
+        }
+    }
+}
+
 /// A comparable node of the heap.
 trait NodeCmp: Eq + Ord {
     /// Returns whether the node still has batch to read.
@@ -336,13 +637,13 @@ trait NodeCmp: Eq + Ord {
 }
 
 /// Common algorithm of merging sorted batches from multiple nodes.
-struct MergeAlgo<T> {
+struct MergeAlgo<T: Ord> {
     /// Holds nodes whose key range of current batch **is** overlapped with the merge window.
     /// Each node yields batches from a `source`.
     ///
-    /// Node in this heap **MUST** not be empty. A `merge window` is the (primary key, timestamp)
-    /// range of the **root node** in the `hot` heap.
-    hot: BinaryHeap<T>,
+    /// Node in this tree **MUST** not be empty. A `merge window` is the (primary key, timestamp)
+    /// range of the **winner node** in the `hot` tree.
+    hot: TournamentTree<T>,
     /// Holds nodes whose key range of current batch **isn't** overlapped with the merge window.
     ///
     /// Nodes in this heap **MUST** not be empty.
@@ -356,7 +657,7 @@ impl<T: NodeCmp> MergeAlgo<T> {
     fn new(mut nodes: Vec<T>) -> Self {
         // Skips EOF nodes.
         nodes.retain(|node| !node.is_eof());
-        let hot = BinaryHeap::with_capacity(nodes.len());
+        let hot = TournamentTree::with_capacity(nodes.len());
         let cold = BinaryHeap::from(nodes);
 
         let mut algo = MergeAlgo { hot, cold };
@@ -367,7 +668,7 @@ impl<T: NodeCmp> MergeAlgo<T> {
     }
 
     /// Moves nodes in `cold` heap, whose key range is overlapped with current merge
-    /// window to `hot` heap.
+    /// window to `hot` tree.
     fn refill_hot(&mut self) {
         while !self.cold.is_empty() {
             if let Some(merge_window) = self.hot.peek() {
@@ -385,40 +686,61 @@ impl<T: NodeCmp> MergeAlgo<T> {
         }
     }
 
-    /// Push the node popped from `hot` back to a proper heap.
-    fn reheap(&mut self, node: T) {
-        if node.is_eof() {
-            // If the node is EOF, don't put it into the heap again.
-            // The merge window would be updated, need to refill the hot heap.
-            self.refill_hot();
-        } else {
-            // Find a proper heap for this node.
-            let node_is_cold = if let Some(hottest) = self.hot.peek() {
-                // If key range of this node is behind the hottest node's then we can
-                // push it to the cold heap. Otherwise we should push it to the hot heap.
-                node.is_behind(hottest)
-            } else {
-                // The hot heap is empty, but we don't known whether the current
-                // batch of this node is still the hottest.
-                true
-            };
-
-            if node_is_cold {
-                self.cold.push(node);
-            } else {
-                self.hot.push(node);
-            }
-            // Anyway, the merge window has been changed, we need to refill the hot heap.
-            self.refill_hot();
-        }
+    /// Returns the hottest node mutably.
+    fn hottest_mut(&mut self) -> Option<&mut T> {
+        self.hot.winner_mut()
     }
 
-    /// Pops the hottest node.
-    fn pop_hot(&mut self) -> Option<T> {
+    /// Removes the hottest node before a transition that can fetch a batch.
+    fn pop_hot_for_batch_transition(&mut self) -> Option<T> {
         self.hot.pop()
     }
 
-    /// Returns true if there are rows in the hot heap.
+    /// Returns a node to the appropriate heap after a batch transition.
+    fn reheap_after_batch_transition(&mut self, node: T) {
+        if node.is_eof() {
+            self.refill_hot();
+            return;
+        }
+
+        let node_is_cold = self
+            .hot
+            .peek()
+            .is_none_or(|hottest| node.is_behind(hottest));
+        if node_is_cold {
+            self.cold.push(node);
+        } else {
+            self.hot.push(node);
+        }
+        self.refill_hot();
+    }
+
+    /// Repairs the hot tree after mutating its winner and refills the merge window.
+    fn repair_hot_root(&mut self) {
+        if self.hot.peek().is_some_and(NodeCmp::is_eof) {
+            self.hot.pop();
+        } else {
+            let (winner, second_best) = self.hot.winner_and_second_best();
+            let Some(winner) = winner else {
+                self.refill_hot();
+                return;
+            };
+            let root_is_cold = second_best.is_some_and(|best| winner.is_behind(best));
+            // If the winner still wins (tie included), every cached champion on its
+            // path is unchanged and the tree invariant already holds, so the replay
+            // can be skipped.
+            let winner_lost = second_best.is_some_and(|best| winner < best);
+            if root_is_cold {
+                self.cold.push(self.hot.pop().unwrap());
+            } else if winner_lost {
+                self.hot.replay_winner();
+            }
+        }
+
+        self.refill_hot();
+    }
+
+    /// Returns true if there are rows in the hot tree.
     fn has_rows(&self) -> bool {
         !self.hot.is_empty()
     }
@@ -433,8 +755,11 @@ impl<T: NodeCmp> MergeAlgo<T> {
 /// Columns to compare for a [RecordBatch].
 struct SortColumns {
     primary_key: PrimaryKeyArray,
+    primary_key_values: BinaryArray,
     timestamp: Int64Array,
     sequence: UInt64Array,
+    #[cfg(test)]
+    primary_key_lookups: Cell<usize>,
 }
 
 impl SortColumns {
@@ -450,6 +775,12 @@ impl SortColumns {
             .downcast_ref::<PrimaryKeyArray>()
             .unwrap()
             .clone();
+        let primary_key_values = primary_key
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap()
+            .clone();
         let timestamp = batch.column(time_index_column_index(num_columns));
         let (timestamp, _unit) = timestamp_array_to_primitive(timestamp).unwrap();
         let sequence = batch
@@ -461,20 +792,31 @@ impl SortColumns {
 
         Self {
             primary_key,
+            primary_key_values,
             timestamp,
             sequence,
+            #[cfg(test)]
+            primary_key_lookups: Cell::new(0),
         }
     }
 
     fn primary_key_at(&self, index: usize) -> &[u8] {
-        let key = self.primary_key.keys().value(index);
-        let binary_values = self
-            .primary_key
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-        binary_values.value(key as usize)
+        let range = self.primary_key_range_at(index);
+        &self.primary_key_values.value_data()[range]
+    }
+
+    fn primary_key_range_at(&self, index: usize) -> Range<usize> {
+        #[cfg(test)]
+        self.primary_key_lookups
+            .set(self.primary_key_lookups.get() + 1);
+        let key = self.primary_key.keys().value(index) as usize;
+        let offsets = self.primary_key_values.value_offsets();
+        offsets[key].as_usize()..offsets[key + 1].as_usize()
+    }
+
+    #[cfg(test)]
+    fn primary_key_lookups(&self) -> usize {
+        self.primary_key_lookups.get()
     }
 
     fn timestamp_at(&self, index: usize) -> i64 {
@@ -497,6 +839,8 @@ impl SortColumns {
 struct RowCursor {
     /// Current row offset.
     offset: usize,
+    /// Byte range of the current primary key in the dictionary values.
+    primary_key_range: Range<usize>,
     /// Keys of the batch.
     columns: SortColumns,
 }
@@ -504,8 +848,13 @@ struct RowCursor {
 impl RowCursor {
     fn new(columns: SortColumns) -> Self {
         debug_assert!(columns.num_rows() > 0);
+        let primary_key_range = columns.primary_key_range_at(0);
 
-        Self { offset: 0, columns }
+        Self {
+            offset: 0,
+            primary_key_range,
+            columns,
+        }
     }
 
     fn is_finished(&self) -> bool {
@@ -519,10 +868,13 @@ impl RowCursor {
 
     fn advance(&mut self) {
         self.offset += 1;
+        if !self.is_finished() {
+            self.primary_key_range = self.columns.primary_key_range_at(self.offset);
+        }
     }
 
     fn first_primary_key(&self) -> &[u8] {
-        self.columns.primary_key_at(self.offset)
+        &self.columns.primary_key_values.value_data()[self.primary_key_range.clone()]
     }
 
     fn first_timestamp(&self) -> i64 {
@@ -640,25 +992,29 @@ impl FlatMergeIterator {
         debug_assert!(self.in_progress.is_empty());
 
         // Safety: next_batch() ensures the heap is not empty.
-        let mut hottest = self.algo.pop_hot().unwrap();
+        let mut hottest = self.algo.pop_hot_for_batch_transition().unwrap();
         debug_assert!(!hottest.current_cursor().is_finished());
+        let node_index = hottest.node_index;
         let next = hottest.advance_batch()?;
         // The node is the heap is not empty, so it must have existing rows in the builder.
-        let batch = self
-            .in_progress
-            .take_remaining_rows(hottest.node_index, next);
+        let batch = self.in_progress.take_remaining_rows(node_index, next);
         Self::maybe_output_batch(batch, &mut self.output_batch);
-        self.algo.reheap(hottest);
+        self.algo.reheap_after_batch_transition(hottest);
 
         Ok(())
     }
 
     /// Fetches a row from the hottest node.
     fn fetch_row_from_hottest(&mut self) -> Result<()> {
-        // Safety: next_batch() ensures the heap has more than 1 element.
-        let mut hottest = self.algo.pop_hot().unwrap();
-        debug_assert!(!hottest.current_cursor().is_finished());
-        self.in_progress.push_row(hottest.node_index);
+        let (node_index, at_batch_boundary) = {
+            // Safety: next_batch() ensures the heap has more than 1 element.
+            let hottest = self.algo.hottest_mut().unwrap();
+            debug_assert!(!hottest.current_cursor().is_finished());
+            (hottest.node_index, hottest.current_cursor().is_last_row())
+        };
+        let mut boundary_node =
+            at_batch_boundary.then(|| self.algo.pop_hot_for_batch_transition().unwrap());
+        self.in_progress.push_row(node_index);
         if self.in_progress.len() >= self.batch_size {
             // We buffered enough rows.
             if let Some(output) = self.in_progress.build_record_batch()? {
@@ -666,11 +1022,20 @@ impl FlatMergeIterator {
             }
         }
 
-        if let Some(next) = hottest.advance_row()? {
-            self.in_progress.push_batch(hottest.node_index, next);
+        let next = if let Some(hottest) = &mut boundary_node {
+            hottest.advance_row()?
+        } else {
+            self.algo.hottest_mut().unwrap().advance_row()?
+        };
+        if let Some(next) = next {
+            self.in_progress.push_batch(node_index, next);
         }
 
-        self.algo.reheap(hottest);
+        if let Some(hottest) = boundary_node {
+            self.algo.reheap_after_batch_transition(hottest);
+        } else {
+            self.algo.repair_hot_root();
+        }
         Ok(())
     }
 
@@ -796,27 +1161,31 @@ impl FlatMergeReader {
         debug_assert!(self.in_progress.is_empty());
 
         // Safety: next_batch() ensures the heap is not empty.
-        let mut hottest = self.algo.pop_hot().unwrap();
+        let mut hottest = self.algo.pop_hot_for_batch_transition().unwrap();
         debug_assert!(!hottest.current_cursor().is_finished());
+        let node_index = hottest.node_index;
         let start = Instant::now();
         let next = hottest.advance_batch().await?;
         self.metrics.fetch_cost += start.elapsed();
         // The node is the heap is not empty, so it must have existing rows in the builder.
-        let batch = self
-            .in_progress
-            .take_remaining_rows(hottest.node_index, next);
+        let batch = self.in_progress.take_remaining_rows(node_index, next);
         Self::maybe_output_batch(batch, &mut self.output_batch);
-        self.algo.reheap(hottest);
+        self.algo.reheap_after_batch_transition(hottest);
 
         Ok(())
     }
 
     /// Fetches a row from the hottest node.
     async fn fetch_row_from_hottest(&mut self) -> Result<()> {
-        // Safety: next_batch() ensures the heap has more than 1 element.
-        let mut hottest = self.algo.pop_hot().unwrap();
-        debug_assert!(!hottest.current_cursor().is_finished());
-        self.in_progress.push_row(hottest.node_index);
+        let (node_index, at_batch_boundary) = {
+            // Safety: next_batch() ensures the heap has more than 1 element.
+            let hottest = self.algo.hottest_mut().unwrap();
+            debug_assert!(!hottest.current_cursor().is_finished());
+            (hottest.node_index, hottest.current_cursor().is_last_row())
+        };
+        let mut boundary_node =
+            at_batch_boundary.then(|| self.algo.pop_hot_for_batch_transition().unwrap());
+        self.in_progress.push_row(node_index);
         if self.in_progress.len() >= self.batch_size {
             // We buffered enough rows.
             if let Some(output) = self.in_progress.build_record_batch()? {
@@ -824,18 +1193,24 @@ impl FlatMergeReader {
             }
         }
 
-        // Only read the clock when advancing will attempt to fetch the next batch.
-        // Check first because `None` means either no fetch or EOF after a fetch attempt.
-        let start = hottest.current_cursor().is_last_row().then(Instant::now);
-        let next = hottest.advance_row().await?;
+        let start = at_batch_boundary.then(Instant::now);
+        let next = if let Some(hottest) = &mut boundary_node {
+            hottest.advance_row().await?
+        } else {
+            self.algo.hottest_mut().unwrap().advance_row().await?
+        };
         if let Some(start) = start {
             self.metrics.fetch_cost += start.elapsed();
         }
         if let Some(next) = next {
-            self.in_progress.push_batch(hottest.node_index, next);
+            self.in_progress.push_batch(node_index, next);
         }
 
-        self.algo.reheap(hottest);
+        if let Some(hottest) = boundary_node {
+            self.algo.reheap_after_batch_transition(hottest);
+        } else {
+            self.algo.repair_hot_root();
+        }
         Ok(())
     }
 
@@ -1012,15 +1387,462 @@ impl GenericNode<BoxedRecordBatchStream> {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Reverse;
+    use std::rc::Rc;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::task::Poll;
 
     use api::v1::OpType;
     use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
     use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt8Array, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
+    use futures::FutureExt;
 
     use super::*;
+    use crate::error::UnexpectedSnafu;
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct TestNode {
+        id: usize,
+        current_rank: Option<usize>,
+        end_rank: usize,
+    }
+
+    impl TestNode {
+        fn new(id: usize, current_rank: usize, end_rank: usize) -> Self {
+            Self {
+                id,
+                current_rank: Some(current_rank),
+                end_rank,
+            }
+        }
+    }
+
+    impl NodeCmp for TestNode {
+        fn is_eof(&self) -> bool {
+            self.current_rank.is_none()
+        }
+
+        fn is_behind(&self, other: &Self) -> bool {
+            self.current_rank.unwrap() > other.end_rank
+        }
+    }
+
+    impl PartialOrd for TestNode {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for TestNode {
+        fn cmp(&self, other: &Self) -> Ordering {
+            Reverse((self.current_rank, self.id)).cmp(&Reverse((other.current_rank, other.id)))
+        }
+    }
+
+    #[test]
+    fn test_merge_algo_repairs_overlapping_hot_root_in_place() {
+        let mut algo = MergeAlgo::new(vec![
+            TestNode::new(0, 0, 10),
+            TestNode::new(1, 5, 15),
+            TestNode::new(2, 20, 25),
+        ]);
+        assert_eq!(0, algo.hot.peek().unwrap().id);
+        assert_eq!((2, 1), (algo.hot.len(), algo.cold.len()));
+
+        algo.hottest_mut().unwrap().current_rank = Some(6);
+        algo.repair_hot_root();
+
+        assert_eq!(1, algo.hot.peek().unwrap().id);
+        assert_eq!((2, 1), (algo.hot.len(), algo.cold.len()));
+    }
+
+    #[test]
+    fn test_merge_algo_moves_root_beyond_remaining_hot_range_to_cold() {
+        let mut algo = MergeAlgo::new(vec![
+            TestNode::new(0, 0, 10),
+            TestNode::new(1, 5, 7),
+            TestNode::new(2, 20, 25),
+        ]);
+
+        algo.hottest_mut().unwrap().current_rank = Some(8);
+        algo.repair_hot_root();
+
+        assert_eq!(1, algo.hot.peek().unwrap().id);
+        assert_eq!((1, 2), (algo.hot.len(), algo.cold.len()));
+    }
+
+    #[test]
+    fn test_merge_algo_removes_eof_root_and_refills_hot() {
+        let mut algo = MergeAlgo::new(vec![TestNode::new(0, 0, 4), TestNode::new(1, 10, 14)]);
+        assert_eq!((1, 1), (algo.hot.len(), algo.cold.len()));
+
+        algo.hottest_mut().unwrap().current_rank = None;
+        algo.repair_hot_root();
+
+        assert_eq!(1, algo.hot.peek().unwrap().id);
+        assert_eq!((1, 0), (algo.hot.len(), algo.cold.len()));
+    }
+
+    #[test]
+    fn test_merge_algo_single_hot_node_can_fetch_batch() {
+        let algo = MergeAlgo::new(vec![TestNode::new(0, 0, 4), TestNode::new(1, 10, 14)]);
+
+        assert_eq!(0, algo.hot.peek().unwrap().id);
+        assert_eq!((1, 1), (algo.hot.len(), algo.cold.len()));
+        assert!(algo.can_fetch_batch());
+    }
+
+    /// A merge node that counts its `Ord::cmp` invocations, to assert how many
+    /// comparisons a repair performs. Unlike [TestNode], nodes with equal
+    /// `current_rank` compare equal (no id tie-break), like rows with equal
+    /// (primary key, timestamp, sequence).
+    #[derive(Debug)]
+    struct CountedNode {
+        id: usize,
+        current_rank: Option<usize>,
+        end_rank: usize,
+        compares: Rc<Cell<usize>>,
+    }
+
+    impl CountedNode {
+        fn new(id: usize, current_rank: usize, compares: &Rc<Cell<usize>>) -> Self {
+            Self {
+                id,
+                current_rank: Some(current_rank),
+                // Never behind, so nodes never move to the cold heap.
+                end_rank: usize::MAX,
+                compares: Rc::clone(compares),
+            }
+        }
+    }
+
+    impl NodeCmp for CountedNode {
+        fn is_eof(&self) -> bool {
+            self.current_rank.is_none()
+        }
+
+        fn is_behind(&self, other: &Self) -> bool {
+            self.current_rank.unwrap() > other.end_rank
+        }
+    }
+
+    impl PartialEq for CountedNode {
+        fn eq(&self, other: &Self) -> bool {
+            self.current_rank == other.current_rank
+        }
+    }
+
+    impl Eq for CountedNode {}
+
+    impl PartialOrd for CountedNode {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for CountedNode {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.compares.set(self.compares.get() + 1);
+            Reverse(self.current_rank).cmp(&Reverse(other.current_rank))
+        }
+    }
+
+    fn drain_merge_algo<T: NodeCmp>(algo: &mut MergeAlgo<T>) -> Vec<T> {
+        let mut nodes = Vec::with_capacity(algo.hot.len());
+        while let Some(node) = algo.pop_hot_for_batch_transition() {
+            nodes.push(node);
+        }
+        nodes
+    }
+
+    #[test]
+    fn test_merge_algo_skips_tree_replay_when_winner_stays_hottest() {
+        let compares = Rc::new(Cell::new(0));
+        let mut algo = MergeAlgo::new(vec![
+            CountedNode::new(0, 10, &compares),
+            CountedNode::new(1, 50, &compares),
+            CountedNode::new(2, 40, &compares),
+            CountedNode::new(3, 30, &compares),
+        ]);
+        assert_eq!(0, algo.hot.peek().unwrap().id);
+        assert_eq!((4, 0), (algo.hot.len(), algo.cold.len()));
+
+        // Advance the winner within its batch: it stays hotter than every
+        // other node, so it remains the champion.
+        algo.hottest_mut().unwrap().current_rank = Some(20);
+        compares.set(0);
+        algo.repair_hot_root();
+
+        // The second-best scan (1 compare) plus the champion-retention check
+        // (1 compare) suffice; a full replay would cost 2 more compares.
+        assert_eq!(2, compares.get());
+        assert_eq!(0, algo.hot.peek().unwrap().id);
+        assert_eq!((4, 0), (algo.hot.len(), algo.cold.len()));
+
+        // The tree still drains in merge order afterwards.
+        let drained: Vec<_> = drain_merge_algo(&mut algo)
+            .into_iter()
+            .map(|node| node.id)
+            .collect();
+        assert_eq!(vec![0, 3, 2, 1], drained);
+    }
+
+    #[test]
+    fn test_merge_algo_retains_winner_tied_with_second_best() {
+        let compares = Rc::new(Cell::new(0));
+        let mut algo = MergeAlgo::new(vec![
+            CountedNode::new(0, 10, &compares),
+            CountedNode::new(1, 20, &compares),
+            CountedNode::new(2, 20, &compares),
+        ]);
+        let winner_id = algo.hot.peek().unwrap().id;
+
+        // The winner drops to exactly tie the second hottest node.
+        algo.hottest_mut().unwrap().current_rank = Some(20);
+        compares.set(0);
+        algo.repair_hot_root();
+
+        // A tie retains the champion without a replay: the same node stays
+        // the winner and nothing moves to the cold heap.
+        assert_eq!(2, compares.get());
+        assert_eq!(winner_id, algo.hot.peek().unwrap().id);
+        assert_eq!((3, 0), (algo.hot.len(), algo.cold.len()));
+
+        let mut drained: Vec<_> = drain_merge_algo(&mut algo)
+            .into_iter()
+            .map(|node| node.id)
+            .collect();
+        drained.sort_unstable();
+        assert_eq!(vec![0, 1, 2], drained);
+    }
+
+    #[test]
+    fn test_merge_algo_caches_second_best_across_retention_repairs() {
+        let compares = Rc::new(Cell::new(0));
+        let mut algo = MergeAlgo::new(vec![
+            CountedNode::new(0, 10, &compares),
+            CountedNode::new(1, 50, &compares),
+            CountedNode::new(2, 40, &compares),
+            CountedNode::new(3, 30, &compares),
+        ]);
+
+        // First retention repair computes the second-best slot.
+        algo.hottest_mut().unwrap().current_rank = Some(20);
+        algo.repair_hot_root();
+        assert_eq!(0, algo.hot.peek().unwrap().id);
+
+        // While the winner keeps its slot and the tree is structurally
+        // unchanged, repairs reuse the cached second-best slot: only the
+        // retention check itself (1 compare) runs per repair.
+        compares.set(0);
+        for rank in 21..=23 {
+            algo.hottest_mut().unwrap().current_rank = Some(rank);
+            algo.repair_hot_root();
+        }
+        assert_eq!(3, compares.get());
+        assert_eq!(0, algo.hot.peek().unwrap().id);
+        assert_eq!((4, 0), (algo.hot.len(), algo.cold.len()));
+
+        // The tree still drains in merge order afterwards.
+        let drained: Vec<_> = drain_merge_algo(&mut algo)
+            .into_iter()
+            .map(|node| node.id)
+            .collect();
+        assert_eq!(vec![0, 3, 2, 1], drained);
+    }
+
+    fn drain_tournament_tree<T: Ord>(tree: &mut TournamentTree<T>) -> Vec<T> {
+        let mut values = Vec::with_capacity(tree.len());
+        while let Some(value) = tree.pop() {
+            values.push(value);
+        }
+        values
+    }
+
+    #[test]
+    fn test_tournament_tree_empty() {
+        let mut tree = TournamentTree::<i32>::with_capacity(0);
+
+        assert!(tree.is_empty());
+        assert_eq!(0, tree.len());
+        assert_eq!(None, tree.peek());
+        assert_eq!(None, tree.winner_mut());
+        assert_eq!(None, tree.second_best());
+        assert_eq!(None, tree.pop());
+        tree.replay_winner();
+    }
+
+    #[test]
+    fn test_tournament_tree_single_element() {
+        let mut tree = TournamentTree::with_capacity(1);
+        tree.push(7);
+
+        assert!(!tree.is_empty());
+        assert_eq!(1, tree.len());
+        assert_eq!(Some(&7), tree.peek());
+        assert_eq!(None, tree.second_best());
+        assert_eq!(Some(7), tree.pop());
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn test_tournament_tree_drains_in_descending_order() {
+        let mut tree = TournamentTree::with_capacity(8);
+        for value in [3, 1, 4, 1, 5, 9, 2, 6] {
+            tree.push(value);
+        }
+
+        assert_eq!(Some(&9), tree.peek());
+        assert_eq!(Some(&6), tree.second_best());
+        assert_eq!(
+            vec![9, 6, 5, 4, 3, 2, 1, 1],
+            drain_tournament_tree(&mut tree)
+        );
+    }
+
+    #[test]
+    fn test_tournament_tree_non_power_of_two_capacity() {
+        let mut tree = TournamentTree::with_capacity(5);
+        for value in [40, 10, 50, 20, 30] {
+            tree.push(value);
+        }
+
+        assert_eq!(Some(&50), tree.peek());
+        assert_eq!(Some(&40), tree.second_best());
+        assert_eq!(vec![50, 40, 30, 20, 10], drain_tournament_tree(&mut tree));
+    }
+
+    #[test]
+    fn test_tournament_tree_replays_winner_after_mutation() {
+        let mut tree = TournamentTree::with_capacity(4);
+        for value in [7, 3, 9, 5] {
+            tree.push(value);
+        }
+
+        *tree.winner_mut().unwrap() = 1;
+        tree.replay_winner();
+
+        assert_eq!(Some(&7), tree.peek());
+        assert_eq!(Some(&5), tree.second_best());
+        assert_eq!(vec![7, 5, 3, 1], drain_tournament_tree(&mut tree));
+    }
+
+    #[test]
+    fn test_tournament_tree_mutated_winner_can_stay_winner() {
+        let mut tree = TournamentTree::with_capacity(3);
+        for value in [1, 2, 9] {
+            tree.push(value);
+        }
+
+        *tree.winner_mut().unwrap() = 8;
+        tree.replay_winner();
+
+        assert_eq!(Some(&8), tree.peek());
+        assert_eq!(vec![8, 2, 1], drain_tournament_tree(&mut tree));
+    }
+
+    #[test]
+    fn test_tournament_tree_remove_and_reinsert() {
+        let mut tree = TournamentTree::with_capacity(3);
+        for value in [5, 9, 7] {
+            tree.push(value);
+        }
+
+        // Remove the winner; its slot is freed for a later reinsert.
+        assert_eq!(Some(9), tree.pop());
+        tree.push(8);
+        assert_eq!(Some(&8), tree.peek());
+        assert_eq!(vec![8, 7, 5], drain_tournament_tree(&mut tree));
+
+        // Refill after the tree was drained to empty.
+        tree.push(4);
+        tree.push(6);
+        assert_eq!(Some(&6), tree.peek());
+        assert_eq!(vec![6, 4], drain_tournament_tree(&mut tree));
+    }
+
+    /// Drives a TournamentTree and a std BinaryHeap oracle with the same seeded op
+    /// sequence (push / pop winner / mutate winner + replay) and compares
+    /// observable behavior after every op. The number of live elements never
+    /// exceeds `capacity`, mirroring how MergeAlgo uses the tree.
+    fn assert_tournament_tree_matches_oracle(
+        seed: u64,
+        value_range: u32,
+        capacity: usize,
+        num_ops: usize,
+    ) {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut tree = TournamentTree::<u32>::with_capacity(capacity);
+        let mut oracle = BinaryHeap::<u32>::new();
+        let mut next_value = 0_u32;
+
+        for _ in 0..num_ops {
+            match rng.random_range(0..3) {
+                0 if tree.len() < capacity => {
+                    let pushed_value = next_value % value_range;
+                    next_value += 1;
+                    tree.push(pushed_value);
+                    oracle.push(pushed_value);
+                }
+                1 => {
+                    assert_eq!(oracle.pop(), tree.pop());
+                }
+                _ => {
+                    let new_value = rng.random_range(0..value_range);
+                    if let Some(winner) = tree.winner_mut() {
+                        *winner = new_value;
+                        tree.replay_winner();
+
+                        oracle.pop();
+                        oracle.push(new_value);
+                    }
+                }
+            }
+
+            assert_eq!(oracle.peek(), tree.peek());
+            assert_eq!(oracle.len(), tree.len());
+            let oracle_second_best = {
+                let mut rest = oracle.clone();
+                rest.pop();
+                rest.peek().copied()
+            };
+            assert_eq!(oracle_second_best, tree.second_best().copied());
+        }
+
+        // Both structures must drain in the same non-increasing order.
+        let mut oracle_values = Vec::with_capacity(oracle.len());
+        while let Some(value) = oracle.pop() {
+            oracle_values.push(value);
+        }
+        assert_eq!(oracle_values, drain_tournament_tree(&mut tree));
+    }
+
+    #[test]
+    fn test_tournament_tree_matches_binary_heap_oracle() {
+        for seed in [0x5eed, 0xdead_beef, 42] {
+            assert_tournament_tree_matches_oracle(seed, 1000, 13, 2000);
+        }
+    }
+
+    #[test]
+    fn test_tournament_tree_matches_oracle_with_duplicate_heavy_values() {
+        // A tiny value range makes duplicates dominate, which exercises the
+        // tie-breaking branches of the tree matches.
+        assert_tournament_tree_matches_oracle(0xc0ffee, 3, 8, 2000);
+    }
+
+    #[test]
+    fn test_tournament_tree_matches_oracle_with_tiny_capacities() {
+        for capacity in 1..=3 {
+            assert_tournament_tree_matches_oracle(0xbeef, 100, capacity, 500);
+        }
+    }
 
     /// Creates a test RecordBatch with the specified data.
     fn create_test_record_batch(
@@ -1072,6 +1894,38 @@ mod tests {
 
     fn new_test_iter(batches: Vec<RecordBatch>) -> BoxedRecordBatchIterator {
         Box::new(batches.into_iter().map(Ok))
+    }
+
+    fn boundary_test_batches() -> (RecordBatch, RecordBatch, RecordBatch) {
+        let first = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[1, 2],
+            &[OpType::Put, OpType::Put],
+            &[10, 12],
+        );
+        let second = create_test_record_batch(
+            &[b"k1", b"k1", b"k1"],
+            &[1500, 2000, 2500],
+            &[1, 1, 1],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[11, 13, 14],
+        );
+        let pending = create_test_record_batch(
+            &[b"k1", b"k1", b"k1"],
+            &[1000, 1500, 2000],
+            &[1, 1, 2],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[10, 11, 12],
+        );
+        (first, second, pending)
+    }
+
+    fn test_source_error() -> crate::error::Error {
+        UnexpectedSnafu {
+            reason: "test source failed".to_string(),
+        }
+        .build()
     }
 
     #[test]
@@ -1261,6 +2115,76 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_iterator_retry_after_row_boundary_error_removes_source() {
+        let (first, second, pending) = boundary_test_batches();
+        let schema = first.schema();
+        let first_source = Box::new(vec![Ok(first), Err(test_source_error())].into_iter())
+            as BoxedRecordBatchIterator;
+        let second_source = new_test_iter(vec![second.clone()]);
+        let mut merge =
+            FlatMergeIterator::new(schema, vec![first_source, second_source], 1024).unwrap();
+
+        assert!(merge.next_batch().is_err());
+        assert_eq!(pending, merge.next_batch().unwrap().unwrap());
+        assert_eq!(second.slice(1, 2), merge.next_batch().unwrap().unwrap());
+        assert!(merge.next_batch().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_merge_reader_retry_after_row_boundary_error_removes_source() {
+        let (first, second, pending) = boundary_test_batches();
+        let schema = first.schema();
+        let first_source = Box::pin(futures::stream::iter(vec![
+            Ok(first),
+            Err(test_source_error()),
+        ])) as BoxedRecordBatchStream;
+        let second_source =
+            Box::pin(futures::stream::iter(vec![Ok(second.clone())])) as BoxedRecordBatchStream;
+        let mut merge = FlatMergeReader::new(schema, vec![first_source, second_source], 1024, None)
+            .await
+            .unwrap();
+
+        assert!(merge.next_batch().await.is_err());
+        assert_eq!(pending, merge.next_batch().await.unwrap().unwrap());
+        assert_eq!(
+            second.slice(1, 2),
+            merge.next_batch().await.unwrap().unwrap()
+        );
+        assert!(merge.next_batch().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_merge_reader_cancelled_row_boundary_fetch_removes_source() {
+        let (first, second, pending) = boundary_test_batches();
+        let schema = first.schema();
+        let fetch_pending = Arc::new(AtomicBool::new(false));
+        let fetch_pending_on_poll = Arc::clone(&fetch_pending);
+        let mut first_batch = Some(first);
+        let first_source = Box::pin(futures::stream::poll_fn(move |_cx| {
+            if let Some(batch) = first_batch.take() {
+                Poll::Ready(Some(Ok(batch)))
+            } else {
+                fetch_pending_on_poll.store(true, AtomicOrdering::Relaxed);
+                Poll::Pending
+            }
+        })) as BoxedRecordBatchStream;
+        let second_source =
+            Box::pin(futures::stream::iter(vec![Ok(second.clone())])) as BoxedRecordBatchStream;
+        let mut merge = FlatMergeReader::new(schema, vec![first_source, second_source], 1024, None)
+            .await
+            .unwrap();
+
+        assert!(Box::pin(merge.next_batch()).now_or_never().is_none());
+        assert!(fetch_pending.load(AtomicOrdering::Relaxed));
+        assert_eq!(pending, merge.next_batch().await.unwrap().unwrap());
+        assert_eq!(
+            second.slice(1, 2),
+            merge.next_batch().await.unwrap().unwrap()
+        );
+        assert!(merge.next_batch().await.unwrap().is_none());
+    }
+
+    #[test]
     fn test_batch_builder_basic() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("field1", DataType::Int64, false),
@@ -1295,6 +2219,137 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_builder_generic_three_column_schema() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field1", DataType::Int64, false),
+            Field::new("field2", DataType::Int64, false),
+            Field::new("field3", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(Int64Array::from(vec![3, 4])),
+                Arc::new(Int64Array::from(vec![5, 6])),
+            ],
+        )
+        .unwrap();
+        let mut builder = BatchBuilder::new(schema, 1, 2);
+        builder.push_batch(0, batch.clone());
+        builder.push_row(0);
+        builder.push_row(0);
+
+        let output_batch = builder.build_record_batch().unwrap().unwrap();
+
+        assert_eq!(batch, output_batch);
+    }
+
+    fn assert_primary_key_dictionary(
+        array: &dyn Array,
+        expected_decoded: &[&[u8]],
+        expected_values: &[&[u8]],
+    ) {
+        let dictionary = array.as_any().downcast_ref::<PrimaryKeyArray>().unwrap();
+        let values = dictionary
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let decoded: Vec<_> = dictionary
+            .keys()
+            .iter()
+            .map(|key| values.value(key.unwrap() as usize))
+            .collect();
+        let dictionary_values: Vec<_> = values.iter().map(Option::unwrap).collect();
+
+        assert_eq!(expected_decoded, decoded);
+        assert_eq!(expected_values, dictionary_values);
+    }
+
+    #[test]
+    fn test_interleave_primary_key_deduplicates_separate_dictionaries() {
+        let batch0 = create_test_record_batch(
+            &[b"k1", b"k2"],
+            &[1000, 2000],
+            &[1, 1],
+            &[OpType::Put, OpType::Put],
+            &[10, 20],
+        );
+        let batch1 = create_test_record_batch(
+            &[b"k1", b"k2"],
+            &[1000, 2000],
+            &[1, 1],
+            &[OpType::Put, OpType::Put],
+            &[11, 21],
+        );
+        let pk_idx = primary_key_column_index(batch0.num_columns());
+        let arrays: Vec<_> = [&batch0, &batch1]
+            .into_iter()
+            .map(|batch| batch.column(pk_idx).as_ref())
+            .collect();
+
+        let output = interleave_primary_key(&arrays, &[(0, 0), (1, 0), (0, 1), (1, 1)]).unwrap();
+
+        assert_primary_key_dictionary(
+            output.as_ref(),
+            &[b"k1", b"k1", b"k2", b"k2"],
+            &[b"k1", b"k2"],
+        );
+    }
+
+    #[test]
+    fn test_interleave_primary_key_rejects_null_dictionary_value() {
+        let primary_key = PrimaryKeyArray::try_new(
+            UInt32Array::from(vec![0]),
+            Arc::new(BinaryArray::from(vec![None::<&[u8]>])),
+        )
+        .unwrap();
+
+        let error = interleave_primary_key(&[&primary_key], &[(0, 0)]).unwrap_err();
+
+        assert!(error.to_string().contains("null dictionary value"));
+    }
+
+    #[test]
+    fn test_batch_builder_primary_key_has_no_state_between_builds() {
+        let long_k1 = vec![b'a'; 4096];
+        let long_k2 = vec![b'b'; 8192];
+        let batch0 =
+            create_test_record_batch(&[long_k1.as_slice()], &[1000], &[1], &[OpType::Put], &[10]);
+        let batch1 =
+            create_test_record_batch(&[long_k1.as_slice()], &[1000], &[1], &[OpType::Put], &[11]);
+        let mut builder = BatchBuilder::new(batch0.schema(), 2, 4);
+        builder.push_batch(0, batch0);
+        builder.push_batch(1, batch1);
+        builder.push_row(0);
+        builder.push_row(1);
+
+        let first = builder.build_record_batch().unwrap().unwrap();
+        let pk_idx = primary_key_column_index(first.num_columns());
+        assert_primary_key_dictionary(
+            first.column(pk_idx).as_ref(),
+            &[long_k1.as_slice(), long_k1.as_slice()],
+            &[long_k1.as_slice()],
+        );
+
+        let batch0 =
+            create_test_record_batch(&[long_k2.as_slice()], &[2000], &[2], &[OpType::Put], &[20]);
+        let batch1 =
+            create_test_record_batch(&[long_k2.as_slice()], &[2000], &[2], &[OpType::Put], &[21]);
+        builder.push_batch(0, batch0);
+        builder.push_batch(1, batch1);
+        builder.push_row(0);
+        builder.push_row(1);
+
+        let second = builder.build_record_batch().unwrap().unwrap();
+        assert_primary_key_dictionary(
+            second.column(pk_idx).as_ref(),
+            &[long_k2.as_slice(), long_k2.as_slice()],
+            &[long_k2.as_slice()],
+        );
+    }
+
+    #[test]
     fn test_row_cursor_comparison() {
         // Create test batches for cursor comparison
         let batch1 = create_test_record_batch(
@@ -1321,5 +2376,20 @@ mod tests {
         // cursors with same pk and timestamp should be ordered by sequence desc
         // cursor1 has sequence 22, cursor2 has sequence 23, so cursor2 < cursor1 (higher sequence comes first)
         assert!(cursor2 < cursor1);
+    }
+
+    #[test]
+    fn test_row_cursor_caches_current_primary_key() {
+        let batch1 = create_test_record_batch(&[b"k1"], &[1000], &[1], &[OpType::Put], &[11]);
+        let batch2 = create_test_record_batch(&[b"k2"], &[1000], &[1], &[OpType::Put], &[12]);
+        let cursor1 = RowCursor::new(SortColumns::new(&batch1));
+        let cursor2 = RowCursor::new(SortColumns::new(&batch2));
+
+        for _ in 0..5 {
+            assert_eq!(Ordering::Less, cursor1.cmp(&cursor2));
+        }
+
+        assert_eq!(1, cursor1.columns.primary_key_lookups());
+        assert_eq!(1, cursor2.columns.primary_key_lookups());
     }
 }
