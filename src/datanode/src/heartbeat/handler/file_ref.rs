@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use common_error::ext::ErrorExt;
-use common_meta::instruction::{GetFileRefs, GetFileRefsReply, InstructionError, InstructionReply};
+use common_meta::instruction::{
+    GetFileRefs, GetFileRefsReply, GetPackedFileRefs, GetPackedFileRefsReply, InstructionError,
+    InstructionReply, PackedFileRefsManifest,
+};
 use store_api::storage::FileRefsManifest;
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
@@ -62,6 +65,57 @@ impl InstructionHandler for GetFileRefsHandler {
                     e.retry_hint(),
                 )),
             })),
+        }
+    }
+}
+
+pub struct GetPackedFileRefsHandler;
+
+#[async_trait::async_trait]
+impl InstructionHandler for GetPackedFileRefsHandler {
+    type Instruction = GetPackedFileRefs;
+
+    async fn handle(
+        &self,
+        ctx: &HandlerContext,
+        get_file_refs: Self::Instruction,
+    ) -> Option<InstructionReply> {
+        let region_server = &ctx.region_server;
+        let Some(mito_engine) = region_server.mito_engine() else {
+            return Some(InstructionReply::GetPackedFileRefs(
+                GetPackedFileRefsReply {
+                    packed_file_refs_manifest: PackedFileRefsManifest::default(),
+                    success: false,
+                    error: Some(InstructionError::legacy_internal_retryable(
+                        "MitoEngine not found",
+                    )),
+                },
+            ));
+        };
+        match mito_engine
+            .get_snapshot_of_file_refs(get_file_refs.query_regions, get_file_refs.related_regions)
+            .await
+        {
+            Ok(all_file_refs) => Some(InstructionReply::GetPackedFileRefs(
+                GetPackedFileRefsReply {
+                    packed_file_refs_manifest: PackedFileRefsManifest::from_manifest(
+                        &all_file_refs,
+                    ),
+                    success: true,
+                    error: None,
+                },
+            )),
+            Err(e) => Some(InstructionReply::GetPackedFileRefs(
+                GetPackedFileRefsReply {
+                    packed_file_refs_manifest: PackedFileRefsManifest::default(),
+                    success: false,
+                    error: Some(InstructionError::new(
+                        e.status_code(),
+                        format!("Failed to get file refs: {}", e.output_msg()),
+                        e.retry_hint(),
+                    )),
+                },
+            )),
         }
     }
 }

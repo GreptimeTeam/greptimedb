@@ -428,9 +428,11 @@ impl HeartbeatMailbox {
                 .as_ref()
                 .with_context(|| UnexpectedInstructionReplySnafu {
                     mailbox_message: msg.to_string(),
-                    reason: format!("empty payload, msg: {msg:?}"),
+                    reason: "empty JSON payload".to_string(),
                 })?;
-        serde_json::from_str(payload).context(DeserializeFromJsonSnafu { input: payload })
+        serde_json::from_str(payload).context(DeserializeFromJsonSnafu {
+            input_len: payload.len(),
+        })
     }
 
     /// Parses the [Instruction] from [MailboxMessage].
@@ -443,9 +445,11 @@ impl HeartbeatMailbox {
                 .as_ref()
                 .with_context(|| UnexpectedInstructionReplySnafu {
                     mailbox_message: msg.to_string(),
-                    reason: format!("empty payload, msg: {msg:?}"),
+                    reason: "empty JSON payload".to_string(),
                 })?;
-        serde_json::from_str(payload).context(DeserializeFromJsonSnafu { input: payload })
+        serde_json::from_str(payload).context(DeserializeFromJsonSnafu {
+            input_len: payload.len(),
+        })
     }
 
     pub fn create(pushers: Pushers, sequence: Sequence) -> MailboxRef {
@@ -526,7 +530,12 @@ impl Mailbox for HeartbeatMailbox {
         msg.id = message_id;
 
         let pusher_id = ch.pusher_id();
-        debug!("Sending mailbox message {msg:?} to {pusher_id}");
+        let payload_len = msg
+            .payload
+            .as_ref()
+            .map(|Payload::Json(payload)| payload.len())
+            .unwrap_or_default();
+        debug!(message_id, payload_len, %pusher_id, "Sending mailbox message");
 
         let (tx, rx) = oneshot::channel();
         let _ = self.senders.insert(message_id, tx);
@@ -548,7 +557,12 @@ impl Mailbox for HeartbeatMailbox {
         msg.id = message_id;
 
         let pusher_id = ch.pusher_id();
-        debug!("Sending mailbox message {msg:?} to {pusher_id}");
+        let payload_len = msg
+            .payload
+            .as_ref()
+            .map(|Payload::Json(payload)| payload.len())
+            .unwrap_or_default();
+        debug!(message_id, payload_len, %pusher_id, "Sending one-way mailbox message");
 
         self.pushers.push(pusher_id, msg).await?;
 
@@ -560,7 +574,18 @@ impl Mailbox for HeartbeatMailbox {
     }
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()> {
-        debug!("Received mailbox message {maybe_msg:?}");
+        let payload_len = maybe_msg
+            .as_ref()
+            .ok()
+            .and_then(|msg| msg.payload.as_ref())
+            .map(|Payload::Json(payload)| payload.len())
+            .unwrap_or_default();
+        debug!(
+            message_id = id,
+            payload_len,
+            success = maybe_msg.is_ok(),
+            "Received mailbox message"
+        );
 
         let _ = self.timeouts.remove(&id);
 
@@ -568,7 +593,15 @@ impl Mailbox for HeartbeatMailbox {
             tx.send(maybe_msg)
                 .map_err(|_| error::MailboxClosedSnafu { id }.build())?;
         } else if let Ok(finally_msg) = maybe_msg {
-            warn!("The response arrived too late: {finally_msg:?}");
+            let payload_len = finally_msg
+                .payload
+                .as_ref()
+                .map(|Payload::Json(payload)| payload.len())
+                .unwrap_or_default();
+            warn!(
+                message_id = id,
+                payload_len, "The mailbox response arrived too late"
+            );
         }
 
         Ok(())
