@@ -552,7 +552,7 @@ impl StatementExecutor {
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
-                Channel::Mysql => set_query_timeout(set_var.value, query_ctx)?,
+                Channel::Mysql | Channel::HttpSql => set_query_timeout(set_var.value, query_ctx)?,
                 Channel::Postgres => {
                     warn!(
                         "Unsupported set variable {} for channel {:?}",
@@ -569,7 +569,9 @@ impl StatementExecutor {
                 }
             },
             "STATEMENT_TIMEOUT" => match query_ctx.channel() {
-                Channel::Postgres => set_query_timeout(set_var.value, query_ctx)?,
+                Channel::Postgres | Channel::HttpSql => {
+                    set_query_timeout(set_var.value, query_ctx)?
+                }
                 Channel::Mysql => {
                     warn!(
                         "Unsupported set variable {} for channel {:?}",
