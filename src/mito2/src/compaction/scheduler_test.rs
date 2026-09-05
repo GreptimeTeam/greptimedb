@@ -33,6 +33,7 @@ use crate::compaction::scheduler::state::{CompactingFiles, CompactionPhase};
 use crate::compaction::scheduler::*;
 use crate::compaction::test_util::new_file_handle;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
+use crate::config::MitoConfig;
 use crate::error::InvalidSchedulerStateSnafu;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics::COMPACTION_MEMORY_REJECTED;
@@ -1547,6 +1548,69 @@ async fn test_automatic_trigger_during_execution_clears_continuation_scope() {
             .iter()
             .flat_map(|output| &output.inputs)
             .any(|file| file.time_range().1 >= Timestamp::new_millisecond(2 * 3_600_000))
+    );
+}
+
+#[tokio::test]
+async fn test_automatic_planning_picks_one_output_before_repicking() {
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(4);
+    let config = MitoConfig {
+        max_background_compactions: 4,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
+
+    let mut builder = VersionControlBuilder::new();
+    for window_start in [0, 2 * 3_600_000] {
+        for offset in [0, 10, 20, 30] {
+            builder.push_l0_file(window_start + offset, window_start + 1_000);
+        }
+    }
+    let region_id = builder.region_id();
+    let version_control = Arc::new(builder.build());
+    let manifest_ctx = env
+        .mock_manifest_context(version_control.current().version.metadata.clone())
+        .await;
+    let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+    let mut schema_value = SchemaNameValue::default();
+    schema_value
+        .extra_options
+        .insert("compaction.type".to_string(), "twcs".to_string());
+    schema_value
+        .extra_options
+        .insert("compaction.twcs.time_window".to_string(), "1h".to_string());
+    schema_metadata_manager
+        .register_region_table_info(
+            region_id.table_id(),
+            "t",
+            "c",
+            "s",
+            Some(schema_value),
+            kv_backend,
+        )
+        .await;
+
+    scheduler
+        .schedule_automatic_compaction(
+            compact_request::Options::Regular(Default::default()),
+            &version_control,
+            &env.access_layer,
+            &manifest_ctx,
+            schema_metadata_manager,
+        )
+        .unwrap();
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    let CompactionPlanningResult::Prepared(prepared) = finished.result else {
+        panic!("expected prepared compaction");
+    };
+
+    assert_eq!(1, prepared.picker_output.outputs.len());
+    assert!(
+        prepared.picker_output.outputs[0]
+            .inputs
+            .iter()
+            .all(|file| { file.time_range().0 >= Timestamp::new_millisecond(2 * 3_600_000) })
     );
 }
 
