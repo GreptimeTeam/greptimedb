@@ -1021,15 +1021,15 @@ async fn test_execution_finished_drains_until_no_plan() {
         .map(|file| file.meta_ref().clone())
         .collect();
 
-    // 5 files for next compaction and removes old files.
+    // Replace the 5 old files with 5 non-empty output files.
     apply_edit(
         &version_control,
         &[(0, end), (20, end), (40, end), (60, end), (80, end)],
         &file_metas,
         purger.clone(),
     );
-    // A completed execution that reduced the file count chains another pick even
-    // without an explicit trigger, because the layout is still compactable.
+    // A completed execution with non-empty output made semantic progress, so it
+    // chains another pick even without an explicit trigger.
     let transition = scheduler
         .on_compaction_finished(
             region_id,
@@ -1125,9 +1125,8 @@ async fn test_execution_finished_without_progress_removes_status() {
         .await;
     assert_eq!(1, job_scheduler.num_jobs());
 
-    // The execution rewrote files without reducing the file count (e.g. its output
-    // was split into more files than its input). Chaining would loop without making
-    // progress, so the lifecycle ends here; the next flush trigger resumes compaction.
+    // The execution produced an empty edit: no files were removed or added. The
+    // lifecycle ends here; the next flush trigger resumes compaction.
     let transition = scheduler
         .on_compaction_finished(
             region_id,
@@ -1164,7 +1163,7 @@ async fn test_time_range_compaction_when_compaction_in_progress() {
         )
         .await;
 
-    // 40 files to compact. The first task picks 32, leaving 8 for the pending request.
+    // 40 files to compact. The first task picks 16, leaving 24 for the pending request.
     let end = 1000 * 1000;
     for offset in 0..40 {
         builder.push_l0_file(offset * 10, end);
