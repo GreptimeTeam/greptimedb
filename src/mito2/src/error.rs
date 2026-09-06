@@ -67,6 +67,20 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display(
+        "Manifest delta {} disappeared after it was listed, path: {}",
+        version,
+        path
+    ))]
+    ManifestDeltaNotFound {
+        version: ManifestVersion,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
@@ -268,6 +282,36 @@ pub enum Error {
         region_id: RegionId,
         given_seq: u64,
         min_enforceable_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "SEQUENCE_RANGE_UNSUPPORTED: exact sequence-range read unsupported, region: {}, min_seq: {}, max_seq: {}, reason: {}, retry_hint: FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE",
+        region_id,
+        min_seq,
+        max_seq,
+        reason
+    ))]
+    SequenceRangeUnsupported {
+        region_id: RegionId,
+        min_seq: u64,
+        max_seq: u64,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "region {} is unusable for sequence reads: file {} declares region {}",
+        region_id,
+        file_id,
+        file_region_id
+    ))]
+    RegionSequenceDomainBroken {
+        region_id: RegionId,
+        file_region_id: RegionId,
+        file_id: FileId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1359,6 +1403,7 @@ impl Error {
     pub(crate) fn is_object_not_found(&self) -> bool {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            Error::ManifestDeltaNotFound { .. } => true,
             _ => false,
         }
     }
@@ -1400,7 +1445,9 @@ impl ErrorExt for Error {
 
         match self {
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
+            }
             WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
                 source.status_code()
             }
@@ -1449,7 +1496,10 @@ impl ErrorExt for Error {
 
             IncrementalQueryStale { .. } | SnapshotFenceStale { .. } => StatusCode::RequestOutdated,
 
-            RegionMetadataNotFound { .. }
+            SequenceRangeUnsupported { .. } => StatusCode::Unsupported,
+
+            RegionSequenceDomainBroken { .. }
+            | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
@@ -1601,7 +1651,8 @@ impl ErrorExt for Error {
             | RegionStopped { .. }
             | RegionBusy { .. }
             | ManualCompactionAlreadyRunning { .. }
-            | FlushableRegionState { .. } => RetryHint::Retryable,
+            | FlushableRegionState { .. }
+            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }

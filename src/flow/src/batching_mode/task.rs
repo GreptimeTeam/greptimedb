@@ -79,6 +79,61 @@ fn wall_clock_unix_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Initial scheduler cursor for `start_scheduled_loop`: exactly one interval
+/// before `start_secs` so the first due scheduled time is `start_secs` itself.
+///
+/// Fallible: a `start_secs - interval_secs` difference that does not fit in
+/// `i64` is an explicit error instead of a saturated cursor that would make
+/// the first due scheduled time `start_secs + interval_secs` and silently skip
+/// the `start_secs` tick.
+fn initial_schedule_cursor(start_secs: i64, interval_secs: i64) -> Result<i64, Error> {
+    let cursor = i128::from(start_secs) - i128::from(interval_secs);
+    i64::try_from(cursor).map_err(|_| {
+        UnexpectedSnafu {
+            reason: format!(
+                "Cannot compute the initial eval schedule cursor one interval before start {start_secs} (interval={interval_secs}): {cursor} does not fit in i64"
+            ),
+        }
+        .build()
+    })
+}
+
+/// Whole seconds to sleep until the next scheduled time `next`, measured from
+/// the current wall clock `wall_now_secs`.
+///
+/// Fallible: `next` must be strictly after `wall_now_secs` and the difference
+/// must fit in `u64`. In practice `i64::MAX - i64::MIN` is exactly `u64::MAX`,
+/// so the difference always fits once `next > wall_now_secs`; the explicit
+/// error keeps the scheduled loop panic-free and wrap-free regardless.
+fn sleep_delta_secs(next: i64, wall_now_secs: i64) -> Result<u64, Error> {
+    let delta = i128::from(next) - i128::from(wall_now_secs);
+    u64::try_from(delta).map_err(|_| {
+        UnexpectedSnafu {
+            reason: format!(
+                "Cannot sleep until the next scheduled time {next}: the delta from wall clock {wall_now_secs} is {delta} seconds, which does not fit in u64"
+            ),
+        }
+        .build()
+    })
+}
+
+/// Scheduled time in seconds converted to milliseconds for the
+/// `FLOW_SCHEDULED_TIME_MILLIS` extension.
+///
+/// Fallible: a seconds value whose millisecond product does not fit in `i64`
+/// is an explicit error instead of a saturated `i64::MAX` that would silently
+/// misrepresent the logical scheduled time.
+fn scheduled_time_millis(scheduled_time_secs: i64) -> Result<i64, Error> {
+    scheduled_time_secs.checked_mul(1000).ok_or_else(|| {
+        UnexpectedSnafu {
+            reason: format!(
+                "Cannot convert scheduled time {scheduled_time_secs}s to milliseconds: the product exceeds i64"
+            ),
+        }
+        .build()
+    })
+}
+
 /// The task's config, immutable once created
 #[derive(Clone)]
 pub struct TaskConfig {
@@ -1020,8 +1075,20 @@ impl BatchingTask {
         };
 
         // Initial cursor is one interval before start so the first due
-        // scheduled time is `start_secs`.
-        let mut cursor_secs = schedule.start_secs.saturating_sub(schedule.interval_secs);
+        // scheduled time is `start_secs`. An unrepresentable difference is an
+        // explicit error, never a saturated cursor that would silently skip
+        // the first scheduled tick.
+        let mut cursor_secs =
+            match initial_schedule_cursor(schedule.start_secs, schedule.interval_secs) {
+                Ok(cursor) => cursor,
+                Err(e) => {
+                    warn!(
+                        "Flow {}: invalid eval schedule, exiting loop: {}",
+                        flow_id_str, e
+                    );
+                    return;
+                }
+            };
 
         info!(
             "Flow {}: entering scheduled loop, interval={}s, start={}, anchor={}, policy={:?}, max_runs={}, max_lag={}s",
@@ -1042,11 +1109,11 @@ impl BatchingTask {
             let wall_now_secs = wall_clock_unix_secs();
 
             let due = match select_due_scheduled_times(&schedule, cursor_secs, wall_now_secs) {
-                Some(d) => d,
-                None => {
+                Ok(d) => d,
+                Err(e) => {
                     warn!(
-                        "Flow {}: Invalid schedule (interval <= 0), exiting loop",
-                        flow_id_str
+                        "Flow {}: invalid eval schedule, exiting loop: {}",
+                        flow_id_str, e
                     );
                     return;
                 }
@@ -1063,14 +1130,32 @@ impl BatchingTask {
                 }
 
                 // No due yet — sleep until the next scheduled time.
-                let next = schedule.next_scheduled_time_after(cursor_secs);
+                let next = match schedule.next_scheduled_time_after(cursor_secs) {
+                    Ok(next) => next,
+                    Err(e) => {
+                        warn!(
+                            "Flow {}: cannot advance eval schedule past cursor {cursor_secs}: {e}; exiting loop",
+                            flow_id_str
+                        );
+                        return;
+                    }
+                };
                 if next <= wall_now_secs {
                     // Shouldn't happen given select_due_scheduled_times returned empty,
                     // but guard against clock skew / logic error.
                     cursor_secs = wall_now_secs;
                     continue;
                 }
-                let wait_secs = (next - wall_now_secs) as u64;
+                let wait_secs = match sleep_delta_secs(next, wall_now_secs) {
+                    Ok(wait_secs) => wait_secs,
+                    Err(e) => {
+                        warn!(
+                            "Flow {}: cannot sleep until next scheduled time {}: {e}; exiting loop",
+                            flow_id_str, next
+                        );
+                        return;
+                    }
+                };
                 let wait_dur = Duration::from_secs(wait_secs);
                 debug!(
                     "Flow {}: no due scheduled times, sleeping for {}s until next scheduled time at {}",
@@ -1259,6 +1344,19 @@ impl BatchingTask {
             }
         }
 
+        // Convert to milliseconds before touching the task state so an
+        // unrepresentable scheduled time fails as an explicit error without
+        // ever installing a saturated (off-phase) extension value.
+        let scheduled_time_millis = match scheduled_time_millis(scheduled_time_secs) {
+            Ok(millis) => millis,
+            Err(e) => {
+                return ExecuteOnceOutcome {
+                    new_query: None,
+                    result: Err(e),
+                };
+            }
+        };
+
         // Clone the current QueryContext and add the scheduled time
         // extension, then swap it into the task state for this attempt.
         let old_ctx = {
@@ -1267,7 +1365,7 @@ impl BatchingTask {
             let mut new_ctx = (*old).clone();
             new_ctx.set_extension(
                 query::options::FLOW_SCHEDULED_TIME_MILLIS,
-                (scheduled_time_secs.saturating_mul(1000)).to_string(),
+                scheduled_time_millis.to_string(),
             );
             state.query_ctx = Arc::new(new_ctx);
             old

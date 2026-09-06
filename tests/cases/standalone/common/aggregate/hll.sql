@@ -44,6 +44,26 @@ select 2, hll(`value`) from test_hll;
 
 select hll_count(hll_merge(`state`)) from test_hll_merge;
 
+CREATE TABLE test_hll_delta_merge (
+    `id` INT PRIMARY KEY,
+    `delta` BINARY,
+    `persisted` BINARY,
+    `ts` timestamp time index default now()
+);
+
+INSERT INTO test_hll_delta_merge (`id`, `delta`, `persisted`)
+SELECT 1, hll(`value`), NULL FROM test_hll WHERE `id` <= 15;
+
+INSERT INTO test_hll_delta_merge (`id`, `delta`, `persisted`)
+SELECT 2, NULL, hll(`value`) FROM test_hll WHERE `id` > 15;
+
+SELECT
+    hll_count(__hll_delta_merge(`delta`, `persisted`)) AS merged_count,
+    (SELECT hll_count(hll(`value`)) FROM test_hll) AS direct_count
+FROM test_hll_delta_merge;
+
 drop table test_hll;
 
 drop table test_hll_merge;
+
+drop table test_hll_delta_merge;

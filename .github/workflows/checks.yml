@@ -80,6 +80,14 @@ jobs:
         run: python3 scripts/check-enterprise-license-test.py
       - name: Run fuzz orchestration script tests
         run: .github/scripts/run-fuzz-targets-test.sh
+      - name: Run query-regression Python tooling tests
+        run: |
+          python3 tests/perf/test_query_regression_runner_compaction_toctou.py
+          python3 tests/perf/test_query_regression_runner_otlp_trace_load.py
+          python3 tests/perf/test_query_regression_summary_otlp.py
+          python3 tests/perf/test_query_regression_case_selection.py
+          python3 tests/perf/test_query_regression_nightly_refs.py
+          python3 tests/perf/test_aliyun_ecs_runner_scripts.py
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}

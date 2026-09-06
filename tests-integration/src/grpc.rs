@@ -63,7 +63,10 @@ mod test {
     };
     use client::OutputData;
     use common_base::Plugins;
-    use common_catalog::consts::MITO_ENGINE;
+    use common_catalog::consts::{
+        DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE,
+        SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+    };
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_query::logical_plan::breakup_insert_plan;
@@ -1341,5 +1344,172 @@ CREATE TABLE {table_name} (
 |                    | )                                                 |
 +--------------------+---------------------------------------------------+"#;
         execute_sql_and_expect(&frontend, sql, expected).await;
+    }
+
+    fn declared_relationships_row_insert() -> Request {
+        use api::v1::value::ValueData;
+        use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, Value};
+
+        let string_column = |name: &str, semantic: SemanticType| ColumnSchema {
+            column_name: name.to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: semantic as i32,
+            ..Default::default()
+        };
+        let string_value = |value: &str| Value {
+            value_data: Some(ValueData::StringValue(value.to_string())),
+        };
+        let mut schema = vec![ColumnSchema {
+            column_name: "observed_at".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        }];
+        let mut values = vec![Value {
+            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+        }];
+        for (tag, value) in [
+            ("src_type", "service"),
+            ("src_id", "frontend"),
+            ("rel_type", "depends_on"),
+            ("dst_type", "service"),
+            ("dst_id", "users-db"),
+            ("provenance", "declared"),
+            ("scope", ""),
+            ("generation_id", ""),
+        ] {
+            schema.push(string_column(tag, SemanticType::Tag));
+            values.push(string_value(value));
+        }
+
+        Request::RowInserts(RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME.to_string(),
+                rows: Some(Rows {
+                    schema,
+                    rows: vec![Row { values }],
+                }),
+            }],
+        })
+    }
+
+    async fn assert_declared_relationships_table_is_canonical(instance: &Instance) {
+        let table = instance
+            .catalog_manager()
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_PRIVATE_SCHEMA_NAME,
+                SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("declared-edge table must exist");
+        let table_info = table.table_info();
+        assert_eq!(table_info.meta.schema.column_schemas().len(), 20);
+        assert_eq!(
+            table_info
+                .meta
+                .schema
+                .timestamp_column()
+                .map(|c| c.name.as_str()),
+            Some("observed_at")
+        );
+        let primary_keys: Vec<&str> = table_info
+            .meta
+            .primary_key_indices
+            .iter()
+            .map(|idx| table_info.meta.schema.column_schemas()[*idx].name.as_str())
+            .collect();
+        assert_eq!(
+            primary_keys,
+            [
+                "src_type",
+                "src_id",
+                "rel_type",
+                "dst_type",
+                "dst_id",
+                "provenance",
+                "scope",
+                "generation_id",
+            ]
+        );
+    }
+
+    /// The declared-edge table's first gRPC write must create it with the
+    /// canonical definition (never the request's shape), entering below the
+    /// user-DDL guard that rejects generic CREATE against the reserved name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_grpc_first_write_creates_declared_relationships_table() {
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new("test_grpc_declared_first_write")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_PRIVATE_SCHEMA_NAME,
+        ));
+        let output =
+            GrpcQueryHandler::do_query(instance.as_ref(), declared_relationships_row_insert(), ctx)
+                .await
+                .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+
+        assert_declared_relationships_table_is_canonical(instance).await;
+    }
+
+    /// The system-defined table is created regardless of the auto-create hint:
+    /// its creation is a system action, not user auto-create.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_grpc_declared_relationships_bypasses_auto_create_hint() {
+        use api::v1::value::ValueData;
+        use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, Value};
+
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new("test_grpc_declared_no_auto_create")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME);
+        ctx.set_extension(table::requests::AUTO_CREATE_TABLE_KEY, "false");
+        let ctx = Arc::new(ctx);
+
+        let output = GrpcQueryHandler::do_query(
+            instance.as_ref(),
+            declared_relationships_row_insert(),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+        assert_declared_relationships_table_is_canonical(instance).await;
+
+        // An ordinary table stays subject to the hint.
+        let request = Request::RowInserts(RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "ordinary_table".to_string(),
+                rows: Some(Rows {
+                    schema: vec![ColumnSchema {
+                        column_name: "ts".to_string(),
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        semantic_type: SemanticType::Timestamp as i32,
+                        ..Default::default()
+                    }],
+                    rows: vec![Row {
+                        values: vec![Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                        }],
+                    }],
+                }),
+            }],
+        });
+        let err = GrpcQueryHandler::do_query(instance.as_ref(), request, ctx)
+            .await
+            .unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
+        assert!(msg.contains("auto_create_table"), "unexpected error: {msg}");
     }
 }

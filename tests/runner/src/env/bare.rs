@@ -31,6 +31,7 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::client::MultiProtocolClient;
 use crate::cmd::bare::ServerAddr;
 use crate::cmd::compat_case::try_infer_version;
+use crate::cmd::datanode_overlay::PreparedDatanodeOverlay;
 use crate::formatter::{ErrorFormatter, MysqlFormatter, OutputFormatter, PostgresqlFormatter};
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
 use crate::server_mode::{GrpcArgStyle, ServerMode};
@@ -104,6 +105,39 @@ pub struct Env {
     extra_args: Vec<String>,
     /// Cache for the inferred gRPC argument style per `bins_dir`.
     grpc_arg_style_cache: Arc<Mutex<HashMap<PathBuf, GrpcArgStyle>>>,
+    compat_config_stage: Arc<Mutex<CompatConfigStage>>,
+}
+
+/// Kills a process unless ownership has been transferred to [`GreptimeDB`].
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn into_inner(mut self) -> Child {
+        self.0.take().unwrap()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            Env::stop_server(child);
+        }
+    }
+}
+
+/// Compatibility configuration selected for future server renders.
+#[derive(Clone, Debug)]
+pub(crate) enum CompatConfigStage {
+    /// Ordinary and baseline compatibility renders use the template unchanged.
+    Baseline,
+    /// Old compatibility renders apply this datanode overlay.
+    Old(Arc<PreparedDatanodeOverlay>),
+    /// Current compatibility renders use the template unchanged.
+    Current,
 }
 
 #[async_trait]
@@ -157,7 +191,23 @@ impl Env {
             store_config,
             extra_args,
             grpc_arg_style_cache: Arc::new(Mutex::new(HashMap::new())),
+            compat_config_stage: Arc::new(Mutex::new(CompatConfigStage::Baseline)),
         }
+    }
+
+    /// Selects the old-stage overlay for subsequent compatibility renders.
+    pub(crate) fn activate_compat_old(&self, overlay: Arc<PreparedDatanodeOverlay>) {
+        *self.compat_config_stage.lock().unwrap() = CompatConfigStage::Old(overlay);
+    }
+
+    /// Selects clean current-stage rendering for subsequent compatibility renders.
+    pub(crate) fn activate_compat_current(&self) {
+        *self.compat_config_stage.lock().unwrap() = CompatConfigStage::Current;
+    }
+
+    /// Takes a cheap compatibility-stage snapshot before rendering or spawning.
+    pub(crate) fn compat_config_stage(&self) -> CompatConfigStage {
+        self.compat_config_stage.lock().unwrap().clone()
     }
 
     async fn start_standalone(&self, id: usize) -> GreptimeDB {
@@ -176,7 +226,8 @@ impl Env {
             let server_process = self.start_server(server_mode, &db_ctx, id, true).await;
 
             let mut greptimedb = self.connect_db(&server_addr, id).await;
-            greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![server_process])));
+            greptimedb.server_processes =
+                Some(Arc::new(Mutex::new(vec![server_process.into_inner()])));
             greptimedb.is_standalone = true;
             greptimedb.ctx = db_ctx;
 
@@ -237,10 +288,12 @@ impl Env {
 
             let mut greptimedb = self.connect_db(&server_addr, id).await;
 
-            greptimedb.metasrv_process = Some(meta_server).into();
-            greptimedb.server_processes = Some(Arc::new(Mutex::new(datanodes)));
-            greptimedb.frontend_process = Some(frontend).into();
-            greptimedb.flownode_process = Some(flownode).into();
+            greptimedb.metasrv_process = Some(meta_server.into_inner()).into();
+            greptimedb.server_processes = Some(Arc::new(Mutex::new(
+                datanodes.into_iter().map(ChildGuard::into_inner).collect(),
+            )));
+            greptimedb.frontend_process = Some(frontend.into_inner()).into();
+            greptimedb.flownode_process = Some(flownode.into_inner()).into();
             greptimedb.is_standalone = false;
             greptimedb.ctx = db_ctx;
 
@@ -311,7 +364,7 @@ impl Env {
         db_ctx: &GreptimeDBContext,
         id: usize,
         truncate_log: bool,
-    ) -> Child {
+    ) -> ChildGuard {
         let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
             "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
         );
@@ -327,7 +380,7 @@ impl Env {
         id: usize,
         truncate_log: bool,
         bins_dir: PathBuf,
-    ) -> Child {
+    ) -> ChildGuard {
         let log_file_name = match mode {
             ServerMode::Datanode { node_id, .. } => {
                 db_ctx.incr_datanode_id();
@@ -351,7 +404,15 @@ impl Env {
             .unwrap();
 
         let arg_style = self.infer_grpc_arg_style(&bins_dir);
-        let args = mode.get_args(&self.sqlness_home, self, db_ctx, id, arg_style);
+        let compat_stage = self.compat_config_stage();
+        let args = mode.get_args(
+            &self.sqlness_home,
+            self,
+            db_ctx,
+            id,
+            arg_style,
+            &compat_stage,
+        );
         let check_ip_addrs = mode.check_addrs();
 
         for check_ip_addr in &check_ip_addrs {
@@ -369,7 +430,7 @@ impl Env {
             .canonicalize()
             .expect("Failed to canonicalize bins_dir");
 
-        let mut process = Command::new(abs_bins_dir.join(program))
+        let process = Command::new(abs_bins_dir.join(program))
             .current_dir(bins_dir.clone())
             .env("TZ", "UTC")
             .args(args)
@@ -382,10 +443,10 @@ impl Env {
                     bins_dir.join(program)
                 );
             });
+        let process = ChildGuard::new(process);
 
         for check_ip_addr in &check_ip_addrs {
             if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(30)).await {
-                Env::stop_server(&mut process);
                 panic!(
                     "{} doesn't up in 30 seconds, check {} for more details.",
                     mode.name(),
@@ -454,6 +515,7 @@ impl Env {
             vec![new_server_process]
         } else {
             db.ctx.reset_datanode_id();
+            let mut new_metasrv = None;
             if is_full_restart {
                 let metasrv_mode = db
                     .ctx
@@ -469,10 +531,7 @@ impl Env {
                         bins_dir.clone(),
                     )
                     .await;
-                db.metasrv_process
-                    .lock()
-                    .expect("lock poisoned")
-                    .replace(metasrv);
+                new_metasrv = Some(metasrv);
 
                 // wait for metasrv to start
                 // since it seems older version of db might take longer to complete election
@@ -498,6 +557,7 @@ impl Env {
                 processes.push(new_server_process);
             }
 
+            let mut new_frontend = None;
             if is_full_restart {
                 let frontend_mode = db
                     .ctx
@@ -514,10 +574,6 @@ impl Env {
                         bins_dir.clone(),
                     )
                     .await;
-                db.frontend_process
-                    .lock()
-                    .expect("lock poisoned")
-                    .replace(frontend);
 
                 // Reconnect protocol clients to the new frontend process
                 // so that MySQL/Postgres queries use the restarted frontend,
@@ -529,9 +585,11 @@ impl Env {
                 client
                     .reconnect_pg_client(server_addr.pg_server_addr.as_ref().unwrap())
                     .await;
+                new_frontend = Some(frontend);
             }
 
             // Restart flownode.
+            let mut new_flownode = None;
             if let Some(flownode_mode) = db.ctx.get_server_mode(SERVER_MODE_FLOWNODE_IDX).cloned() {
                 let flownode = self
                     .start_server_with_bins_dir(
@@ -542,10 +600,20 @@ impl Env {
                         bins_dir.clone(),
                     )
                     .await;
-                db.flownode_process
-                    .lock()
-                    .expect("lock poisoned")
-                    .replace(flownode);
+                new_flownode = Some(flownode);
+            }
+
+            if let Some(metasrv) = new_metasrv {
+                let mut metasrv_process = db.metasrv_process.lock().expect("lock poisoned");
+                metasrv_process.replace(metasrv.into_inner());
+            }
+            if let Some(frontend) = new_frontend {
+                let mut frontend_process = db.frontend_process.lock().expect("lock poisoned");
+                frontend_process.replace(frontend.into_inner());
+            }
+            if let Some(flownode) = new_flownode {
+                let mut flownode_process = db.flownode_process.lock().expect("lock poisoned");
+                flownode_process.replace(flownode.into_inner());
             }
 
             processes
@@ -553,7 +621,10 @@ impl Env {
 
         if let Some(server_processes) = db.server_processes.clone() {
             let mut server_processes = server_processes.lock().unwrap();
-            *server_processes = new_server_processes;
+            *server_processes = new_server_processes
+                .into_iter()
+                .map(ChildGuard::into_inner)
+                .collect();
         }
     }
 
@@ -967,5 +1038,102 @@ impl GreptimeDBContext {
 
     fn get_server_mode(&self, idx: usize) -> Option<&ServerMode> {
         self.server_modes.get(idx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::bare::ServerAddr;
+    use crate::cmd::datanode_overlay::{DatanodeOverlay, DatanodeProtectionPolicy};
+
+    fn test_env(temp_dir: &Path) -> Env {
+        Env::new(
+            temp_dir.to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            None,
+            StoreConfig {
+                store_addrs: vec![],
+                setup_etcd: false,
+                setup_pg: None,
+                setup_mysql: None,
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+            vec![],
+        )
+    }
+
+    #[test]
+    fn compat_config_stage_is_shared_by_env_clones_and_transitions_cleanly() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join("overlay.toml"), "value = 1").unwrap();
+        let overlay = DatanodeOverlay::load(temp_dir.path(), Path::new("overlay.toml"))
+            .unwrap()
+            .prepare(&DatanodeProtectionPolicy::for_wal(&WalConfig::RaftEngine))
+            .unwrap();
+        let env = test_env(temp_dir.path());
+        let clone = env.clone();
+
+        assert!(matches!(
+            clone.compat_config_stage(),
+            CompatConfigStage::Baseline
+        ));
+        env.activate_compat_old(Arc::new(overlay));
+        assert!(matches!(
+            clone.compat_config_stage(),
+            CompatConfigStage::Old(_)
+        ));
+        clone.activate_compat_current();
+        assert!(matches!(
+            env.compat_config_stage(),
+            CompatConfigStage::Current
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_guard_kills_untransferred_processes() {
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id().to_string();
+
+        drop(ChildGuard::new(child));
+
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_guard_kills_process_on_forced_unwind() {
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id().to_string();
+
+        let unwind = std::panic::catch_unwind(|| {
+            let _guard = ChildGuard::new(child);
+            panic!("forced startup unwind");
+        });
+
+        assert!(unwind.is_err());
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

@@ -31,6 +31,10 @@ inputs:
     description: Build dev-builder-android image
     required: false
     default: "true"
+  build-dev-builder-riscv64:
+    description: Build dev-builder-riscv64 image
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -69,6 +73,21 @@ runs:
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
           DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}
+
+    - name: Build and push dev-builder-riscv64 image # Only build image for amd64 platform (it cross-compiles riscv64 binaries).
+      shell: bash
+      if: ${{ inputs.build-dev-builder-riscv64 == 'true' }}
+      run: |
+        make dev-builder-riscv64 \
+          IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
+          IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
+          DEV_BUILDER_RISCV64_IMAGE_TAG=${{ inputs.version }}
+        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:${{ inputs.version }}
+        if [[ "${{ github.event_name }}" == "push" ]]; then
+          docker tag ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:${{ inputs.version }} \
+            ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:latest
+          docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:latest
+        fi
 
     - name: Build and push dev-builder-android image # Only build image for amd64 platform.
       shell: bash

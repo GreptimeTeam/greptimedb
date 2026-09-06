@@ -12,20 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::{assert_matches, fs};
 
 use api::v1::Rows;
+use api::v1::region::{StrictWindow, compact_request};
 use common_function::utils::partition_expr_version;
 use common_recordbatch::RecordBatches;
+use datatypes::arrow::array::{AsArray, UInt64Array};
+use datatypes::arrow::datatypes::Float64Type;
 use datatypes::value::Value;
 use partition::expr::{PartitionExpr, col};
 use store_api::region_engine::{
     RegionEngine, RegionRole, RemapManifestsRequest, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    ApplyStagingManifestRequest, EnterStagingRequest, RegionFlushRequest, RegionPutRequest,
-    RegionRequest, StagingPartitionDirective,
+    ApplyStagingManifestRequest, EnterStagingRequest, RegionCompactRequest, RegionFlushRequest,
+    RegionPutRequest, RegionRequest, StagingPartitionDirective,
 };
 use store_api::storage::{FileId, RegionId};
 
@@ -37,12 +41,313 @@ use crate::manifest::action::{
 };
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
-use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
+use crate::test_util::{
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, put_rows, rows_schema,
+};
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
     col(col_name)
         .gt_eq(Value::Int64(start))
         .and(col(col_name).lt(Value::Int64(end)))
+}
+
+#[tokio::test]
+async fn test_apply_staging_manifest_sequence_domain() {
+    common_telemetry::init_default_ut_logging();
+    for flat_format in [false, true] {
+        test_apply_staging_manifest_sequence_domain_with_format(flat_format, false).await;
+        test_apply_staging_manifest_sequence_domain_with_format(flat_format, true).await;
+    }
+}
+
+async fn test_apply_staging_manifest_sequence_domain_with_format(
+    flat_format: bool,
+    preserve_row_sequence: bool,
+) {
+    let mut env = TestEnv::with_prefix("apply-staging-sequence-domain").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(1, 1);
+    let target = RegionId::new(1, 2);
+    let mut request_builder = CreateRequestBuilder::new();
+    if preserve_row_sequence {
+        request_builder = request_builder
+            .insert_option("append_mode", "true")
+            .insert_option("preserve_row_sequence", "true");
+    }
+    let request = request_builder.build();
+    let schema = rows_schema(&request);
+
+    engine
+        .handle_request(source, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    if preserve_row_sequence {
+        put_rows(
+            &engine,
+            source,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows_for_key("0", 0, 3, 0),
+            },
+        )
+        .await;
+    } else {
+        for value in 0..3 {
+            put_rows(
+                &engine,
+                source,
+                Rows {
+                    schema: schema.clone(),
+                    rows: build_rows_for_key("0", 0, 1, value),
+                },
+            )
+            .await;
+        }
+    }
+    engine
+        .handle_request(source, RegionRequest::Flush(RegionFlushRequest::default()))
+        .await
+        .unwrap();
+    let source_manifest = engine
+        .get_region(source)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(source_manifest.files.len(), 1);
+    assert_eq!(
+        source_manifest.files.values().next().unwrap().sequence,
+        Some(std::num::NonZeroU64::new(3).unwrap())
+    );
+
+    engine
+        .set_region_role_state_gracefully(source, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let partition_expr = float_range_expr("field_0", 0.1, 100.1)
+        .as_json_str()
+        .unwrap();
+    let result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source,
+            input_regions: vec![source],
+            region_mapping: [(source, vec![target])].into_iter().collect(),
+            new_partition_exprs: [(target, partition_expr.clone())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(target, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr,
+                central_region_id: source,
+                manifest_path: result.manifest_paths[&target].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let manifest = engine
+        .get_region(target)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(manifest.files.len(), 1);
+    assert_eq!(manifest.committed_sequence, Some(1));
+    let imported_file = manifest.files.values().next().unwrap();
+    assert_eq!(imported_file.region_id, source);
+    assert_eq!(
+        imported_file.sequence,
+        Some(std::num::NonZeroU64::new(1).unwrap())
+    );
+
+    put_rows(
+        &engine,
+        target,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key(
+                if preserve_row_sequence { "1" } else { "0" },
+                if preserve_row_sequence { 3 } else { 0 },
+                if preserve_row_sequence { 4 } else { 1 },
+                99,
+            ),
+        },
+    )
+    .await;
+    if !preserve_row_sequence {
+        assert_target_value(&engine, target, 99.0).await;
+    }
+
+    engine
+        .handle_request(target, RegionRequest::Flush(RegionFlushRequest::default()))
+        .await
+        .unwrap();
+    let input_ids = current_file_ids(&engine, target);
+    assert_eq!(
+        input_ids.len(),
+        2,
+        "imported and target-write SSTs must both exist"
+    );
+
+    engine
+        .handle_request(
+            target,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let output_version = engine.get_region(target).unwrap().version();
+    let output_files = output_version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    let output_ids = output_files
+        .iter()
+        .map(|file| file.meta_ref().file_id)
+        .collect::<HashSet<_>>();
+    assert_eq!(output_ids.len(), 1);
+    assert!(
+        output_files
+            .iter()
+            .all(|file| file.meta_ref().region_id == target)
+    );
+    assert!(
+        input_ids.iter().all(|id| !output_ids.contains(id)),
+        "real compaction must replace both input SSTs"
+    );
+    if !preserve_row_sequence {
+        assert_target_value(&engine, target, 99.0).await;
+    }
+
+    if preserve_row_sequence {
+        let output = output_files
+            .iter()
+            .find(|file| output_ids.contains(&file.meta_ref().file_id))
+            .expect("target-owned compaction output");
+        assert!(output.meta_ref().preserve_row_sequence);
+        // The imported rows are virtualized at target barrier 1 and the local
+        // row has physical sequence 2, so the output frontier is 2.
+        assert_eq!(
+            Some(std::num::NonZeroU64::new(2).unwrap()),
+            output.meta_ref().sequence
+        );
+
+        let mut reader = engine
+            .get_region(target)
+            .unwrap()
+            .access_layer
+            .read_sst((**output).clone())
+            .build()
+            .await
+            .unwrap()
+            .expect("compaction output reader");
+        let batch = reader
+            .next_record_batch()
+            .await
+            .unwrap()
+            .expect("output batch");
+        let sequences = batch
+            .column(batch.num_columns() - 2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("sequence column");
+        // The target partition excludes source field_0 = 0, leaving two
+        // imported rows at barrier 1 and the local row at sequence 2.
+        assert_eq!(
+            2,
+            sequences.values().iter().filter(|&&seq| seq == 1).count()
+        );
+        assert_eq!(
+            1,
+            sequences.values().iter().filter(|&&seq| seq == 2).count()
+        );
+
+        for (min, max, expected_rows) in [(0, 1, 2), (1, 2, 1)] {
+            let stream = engine
+                .scan_to_stream(
+                    target,
+                    ScanRequest {
+                        exact_sequence_range: true,
+                        memtable_min_sequence: Some(min),
+                        memtable_max_sequence: Some(max),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            assert_eq!(
+                expected_rows,
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+            );
+        }
+    }
+}
+
+fn current_file_ids(engine: &crate::engine::MitoEngine, region_id: RegionId) -> HashSet<FileId> {
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .map(|file| file.meta_ref().file_id)
+        .collect()
+}
+
+async fn assert_target_value(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    expected: f64,
+) {
+    let scan = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(scan).await.unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+    let batch = batches.iter().next().unwrap();
+    let values = batch
+        .column_by_name("field_0")
+        .unwrap()
+        .as_primitive::<Float64Type>();
+    assert_eq!(values.value(0), expected);
 }
 
 fn float_range_expr(col_name: &str, start: f64, end: f64) -> PartitionExpr {

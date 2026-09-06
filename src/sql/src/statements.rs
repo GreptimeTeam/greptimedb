@@ -40,6 +40,7 @@ use api::v1::SemanticType;
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+use datatypes::json::JsonSettings;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::json_type::JsonNativeType;
@@ -163,7 +164,10 @@ pub fn column_to_schema(
         false
     };
     if is_json2_column {
-        let settings = column.extensions.build_json_settings()?.unwrap_or_default();
+        let settings = column
+            .extensions
+            .build_json_settings()?
+            .unwrap_or_else(JsonSettings::new_v2);
         let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings)));
         column_schema.with_extension_type(&extension);
     }
@@ -644,6 +648,53 @@ mod tests {
     }
 
     #[test]
+    fn test_new_json2_column_uses_v2_layout() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let column = Column {
+            column_def: ColumnDef {
+                name: "data".into(),
+                data_type: SqlDataType::Custom(
+                    sqlparser::ast::ObjectName::from(vec!["JSON2".into()]),
+                    vec![],
+                ),
+                options: vec![],
+            },
+            extensions: ColumnExtensions::default(),
+        };
+
+        let schema = column_to_schema(&column, "ts", None)?;
+        let metadata: serde_json::Value =
+            serde_json::from_str(schema.metadata().get("ARROW:extension:metadata").unwrap())?;
+        assert_eq!(Some(2), metadata["layout_version"].as_u64());
+        assert_eq!(
+            Some(100),
+            metadata["json_settings"]["max_auto_expanded_paths"].as_u64()
+        );
+
+        let mut hinted = column;
+        hinted
+            .extensions
+            .set_json_settings(datatypes::json::JsonSettings::try_new(
+                vec![datatypes::json::JsonTypeHint {
+                    path: vec!["kind".to_string()],
+                    data_type: ConcreteDataType::string_datatype(),
+                    nullable: true,
+                    default_constraint: None,
+                    inverted_index: false,
+                }],
+                None,
+            )?)?;
+        let schema = column_to_schema(&hinted, "ts", None)?;
+        let metadata: serde_json::Value =
+            serde_json::from_str(schema.metadata().get("ARROW:extension:metadata").unwrap())?;
+        assert_eq!(
+            Some(100),
+            metadata["json_settings"]["max_auto_expanded_paths"].as_u64()
+        );
+        Ok(())
+    }
+
+    #[test]
     pub fn test_column_to_schema_timestamp_with_timezone() {
         let column = Column {
             column_def: ColumnDef {
@@ -718,11 +769,7 @@ mod tests {
                         "true".to_string(),
                     ),
                 ])),
-                vector_options: None,
-                skipping_index_options: None,
-                inverted_index_options: None,
-                json_type_hints: vec![],
-                vector_index_options: None,
+                ..Default::default()
             },
         };
 
@@ -749,17 +796,13 @@ mod tests {
                 options: vec![],
             },
             extensions: ColumnExtensions {
-                fulltext_index_options: None,
-                vector_options: None,
-                skipping_index_options: None,
-                inverted_index_options: None,
-                json_type_hints: vec![],
                 vector_index_options: Some(OptionMap::from([
                     ("metric".to_string(), "cosine".to_string()),
                     ("connectivity".to_string(), "32".to_string()),
                     ("expansion_add".to_string(), "200".to_string()),
                     ("expansion_search".to_string(), "100".to_string()),
                 ])),
+                ..Default::default()
             },
         };
 
@@ -790,12 +833,8 @@ mod tests {
                 options: vec![],
             },
             extensions: ColumnExtensions {
-                fulltext_index_options: None,
-                vector_options: None,
-                skipping_index_options: None,
-                inverted_index_options: None,
-                json_type_hints: vec![],
                 vector_index_options: Some(OptionMap::default()),
+                ..Default::default()
             },
         };
 

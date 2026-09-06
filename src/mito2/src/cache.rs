@@ -34,6 +34,7 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef};
@@ -49,7 +50,8 @@ use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef}
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
+use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
+pub use write_cache::{WriteCacheUploadStoreWrapper, WriteCacheUploadStoreWrapperRef};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -65,6 +67,7 @@ use crate::memtable::record_batch_estimated_size;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::read::range_cache::{RangeScanCacheKey, RangeScanCacheValue};
+use crate::read::read_columns::JsonTargetTypes;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 use crate::sst::parquet::read_columns::ParquetReadColumns;
@@ -2025,6 +2028,11 @@ pub struct SelectorResultValue {
     pub result: SelectorResult,
     /// The read columns of rows.
     pub read_cols: ParquetReadColumns,
+    /// JSON2 target types used by flat-format reads.
+    ///
+    /// JSON2 projection is query-driven; the same parquet columns can produce
+    /// different cached batches under different type hints.
+    pub json_target_types: JsonTargetTypes,
 }
 
 impl SelectorResultValue {
@@ -2033,6 +2041,7 @@ impl SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::PrimaryKey(result),
             read_cols,
+            json_target_types: Arc::default(),
         }
     }
 
@@ -2040,21 +2049,25 @@ impl SelectorResultValue {
     pub fn new_flat(
         result: Vec<RecordBatch>,
         read_cols: ParquetReadColumns,
+        json_target_types: JsonTargetTypes,
     ) -> SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::Flat(result),
             read_cols,
+            json_target_types,
         }
     }
 
     /// Returns memory used by the value (estimated).
     fn estimated_size(&self) -> usize {
-        match &self.result {
+        let result_size: usize = match &self.result {
             SelectorResult::PrimaryKey(batches) => {
                 batches.iter().map(|batch| batch.memory_size()).sum()
             }
             SelectorResult::Flat(batches) => batches.iter().map(record_batch_estimated_size).sum(),
-        }
+        };
+        result_size
+            + self.json_target_types.len() * (size_of::<ColumnId>() + size_of::<JsonNativeType>())
     }
 }
 
@@ -2752,7 +2765,7 @@ mod tests {
             region_id: RegionId::new(1, 1),
             row_groups: vec![(FileId::random(), 0)],
             scan: ScanRequestFingerprintBuilder {
-                read_columns: ReadColumns::from_deduped_column_ids(std::iter::empty()),
+                read_columns: ReadColumns::new(std::iter::empty()),
                 read_column_types: vec![],
                 filters: vec!["tag_0 = 1".to_string()],
                 time_filters: vec![],
@@ -2760,6 +2773,7 @@ mod tests {
                 append_mode: false,
                 filter_deleted: true,
                 merge_mode: crate::region::options::MergeMode::LastRow,
+                sequence_range: None,
                 partition_expr_version: 0,
             }
             .build(),

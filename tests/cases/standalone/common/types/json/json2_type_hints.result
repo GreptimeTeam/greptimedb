@@ -20,6 +20,7 @@ SHOW CREATE TABLE json2_type_hints;
 | json2_type_hints | CREATE TABLE IF NOT EXISTS "json2_type_hints" (  |
 |                  |   "ts" TIMESTAMP(3) NOT NULL,                    |
 |                  |   "j" JSON2(                                     |
+|                  |     max_auto_expanded_paths = 100,               |
 |                  |     "user"."age" BIGINT NOT NULL DEFAULT 18,     |
 |                  |     "user"."name" STRING NULL DEFAULT 'unknown', |
 |                  |     "user"."active" BOOLEAN NULL,                |

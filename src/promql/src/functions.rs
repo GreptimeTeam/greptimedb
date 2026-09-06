@@ -45,7 +45,7 @@ pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
 pub use native_histogram::{
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
     NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
     NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
@@ -54,7 +54,7 @@ pub use native_histogram::{
     NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString,
+    NativeHistogramToString, PromqlFloatToString,
 };
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;

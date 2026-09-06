@@ -9,11 +9,13 @@ common-base.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 lazy_static.workspace = true
-nix.workspace = true
 num_cpus.workspace = true
 prometheus.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
 
 [lints]
 workspace = true

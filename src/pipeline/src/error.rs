@@ -389,6 +389,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Invalid JSON2 type hint: {reason}"))]
+    InvalidJson2TypeHint {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid JSON2 type hint path '{path}'"))]
+    ParseJson2TypeHintPath {
+        path: String,
+        #[snafu(source)]
+        source: sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Transform index `type` must be set."))]
     TransformIndexTypeMustBeSet {
         #[snafu(implicit)]
@@ -685,6 +699,15 @@ pub enum Error {
         location: Location,
     },
 
+    /// `try_get_with` shares one loader across concurrent misses, so its error
+    /// arrives behind an `Arc`.
+    #[snafu(display("Failed to load pipeline into cache: {}", error))]
+    CacheLoad {
+        error: std::sync::Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect record batch"))]
     CollectRecords {
         #[snafu(implicit)]
@@ -881,6 +904,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            CacheLoad { error, .. } => error.status_code(),
             CastType { .. } => StatusCode::Unexpected,
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
@@ -952,6 +976,8 @@ impl ErrorExt for Error {
             | TransformElementMustBeMap { .. }
             | TransformFieldMustBeSet { .. }
             | TransformTypeMustBeSet { .. }
+            | InvalidJson2TypeHint { .. }
+            | ParseJson2TypeHintPath { .. }
             | TransformIndexTypeMustBeSet { .. }
             | TransformIndexUnsupportedField { .. }
             | TransformIndexOptionMustBeScalar { .. }

@@ -150,6 +150,10 @@ pub const PIPELINE_DELETE: PermissionAction = PermissionAction::write("pipeline.
 pub const DASHBOARD_QUERY: PermissionAction = PermissionAction::read("dashboard.query");
 pub const DASHBOARD_SAVE: PermissionAction = PermissionAction::write("dashboard.save");
 pub const DASHBOARD_DELETE: PermissionAction = PermissionAction::write("dashboard.delete");
+/// Reading a telemetry table through the entity-graph derivation
+/// (`greptime_private.semantic_entities` / `semantic_relationships`); checked
+/// once per candidate source table with that table as the target.
+pub const SEMANTIC_GRAPH_QUERY: PermissionAction = PermissionAction::read("semantic_graph.query");
 
 /// All permission actions built into GreptimeDB.
 ///
@@ -171,6 +175,7 @@ pub const ALL_ACTIONS: &[PermissionAction] = &[
     DASHBOARD_QUERY,
     DASHBOARD_SAVE,
     DASHBOARD_DELETE,
+    SEMANTIC_GRAPH_QUERY,
 ];
 
 #[derive(Debug, Clone)]

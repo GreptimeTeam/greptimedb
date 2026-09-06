@@ -706,6 +706,14 @@ pub struct IndexBuildTask {
     pub region_id: RegionId,
     /// The SST file handle to build index for.
     pub file: FileHandle,
+    /// The target region metadata used to decode rows from the SST.
+    ///
+    /// An SST may originate in another region while being visible in the target
+    /// manifest. This metadata defines the target schema and sequence domain;
+    /// applying the staging manifest only makes imported files visible. Index
+    /// rebuild happens later when a flush, compaction, schema change, or manual
+    /// index build request schedules it.
+    pub(crate) target_region_metadata: RegionMetadataRef,
     /// The manifest state this build is based on.
     pub(crate) source: IndexBuildSource,
     pub reason: IndexBuildType,
@@ -846,6 +854,7 @@ impl IndexBuildTask {
         let mut parquet_reader = self
             .access_layer
             .read_sst(self.file.clone()) // use the latest file handle instead of creating a new one
+            .expected_metadata(Some(self.target_region_metadata.clone()))
             .build()
             .await?;
 
@@ -1006,7 +1015,14 @@ impl IndexBuildTask {
             )
             .build_index_file_path_with_version(index_id);
             if let Err(e) = write_cache
-                .upload(puffin_key, &puffin_path, remote_store)
+                // Index rebuild is background maintenance work, so its uploads
+                // are reported as compaction uploads.
+                .upload(
+                    puffin_key,
+                    &puffin_path,
+                    remote_store,
+                    OperationType::Compact,
+                )
                 .await
             {
                 err = Some(e);
@@ -1494,8 +1510,12 @@ mod tests {
     use datatypes::schema::{
         ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
     };
+    use datatypes::value::Value;
+    use index::inverted_index::format::reader::InvertedIndexReader;
     use object_store::ObjectStore;
     use object_store::services::Memory;
+    use partition::expr::col;
+    use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use puffin_manager::PuffinManagerFactory;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use tokio::sync::mpsc;
@@ -1687,6 +1707,7 @@ mod tests {
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: Default::default(),
+            preserve_row_sequence: false,
             index_options: IndexOptions::default(),
             index_config,
             inverted_index_config: Default::default(),
@@ -2088,6 +2109,7 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
+            target_region_metadata: version_control.current().version.metadata.clone(),
             source: IndexBuildSource::new(
                 file_meta,
                 version_control.current().version.metadata.schema_version,
@@ -2120,16 +2142,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_index_build_task_increments_legacy_index_version() {
+    async fn test_index_build_task_foreign_file_uses_target_metadata() {
         let env = SchedulerEnv::new().await;
         let mut scheduler = env.mock_index_build_scheduler(4);
-        let metadata = Arc::new(sst_region_metadata());
-        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        let region_id = metadata.region_id;
+        let source_metadata = Arc::new(sst_region_metadata());
+        let mut target_metadata = (*source_metadata).clone();
+        target_metadata.region_id = RegionId::new(1, 3);
+        let mut target_builder = RegionMetadataBuilder::new(target_metadata.region_id);
+        for mut column_metadata in target_metadata.column_metadatas.clone() {
+            if column_metadata.column_id == 2 {
+                column_metadata.column_schema =
+                    column_metadata.column_schema.with_inverted_index(true);
+            }
+            target_builder.push_column_metadata(column_metadata);
+        }
+        let partition_expr = col("field_0")
+            .gt_eq(Value::UInt64(100))
+            .and(col("field_0").lt(Value::UInt64(200)));
+        target_builder
+            .primary_key(target_metadata.primary_key.clone())
+            .partition_expr_json(Some(partition_expr.as_json_str().unwrap()))
+            .bump_version();
+        let target_metadata = Arc::new(target_builder.build().unwrap());
+        let manifest_ctx = env.mock_manifest_context(target_metadata.clone()).await;
+        let region_id = target_metadata.region_id;
         let file_purger = Arc::new(NoopFilePurger {});
-        let sst_info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
+        let sst_info = mock_sst_file(source_metadata.clone(), &env, IndexBuildMode::Async).await;
         let file_meta = FileMeta {
-            region_id,
+            region_id: source_metadata.region_id,
             file_id: sst_info.file_id,
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
@@ -2144,8 +2184,8 @@ mod tests {
         seed_manifest_file(&manifest_ctx, &file_meta).await;
         let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
         let version_control =
-            mock_version_control(metadata.clone(), file_purger.clone(), files).await;
-        let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
+            mock_version_control(target_metadata.clone(), file_purger.clone(), files).await;
+        let indexer_builder = mock_indexer_builder(target_metadata.clone(), &env).await;
 
         let file = FileHandle::new(file_meta.clone(), file_purger.clone());
 
@@ -2155,6 +2195,7 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
+            target_region_metadata: version_control.current().version.metadata.clone(),
             source: IndexBuildSource::new(
                 file_meta.clone(),
                 version_control.current().version.metadata.schema_version,
@@ -2199,9 +2240,40 @@ mod tests {
                 assert!(updated_meta.index_file_size > 0);
                 assert_eq!(updated_meta.file_id, file_meta.file_id);
                 assert_eq!(updated_meta.index_version, 1);
+                let field_0_index = updated_meta
+                    .indexes
+                    .iter()
+                    .find(|index| index.column_id == 2)
+                    .expect("field_0 should have an inverted index");
+                assert_eq!(
+                    field_0_index.created_indexes.as_slice(),
+                    [IndexType::InvertedIndex]
+                );
             }
             _ => panic!("Unexpected worker request: {:?}", worker_req),
         }
+
+        let puffin_reader = env
+            .access_layer
+            .build_puffin_manager()
+            .reader(&RegionIndexId::new(
+                RegionFileId::new(source_metadata.region_id, file_meta.file_id),
+                1,
+            ))
+            .await
+            .unwrap();
+        let blob = puffin_reader
+            .blob(inverted_index::INDEX_BLOB_TYPE)
+            .await
+            .unwrap();
+        let blob_reader = blob.reader().await.unwrap();
+        let index_metadata =
+            index::inverted_index::format::reader::InvertedIndexBlobReader::new(blob_reader)
+                .metadata(None)
+                .await
+                .unwrap();
+        assert!(index_metadata.metas.contains_key("2"));
+        assert_eq!(index_metadata.total_row_count, 100);
     }
 
     async fn schedule_index_build_task_with_mode(build_mode: IndexBuildMode) {
@@ -2236,6 +2308,7 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
+            target_region_metadata: version_control.current().version.metadata.clone(),
             source: IndexBuildSource::new(
                 file_meta.clone(),
                 version_control.current().version.metadata.schema_version,
@@ -2346,6 +2419,7 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
+            target_region_metadata: version_control.current().version.metadata.clone(),
             source: IndexBuildSource::new(
                 file_meta.clone(),
                 version_control.current().version.metadata.schema_version,
@@ -2444,6 +2518,7 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
+            target_region_metadata: version_control.current().version.metadata.clone(),
             source: IndexBuildSource::new(
                 file_meta.clone(),
                 version_control.current().version.metadata.schema_version,
@@ -2505,7 +2580,7 @@ mod tests {
         let schema_version = metadata.schema_version;
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
-        let indexer_builder = mock_indexer_builder(metadata, env).await;
+        let indexer_builder = mock_indexer_builder(metadata.clone(), env).await;
         let (tx, _rx) = mpsc::channel(4);
         let (result_tx, result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
 
@@ -2521,6 +2596,7 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
+            target_region_metadata: metadata,
             source: IndexBuildSource::new(file_meta, schema_version),
             reason,
             access_layer: env.access_layer.clone(),

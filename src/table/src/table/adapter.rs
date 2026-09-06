@@ -28,6 +28,7 @@ use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDow
 use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
+use datatypes::types::json_type::JsonNativeType;
 use store_api::storage::{ScanRequest, VectorSearchRequest};
 
 use crate::table::{TableRef, TableType};
@@ -61,6 +62,10 @@ impl DfTableProviderAdapter {
 
     pub fn with_vector_search_hint(&self, hint: VectorSearchRequest) {
         self.scan_req.lock().unwrap().vector_search = Some(hint);
+    }
+
+    pub fn with_json_type_hint(&self, hint: std::collections::HashMap<String, JsonNativeType>) {
+        self.scan_req.lock().unwrap().json_type_hint = hint;
     }
 
     pub fn get_vector_search_hint(&self) -> Option<VectorSearchRequest> {

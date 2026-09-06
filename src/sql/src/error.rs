@@ -339,6 +339,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(transparent)]
+    Datatypes {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -384,7 +391,9 @@ impl ErrorExt for Error {
             #[cfg(feature = "enterprise")]
             InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
 
-            SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
+            SerializeColumnDefaultConstraint { source, .. } | Datatypes { source, .. } => {
+                source.status_code()
+            }
 
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             SqlCommon { source, .. } => source.status_code(),

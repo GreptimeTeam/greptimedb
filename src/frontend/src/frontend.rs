@@ -22,6 +22,7 @@ use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -75,6 +76,8 @@ pub struct FrontendOptions {
     pub query: QueryOptions,
     pub slow_query: SlowQueryOptions,
     pub memory: MemoryOptions,
+    /// The pipeline options.
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -108,6 +111,7 @@ impl Default for FrontendOptions {
             query: QueryOptions::default(),
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -116,7 +120,11 @@ impl Default for FrontendOptions {
 
 impl Configurable for FrontendOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["heartbeat_env_vars", "meta_client.metasrv_addrs"])
+        Some(&[
+            "heartbeat_env_vars",
+            "meta_client.metasrv_addrs",
+            "event_recorder.event_types",
+        ])
     }
 }
 
@@ -165,6 +173,7 @@ impl Frontend {
 mod tests {
     use std::any::Any;
     use std::net::SocketAddr;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -186,9 +195,9 @@ mod tests {
     use common_meta::heartbeat::handler::suspend::SuspendHandler;
     use common_meta::instruction::Instruction;
     use common_stat::ResourceStatImpl;
+    use futures::Stream;
     use meta_client::MetaClientRef;
     use meta_client::client::MetaClientBuilder;
-    use meta_srv::service::GrpcStream;
     use servers::grpc::{FlightCompression, GRPC_SERVER};
     use servers::http::HTTP_SERVER;
     use servers::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -206,11 +215,16 @@ mod tests {
     use crate::instance::builder::FrontendBuilder;
     use crate::server::Services;
 
+    type GrpcStream<T> =
+        Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
+
     #[test]
     fn test_toml() {
         let opts = FrontendOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+        assert!(toml_string.contains("experimental_enable_exponential_histogram = false"));
+        let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed.otlp, opts.otlp);
     }
 
     #[test]

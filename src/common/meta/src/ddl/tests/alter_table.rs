@@ -29,7 +29,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::{Procedure, ProcedureId, Status};
-use common_procedure_test::MockContextProvider;
+use common_procedure_test::{MockContextProvider, execute_procedure_until_done};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
@@ -817,6 +817,65 @@ async fn test_skip_wal_detects_region_route_change() {
 }
 
 #[tokio::test]
+async fn test_skip_wal_rejects_no_leader_before_updating_metadata() {
+    let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let table_name = "foo";
+    let table_id = 1024;
+    let task = test_create_table_task(table_name, table_id);
+    let mut region_routes = prepare_table_route(table_id)
+        .region_routes()
+        .unwrap()
+        .clone();
+    for route in &mut region_routes {
+        route.leader_peer = None;
+    }
+    let region_locks = region_routes.iter().map(|route| route.region.id).collect();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(region_routes),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "true".to_string(),
+                }],
+            })),
+        },
+    };
+    let mut procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        alter_task,
+        region_locks,
+        ddl_context.clone(),
+    )
+    .unwrap();
+
+    let error = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(error, Error::NoLeader { .. });
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(!table_info.meta.options.skip_wal);
+}
+
+#[tokio::test]
 async fn test_skip_wal_updates_metadata_before_all_replicas() {
     let (tx, mut rx) = mpsc::channel(8);
     let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
@@ -1061,4 +1120,61 @@ async fn test_on_submit_alter_request_with_exist_poison() {
         .await
         .unwrap_err();
     assert_matches!(err, Error::PutPoison { .. });
+}
+
+#[tokio::test]
+async fn test_semantic_annotation_alter_is_metadata_only() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_table_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: "greptime.semantic.signal_type".to_string(),
+                    value: "metric".to_string(),
+                }],
+            })),
+        },
+    };
+    let mut procedure =
+        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    execute_procedure_until_done(&mut procedure).await;
+
+    // Metadata-only: no region request reaches any datanode.
+    rx.try_recv().unwrap_err();
+
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert_eq!(
+        table_info
+            .meta
+            .options
+            .extra_options
+            .get("greptime.semantic.signal_type"),
+        Some(&"metric".to_string())
+    );
 }

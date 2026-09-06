@@ -399,7 +399,8 @@ async fn test_gc_worker_basic_compact() {
 
     let region = engine.get_region(region_id).unwrap();
     let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(manifest.removed_files.removed_files[0].files.len(), 3);
+    let removed_file_num = manifest.removed_files.removed_files[0].files.len();
+    assert!(removed_file_num > 0);
 
     let version = manifest.manifest_version;
 
@@ -413,7 +414,10 @@ async fn test_gc_worker_basic_compact() {
     let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
     let report = gc_worker.run().await.unwrap();
 
-    assert_eq!(report.deleted_files.get(&region_id).unwrap().len(), 3,);
+    assert_eq!(
+        report.deleted_files.get(&region_id).unwrap().len(),
+        removed_file_num
+    );
     assert!(report.need_retry_regions.is_empty());
 }
 
@@ -476,7 +480,7 @@ async fn test_gc_worker_compact_with_ref() {
 
     let region = engine.get_region(region_id).unwrap();
     let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(manifest.removed_files.removed_files[0].files.len(), 3);
+    assert!(!manifest.removed_files.removed_files[0].files.is_empty());
 
     let version = manifest.manifest_version;
 

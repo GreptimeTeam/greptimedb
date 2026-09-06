@@ -84,13 +84,25 @@ watch = false
 ## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
-## Defaults to max(num_cpus / 2, 1).
+## Defaults to max(num_cpus / 2, 2).
 #+ compact_rt_max_blocking_threads = 4
 ## The number of threads to execute datanode query operations.
-## Defaults to max(num_cpus - 1, 1).
+## Defaults to max(num_cpus - 1, 2).
 #+ query_rt_size = 7
 ## The number of threads to execute datanode ingestion operations.
 #+ ingest_rt_size = 8
+
+## Experimental weighted, work-conserving query/write task scheduler.
+#+ [runtime.experimental_workload_scheduler]
+## Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.
+## The weights set their relative runtime shares while both are backlogged. Disabled by default.
+#+ enable = false
+## Relative query share while both query and write workloads are backlogged.
+#+ query_weight = 2
+## Relative write share while both query and write workloads are backlogged.
+#+ write_weight = 8
+## Number of polls between scheduler fairness samples. Must be greater than zero.
+#+ sample_every_polls = 16
 
 ## The metasrv client options.
 [meta_client]
@@ -174,9 +186,9 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## **It's only used when the provider is `kafka`**.
 #+ connect_timeout = "3s"
 
-## The timeout for kafka client.
+## The total request timeout for kafka client.
 ## **It's only used when the provider is `kafka`**.
-#+ timeout = "3s"
+#+ timeout = "5s"
 
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
@@ -281,6 +293,30 @@ memory_pool_size = "50%"
 ## Use the experimental memory ledger to enforce the query memory pool limit.
 ## Disabled by default.
 experimental_enable_memory_ledger = false
+
+## Experimental memory pool allocation policy:
+## - "greedy" (default): first-come-first-served allocation; preserves current behavior.
+## - "fair": divides available memory among spillable operators and may spill earlier.
+## Only effective when `memory_pool_size` is bounded (>0).
+#+ experimental_memory_pool_policy = "greedy"
+
+# --- Experimental: DataFusion spill-to-disk controls ---
+## Spill mode:
+## - "default": preserve DataFusion built-in OS temp directory (default).
+## - "custom": explicitly configure spill path, quota, and compression.
+## - "disabled": explicitly disable disk spilling.
+## Set this to "custom" before using the path/quota/compression keys below.
+#+ experimental_spill_mode = "default"
+## Spill directory path. Ignored unless mode is "custom".
+## @toml2docs:none-default
+#+ experimental_spill_path = "/path/to/spill"
+## Maximum total size of spill directory (default: "1GiB").
+## Ignored unless mode is "custom".
+#+ experimental_spill_max_temp_directory_size = "1GiB"
+## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
+## Ignored unless mode is "custom".
+#+ experimental_spill_compression = "uncompressed"
+# --- End spill-to-disk ---
 
 ## The data storage options.
 [storage]
@@ -466,7 +502,7 @@ compress_manifest = false
 #+ experimental_compaction_on_exhausted = "wait"
 
 ## Interval to auto flush a region if it has not flushed yet.
-auto_flush_interval = "1h"
+auto_flush_interval = "10m"
 
 ## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 ## @toml2docs:none-default="Auto"
@@ -574,6 +610,9 @@ schedule_compaction_after_edit = true
 
 ## Whether to enable flat format as the default SST format.
 default_flat_format = true
+
+## Whether to enable the experimental two-phase mode for eligible metric series scans.
+experimental_series_scan_v2 = true
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]

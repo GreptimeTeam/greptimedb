@@ -186,7 +186,7 @@ impl Procedure for DropDatabaseProcedure {
                 self.context.drop_if_exists,
             )
         } else {
-            DatabaseDdlEvent::drop_lifecycle()
+            DatabaseDdlEvent::drop_lifecycle(&self.context.catalog, &self.context.schema)
         };
         Some(Box::new(event))
     }

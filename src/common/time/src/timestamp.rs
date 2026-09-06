@@ -483,6 +483,31 @@ impl Timestamp {
         ParseTimestampSnafu { raw: s }.fail()
     }
 
+    /// Interprets a timezone-less [`NaiveDateTime`] in the given timezone and
+    /// returns the corresponding timestamp.
+    ///
+    /// Datetimes that fall into a DST gap (a local time that does not exist)
+    /// are rejected, while ambiguous datetimes (from a repeated local time)
+    /// are resolved to the earlier instant. This policy is shared with
+    /// [`Timestamp::from_str`] so that the text and binary protocols interpret
+    /// datetimes consistently.
+    pub fn from_naive_datetime(
+        datetime: NaiveDateTime,
+        timezone: &Timezone,
+    ) -> crate::error::Result<Timestamp> {
+        match datetime_to_utc(&datetime, timezone) {
+            LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
+                Timestamp::from_chrono_datetime(utc).context(ParseTimestampSnafu {
+                    raw: format!("{datetime} (timezone {timezone})"),
+                })
+            }
+            LocalResult::None => ParseTimestampSnafu {
+                raw: format!("{datetime} (timezone {timezone})"),
+            }
+            .fail(),
+        }
+    }
+
     pub fn negative(mut self) -> Self {
         self.value = -self.value;
         self
@@ -531,12 +556,8 @@ fn naive_datetime_to_timestamp(
             .context(ParseTimestampSnafu { raw: s });
     };
 
-    match datetime_to_utc(&datetime, timezone) {
-        LocalResult::None => ParseTimestampSnafu { raw: s }.fail(),
-        LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
-            Timestamp::from_chrono_datetime(utc).context(ParseTimestampSnafu { raw: s })
-        }
-    }
+    Timestamp::from_naive_datetime(datetime, timezone)
+        .map_err(|_| ParseTimestampSnafu { raw: s }.build())
 }
 
 impl From<i64> for Timestamp {
@@ -566,8 +587,12 @@ impl fmt::Debug for Timestamp {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub enum TimeUnit {
+    // The declaration order (Second < Millisecond < Microsecond < Nanosecond) is
+    // the precision order; the derived ordering intentionally reflects it.
     Second,
     #[default]
     Millisecond,
@@ -583,6 +608,51 @@ impl From<&ArrowTimeUnit> for TimeUnit {
             ArrowTimeUnit::Microsecond => Self::Microsecond,
             ArrowTimeUnit::Nanosecond => Self::Nanosecond,
         }
+    }
+}
+
+impl From<TimeUnit> for ArrowTimeUnit {
+    fn from(unit: TimeUnit) -> Self {
+        match unit {
+            TimeUnit::Second => Self::Second,
+            TimeUnit::Millisecond => Self::Millisecond,
+            TimeUnit::Microsecond => Self::Microsecond,
+            TimeUnit::Nanosecond => Self::Nanosecond,
+        }
+    }
+}
+
+/// The exact division of a timestamp value into a different unit:
+/// `quotient * from_scale + remainder == value * to_scale` with
+/// `0 <= remainder < from_scale`. `quotient` is the value floored in
+/// `to_unit`; `remainder == 0` iff the value is representable in `to_unit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitQuotient {
+    pub quotient: i64,
+    pub remainder: i128,
+}
+
+/// Divides a `value` given in `from_unit` by `to_unit`, i.e. computes its
+/// value in `to_unit` exactly (floor division). Returns `None` if the
+/// quotient overflows `i64`.
+pub fn div_mod_units(value: i64, from_unit: TimeUnit, to_unit: TimeUnit) -> Option<UnitQuotient> {
+    let from_scale = timestamp_unit_scale(from_unit);
+    let to_scale = timestamp_unit_scale(to_unit);
+    let instant = i128::from(value) * to_scale;
+    let quotient = i64::try_from(instant.div_euclid(from_scale)).ok()?;
+    Some(UnitQuotient {
+        quotient,
+        remainder: instant.rem_euclid(from_scale),
+    })
+}
+
+/// Number of units in one second.
+fn timestamp_unit_scale(unit: TimeUnit) -> i128 {
+    match unit {
+        TimeUnit::Second => 1,
+        TimeUnit::Millisecond => 1_000,
+        TimeUnit::Microsecond => 1_000_000,
+        TimeUnit::Nanosecond => 1_000_000_000,
     }
 }
 
@@ -692,6 +762,22 @@ mod tests {
 
     use super::*;
     use crate::timezone::set_default_timezone;
+
+    #[test]
+    fn test_div_mod_units() {
+        // Representable: 7000ms in us.
+        let q = div_mod_units(7_000, TimeUnit::Millisecond, TimeUnit::Microsecond).unwrap();
+        assert_eq!((7_000_000, 0), (q.quotient, q.remainder));
+        // Not representable: 7_000_500us in ms floors to 7000ms, remainder set.
+        let q = div_mod_units(7_000_500, TimeUnit::Microsecond, TimeUnit::Millisecond).unwrap();
+        assert_eq!(7_000, q.quotient);
+        assert_ne!(0, q.remainder);
+        // Floor semantics for negative instants: -2_500_500us -> -2501ms.
+        let q = div_mod_units(-2_500_500, TimeUnit::Microsecond, TimeUnit::Millisecond).unwrap();
+        assert_eq!(-2_501, q.quotient);
+        // Quotient overflow beyond the target unit's i64 range.
+        assert!(div_mod_units(i64::MAX, TimeUnit::Millisecond, TimeUnit::Nanosecond).is_none());
+    }
 
     #[test]
     pub fn test_time_unit() {
@@ -916,6 +1002,48 @@ mod tests {
         check_from_str(
             "2020-09-08T13:42:29.0042+08:00",
             "2020-09-08 05:42:29.004200",
+        );
+    }
+
+    #[test]
+    fn test_from_naive_datetime() {
+        let datetime = NaiveDate::from_ymd_opt(2026, 8, 13)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap();
+
+        // A fixed-offset timezone shifts the datetime by a constant amount.
+        let shanghai = Timezone::from_tz_string("Asia/Shanghai").unwrap();
+        assert_eq!(
+            "2026-08-13 00:00:00",
+            Timestamp::from_naive_datetime(datetime, &shanghai)
+                .unwrap()
+                .to_chrono_datetime()
+                .unwrap()
+                .to_string()
+        );
+
+        // 2026-03-08 02:30 does not exist in America/New_York (DST gap).
+        let new_york = Timezone::from_tz_string("America/New_York").unwrap();
+        let gap = NaiveDate::from_ymd_opt(2026, 3, 8)
+            .unwrap()
+            .and_hms_opt(2, 30, 0)
+            .unwrap();
+        assert!(Timestamp::from_naive_datetime(gap, &new_york).is_err());
+
+        // 2026-11-01 01:30 is ambiguous in America/New_York; picks the first
+        // instant (EDT, UTC-4).
+        let ambiguous = NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+        assert_eq!(
+            "2026-11-01 05:30:00",
+            Timestamp::from_naive_datetime(ambiguous, &new_york)
+                .unwrap()
+                .to_chrono_datetime()
+                .unwrap()
+                .to_string()
         );
     }
 

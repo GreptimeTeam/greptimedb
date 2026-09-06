@@ -26,7 +26,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::access_layer::{
-    FilePathProvider, Metrics, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
+    FilePathProvider, Metrics, OperationType, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
     TempFileCleaner, WriteCachePathProvider, WriteType, new_fs_cache_store,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
@@ -42,6 +42,19 @@ use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
+/// Wraps the remote object store used by write cache uploads.
+pub trait WriteCacheUploadStoreWrapper: Send + Sync {
+    /// Wraps an object store before uploading a cached file.
+    ///
+    /// `op_type` identifies the origin of the upload so implementations can
+    /// apply different policies per operation, e.g. throttling compaction
+    /// uploads but not flush uploads. Index rebuild uploads are reported as
+    /// [`OperationType::Compact`].
+    fn wrap(&self, store: ObjectStore, op_type: OperationType) -> ObjectStore;
+}
+
+pub type WriteCacheUploadStoreWrapperRef = Arc<dyn WriteCacheUploadStoreWrapper>;
+
 /// A cache for uploading files to remote object stores.
 ///
 /// It keeps files in local disk and then sends files to object stores.
@@ -56,6 +69,8 @@ pub struct WriteCache {
     task_sender: UnboundedSender<RegionLoadCacheTask>,
     /// Optional cache for manifest files.
     manifest_cache: Option<ManifestCache>,
+    /// Optional wrapper for remote stores used by uploads.
+    upload_store_wrapper: Option<WriteCacheUploadStoreWrapperRef>,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -91,6 +106,7 @@ impl WriteCache {
             intermediate_manager,
             task_sender,
             manifest_cache,
+            upload_store_wrapper: None,
         })
     }
 
@@ -140,6 +156,15 @@ impl WriteCache {
         self.manifest_cache.clone()
     }
 
+    /// Sets the wrapper for remote stores used by uploads.
+    pub(crate) fn with_upload_store_wrapper(
+        mut self,
+        upload_store_wrapper: Option<WriteCacheUploadStoreWrapperRef>,
+    ) -> Self {
+        self.upload_store_wrapper = upload_store_wrapper;
+        self
+    }
+
     /// Build the puffin manager
     pub(crate) fn build_puffin_manager(&self) -> SstPuffinManager {
         let store = self.file_cache.local_store();
@@ -185,7 +210,13 @@ impl WriteCache {
             .build_sst_file_path(region_file_id);
 
         if let Err(e) = self
-            .upload(parquet_key, &remote_path, &upload_request.remote_store)
+            .upload(
+                parquet_key,
+                &remote_path,
+                &upload_request.remote_store,
+                // `put_and_upload_sst` is only used by the flush path.
+                OperationType::Flush,
+            )
             .await
         {
             // Clean up cache on failure
@@ -211,6 +242,11 @@ impl WriteCache {
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
         let region_id = write_request.metadata.region_id;
+        let override_sequence = if write_request.preserve_row_sequence {
+            None
+        } else {
+            write_request.max_sequence
+        };
 
         let store = self.file_cache.local_store();
         let path_provider = WriteCachePathProvider::new(self.file_cache.clone());
@@ -248,14 +284,14 @@ impl WriteCache {
                 writer
                     .write_all_flat_as_primary_key(
                         write_request.source,
-                        write_request.max_sequence,
+                        override_sequence,
                         write_opts,
                     )
                     .await?
             }
             crate::sst::FormatType::Flat => {
                 writer
-                    .write_all_flat(write_request.source, write_request.max_sequence, write_opts)
+                    .write_all_flat(write_request.source, override_sequence, write_opts)
                     .await?
             }
         };
@@ -267,6 +303,7 @@ impl WriteCache {
 
         let mut upload_tracker = UploadTracker::new(region_id);
         let mut err = None;
+        let op_type = write_request.op_type;
         let remote_store = &upload_request.remote_store;
         for sst in &sst_info {
             let parquet_key = IndexKey::new(region_id, sst.file_id, FileType::Parquet);
@@ -274,7 +311,10 @@ impl WriteCache {
                 .dest_path_provider
                 .build_sst_file_path(RegionFileId::new(region_id, sst.file_id));
             let start = Instant::now();
-            if let Err(e) = self.upload(parquet_key, &parquet_path, remote_store).await {
+            if let Err(e) = self
+                .upload(parquet_key, &parquet_path, remote_store, op_type)
+                .await
+            {
                 err = Some(e);
                 break;
             }
@@ -287,7 +327,10 @@ impl WriteCache {
                     .dest_path_provider
                     .build_index_file_path(RegionFileId::new(region_id, sst.file_id));
                 let start = Instant::now();
-                if let Err(e) = self.upload(puffin_key, &puffin_path, remote_store).await {
+                if let Err(e) = self
+                    .upload(puffin_key, &puffin_path, remote_store, op_type)
+                    .await
+                {
                     err = Some(e);
                     break;
                 }
@@ -356,6 +399,7 @@ impl WriteCache {
         index_key: IndexKey,
         upload_path: &str,
         remote_store: &ObjectStore,
+        op_type: OperationType,
     ) -> Result<()> {
         let region_id = index_key.region_id;
         let file_id = index_key.file_id;
@@ -379,7 +423,11 @@ impl WriteCache {
             .await
             .context(error::OpenDalSnafu)?;
 
-        let mut writer = remote_store
+        let upload_store = self.upload_store_wrapper.as_ref().map_or_else(
+            || remote_store.clone(),
+            |wrapper| wrapper.wrap(remote_store.clone(), op_type),
+        );
+        let mut writer = upload_store
             .writer_with(upload_path)
             .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
             .concurrent(DEFAULT_WRITE_CONCURRENCY)
@@ -499,9 +547,12 @@ impl UploadTracker {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use bytes::Bytes;
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::ATOMIC_WRITE_DIR;
+    use object_store::services::Memory;
+    use object_store::{ATOMIC_WRITE_DIR, ObjectStore};
     use parquet::file::metadata::PageIndexPolicy;
     use store_api::region_request::PathType;
     use store_api::storage::FileId;
@@ -520,6 +571,67 @@ mod tests {
         new_flat_source_from_record_batches, new_record_batch_by_range,
         sst_file_handle_with_file_id, sst_region_metadata,
     };
+
+    struct RedirectUploadStoreWrapper {
+        target_store: ObjectStore,
+        last_op_type: Mutex<Option<OperationType>>,
+    }
+
+    impl WriteCacheUploadStoreWrapper for RedirectUploadStoreWrapper {
+        fn wrap(&self, _store: ObjectStore, op_type: OperationType) -> ObjectStore {
+            *self.last_op_type.lock().unwrap() = Some(op_type);
+            self.target_store.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upload_uses_wrapped_remote_store() {
+        let env = TestEnv::new().await;
+        let local_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let original_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let target_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let wrapper = Arc::new(RedirectUploadStoreWrapper {
+            target_store: target_store.clone(),
+            last_op_type: Mutex::new(None),
+        });
+        let write_cache = WriteCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+            None,
+            false,
+            env.get_puffin_manager(),
+            env.get_intermediate_manager(),
+            None,
+        )
+        .await
+        .unwrap()
+        .with_upload_store_wrapper(Some(wrapper.clone()));
+
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        let cache_path = write_cache.file_cache.cache_file_path(key);
+        let upload_path = "wrapped-upload.parquet";
+        let data = Bytes::from_static(b"wrapped upload data");
+        local_store.write(&cache_path, data.clone()).await.unwrap();
+
+        write_cache
+            .upload(key, upload_path, &original_store, OperationType::Compact)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *wrapper.last_op_type.lock().unwrap(),
+            Some(OperationType::Compact)
+        );
+
+        assert!(original_store.stat(upload_path).await.is_err());
+        assert_eq!(
+            target_store.read(upload_path).await.unwrap().to_vec(),
+            data.to_vec()
+        );
+    }
 
     #[tokio::test]
     async fn test_write_and_upload_sst() {
@@ -553,6 +665,7 @@ mod tests {
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: Default::default(),
+            preserve_row_sequence: false,
             index_options: IndexOptions::default(),
             index_config: Default::default(),
             inverted_index_config: Default::default(),
@@ -657,6 +770,7 @@ mod tests {
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
+            preserve_row_sequence: false,
             index_options: IndexOptions::default(),
             index_config: Default::default(),
             inverted_index_config: Default::default(),
@@ -751,6 +865,7 @@ mod tests {
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
+            preserve_row_sequence: false,
             index_options: IndexOptions::default(),
             index_config: Default::default(),
             inverted_index_config: Default::default(),

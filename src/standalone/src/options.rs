@@ -24,10 +24,11 @@ use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlowConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::service_config::{
-    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
     PromStoreOptions,
 };
 use mito2::config::MitoConfig;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -56,6 +57,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub jaeger: JaegerOptions,
+    pub otlp: OtlpOptions,
     pub prom_store: PromStoreOptions,
     pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
@@ -72,6 +74,8 @@ pub struct StandaloneOptions {
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    /// The pipeline options.
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -94,6 +98,7 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             jaeger: JaegerOptions::default(),
+            otlp: OtlpOptions::default(),
             prom_store: PromStoreOptions::default(),
             wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
@@ -112,6 +117,7 @@ impl Default for StandaloneOptions {
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -153,11 +159,14 @@ impl StandaloneOptions {
             opentsdb: cloned_opts.opentsdb,
             influxdb: cloned_opts.influxdb,
             jaeger: cloned_opts.jaeger,
+            otlp: cloned_opts.otlp,
             prom_store: cloned_opts.prom_store,
             meta_client: None,
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
+            query: cloned_opts.query,
             slow_query: cloned_opts.slow_query,
+            pipeline: cloned_opts.pipeline,
             event_recorder: cloned_opts.event_recorder,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
             ..Default::default()
@@ -226,5 +235,14 @@ mod tests {
             &selected.event_recorder.event_types,
             &frontend_options.event_recorder.event_types,
         ));
+    }
+
+    #[test]
+    fn test_query_options_propagated_to_components() {
+        let mut options = StandaloneOptions::default();
+        options.query.parallelism = 4;
+
+        assert_eq!(options.frontend_options().query.parallelism, 4);
+        assert_eq!(options.datanode_options().query.parallelism, 4);
     }
 }

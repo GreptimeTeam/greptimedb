@@ -40,6 +40,21 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display(
+        "Failed to receive Flight data from {}, code: {}: {}",
+        addr,
+        tonic_code,
+        message
+    ))]
+    FlightStream {
+        addr: String,
+        tonic_code: Code,
+        message: String,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert FlightData"))]
     ConvertFlightData {
         #[snafu(implicit)]
@@ -154,6 +169,7 @@ impl ErrorExt for Error {
 
             Error::Server { code, .. } | Error::Tonic { code, .. } => *code,
             Error::FlightGet { source, .. }
+            | Error::FlightStream { source, .. }
             | Error::RegionServer { source, .. }
             | Error::FlowServer { source, .. } => source.status_code(),
             Error::CreateChannel { source, .. }
@@ -174,6 +190,7 @@ impl ErrorExt for Error {
         match self {
             Error::Tonic { retry_hint, .. } => *retry_hint,
             Error::FlightGet { source, .. }
+            | Error::FlightStream { source, .. }
             | Error::RegionServer { source, .. }
             | Error::FlowServer { source, .. }
             | Error::External { source, .. } => source.retry_hint(),
@@ -193,6 +210,7 @@ impl Error {
     pub fn tonic_code(&self) -> Option<Code> {
         match self {
             Self::FlightGet { tonic_code, .. }
+            | Self::FlightStream { tonic_code, .. }
             | Self::RegionServer {
                 code: tonic_code, ..
             }

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
+use common_procedure::ProcedureContext;
 use common_telemetry::{info, init_default_ut_logging};
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
@@ -97,7 +98,12 @@ async fn test_concurrent_table_processing_limits() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
+        .parallel_process_datanodes(
+            datanode_to_candidates,
+            HashMap::new(),
+            HashMap::new(),
+            ProcedureContext::default(),
+        )
         .await;
 
     // Should process all datanodes
@@ -180,7 +186,12 @@ async fn test_datanode_processes_tables_with_partial_gc_failures() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
+        .parallel_process_datanodes(
+            datanode_to_candidates,
+            HashMap::new(),
+            HashMap::new(),
+            ProcedureContext::default(),
+        )
         .await;
 
     // Should have one datanode with mixed results
@@ -285,6 +296,7 @@ async fn test_region_gc_concurrency_limit() {
             candidates.into_iter().map(|c| (table_id, c)).collect(),
             HashSet::new(),
             HashMap::new(),
+            ProcedureContext::default(),
         )
         .await
         .unwrap();
@@ -397,7 +409,12 @@ async fn test_region_gc_concurrency_with_partial_failures() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
+        .parallel_process_datanodes(
+            datanode_to_candidates,
+            HashMap::new(),
+            HashMap::new(),
+            ProcedureContext::default(),
+        )
         .await;
 
     let report = match &report {
@@ -536,7 +553,12 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
         candidates.into_iter().map(|c| (table_id, c)).collect(),
     )]);
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
+        .parallel_process_datanodes(
+            datanode_to_candidates,
+            HashMap::new(),
+            HashMap::new(),
+            ProcedureContext::default(),
+        )
         .await;
 
     let report = match &report {

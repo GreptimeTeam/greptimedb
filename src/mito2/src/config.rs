@@ -102,7 +102,7 @@ pub struct MitoConfig {
     pub experimental_compaction_on_exhausted: OnExhaustedPolicy,
 
     // Flush configs:
-    /// Interval to auto flush a region if it has not flushed yet (default 30 min).
+    /// Interval to auto flush a region if it has not flushed yet (default 10 min).
     #[serde(with = "humantime_serde")]
     pub auto_flush_interval: Duration,
     /// Global write buffer size threshold to trigger flush.
@@ -188,6 +188,9 @@ pub struct MitoConfig {
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
     pub default_flat_format: bool,
 
+    /// Whether to enable the experimental two-phase mode for eligible metric series scans.
+    pub experimental_series_scan_v2: bool,
+
     pub gc: GcConfig,
 }
 
@@ -207,7 +210,7 @@ impl Default for MitoConfig {
             max_background_purges: get_total_cpu_cores(),
             experimental_compaction_memory_limit: MemoryLimit::Unlimited,
             experimental_compaction_on_exhausted: OnExhaustedPolicy::default(),
-            auto_flush_interval: Duration::from_secs(30 * 60),
+            auto_flush_interval: Duration::from_secs(10 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
             default_region_write_buffer_size: ReadableSize::mb(0),
@@ -239,6 +242,7 @@ impl Default for MitoConfig {
             min_compaction_interval: Duration::from_secs(0),
             schedule_compaction_after_edit: true,
             default_flat_format: true,
+            experimental_series_scan_v2: true,
             gc: GcConfig::default(),
         };
 
@@ -378,6 +382,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_default_auto_flush_interval() {
+        assert_eq!(
+            Duration::from_secs(10 * 60),
+            MitoConfig::default().auto_flush_interval
+        );
+    }
+
+    #[test]
     fn test_adjust_sst_metadata_and_prefilter_cache_caps_independently() {
         let mut config = MitoConfig::default();
 
@@ -388,6 +400,14 @@ mod tests {
         config.adjust_buffer_and_cache_size(ReadableSize::gb(64));
         assert_eq!(ReadableSize::mb(512), config.sst_meta_cache_size);
         assert_eq!(ReadableSize::mb(128), config.prefilter_result_cache_size);
+    }
+
+    #[test]
+    fn test_experimental_series_scan_v2_config() {
+        assert!(MitoConfig::default().experimental_series_scan_v2);
+
+        let config: MitoConfig = toml::from_str("experimental_series_scan_v2 = false").unwrap();
+        assert!(!config.experimental_series_scan_v2);
     }
 }
 

@@ -67,6 +67,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Procedure submission requires query context"))]
+    MissingQueryContext {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to send heartbeat: {}", err_msg))]
     SendHeartbeat {
         err_msg: String,
@@ -141,6 +147,7 @@ impl ErrorExt for Error {
             | Error::NoLeader { .. }
             | Error::AskLeaderTimeout { .. }
             | Error::NotStarted { .. }
+            | Error::MissingQueryContext { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. }

@@ -15,9 +15,10 @@
 use std::hash::Hasher;
 use std::sync::Arc;
 
-use datatypes::arrow::array::{Array, BinaryBuilder, StringArray, UInt64Array};
+use datatypes::arrow::array::{Array, ArrayRef, BinaryBuilder, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::arrow_array::{is_string_null_at, string_array_value_at_index};
 use fxhash::FxHasher;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use snafu::ResultExt;
@@ -49,7 +50,7 @@ pub struct TagColumnInfo {
 pub fn compute_tsid_array(
     batch: &RecordBatch,
     sorted_tag_columns: &[TagColumnInfo],
-    tag_arrays: &[&StringArray],
+    tag_arrays: &[&ArrayRef],
 ) -> UInt64Array {
     let num_rows = batch.num_rows();
 
@@ -64,20 +65,22 @@ pub fn compute_tsid_array(
 
     let mut tsid_values = Vec::with_capacity(num_rows);
     for row in 0..num_rows {
-        let has_null = tag_arrays.iter().any(|arr| arr.is_null(row));
+        let has_null = tag_arrays.iter().any(|arr| is_string_null_at(arr, row));
 
         let tsid = if !has_null {
             let mut hasher = FxHasher::default();
             hasher.write_u64(label_name_hash);
             for arr in tag_arrays {
-                hasher.write(arr.value(row).as_bytes());
-                hasher.write_u8(0xff);
+                if let Some(value) = string_array_value_at_index(arr, row) {
+                    hasher.write(value.as_bytes());
+                    hasher.write_u8(0xff);
+                }
             }
             hasher.finish()
         } else {
             let mut name_hasher = FxHasher::default();
             for (tc, arr) in sorted_tag_columns.iter().zip(tag_arrays.iter()) {
-                if !arr.is_null(row) {
+                if !is_string_null_at(arr, row) {
                     name_hasher.write(tc.name.as_bytes());
                     name_hasher.write_u8(0xff);
                 }
@@ -87,8 +90,8 @@ pub fn compute_tsid_array(
             let mut val_hasher = FxHasher::default();
             val_hasher.write_u64(row_label_hash);
             for arr in tag_arrays {
-                if !arr.is_null(row) {
-                    val_hasher.write(arr.value(row).as_bytes());
+                if let Some(value) = string_array_value_at_index(arr, row) {
+                    val_hasher.write(value.as_bytes());
                     val_hasher.write_u8(0xff);
                 }
             }
@@ -104,15 +107,26 @@ pub fn compute_tsid_array(
 fn build_tag_arrays<'a>(
     batch: &'a RecordBatch,
     sorted_tag_columns: &[TagColumnInfo],
-) -> Vec<&'a StringArray> {
+) -> Result<Vec<&'a ArrayRef>> {
     sorted_tag_columns
         .iter()
         .map(|tc| {
-            batch
-                .column(tc.index)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("tag column must be utf8")
+            let array = batch.column(tc.index);
+            match array.data_type() {
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Ok(array),
+                DataType::Dictionary(key_type, value_type)
+                    if key_type.is_integer() && value_type.is_string() =>
+                {
+                    Ok(array)
+                }
+                data_type => UnexpectedRequestSnafu {
+                    reason: format!(
+                        "Tag column '{}' must be a string, given: {data_type}",
+                        tc.name
+                    ),
+                }
+                .fail(),
+            }
         })
         .collect()
 }
@@ -144,7 +158,7 @@ pub fn modify_batch_sparse(
 ) -> Result<RecordBatch> {
     let num_rows = batch.num_rows();
     let codec = SparsePrimaryKeyCodec::schemaless();
-    let tag_arrays: Vec<&StringArray> = build_tag_arrays(&batch, sorted_tag_columns);
+    let tag_arrays = build_tag_arrays(&batch, sorted_tag_columns)?;
     let tsid_array = compute_tsid_array(&batch, sorted_tag_columns, &tag_arrays);
 
     let mut pk_builder = BinaryBuilder::with_capacity(num_rows, 0);
@@ -158,8 +172,9 @@ pub fn modify_batch_sparse(
         let tags = sorted_tag_columns
             .iter()
             .zip(tag_arrays.iter())
-            .filter(|(_, arr)| !arr.is_null(row))
-            .map(|(tc, arr)| (tc.column_id, arr.value(row).as_bytes()));
+            .filter_map(|(tc, arr)| {
+                string_array_value_at_index(arr, row).map(|value| (tc.column_id, value.as_bytes()))
+            });
         codec
             .encode_raw_tag_value(tags, &mut buffer)
             .context(EncodePrimaryKeySnafu)?;
@@ -268,7 +283,7 @@ mod tests {
                 column_id: 1,
             },
         ];
-        let tag_arrays = build_tag_arrays(&batch, &tag_columns);
+        let tag_arrays = build_tag_arrays(&batch, &tag_columns).unwrap();
         let tsid_array = compute_tsid_array(&batch, &tag_columns, &tag_arrays);
 
         assert_eq!(tsid_array.value(0), 2721566936019240841);
@@ -300,7 +315,7 @@ mod tests {
                 column_id: 2,
             },
         ];
-        let tag_arrays_2 = build_tag_arrays(&batch_no_null, &tag_cols_2);
+        let tag_arrays_2 = build_tag_arrays(&batch_no_null, &tag_cols_2).unwrap();
         let tsid_no_null = compute_tsid_array(&batch_no_null, &tag_cols_2, &tag_arrays_2);
 
         let schema3 = Arc::new(ArrowSchema::new(vec![
@@ -334,7 +349,7 @@ mod tests {
                 column_id: 3,
             },
         ];
-        let tag_arrays_3 = build_tag_arrays(&batch_with_null, &tag_cols_3);
+        let tag_arrays_3 = build_tag_arrays(&batch_with_null, &tag_cols_3).unwrap();
         let tsid_with_null = compute_tsid_array(&batch_with_null, &tag_cols_3, &tag_arrays_3);
 
         assert_eq!(tsid_no_null.value(0), tsid_with_null.value(0));
@@ -451,5 +466,157 @@ mod tests {
             .downcast_ref::<BinaryArray>()
             .unwrap();
         assert_eq!(actual_array.value(0), expected_pk.as_slice());
+    }
+
+    #[test]
+    fn label_replace_with_utf8view_labels_does_not_panic() {
+        // Tag (label) columns may arrive as any string representation (`Utf8`,
+        // `LargeUtf8`, `Utf8View`, or dictionary-encoded). `modify_batch_sparse`
+        // must not assume the tag columns are plain `StringArray`s.
+        let tag_arrays: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["greptimedb"])),
+            Arc::new(datatypes::arrow::array::LargeStringArray::from(vec![
+                "greptimedb",
+            ])),
+            Arc::new(datatypes::arrow::array::StringViewArray::from(vec![
+                "greptimedb",
+            ])),
+            Arc::new(datatypes::arrow::array::DictionaryArray::<
+                datatypes::arrow::datatypes::UInt32Type,
+            >::new(
+                datatypes::arrow::array::UInt32Array::from(vec![0]),
+                Arc::new(StringArray::from(vec!["greptimedb"])),
+            )),
+        ];
+        let tag_columns = vec![TagColumnInfo {
+            name: "namespace".to_string(),
+            index: 2,
+            column_id: 2,
+        }];
+        let non_tag_indices = vec![0, 1];
+
+        let primary_keys = tag_arrays
+            .into_iter()
+            .map(|tag_array| {
+                let schema = Arc::new(ArrowSchema::new(vec![
+                    Field::new("greptime_timestamp", DataType::Int64, false),
+                    Field::new("greptime_value", DataType::Float64, true),
+                    Field::new("namespace", tag_array.data_type().clone(), true),
+                ]));
+                let batch = RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(Int64Array::from(vec![1000])),
+                        Arc::new(datatypes::arrow::array::Float64Array::from(vec![42.0])),
+                        tag_array,
+                    ],
+                )
+                .unwrap();
+                let modified =
+                    modify_batch_sparse(batch, 1025, &tag_columns, &non_tag_indices).unwrap();
+                modified
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<BinaryArray>()
+                    .unwrap()
+                    .value(0)
+                    .to_vec()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(primary_keys.windows(2).all(|keys| keys[0] == keys[1]));
+    }
+
+    #[test]
+    fn test_compute_tsid_utf8view_with_nulls_matches_utf8() {
+        // Regression test for Utf8View tag/label columns: the whole
+        // `build_tag_arrays` -> `compute_tsid_array` -> sparse primary key path must handle
+        // `Utf8View` columns exactly like `Utf8`, including rows with null tags, instead of
+        // panicking or producing different TSIDs.
+        let namespace_values: Vec<Option<&str>> =
+            vec![Some("ns-a"), Some("ns-b"), None, Some("ns-c")];
+        let host_values: Vec<Option<&str>> = vec![Some("host-1"), None, Some("host-2"), None];
+
+        let build_batch = |data_type: DataType| {
+            let (namespace, host): (ArrayRef, ArrayRef) = match &data_type {
+                DataType::Utf8 => (
+                    Arc::new(StringArray::from(namespace_values.clone())),
+                    Arc::new(StringArray::from(host_values.clone())),
+                ),
+                DataType::Utf8View => (
+                    Arc::new(datatypes::arrow::array::StringViewArray::from(
+                        namespace_values.clone(),
+                    )),
+                    Arc::new(datatypes::arrow::array::StringViewArray::from(
+                        host_values.clone(),
+                    )),
+                ),
+                _ => unreachable!(),
+            };
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("greptime_timestamp", DataType::Int64, false),
+                Field::new("greptime_value", DataType::Float64, true),
+                Field::new("namespace", data_type.clone(), true),
+                Field::new("host", data_type, true),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Int64Array::from(vec![1000, 1001, 1002, 1003])),
+                    Arc::new(datatypes::arrow::array::Float64Array::from(vec![
+                        1.0, 2.0, 3.0, 4.0,
+                    ])),
+                    namespace,
+                    host,
+                ],
+            )
+            .unwrap()
+        };
+
+        let tag_columns = vec![
+            TagColumnInfo {
+                name: "host".to_string(),
+                index: 3,
+                column_id: 3,
+            },
+            TagColumnInfo {
+                name: "namespace".to_string(),
+                index: 2,
+                column_id: 2,
+            },
+        ];
+
+        let utf8_batch = build_batch(DataType::Utf8);
+        let utf8view_batch = build_batch(DataType::Utf8View);
+
+        // Both representations must be accepted by `build_tag_arrays`.
+        let utf8_tag_arrays = build_tag_arrays(&utf8_batch, &tag_columns).unwrap();
+        let utf8view_tag_arrays = build_tag_arrays(&utf8view_batch, &tag_columns).unwrap();
+
+        // TSIDs must be identical across representations, including rows with null tags.
+        let utf8_tsids = compute_tsid_array(&utf8_batch, &tag_columns, &utf8_tag_arrays);
+        let utf8view_tsids =
+            compute_tsid_array(&utf8view_batch, &tag_columns, &utf8view_tag_arrays);
+        assert_eq!(utf8_tsids, utf8view_tsids);
+
+        // The full sparse primary key (TSID + tag values) must also be identical.
+        let non_tag_indices = vec![0, 1];
+        let modified_utf8 =
+            modify_batch_sparse(utf8_batch, 1025, &tag_columns, &non_tag_indices).unwrap();
+        let modified_utf8view =
+            modify_batch_sparse(utf8view_batch, 1025, &tag_columns, &non_tag_indices).unwrap();
+        let utf8_pks = modified_utf8
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let utf8view_pks = modified_utf8view
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        for row in 0..utf8_pks.len() {
+            assert_eq!(utf8_pks.value(row), utf8view_pks.value(row));
+        }
     }
 }

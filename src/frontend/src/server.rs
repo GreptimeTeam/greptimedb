@@ -158,8 +158,11 @@ where
         }
 
         if opts.otlp.enable {
-            builder = builder
-                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
+            builder = builder.with_otlp_handler(
+                self.instance.clone(),
+                opts.prom_store.with_metric_engine,
+                opts.otlp.experimental_enable_exponential_histogram,
+            );
         }
 
         if opts.jaeger.enable {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,6 +32,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr as DfExpr, ExprSchemable, Operat
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, ScalarValue, ToDFSchema};
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::compute;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -52,12 +54,23 @@ use sqlparser::parser::Parser as SqlParser;
 use store_api::metadata::RegionMetadata;
 use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::{PrepareRequest, QueryScanContext, RegionEngine};
-use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use tokio::fs;
 
-use crate::datanode::objbench::{build_object_store, parse_config};
+use crate::datanode::tool_util::{
+    build_object_store, format_bytes, parse_config, parse_path_type, parse_region_id,
+};
 use crate::error;
+
+/// Displays a scanner using DataFusion's verbose explain format.
+struct VerboseScannerDisplay<'a, T: ?Sized>(&'a T);
+
+impl<T: DisplayAs + ?Sized> fmt::Display for VerboseScannerDisplay<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_as(DisplayFormatType::Verbose, f)
+    }
+}
 
 /// Scan benchmark command - benchmarks scanning a region directly from storage.
 #[derive(Debug, Parser)]
@@ -162,60 +175,6 @@ fn resolve_projection(
     }
 
     Ok(None)
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-fn parse_region_id(s: &str) -> error::Result<RegionId> {
-    if s.contains(':') {
-        let parts: Vec<&str> = s.splitn(2, ':').collect();
-        let table_id: u32 = parts[0].parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid table_id in region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        let region_num: u32 = parts[1].parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid region_num in region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        Ok(RegionId::new(table_id, region_num))
-    } else {
-        let id: u64 = s.parse().map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("invalid region_id '{}': {}", s, e),
-            }
-            .build()
-        })?;
-        Ok(RegionId::from_u64(id))
-    }
-}
-
-fn parse_path_type(s: &str) -> error::Result<PathType> {
-    match s.to_lowercase().as_str() {
-        "bare" => Ok(PathType::Bare),
-        "data" => Ok(PathType::Data),
-        "metadata" => Ok(PathType::Metadata),
-        _ => Err(error::IllegalConfigSnafu {
-            msg: format!("invalid path_type '{}', expected: bare, data, metadata", s),
-        }
-        .build()),
-    }
 }
 
 /// Rewrites literal values in comparison expressions to match the column's arrow type.
@@ -739,6 +698,14 @@ impl ScanbenchCommand {
                 format_bytes(total_array_mem_size),
                 format_bytes(total_estimated_size),
             );
+
+            if self.verbose {
+                println!(
+                    "  {} Scanner explain: {}",
+                    "ℹ".blue(),
+                    VerboseScannerDisplay(scanner.as_ref())
+                );
+            }
 
             // Start profiling after the first iteration (warmup) if pprof_after_warmup is set
             #[cfg(unix)]

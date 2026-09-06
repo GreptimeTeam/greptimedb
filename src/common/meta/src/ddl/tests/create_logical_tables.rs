@@ -324,6 +324,7 @@ async fn test_on_create_metadata() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     procedure.execute(&ctx).await.unwrap();
     // Triggers procedure to create table metadata
@@ -417,6 +418,7 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     procedure.execute(&ctx).await.unwrap();
     // Triggers procedure to create table metadata
@@ -489,6 +491,7 @@ async fn test_on_create_metadata_err() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     procedure.execute(&ctx).await.unwrap();
     // Creates logical table metadata(different with the task)

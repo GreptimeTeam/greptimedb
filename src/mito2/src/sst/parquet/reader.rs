@@ -16,13 +16,16 @@
 
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
-use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{error, tracing, warn};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
+use common_recordbatch::filter::{SimpleFilterEvaluator, TimestampUnitCast};
+use common_telemetry::{debug, error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::utils::expr_to_columns;
@@ -31,8 +34,9 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::{Json2ExtensionType, is_json2_extension_type};
 use datatypes::prelude::DataType;
+use datatypes::vectors::json::json2_physical_data_type;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
@@ -76,7 +80,6 @@ use crate::sst::index::inverted_index::applier::{
 };
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -94,6 +97,7 @@ use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_pla
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, Json2RewriteTargets, Json2TargetLayout};
 use crate::sst::{override_pk_field_to_binary, tag_maybe_to_dictionary_field};
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
@@ -106,6 +110,43 @@ const MAX_ROW_GROUPS_TO_CHECK_PK: usize = 4;
 /// limit, signalling the writer likely fell back to plain encoding.
 fn should_read_pk_as_binary(parquet_meta: &ParquetMetaData) -> bool {
     should_read_pk_as_binary_with_limit(parquet_meta, DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT)
+}
+
+fn apply_json2_rewrite_targets(
+    read_format: &FlatReadFormat,
+    targets: &Json2RewriteTargets,
+) -> Result<SchemaRef> {
+    let schema = read_format.output_arrow_schema()?;
+    if targets.is_empty() {
+        return Ok(schema);
+    }
+
+    let mut schema = schema.as_ref().clone();
+    let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
+    for (column_id, layout) in targets.iter() {
+        let Some(index) = read_format.parquet_projected_index_by_id(*column_id) else {
+            continue;
+        };
+        let Some(field) = fields.get(index) else {
+            continue;
+        };
+        let mut field = field.as_ref().clone();
+        field.set_data_type(json2_physical_data_type(&layout.target_layout));
+
+        let mut metadata = field.metadata().clone();
+        metadata.insert(
+            EXTENSION_TYPE_NAME_KEY.to_string(),
+            Json2ExtensionType::NAME.to_string(),
+        );
+        metadata.insert(
+            EXTENSION_TYPE_METADATA_KEY.to_string(),
+            layout.extension_metadata.clone(),
+        );
+        field.set_metadata(metadata);
+        fields[index] = Arc::new(field);
+    }
+    schema.fields = fields.into();
+    Ok(Arc::new(schema))
 }
 
 fn should_read_pk_as_binary_with_limit(
@@ -163,6 +204,8 @@ pub struct ParquetReaderBuilder {
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
     read_cols: Option<ReadColumns>,
+    /// Compaction-only JSON2 physical rewrite targets.
+    json2_rewrite_targets: Json2RewriteTargets,
     /// Strategy to cache SST data.
     cache_strategy: CacheStrategy,
     /// Index appliers.
@@ -185,6 +228,8 @@ pub struct ParquetReaderBuilder {
     pre_filter_mode: PreFilterMode,
     /// Whether to run the reduced-column predicate prefilter pass.
     enable_predicate_prefilter: bool,
+    /// Whether to apply simple time index filters during the normal precise-filter pass.
+    postpone_time_index_filter: bool,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
     page_index_policy: PageIndexPolicy,
@@ -208,6 +253,7 @@ impl ParquetReaderBuilder {
             object_store,
             predicate: None,
             read_cols: None,
+            json2_rewrite_targets: Arc::default(),
             cache_strategy: CacheStrategy::Disabled,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
@@ -220,6 +266,7 @@ impl ParquetReaderBuilder {
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
             enable_predicate_prefilter: true,
+            postpone_time_index_filter: false,
             decode_primary_key_values: false,
             page_index_policy: Default::default(),
             defer_optional_page_index: false,
@@ -247,6 +294,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn projection(mut self, read_cols: Option<ReadColumns>) -> ParquetReaderBuilder {
         self.read_cols = read_cols;
+        self
+    }
+
+    /// Attaches fixed JSON2 physical layouts used by compaction readers.
+    #[must_use]
+    pub(crate) fn json2_rewrite_targets(mut self, targets: Json2RewriteTargets) -> Self {
+        self.json2_rewrite_targets = targets;
         self
     }
 
@@ -325,6 +379,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub(crate) fn enable_predicate_prefilter(mut self, enable: bool) -> Self {
         self.enable_predicate_prefilter = enable;
+        self
+    }
+
+    /// Sets whether to postpone simple time index filters to precise filtering.
+    #[must_use]
+    pub(crate) fn postpone_time_index_filter(mut self, postpone: bool) -> Self {
+        self.postpone_time_index_filter = postpone;
         self
     }
 
@@ -451,7 +512,7 @@ impl ParquetReaderBuilder {
         } else {
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
             // Lists all column ids to read, we always use the expected metadata if possible.
-            ReadColumns::from_deduped_column_ids(
+            ReadColumns::new(
                 expected_meta
                     .column_metadatas
                     .iter()
@@ -471,9 +532,35 @@ impl ParquetReaderBuilder {
             &file_path,
             skip_auto_convert,
         )?;
-        if need_override_sequence(&parquet_meta) {
-            read_format
-                .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
+        // `region_meta` comes from the Parquet/source file and must not be used as the
+        // target identity. When the caller has no current metadata, the handle is the
+        // only local identity available and therefore denotes a local read.
+        let expected_region_id = self
+            .expected_metadata
+            .as_ref()
+            .map(|metadata| metadata.region_id)
+            .unwrap_or(self.file_handle.region_id());
+        let is_foreign = self.file_handle.region_id() != expected_region_id;
+        if is_foreign {
+            debug!(
+                "Reading foreign SST, file_id: {}, source_region_id: {}, expected_region_id: {}",
+                self.file_handle.file_id().file_id(),
+                self.file_handle.region_id(),
+                expected_region_id,
+            );
+        }
+        let file_meta = self.file_handle.meta_ref();
+        let override_sequence = if is_foreign {
+            file_meta.sequence.map(|sequence| sequence.get())
+        } else if file_meta.preserve_row_sequence {
+            None
+        } else if need_override_sequence(&parquet_meta) {
+            file_meta.sequence.map(|sequence| sequence.get())
+        } else {
+            None
+        };
+        if let Some(sequence) = override_sequence {
+            read_format.set_override_sequence(Some(sequence));
         }
 
         // Computes the projection mask.
@@ -508,6 +595,7 @@ impl ParquetReaderBuilder {
             self.expected_metadata.as_deref(),
             self.pre_filter_mode,
             self.enable_predicate_prefilter,
+            self.postpone_time_index_filter,
             &read_format,
             &codec,
         );
@@ -546,6 +634,8 @@ impl ParquetReaderBuilder {
             );
         }
 
+        let output_schema = apply_json2_rewrite_targets(&read_format, &self.json2_rewrite_targets)?;
+
         // Create ArrowReaderMetadata for async stream building.
         let mut arrow_reader_options = ArrowReaderOptions::new();
         if !read_format
@@ -557,7 +647,7 @@ impl ParquetReaderBuilder {
             // Read `__primary_key` as Binary when it's too large for dictionary
             // encoding; convert_batch wraps it back to a DictionaryArray.
             let schema_for_reader = if should_read_pk_as_binary(&parquet_meta) {
-                read_format.set_pk_as_binary()?;
+                read_format.set_pk_as_binary(output_schema.clone());
                 override_pk_field_to_binary(read_format.arrow_schema())
             } else {
                 read_format.arrow_schema().clone()
@@ -568,7 +658,18 @@ impl ParquetReaderBuilder {
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;
 
-        let output_schema = read_format.output_arrow_schema()?;
+        let json2_rewrite_targets = self
+            .json2_rewrite_targets
+            .iter()
+            .map(|(column_id, layout)| {
+                let column = region_meta
+                    .column_by_id(*column_id)
+                    .context(UnexpectedSnafu {
+                        reason: format!("JSON2 target column by id {column_id} does not exist"),
+                    })?;
+                Ok((column.column_schema.name.clone(), layout.clone()))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
@@ -577,6 +678,7 @@ impl ParquetReaderBuilder {
             parquet_metadata_size,
             arrow_metadata,
             output_schema,
+            json2_rewrite_targets,
             object_store: self.object_store.clone(),
             projection: projection_plan,
             has_nested_projection,
@@ -1797,6 +1899,8 @@ pub(crate) struct RowGroupReaderBuilder {
     arrow_metadata: ArrowReaderMetadata,
     /// Projected output schema aligned with `projection.projected_root_presence`.
     output_schema: SchemaRef,
+    /// JSON2 columns that must be semantically rewritten into the projected target layout.
+    json2_rewrite_targets: HashMap<String, Json2TargetLayout>,
     /// Object store as an Operator.
     object_store: ObjectStore,
     /// Projection mask.
@@ -1958,7 +2062,7 @@ impl RowGroupReaderBuilder {
         &self,
         stream: ProjectedRecordBatchStream,
     ) -> Result<ProjectedRecordBatchStream> {
-        if !self.has_nested_projection {
+        if !self.has_nested_projection && self.json2_rewrite_targets.is_empty() {
             return Ok(stream);
         }
 
@@ -1967,6 +2071,7 @@ impl RowGroupReaderBuilder {
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
         )?
+        .with_json2_rewrite_targets(&self.json2_rewrite_targets)?
         .boxed())
     }
 
@@ -2054,19 +2159,29 @@ impl SimpleFilterContext {
                 match sst_meta.column_by_id(column.column_id) {
                     Some(sst_column) => {
                         debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
-                        // Schema evolution can make field columns with the same id have
-                        // different concrete data types across SSTs. In that case,
-                        // evaluating this simple filter against current SST column may
-                        // raise an invalid cross-type comparison error (e.g. Float64 == Utf8).
                         let maybe_filter = if sst_column.column_schema.data_type
                             == column.column_schema.data_type
                         {
                             MaybeFilter::Filter(filter)
                         } else {
-                            // Altering tag or timestamp column types is not allowed,
-                            // so only field columns can reach this branch.
-                            debug_assert_eq!(column.semantic_type, SemanticType::Field);
-                            return None;
+                            // Schema evolution (altered field columns, or a
+                            // widened time index unit) can make columns with
+                            // the same id have different types across SSTs;
+                            // evaluating the original filter may raise an
+                            // invalid cross-type comparison. Timestamp
+                            // predicates are not re-applied above this scan,
+                            // so cast them into the file's unit instead of
+                            // dropping them; other mismatches keep the
+                            // conservative skip (the query layer re-applies
+                            // those predicates).
+                            match filter.cast_timestamp_unit(&sst_column.column_schema.data_type) {
+                                Some(TimestampUnitCast::Filter(filter)) => {
+                                    MaybeFilter::Filter(filter)
+                                }
+                                Some(TimestampUnitCast::Pruned) => MaybeFilter::Pruned,
+                                Some(TimestampUnitCast::Matched) => MaybeFilter::Matched,
+                                None => return None,
+                            }
                         };
                         (column, maybe_filter)
                     }
@@ -2158,6 +2273,15 @@ impl PhysicalFilterContext {
                 let sst_column = sst_meta.column_by_id(column.column_id)?;
                 // Physical expr requires the column name to match the SST column name.
                 if sst_column.column_schema.name != column_name {
+                    return None;
+                }
+                // Schema evolution (an altered field column, or a widened time
+                // index unit) can make the column's file type differ from the
+                // expected type; evaluating the original expr against the
+                // file's column would raise a cross-type comparison error
+                // (e.g. Timestamp(ms) >= Timestamp(µs)). Drop the prefilter;
+                // the query layer re-applies the predicate above the scan.
+                if sst_column.column_schema.data_type != column.column_schema.data_type {
                     return None;
                 }
                 column
@@ -2472,9 +2596,7 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -2506,6 +2628,47 @@ mod tests {
         assert!(new_filter(between_nested).is_none());
 
         Ok(())
+    }
+
+    /// A physical prefilter expr must be dropped when the column's file type
+    /// differs from the expected type (e.g. an old-unit SST after the time
+    /// index unit was widened): evaluating the expected-unit literals against
+    /// the file's column raises a cross-unit comparison error.
+    #[test]
+    fn test_physical_filter_dropped_on_file_type_mismatch() {
+        let file_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        // The region metadata after widening the `ts` unit to microsecond.
+        let mut expected = (*file_metadata).clone();
+        for column in expected.column_metadatas.iter_mut() {
+            if column.column_schema.name == "ts" {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let expected = Arc::new(expected);
+
+        let format = FlatReadFormat::new(
+            file_metadata.clone(),
+            ReadColumns::new(file_metadata.column_metadatas.iter().map(|c| c.column_id)),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let between = col("ts").between(
+            lit(ScalarValue::TimestampMicrosecond(Some(1_000_000), None)),
+            lit(ScalarValue::TimestampMicrosecond(Some(2_000_000), None)),
+        );
+        // Same type: the prefilter is kept.
+        assert!(
+            PhysicalFilterContext::new_opt(&file_metadata, Some(&file_metadata), &format, &between)
+                .is_some()
+        );
+        // Widened unit: the prefilter is dropped.
+        assert!(
+            PhysicalFilterContext::new_opt(&file_metadata, Some(&expected), &format, &between)
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2679,7 +2842,7 @@ mod tests {
         let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             region_metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
+            ReadColumns::new(
                 region_metadata
                     .column_metadatas
                     .iter()
@@ -2946,9 +3109,7 @@ mod tests {
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -2970,9 +3131,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,

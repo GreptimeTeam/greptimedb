@@ -167,9 +167,10 @@ The release note is also published as a blog post in **`GreptimeTeam/docs`**.
   git -C <docs> fetch origin main
   git -C <docs> worktree add -b chore/X.Y.Z-release-note /tmp/docs-release-note origin/main
   ```
-- **The PR body must follow the docs repo's template** (`.github/pull_request_template.md` —
-  "What's Changed in this PR" + a Checklist). Fill in the description; leave checklist boxes
-  for the reviewer.
+- **Read and follow the current docs repo PR template**
+  (`.github/pull_request_template.md`) from the checkout used for the release.
+  Fill in every required section and leave reviewer-owned checklist boxes unchecked;
+  do not rely on hard-coded section names from an older template.
 - Commit with sign-off, push, open a **draft** PR, then remove the worktree:
   ```
   git -C /tmp/docs-release-note add blog/release-X-Y-Z.md

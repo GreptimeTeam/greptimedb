@@ -29,3 +29,110 @@ SELECT * FROM test;
 DESCRIBE test;
 
 DROP TABLE test;
+
+CREATE TABLE ts_widen (host STRING, ts TIMESTAMP TIME INDEX);
+INSERT INTO ts_widen VALUES ("a", "2024-01-01 00:00:01");
+
+-- widen the time index unit: millisecond -> microsecond
+ALTER TABLE ts_widen MODIFY COLUMN ts TIMESTAMP_US;
+DESCRIBE ts_widen;
+
+-- historical data is interpreted in the new unit
+SELECT * FROM ts_widen ORDER BY ts;
+
+-- predicate on the widened time index reads old-unit SST data correctly
+SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:01' ORDER BY ts;
+
+SELECT * FROM ts_widen WHERE ts < '2024-01-01 00:00:01.000300' ORDER BY ts;
+
+-- new writes can use sub-millisecond precision
+INSERT INTO ts_widen VALUES ("b", "2024-01-01 00:00:01.000500");
+
+-- filters see both the old-unit SST row and the new-unit memtable row correctly
+SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:01.000001' ORDER BY ts;
+
+SELECT * FROM ts_widen WHERE ts > '2024-01-01 00:00:00.999999' ORDER BY ts;
+
+-- narrowing the time index unit is rejected
+ALTER TABLE ts_widen MODIFY COLUMN ts TIMESTAMP;
+
+-- changing the time index to a non-timestamp type is rejected
+ALTER TABLE ts_widen MODIFY COLUMN ts STRING;
+
+DROP TABLE ts_widen;
+
+-- Regression: predicates must filter old-unit SST rows exactly after the
+-- widen; a dropped filter would return whole row groups.
+CREATE TABLE ts_widen_multi (host STRING, ts TIMESTAMP TIME INDEX);
+INSERT INTO ts_widen_multi VALUES
+  ("a", "2024-01-01 00:00:00"), ("b", "2024-01-01 00:00:01"),
+  ("c", "2024-01-01 00:00:02"), ("d", "2024-01-01 00:00:03"),
+  ("e", "2024-01-01 00:00:04"), ("f", "2024-01-01 00:00:05"),
+  ("g", "2024-01-01 00:00:06"), ("h", "2024-01-01 00:00:07"),
+  ("i", "2024-01-01 00:00:08"), ("j", "2024-01-01 00:00:09");
+
+-- force the rows into an SST written in the old (millisecond) unit
+ADMIN FLUSH_TABLE('ts_widen_multi');
+
+ALTER TABLE ts_widen_multi MODIFY COLUMN ts TIMESTAMP_US;
+
+-- equality on the widened time index returns exactly one old-unit row
+SELECT * FROM ts_widen_multi WHERE ts = '2024-01-01 00:00:07' ORDER BY ts;
+
+SELECT * FROM ts_widen_multi WHERE ts != '2024-01-01 00:00:07' ORDER BY ts;
+
+-- boundaries strictly between the stored seconds
+SELECT * FROM ts_widen_multi WHERE ts > '2024-01-01 00:00:06.5' ORDER BY ts;
+
+SELECT * FROM ts_widen_multi WHERE ts <= '2024-01-01 00:00:05.0005' ORDER BY ts;
+
+-- BETWEEN must not fail or misfilter on old-unit rows
+SELECT * FROM ts_widen_multi WHERE ts BETWEEN '2024-01-01 00:00:03' AND '2024-01-01 00:00:06.5' ORDER BY ts;
+
+-- a large IN-list is not rewritten to OR; it must still filter exactly
+SELECT * FROM ts_widen_multi WHERE ts IN (
+  '2024-01-01 00:00:00', '2024-01-01 00:00:01', '2024-01-01 00:00:02',
+  '2024-01-01 00:00:03', '2024-01-01 00:00:04', '2024-01-01 00:00:05',
+  '2024-01-01 00:00:06', '2024-01-01 00:00:07', '2024-01-01 00:00:08',
+  '2024-01-01 00:00:09', '2024-01-01 00:00:02.5'
+) ORDER BY ts;
+
+-- an IN-list literal that no millisecond row can equal matches nothing
+SELECT * FROM ts_widen_multi WHERE ts IN ('2024-01-01 00:00:02', '2024-01-01 00:00:05.5', '2024-01-01 00:00:08') ORDER BY ts;
+
+DROP TABLE ts_widen_multi;
+
+CREATE TABLE ts_widen_part (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (ts) (
+  ts < '2024-01-02 00:00:00',
+  ts >= '2024-01-02 00:00:00'
+);
+INSERT INTO ts_widen_part VALUES ("a", 1, "2024-01-01 23:59:59.5");
+
+-- widen the time index unit of a table partitioned on the time index
+ALTER TABLE ts_widen_part MODIFY COLUMN ts TIMESTAMP_US;
+
+-- historical data still routes/joins correctly
+SELECT * FROM ts_widen_part ORDER BY ts;
+
+-- new writes land in the right partition
+INSERT INTO ts_widen_part VALUES ("b", 2, "2024-01-02 00:00:00.000250");
+SELECT * FROM ts_widen_part ORDER BY ts;
+
+DROP TABLE ts_widen_part;
+
+CREATE TABLE ts_overflow (host STRING, ts TIMESTAMP TIME INDEX);
+-- 3000-01-01 fits milliseconds but overflows nanoseconds (max ~2262-04-11).
+INSERT INTO ts_overflow VALUES ("a", "3000-01-01 00:00:00");
+
+-- widening to microseconds fits the data
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_US;
+
+DESCRIBE ts_overflow;
+
+-- widening to nanoseconds would overflow the data: allowed, only logged
+ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
+
+DESCRIBE ts_overflow;
+
+DROP TABLE ts_overflow;

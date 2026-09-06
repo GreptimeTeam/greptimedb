@@ -175,6 +175,7 @@ async fn test_on_create_metadata() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     // Triggers procedure to create view metadata
     let status = procedure.execute(&ctx).await.unwrap();
@@ -194,6 +195,7 @@ async fn test_replace_view_metadata() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     // Triggers procedure to create view metadata
     let status = procedure.execute(&ctx).await.unwrap();
@@ -230,6 +232,7 @@ async fn test_replace_view_metadata() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     // Triggers procedure to replace view metadata, but the view_id is unchanged.
     let status = procedure.execute(&ctx).await.unwrap();
@@ -264,6 +267,7 @@ async fn test_replace_table() {
         let ctx = ProcedureContext {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
         };
         procedure.execute(&ctx).await.unwrap();
         procedure.execute(&ctx).await.unwrap();

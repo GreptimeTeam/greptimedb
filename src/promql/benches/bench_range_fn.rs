@@ -37,7 +37,7 @@ use datatypes::arrow::datatypes::{DataType, Field};
 use futures::StreamExt;
 use promql::extension_plan::RangeManipulate;
 use promql::functions::{
-    Changes, Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate, Resets,
+    Changes, Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate, Resets, SumOverTime,
 };
 use promql::range_array::RangeArray;
 
@@ -133,6 +133,62 @@ fn make_extrapolated_rate_input(
         ColumnarValue::Array(eval_ts),
         ColumnarValue::Scalar(ScalarValue::Int64(Some(range_length))),
     ]
+}
+
+fn make_delta_rate_comparison_input(
+    series_count: usize,
+    hours: usize,
+    sample_step_seconds: usize,
+    query_step_seconds: usize,
+    window_seconds: usize,
+) -> (Vec<ColumnarValue>, Vec<ColumnarValue>) {
+    let points_per_series = hours * 60 * 60 / sample_step_seconds;
+    let window_points = window_seconds / sample_step_seconds;
+    let query_stride = query_step_seconds / sample_step_seconds;
+    let mut timestamps = Vec::with_capacity(series_count * points_per_series);
+    let mut deltas = Vec::with_capacity(timestamps.capacity());
+    let mut cumulative = Vec::with_capacity(timestamps.capacity());
+    let mut ranges = Vec::new();
+    let mut eval_timestamps = Vec::new();
+
+    for _ in 0..series_count {
+        let offset = timestamps.len();
+        let mut total = 0.0;
+        for point in 0..points_per_series {
+            let delta = 1.0 + (point % 7) as f64 * 0.25;
+            total += delta;
+            timestamps.push((point as i64 + 1) * sample_step_seconds as i64 * 1_000);
+            deltas.push(delta);
+            cumulative.push(total);
+        }
+        for end in (window_points - 1..points_per_series).step_by(query_stride) {
+            ranges.push((
+                (offset + end + 1 - window_points) as u32,
+                window_points as u32,
+            ));
+            eval_timestamps.push(timestamps[offset + end] + 500);
+        }
+    }
+
+    let timestamps = Arc::new(TimestampMillisecondArray::from(timestamps));
+    let delta_timestamp_ranges =
+        RangeArray::from_ranges(timestamps.clone(), ranges.clone()).unwrap();
+    let cumulative_timestamp_ranges = RangeArray::from_ranges(timestamps, ranges.clone()).unwrap();
+    let delta_ranges =
+        RangeArray::from_ranges(Arc::new(Float64Array::from(deltas)), ranges.clone()).unwrap();
+    let cumulative_ranges =
+        RangeArray::from_ranges(Arc::new(Float64Array::from(cumulative)), ranges).unwrap();
+    let delta = vec![
+        ColumnarValue::Array(Arc::new(delta_timestamp_ranges.into_dict())),
+        ColumnarValue::Array(Arc::new(delta_ranges.into_dict())),
+    ];
+    let cumulative = vec![
+        ColumnarValue::Array(Arc::new(cumulative_timestamp_ranges.into_dict())),
+        ColumnarValue::Array(Arc::new(cumulative_ranges.into_dict())),
+        ColumnarValue::Array(Arc::new(TimestampMillisecondArray::from(eval_timestamps))),
+        ColumnarValue::Scalar(ScalarValue::Int64(Some(window_seconds as i64 * 1_000))),
+    ];
+    (delta, cumulative)
 }
 
 fn make_idelta_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
@@ -447,6 +503,49 @@ fn bench_range_functions(c: &mut Criterion) {
                     }
                 })
             },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_delta_rate_comparison(c: &mut Criterion) {
+    let mut group = c.benchmark_group("delta_rate_comparison");
+    let series_count = 64;
+    let hours = 4;
+    let sample_step_seconds = 15;
+    let window_seconds = 2 * 60 * 60;
+    let delta_udf = SumOverTime::scalar_udf();
+    let cumulative_udf = Rate::scalar_udf();
+
+    // Release acceptance threshold: on both step sweeps, the sum reducer that
+    // dominates delta-rate cost should stay below 100 ms and within 100x of
+    // cumulative rate on this 64-series, four-hour data set. Optimize the
+    // reducer before release if either bound is exceeded on a typical CI host.
+    for query_step_seconds in [60, 300] {
+        let (delta, cumulative) = make_delta_rate_comparison_input(
+            series_count,
+            hours,
+            sample_step_seconds,
+            query_step_seconds,
+            window_seconds,
+        );
+        let delta = PreparedUdfCall::new(delta);
+        let cumulative = PreparedUdfCall::new(cumulative);
+        let parameters = format!(
+            "series{series_count}_hours{hours}_window{}h_step{}s",
+            window_seconds / 60 / 60,
+            query_step_seconds
+        );
+        group.bench_with_input(
+            BenchmarkId::new("delta_sum_over_time", &parameters),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&delta_udf, &delta)),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("cumulative_rate", &parameters),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&cumulative_udf, &cumulative)),
         );
     }
 
@@ -781,6 +880,7 @@ fn bench_range_manipulate_wall_time(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_range_functions,
+    bench_delta_rate_comparison,
     bench_edge_count_functions,
     bench_range_manipulate_wall_time
 );

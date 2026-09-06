@@ -50,6 +50,7 @@ pub mod repeated_field;
 pub mod request_memory_limiter;
 pub mod request_memory_metrics;
 mod row_writer;
+pub mod semantic;
 pub mod server;
 pub mod tls;
 

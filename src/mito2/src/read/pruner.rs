@@ -841,9 +841,10 @@ mod tests {
             })
             .collect();
 
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_files(files)
-            .with_append_mode(true);
+            .with_append_mode(true)
+            .build();
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
         let pruner = Arc::new(Pruner::new_with_options(
             stream_ctx,
@@ -898,10 +899,11 @@ mod tests {
             })
             .collect();
 
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_files(files)
             .with_predicate(predicate)
-            .with_append_mode(true);
+            .with_append_mode(true)
+            .build();
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
         let pruner = Arc::new(Pruner::new(stream_ctx, 1));
         (env, pruner)

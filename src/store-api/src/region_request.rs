@@ -38,6 +38,7 @@ use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
 use common_time::range::TimestampRange;
 use common_time::{TimeToLive, Timestamp};
+use datatypes::error::time_index_not_widening_error;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use num_enum::TryFromPrimitive;
@@ -56,7 +57,7 @@ use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
+    MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
     TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
@@ -458,6 +459,10 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
                 RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges { time_ranges }),
             )])
         }
+        Some(truncate_request::Kind::Unflushed(_)) => Ok(vec![(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )]),
     }
 }
 
@@ -774,7 +779,10 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
-    /// Change columns datatype form the region, only fields are allowed to change.
+    /// Change columns datatype of the region. Field columns can change to any
+    /// Arrow-castable type; the time index column only supports widening its
+    /// timestamp unit (e.g. `TimestampMillisecond -> TimestampMicrosecond`),
+    /// which is lossless for values that fit the target unit's `i64` range.
     ModifyColumnTypes {
         /// Columns to change.
         columns: Vec<ModifyColumnType>,
@@ -1390,34 +1398,66 @@ impl ModifyColumnType {
                 err: format!("column {} not found", self.column_name),
             })?;
 
-        ensure!(
-            matches!(column_meta.semantic_type, SemanticType::Field),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: "'timestamp' or 'tag' column cannot change type".to_string()
+        match column_meta.semantic_type {
+            SemanticType::Field => {
+                ensure!(
+                    column_meta
+                        .column_schema
+                        .data_type
+                        .can_arrow_type_cast_to(&self.target_type),
+                    InvalidRegionRequestSnafu {
+                        region_id: metadata.region_id,
+                        err: format!(
+                            "column '{}' cannot be cast automatically to type '{}'",
+                            self.column_name, self.target_type
+                        ),
+                    }
+                );
             }
-        );
-        ensure!(
-            column_meta
-                .column_schema
-                .data_type
-                .can_arrow_type_cast_to(&self.target_type),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "column '{}' cannot be cast automatically to type '{}'",
-                    self.column_name, self.target_type
-                ),
+            // The time index column only supports widening its timestamp
+            // unit; historical SST data is cast to the new unit on read.
+            // A same-type change validates so a retried alter procedure is a
+            // no-op instead of failing the retry forever.
+            SemanticType::Timestamp => {
+                ensure!(
+                    column_meta.column_schema.data_type == self.target_type
+                        || column_meta
+                            .column_schema
+                            .data_type
+                            .is_timestamp_unit_widening_to(&self.target_type),
+                    InvalidRegionRequestSnafu {
+                        region_id: metadata.region_id,
+                        err: time_index_not_widening_error(
+                            &column_meta.column_schema.name,
+                            &column_meta.column_schema.data_type,
+                            &self.target_type,
+                        ),
+                    }
+                );
             }
-        );
+            SemanticType::Tag => {
+                return InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "tag column '{}' cannot change type, it is part of the primary key",
+                        self.column_name
+                    ),
+                }
+                .fail();
+            }
+        }
 
         Ok(())
     }
 
     /// Returns true if no column's datatype to change to the region.
+    /// A column already in the target type needs no alteration, so a retried
+    /// alter is a successful no-op.
     pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
         debug_assert!(self.validate(metadata).is_ok());
-        metadata.column_by_name(&self.column_name).is_some()
+        metadata
+            .column_by_name(&self.column_name)
+            .is_some_and(|column| column.column_schema.data_type != self.target_type)
     }
 }
 
@@ -1454,6 +1494,7 @@ pub enum SetRegionOption {
     AutoFlushInterval(Option<Duration>),
     // Modifying the max number of rows in a parquet row group.
     MaxRowGroupRowCount(Option<usize>),
+    PreserveRowSequence(bool),
     // Stops writing new WAL entries. This operation is irreversible.
     SkipWal,
 }
@@ -1513,6 +1554,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::MaxRowGroupRowCount(Some(row_count)))
             }
+            PRESERVE_ROW_SEQUENCE => {
+                let preserve = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::PreserveRowSequence(preserve))
+            }
             SKIP_WAL_KEY if value == "true" => Ok(Self::SkipWal),
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -1534,6 +1581,7 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
             UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
             UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
+            UnsetRegionOption::PreserveRowSequence => SetRegionOption::PreserveRowSequence(false),
         }
     }
 }
@@ -1549,6 +1597,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
+            PRESERVE_ROW_SEQUENCE => Ok(Self::PreserveRowSequence),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1562,6 +1611,7 @@ pub enum UnsetRegionOption {
     Ttl,
     MaxRowGroupRowCount,
     WriteBufferSize,
+    PreserveRowSequence,
 }
 
 impl UnsetRegionOption {
@@ -1573,6 +1623,7 @@ impl UnsetRegionOption {
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
             Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
+            Self::PreserveRowSequence => PRESERVE_ROW_SEQUENCE,
         }
     }
 }
@@ -1812,6 +1863,41 @@ mod tests {
     }
 
     #[test]
+    fn test_make_region_truncate_unflushed() {
+        let region_id = RegionId::new(42, 3);
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: region_id.as_u64(),
+                kind: Some(truncate_request::Kind::Unflushed(
+                    api::v1::region::Unflushed {},
+                )),
+            }))
+            .unwrap();
+
+        assert_eq!(region_id, requests[0].0);
+        assert!(matches!(
+            requests[0].1,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
+        ));
+    }
+
+    #[test]
+    fn test_make_region_truncate_requires_kind() {
+        let error =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: RegionId::new(42, 3).as_u64(),
+                kind: None,
+            }))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing kind in TruncateRequest")
+        );
+    }
+
+    #[test]
     fn test_from_proto_location() {
         let proto_location = v1::AddColumnLocation {
             location_type: LocationType::First as i32,
@@ -1943,6 +2029,37 @@ mod tests {
         assert_eq!(
             UnsetRegionOption::MaxRowGroupRowCount,
             UnsetRegionOption::try_from(MAX_ROW_GROUP_ROW_COUNT).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_set_region_option_preserve_row_sequence_try_from() {
+        for (value, expected) in [("true", true), ("false", false)] {
+            let pb = PbOption {
+                key: PRESERVE_ROW_SEQUENCE.to_string(),
+                value: value.to_string(),
+            };
+            assert_eq!(
+                SetRegionOption::PreserveRowSequence(expected),
+                SetRegionOption::try_from(&pb).unwrap()
+            );
+        }
+
+        for value in ["1", "invalid"] {
+            let pb = PbOption {
+                key: PRESERVE_ROW_SEQUENCE.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert_eq!(
+            UnsetRegionOption::PreserveRowSequence,
+            UnsetRegionOption::try_from(PRESERVE_ROW_SEQUENCE).unwrap()
+        );
+        assert_eq!(
+            SetRegionOption::PreserveRowSequence(false),
+            (&UnsetRegionOption::PreserveRowSequence).into()
         );
     }
 
@@ -2291,6 +2408,57 @@ mod tests {
             columns: vec![ModifyColumnType {
                 column_name: "ts".to_string(),
                 target_type: ConcreteDataType::date_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        // Time index unit widening is allowed.
+        let kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+            }],
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
+
+        // Narrowing the time index unit is rejected.
+        let metadata_nano = {
+            let mut metadata = new_metadata();
+            for col in metadata.column_metadatas.iter_mut() {
+                if col.column_schema.name == "ts" {
+                    col.column_schema.data_type = ConcreteDataType::timestamp_nanosecond_datatype();
+                }
+            }
+            metadata
+        };
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            }],
+        }
+        .validate(&metadata_nano)
+        .unwrap_err();
+
+        // Changing the time index to the same type is a validated no-op, so a
+        // retried alter procedure (region already altered) succeeds and is
+        // skipped by `need_alter`.
+        let same_type = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            }],
+        };
+        same_type.validate(&metadata).unwrap();
+        assert!(!same_type.need_alter(&metadata));
+
+        // Changing the time index to a non-timestamp type is rejected.
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
             }],
         }
         .validate(&metadata)

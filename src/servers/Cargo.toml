@@ -83,11 +83,10 @@ log-query.workspace = true
 loki-proto.workspace = true
 metric-engine.workspace = true
 mime_guess = "2.0"
-mysql_common = "0.34"
+mysql_common = "0.38"
 notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
-openmetrics-parser = "0.4"
 # Wait for https://github.com/databendlabs/opensrv/pull/81
 opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "6c5a451544194b7bb60a8318d155d4f892b49f2c" }
 opentelemetry-proto.workspace = true
@@ -116,6 +115,7 @@ rust_decimal = { workspace = true, features = ["db-postgres"] }
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
+ryu.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
@@ -157,17 +157,18 @@ common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
 moka.workspace = true
-mysql_async = { version = "0.35", default-features = false, features = [
+mysql_async = { version = "0.37", default-features = false, features = [
     "default-rustls",
 ] }
 permutation = "0.4"
 rand.workspace = true
 serde_json.workspace = true
+servers = { workspace = true, features = ["testing"] }
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
-tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.12"
+tokio-postgres.workspace = true
+tokio-postgres-rustls = "0.14"
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
@@ -178,6 +179,11 @@ common-version.workspace = true
 [[bench]]
 name = "bench_prom"
 harness = false
+
+[[bench]]
+name = "prom_decode"
+harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "to_http_output"

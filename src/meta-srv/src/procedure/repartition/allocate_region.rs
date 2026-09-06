@@ -777,6 +777,7 @@ mod tests {
                 concurrent_region_route,
                 region_wal_options: test_region_wal_options(&[1, 2]),
             }),
+            event_context: None,
         };
         let mut state = ExecutePlan;
 

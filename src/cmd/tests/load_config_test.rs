@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::io::Write;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
@@ -50,6 +51,12 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         compact_rt_max_blocking_threads = 6
         ingest_rt_size = 8
         query_rt_size = 7
+
+        [runtime.experimental_workload_scheduler]
+        enable = true
+        query_weight = 1
+        write_weight = 4
+        sample_every_polls = 32
     "#;
 
     let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
@@ -59,6 +66,44 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
     assert_eq!(6, options.runtime.compact_rt_max_blocking_threads);
     assert_eq!(8, options.runtime.ingest_rt_size);
     assert_eq!(7, options.runtime.query_rt_size);
+    assert!(options.runtime.experimental_workload_scheduler.enable);
+    assert_eq!(
+        NonZeroU32::new(1).unwrap(),
+        options.runtime.experimental_workload_scheduler.query_weight
+    );
+    assert_eq!(
+        NonZeroU32::new(4).unwrap(),
+        options.runtime.experimental_workload_scheduler.write_weight
+    );
+    assert_eq!(
+        NonZeroUsize::new(32).unwrap(),
+        options
+            .runtime
+            .experimental_workload_scheduler
+            .sample_every_polls
+    );
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_sampling() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        sample_every_polls = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_weight() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        query_weight = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -113,7 +158,7 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
@@ -153,6 +198,12 @@ fn test_load_frontend_example_config() {
     let options =
         GreptimeOptions::<FrontendOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
+    assert!(
+        !options
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
@@ -302,6 +353,7 @@ fn test_load_flownode_example_config() {
                 memory_pool_size: MemoryLimit::Percentage(50),
                 experimental_enable_memory_ledger: false,
                 enable_per_region_metrics: false,
+                ..Default::default()
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
@@ -330,6 +382,12 @@ fn test_load_standalone_example_config() {
     let options =
         GreptimeOptions::<StandaloneOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
+    assert!(
+        !options
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
@@ -343,7 +401,7 @@ fn test_load_standalone_example_config() {
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
@@ -379,6 +437,43 @@ fn test_load_standalone_example_config() {
         ..Default::default()
     };
     similar_asserts::assert_eq!(options, expected);
+}
+
+#[test]
+fn test_load_otlp_exponential_histogram_option() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        "[otlp]\nexperimental_enable_exponential_histogram = true\n",
+    )
+    .unwrap();
+
+    let frontend =
+        GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(
+        frontend
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
+
+    let standalone =
+        GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(
+        standalone
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
+    assert!(
+        standalone
+            .component
+            .frontend_options()
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
 }
 
 #[test]
@@ -442,6 +537,11 @@ fn test_load_event_types_from_env() {
                 .event_recorder
                 .event_types,
             GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix)
+                .unwrap()
+                .component
+                .event_recorder
+                .event_types,
+            GreptimeOptions::<FrontendOptions>::load_layered_options(None, env_prefix)
                 .unwrap()
                 .component
                 .event_recorder

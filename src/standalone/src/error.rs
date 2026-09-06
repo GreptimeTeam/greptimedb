@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -28,6 +28,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
+    },
+
+    #[snafu(display("Operation to region server failed"))]
+    InvokeRegionServer {
+        #[snafu(implicit)]
+        location: Location,
+        source: servers::error::Error,
     },
 
     #[snafu(display("External error"))]
@@ -49,6 +56,9 @@ pub enum Error {
     #[snafu(display("Invalid url scheme: {}", scheme))]
     InvalidUrlScheme { scheme: String },
 
+    #[snafu(display("Invalid region request, reason: {}", reason))]
+    InvalidRegionRequest { reason: String },
+
     #[snafu(display("Repartition procedure is not supported in standalone mode"))]
     NoSupportRepartitionProcedure {
         #[snafu(implicit)]
@@ -62,14 +72,23 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::OpenMetadataKvBackend { source, .. } => source.status_code(),
+            Error::InvokeRegionServer { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
             Error::ParseUrl { .. } => StatusCode::InvalidArguments,
             Error::InvalidUrlScheme { .. } => StatusCode::InvalidArguments,
+            Error::InvalidRegionRequest { .. } => StatusCode::IllegalState,
             Error::NoSupportRepartitionProcedure { .. } => StatusCode::Unsupported,
         }
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::InvokeRegionServer { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }

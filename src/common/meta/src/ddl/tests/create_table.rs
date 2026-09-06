@@ -249,6 +249,7 @@ async fn test_on_datanode_create_regions_should_retry() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     let error = procedure.execute(&ctx).await.unwrap_err();
     assert!(error.is_retry_later());
@@ -266,6 +267,7 @@ async fn test_on_datanode_create_regions_should_not_retry() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     let error = procedure.execute(&ctx).await.unwrap_err();
     assert!(!error.is_retry_later());
@@ -304,6 +306,7 @@ async fn test_on_create_metadata_error() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     procedure.execute(&ctx).await.unwrap();
     let mut task = task;
@@ -337,6 +340,7 @@ async fn test_on_create_metadata() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     procedure.execute(&ctx).await.unwrap();
     // Triggers procedure to create table metadata

@@ -16,8 +16,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common_event_recorder::PersistentEventContext;
 use common_meta::DatanodeId;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
+use common_meta::rpc::ddl::TriggerReason;
+use common_procedure::ProcedureContext;
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
@@ -103,6 +106,7 @@ pub enum Event {
         full_file_listing: Option<bool>,
         /// Optional override for timeout. If None, uses scheduler config.
         timeout: Option<Duration>,
+        procedure_context: ProcedureContext,
     },
 }
 
@@ -181,12 +185,13 @@ impl GcScheduler {
                     region_ids,
                     full_file_listing,
                     timeout,
+                    procedure_context,
                 } => {
                     info!("Received manually gc request");
                     let span =
                         common_telemetry::tracing::info_span!("meta_gc_tick", trigger = "manual");
                     let result = self
-                        .handle_manual_gc(region_ids, full_file_listing, timeout)
+                        .handle_manual_gc(region_ids, full_file_listing, timeout, procedure_context)
                         .instrument(span)
                         .await;
                     if let Err(e) = &result {
@@ -216,7 +221,13 @@ impl GcScheduler {
                 .await;
         }
         let span = common_telemetry::tracing::info_span!("meta_gc_handle_tick");
-        let report = self.trigger_gc().instrument(span).await?;
+        let report = self
+            .trigger_gc(ProcedureContext {
+                actor: None,
+                event_context: Some(PersistentEventContext::new(TriggerReason::ScheduledGc)),
+            })
+            .instrument(span)
+            .await?;
 
         // Periodically clean up stale tracker entries
         self.cleanup_tracker_if_needed().await?;
@@ -290,6 +301,7 @@ impl GcScheduler {
         region_ids: Option<Vec<RegionId>>,
         full_file_listing: Option<bool>,
         timeout: Option<Duration>,
+        procedure_context: ProcedureContext,
     ) -> Result<GcJobReport> {
         info!("Start to handle manual gc request");
 
@@ -300,7 +312,7 @@ impl GcScheduler {
 
         // No specific regions, use default tick behavior
         let Some(regions) = region_ids else {
-            let report = self.trigger_gc().await?;
+            let report = self.trigger_gc(procedure_context).await?;
             info!("Finished manual gc request");
             return Ok(report);
         };
@@ -347,6 +359,7 @@ impl GcScheduler {
                     full_listing,
                     gc_timeout,
                     Region2Peers::new(),
+                    procedure_context.clone(),
                 )
                 .await?;
             combined_report.merge(report);
@@ -355,7 +368,13 @@ impl GcScheduler {
         if !dropped_regions.is_empty() {
             let report = self
                 .ctx
-                .gc_regions(&dropped_regions, true, gc_timeout, dropped_routes_override)
+                .gc_regions(
+                    &dropped_regions,
+                    true,
+                    gc_timeout,
+                    dropped_routes_override,
+                    procedure_context,
+                )
                 .await?;
             combined_report.merge(report);
         }
@@ -477,6 +496,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _procedure_context: ProcedureContext,
         ) -> Result<GcReport> {
             self.gc_regions_calls.fetch_add(1, Ordering::Relaxed);
             panic!("gc_regions should not be called in maintenance mode")
@@ -550,6 +570,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _procedure_context: ProcedureContext,
         ) -> Result<GcReport> {
             Ok(GcReport::default())
         }
@@ -846,7 +867,10 @@ mod tests {
         *ctx.dropped_tables.lock().unwrap() = vec![dropped_table(1, Some(i64::MIN))];
         let scheduler = soft_drop_scheduler(ctx.clone());
 
-        scheduler.handle_manual_gc(None, None, None).await.unwrap();
+        scheduler
+            .handle_manual_gc(None, None, None, ProcedureContext::default())
+            .await
+            .unwrap();
 
         assert!(ctx.purge_attempts.lock().unwrap().is_empty());
     }
@@ -883,6 +907,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _procedure_context: ProcedureContext,
         ) -> Result<GcReport> {
             crate::error::UnexpectedSnafu {
                 violated: "mock gc failure".to_string(),
@@ -933,6 +958,7 @@ mod tests {
                 Some(vec![RegionId::new(1, 0)]),
                 Some(false),
                 Some(Duration::from_secs(1)),
+                ProcedureContext::default(),
             )
             .await;
 
@@ -961,6 +987,7 @@ mod tests {
                 Some(vec![RegionId::new(1, 0)]),
                 Some(false),
                 Some(Duration::from_secs(1)),
+                ProcedureContext::default(),
             )
             .await;
 

@@ -32,8 +32,9 @@ use common_catalog::format_full_table_name;
 use common_datasource::file_format::{FileFormat, Format, infer_schemas};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{LocalFileAccess, build_backend_with_path};
+use common_error::ext::BoxedError;
 use common_meta::SchemaOptions;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{FlowType, effective_eval_schedule_from_flow_info};
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
 use common_query::prelude::greptime_timestamp;
@@ -41,6 +42,7 @@ use common_recordbatch::RecordBatches;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_time::Timestamp;
 use common_time::timezone::get_timezone;
+use datafusion::dataframe::DataFrame;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::{Expr, SortExpr, col, lit};
 use datatypes::prelude::*;
@@ -109,7 +111,7 @@ const INDEX_KEY_NAME_COLUMN: &str = "Key_name";
 const INDEX_SEQ_IN_INDEX_COLUMN: &str = "Seq_in_index";
 const INDEX_COLUMN_NAME_COLUMN: &str = "Column_name";
 
-static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+pub static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
         ColumnSchema::new(
             COLUMN_NAME_COLUMN,
@@ -178,6 +180,18 @@ pub async fn show_databases(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
+    let dataframe =
+        show_databases_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for `SHOW DATABASES` without executing it.
+pub async fn show_databases_dataframe(
+    stmt: &ShowDatabases,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
     let projects = if stmt.full {
         vec![
             (schemata::SCHEMA_NAME, SCHEMAS_COLUMN),
@@ -191,7 +205,7 @@ pub async fn show_databases(
     let like_field = Some(schemata::SCHEMA_NAME);
     let sort = vec![col(schemata::SCHEMA_NAME).sort(true, true)];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -201,7 +215,7 @@ pub async fn show_databases(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        &stmt.kind,
     )
     .await
 }
@@ -249,6 +263,45 @@ async fn query_from_information_schema_table(
     sort: Vec<SortExpr>,
     kind: ShowKind,
 ) -> Result<Output> {
+    let dataframe = query_from_information_schema_dataframe(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        table_name,
+        select,
+        projects,
+        filters,
+        like_field,
+        sort,
+        &kind,
+    )
+    .await?;
+    dataframe_to_output(dataframe).await
+}
+
+async fn dataframe_to_output(dataframe: DataFrame) -> Result<Output> {
+    let stream = dataframe.execute_stream().await?;
+    Ok(Output::new_with_stream(Box::pin(
+        RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?,
+    )))
+}
+
+/// Builds the [`DataFrame`] for a `SHOW` statement without executing it,
+/// so `Describe` handlers can derive the output schema from the same
+/// projection the executor uses.
+#[allow(clippy::too_many_arguments)]
+async fn query_from_information_schema_dataframe(
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+    table_name: &str,
+    select: Vec<Expr>,
+    projects: Vec<(&str, &str)>,
+    filters: Vec<Expr>,
+    like_field: Option<&str>,
+    sort: Vec<SortExpr>,
+    kind: &ShowKind,
+) -> Result<DataFrame> {
     let table = catalog_manager
         .table(
             query_ctx.current_catalog(),
@@ -336,7 +389,7 @@ async fn query_from_information_schema_table(
                 .expect("Must be the datafusion planner");
 
             let filter = planner
-                .sql_to_expr(filter, dataframe.schema(), false, query_ctx)
+                .sql_to_expr(filter.clone(), dataframe.schema(), false, query_ctx)
                 .await?;
 
             // Apply the `where` clause filters
@@ -344,11 +397,7 @@ async fn query_from_information_schema_table(
         }
     };
 
-    let stream = dataframe.execute_stream().await?;
-
-    Ok(Output::new_with_stream(Box::pin(
-        RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?,
-    )))
+    Ok(dataframe)
 }
 
 /// Execute `SHOW COLUMNS` statement.
@@ -358,8 +407,19 @@ pub async fn show_columns(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let schema_name = if let Some(database) = stmt.database {
-        database
+    let dataframe = show_columns_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for `SHOW COLUMNS` without executing it.
+pub async fn show_columns_dataframe(
+    stmt: &ShowColumns,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
+    let schema_name = if let Some(database) = &stmt.database {
+        database.clone()
     } else {
         query_ctx.current_schema()
     };
@@ -397,7 +457,7 @@ pub async fn show_columns(
     let like_field = Some(columns::COLUMN_NAME);
     let sort = vec![col(columns::COLUMN_NAME).sort(true, true)];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -407,7 +467,7 @@ pub async fn show_columns(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        &stmt.kind,
     )
     .await
 }
@@ -419,8 +479,19 @@ pub async fn show_index(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let schema_name = if let Some(database) = stmt.database {
-        database
+    let dataframe = show_index_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for `SHOW INDEX` without executing it.
+pub async fn show_index_dataframe(
+    stmt: &ShowIndex,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
+    let schema_name = if let Some(database) = &stmt.database {
+        database.clone()
     } else {
         query_ctx.current_schema()
     };
@@ -471,7 +542,7 @@ pub async fn show_index(
         col(statistics::SEQ_IN_INDEX).sort(true, true),
     ];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -481,7 +552,7 @@ pub async fn show_index(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        &stmt.kind,
     )
     .await
 }
@@ -493,8 +564,19 @@ pub async fn show_region(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let schema_name = if let Some(database) = stmt.database {
-        database
+    let dataframe = show_region_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for `SHOW REGION` without executing it.
+pub async fn show_region_dataframe(
+    stmt: &ShowRegion,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
+    let schema_name = if let Some(database) = &stmt.database {
+        database.clone()
     } else {
         query_ctx.current_schema()
     };
@@ -517,7 +599,7 @@ pub async fn show_region(
         col(columns::PEER_ID).sort(true, true),
     ];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -527,7 +609,7 @@ pub async fn show_region(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        &stmt.kind,
     )
     .await
 }
@@ -539,8 +621,19 @@ pub async fn show_tables(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let schema_name = if let Some(database) = stmt.database {
-        database
+    let dataframe = show_tables_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for [`ShowTables`] without executing it.
+pub async fn show_tables_dataframe(
+    stmt: &ShowTables,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
+    let schema_name = if let Some(database) = &stmt.database {
+        database.clone()
     } else {
         query_ctx.current_schema()
     };
@@ -564,15 +657,16 @@ pub async fn show_tables(
 
     // Transform the WHERE clause for backward compatibility:
     // Replace "Tables" with "Tables_in_{schema}" to support old queries
-    let kind = match stmt.kind {
-        ShowKind::Where(mut filter) => {
+    let rewritten_kind = match &stmt.kind {
+        ShowKind::Where(filter) => {
+            let mut filter = filter.clone();
             replace_column_in_expr(&mut filter, "Tables", &tables_column);
             ShowKind::Where(filter)
         }
-        other => other,
+        kind => kind.clone(),
     };
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -582,7 +676,7 @@ pub async fn show_tables(
         filters,
         like_field,
         sort,
-        kind,
+        &rewritten_kind,
     )
     .await
 }
@@ -594,8 +688,20 @@ pub async fn show_table_status(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let schema_name = if let Some(database) = stmt.database {
-        database
+    let dataframe =
+        show_table_status_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for [`ShowTableStatus`] without executing it.
+pub async fn show_table_status_dataframe(
+    stmt: &ShowTableStatus,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
+    let schema_name = if let Some(database) = &stmt.database {
+        database.clone()
     } else {
         query_ctx.current_schema()
     };
@@ -629,7 +735,7 @@ pub async fn show_table_status(
     let like_field = Some(tables::TABLE_NAME);
     let sort = vec![col(tables::TABLE_NAME).sort(true, true)];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -639,7 +745,7 @@ pub async fn show_table_status(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        &stmt.kind,
     )
     .await
 }
@@ -651,6 +757,18 @@ pub async fn show_collations(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
+    let dataframe =
+        show_collations_dataframe(&kind, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for `SHOW COLLATION` without executing it.
+pub async fn show_collations_dataframe(
+    kind: &ShowKind,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
     // Refer to https://dev.mysql.com/doc/refman/8.0/en/show-collation.html
     let projects = vec![
         ("collation_name", "Collation"),
@@ -665,7 +783,7 @@ pub async fn show_collations(
     let like_field = Some("collation_name");
     let sort = vec![];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -687,6 +805,18 @@ pub async fn show_charsets(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
+    let dataframe =
+        show_charsets_dataframe(&kind, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for `SHOW CHARSET` without executing it.
+pub async fn show_charsets_dataframe(
+    kind: &ShowKind,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
     // Refer to https://dev.mysql.com/doc/refman/8.0/en/show-character-set.html
     let projects = vec![
         ("character_set_name", "Charset"),
@@ -699,7 +829,7 @@ pub async fn show_charsets(
     let like_field = Some("character_set_name");
     let sort = vec![];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -916,8 +1046,19 @@ pub async fn show_views(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let schema_name = if let Some(database) = stmt.database {
-        database
+    let dataframe = show_views_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for [`ShowViews`] without executing it.
+pub async fn show_views_dataframe(
+    stmt: &ShowViews,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
+    let schema_name = if let Some(database) = &stmt.database {
+        database.clone()
     } else {
         query_ctx.current_schema()
     };
@@ -930,7 +1071,7 @@ pub async fn show_views(
     let like_field = Some(tables::TABLE_NAME);
     let sort = vec![col(tables::TABLE_NAME).sort(true, true)];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -940,7 +1081,7 @@ pub async fn show_views(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        &stmt.kind,
     )
     .await
 }
@@ -952,12 +1093,23 @@ pub async fn show_flows(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
+    let dataframe = show_flows_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for [`ShowFlows`] without executing it.
+pub async fn show_flows_dataframe(
+    stmt: &ShowFlows,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
     let projects = vec![(flows::FLOW_NAME, FLOWS_COLUMN)];
     let filters = vec![col(flows::TABLE_CATALOG).eq(lit(query_ctx.current_catalog()))];
     let like_field = Some(flows::FLOW_NAME);
     let sort = vec![col(flows::FLOW_NAME).sort(true, true)];
 
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx,
@@ -967,7 +1119,7 @@ pub async fn show_flows(
         filters,
         like_field,
         sort,
-        stmt.kind,
+        &stmt.kind,
     )
     .await
 }
@@ -1076,6 +1228,11 @@ pub fn show_create_flow(
         if_not_exists: true,
         expire_after: flow_val.expire_after(),
         eval_interval: flow_val.eval_interval(),
+        eval_offset: effective_eval_schedule_from_flow_info(&flow_val)
+            .map_err(BoxedError::new)
+            .context(error::QueryExecutionSnafu)?
+            .map(|schedule| schedule.anchor_secs)
+            .filter(|anchor_secs| *anchor_secs != 0),
         comment,
         flow_options: OptionMap::from_filtered_string_map(
             flow_val.options(),
@@ -1340,6 +1497,18 @@ pub async fn show_processlist(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
+    let dataframe =
+        show_processlist_dataframe(&stmt, query_engine, catalog_manager, query_ctx).await?;
+    dataframe_to_output(dataframe).await
+}
+
+/// Builds the [`DataFrame`] for `SHOW PROCESSLIST` without executing it.
+pub async fn show_processlist_dataframe(
+    stmt: &ShowProcessList,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<DataFrame> {
     let projects = if stmt.full {
         vec![
             (process_list::ID, "Id"),
@@ -1360,20 +1529,24 @@ pub async fn show_processlist(
         ]
     };
 
-    let filters = vec![];
+    let filters = if query_ctx.current_user().is_admin() {
+        vec![]
+    } else {
+        vec![col(process_list::CATALOG).eq(lit(query_ctx.current_catalog()))]
+    };
     let like_field = None;
     let sort = vec![col("id").sort(true, true)];
-    query_from_information_schema_table(
+    query_from_information_schema_dataframe(
         query_engine,
         catalog_manager,
         query_ctx.clone(),
         "process_list",
         vec![],
-        projects.clone(),
+        projects,
         filters,
         like_field,
         sort,
-        ShowKind::All,
+        &ShowKind::All,
     )
     .await
 }

@@ -342,6 +342,11 @@ impl AccessLayer {
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
         let cache_manager = request.cache_manager.clone();
+        let override_sequence = if request.preserve_row_sequence {
+            None
+        } else {
+            request.max_sequence
+        };
 
         let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
             // Write to the write cache.
@@ -397,14 +402,14 @@ impl AccessLayer {
                     writer
                         .write_all_flat_as_primary_key(
                             request.source,
-                            request.max_sequence,
+                            override_sequence,
                             write_opts,
                         )
                         .await?
                 }
                 FormatType::Flat => {
                     writer
-                        .write_all_flat(request.source, request.max_sequence, write_opts)
+                        .write_all_flat(request.source, override_sequence, write_opts)
                         .await?
                 }
             }
@@ -564,6 +569,8 @@ pub struct SstWriteRequest {
     pub storage: Option<String>,
     pub max_sequence: Option<SequenceNumber>,
     pub sst_write_format: FormatType,
+
+    pub preserve_row_sequence: bool,
 
     /// Configs for index
     pub index_options: IndexOptions,

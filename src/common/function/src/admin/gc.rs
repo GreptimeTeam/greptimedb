@@ -38,17 +38,20 @@ const DEFAULT_FULL_FILE_LISTING: bool = false;
 )]
 pub(crate) async fn gc_regions(
     procedure_service_handler: &ProcedureServiceHandlerRef,
-    _ctx: &QueryContextRef,
+    query_ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
     let (region_ids, full_file_listing) = parse_gc_regions_params(params)?;
 
     let resp = procedure_service_handler
-        .gc_regions(GcRegionsRequest {
-            region_ids,
-            full_file_listing,
-            timeout: None,
-        })
+        .gc_regions(
+            query_ctx.clone(),
+            GcRegionsRequest {
+                region_ids,
+                full_file_listing,
+                timeout: None,
+            },
+        )
         .await?;
 
     Ok(Value::from(resp.processed_regions))
@@ -69,13 +72,16 @@ pub(crate) async fn gc_table(
         parse_gc_table_params(params, query_ctx)?;
 
     let resp = procedure_service_handler
-        .gc_table(GcTableRequest {
-            catalog_name,
-            schema_name,
-            table_name,
-            full_file_listing,
-            timeout: None,
-        })
+        .gc_table(
+            query_ctx.clone(),
+            GcTableRequest {
+                catalog_name,
+                schema_name,
+                table_name,
+                full_file_listing,
+                timeout: None,
+            },
+        )
         .await?;
 
     Ok(Value::from(resp.processed_regions))
@@ -268,13 +274,17 @@ mod tests {
     impl ProcedureServiceHandler for MockProcedureServiceHandler {
         async fn purge_table(
             &self,
-            _table_name: table::table_name::TableName,
             _query_ctx: QueryContextRef,
+            _table_name: table::table_name::TableName,
         ) -> Result<()> {
             unreachable!()
         }
 
-        async fn migrate_region(&self, _request: MigrateRegionRequest) -> Result<Option<String>> {
+        async fn migrate_region(
+            &self,
+            _query_ctx: QueryContextRef,
+            _request: MigrateRegionRequest,
+        ) -> Result<Option<String>> {
             unreachable!()
         }
 
@@ -297,12 +307,20 @@ mod tests {
             unreachable!()
         }
 
-        async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
+        async fn gc_regions(
+            &self,
+            _query_ctx: QueryContextRef,
+            request: GcRegionsRequest,
+        ) -> Result<GcResponse> {
             *self.gc_regions_request.lock().unwrap() = Some(request);
             Ok(GcResponse::default())
         }
 
-        async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
+        async fn gc_table(
+            &self,
+            _query_ctx: QueryContextRef,
+            request: GcTableRequest,
+        ) -> Result<GcResponse> {
             *self.gc_table_request.lock().unwrap() = Some(request);
             Ok(GcResponse::default())
         }

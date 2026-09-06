@@ -961,7 +961,7 @@ async fn test_query_prepared() -> Result<()> {
         .await
     {
         Err(mysql_async::Error::Server(e)) => assert_eq!(
-            "ERROR HY000 (1210): (InvalidArguments): Invalid prepare statement: Invalid SQL syntax: sql parser error: INTERVAL requires a unit after the literal value",
+            "ERROR 1210 (HY000): (InvalidArguments): Invalid prepare statement: Invalid SQL syntax: sql parser error: INTERVAL requires a unit after the literal value",
             e.to_string()
         ),
         _ => unreachable!(),

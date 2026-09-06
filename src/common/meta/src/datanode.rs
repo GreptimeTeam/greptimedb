@@ -31,6 +31,8 @@ use crate::heartbeat::utils::get_datanode_workloads;
 const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
 
 pub const REGION_STATISTIC_KEY: &str = "__region_statistic";
+/// The private table name for persisted region statistics.
+pub const REGION_STATS_HISTORY_TABLE_NAME: &str = "region_statistics_history";
 
 lazy_static! {
     pub(crate) static ref DATANODE_LEASE_KEY_PATTERN: Regex =

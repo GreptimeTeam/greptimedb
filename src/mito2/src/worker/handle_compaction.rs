@@ -131,6 +131,11 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
         let execution = request.execution.clone();
+        // Whether this execution reduced the SST file count. The scheduler keeps
+        // draining while compaction makes progress; a rewrite that did not reduce
+        // files (e.g. its output was split into more files than its input) must end
+        // the chain to avoid a no-progress loop.
+        let made_progress = request.edit.files_to_remove.len() > request.edit.files_to_add.len();
 
         region.version_control.apply_edit(
             Some(request.edit.clone()),
@@ -167,6 +172,7 @@ impl<S> RegionWorkerLoop<S> {
                 &execution,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
+                made_progress,
             )
             .await;
         match transition {

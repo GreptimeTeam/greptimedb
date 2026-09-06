@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use arrow_schema::{
-    ArrowError, DataType, DataType as ArrowDataType, Field, Schema as ArrowSchema,
+    ArrowError, DataType as ArrowDataType, Field, Schema as ArrowSchema,
     SchemaRef as ArrowSchemaRef, SortOptions,
 };
 use async_stream::stream;
@@ -42,14 +42,12 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
-use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_common::stats::Precision;
+use datafusion_common::{Column as ColumnExpr, DFSchemaRef, DataFusionError, Result, Statistics};
+use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
-use datatypes::extension::json::{
-    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
-    is_legacy_json2_extension_type,
-};
+use datatypes::extension::json::is_any_json_extension_type;
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -84,6 +82,51 @@ fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<Que
     context.session_config().get_extension()
 }
 
+/// Returns a deterministic upper bound on rows emitted by the remote plan for
+/// one region.
+///
+/// Only explicit caps and row-non-increasing wrappers are followed. Nodes that
+/// may multiply rows fail open, so the result remains a sound upper bound.
+fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
+    match plan {
+        LogicalPlan::Limit(limit) => {
+            let input_bound = remote_plan_row_bound(&limit.input);
+            match limit.get_fetch_type() {
+                Ok(FetchType::Literal(Some(fetch))) => {
+                    Some(input_bound.map_or(fetch, |bound| bound.min(fetch)))
+                }
+                _ => input_bound,
+            }
+        }
+        LogicalPlan::Sort(sort) => {
+            let input_bound = remote_plan_row_bound(&sort.input);
+            sort.fetch
+                .map(|fetch| input_bound.map_or(fetch, |bound| bound.min(fetch)))
+                .or(input_bound)
+        }
+        LogicalPlan::Projection(projection) => remote_plan_row_bound(&projection.input),
+        LogicalPlan::Filter(filter) => remote_plan_row_bound(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => remote_plan_row_bound(&alias.input),
+        LogicalPlan::Window(window) => remote_plan_row_bound(&window.input),
+        LogicalPlan::Repartition(repartition) => remote_plan_row_bound(&repartition.input),
+        LogicalPlan::Distinct(distinct) => remote_plan_row_bound(distinct.input()),
+        LogicalPlan::Aggregate(aggregate) => {
+            if aggregate
+                .group_expr
+                .iter()
+                .any(|expr| matches!(expr, Expr::GroupingSet(_)))
+            {
+                None
+            } else if aggregate.group_expr.is_empty() {
+                Some(1)
+            } else {
+                remote_plan_row_bound(&aggregate.input)
+            }
+        }
+        _ => None,
+    }
+}
+
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
     remote_dyn_filter_pushdown_enabled_from_extensions(&query_ctx.extensions())
         .map_err(|err| DataFusionError::External(Box::new(err)))
@@ -113,6 +156,33 @@ fn merge_scan_schema_error_count_for_test() -> u64 {
     TEST_MERGE_SCAN_SCHEMA_ERRORS.with(Cell::get)
 }
 
+/// Returns true when the field is a JSON column, identified either by its
+/// Arrow extension type (`greptime.json` / `greptime.json2`) or by its
+/// `greptime:type=Json` marker.
+fn is_json_field(field: &Field) -> bool {
+    is_any_json_extension_type(field)
+        || field
+            .metadata()
+            .get(datatypes::schema::TYPE_KEY)
+            .map(String::as_ref)
+            == Some("Json")
+}
+
+/// Returns true when two fields describe the same column semantics: same
+/// name, same data type, and same nullability.
+///
+/// Arrow `Field` metadata is auxiliary information (indexing, encoding,
+/// compression hints, ...) and does not participate in the comparison. This
+/// applies to every field, JSON columns included: JSON identity keys
+/// (`greptime:type`, `ARROW:extension:metadata`) are never compared here.
+/// The wire/decoded physical-type difference of JSON columns is exempted
+/// separately by [`json_fields_compatible`].
+fn fields_semantically_equal(expected_field: &Field, actual_field: &Field) -> bool {
+    expected_field.name() == actual_field.name()
+        && expected_field.data_type() == actual_field.data_type()
+        && expected_field.is_nullable() == actual_field.is_nullable()
+}
+
 /// Returns true when two fields are semantically equivalent JSON columns.
 ///
 /// A JSON column is carried on the wire in its binary-encoded form (e.g.
@@ -124,17 +194,8 @@ fn merge_scan_schema_error_count_for_test() -> u64 {
 /// settings (`ARROW:extension:metadata`, e.g. type hints) are the semantic
 /// parts of the field and must match.
 fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool {
-    let is_json = |field: &Field| {
-        is_any_json_extension_type(field)
-            || field
-                .metadata()
-                .get(datatypes::schema::TYPE_KEY)
-                .map(String::as_ref)
-                == Some("Json")
-    };
-
-    is_json(expected_field)
-        && is_json(actual_field)
+    is_json_field(expected_field)
+        && is_json_field(actual_field)
         && expected_field.name() == actual_field.name()
         && expected_field.is_nullable() == actual_field.is_nullable()
         // Both must carry the same JSON marker.
@@ -151,12 +212,15 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
 
 /// Validates the remote schema before positional column handling.
 ///
-/// A timestamp timezone difference is the only intentional exception. It is
-/// accepted by directly comparing the same timestamp unit, distinct timezones,
-/// and equal name, nullability, and field metadata. Top-level Arrow schema
-/// metadata is non-semantic at this boundary. JSON columns are additionally
-/// compared semantically (see [`json_fields_compatible`]) because their wire
-/// and decoded representations use different physical arrow types.
+/// Field metadata (indexing/encoding/compression hints) is non-semantic at
+/// this boundary and is ignored: two fields are equal when their name, data
+/// type, and nullability match (see [`fields_semantically_equal`]). A
+/// timestamp timezone difference is the only intentional exception, accepted
+/// when the fields share the same timestamp unit, distinct timezones, and
+/// equal name and nullability. Top-level Arrow schema metadata is
+/// non-semantic at this boundary as well. JSON columns are compared
+/// semantically (see [`json_fields_compatible`]) because their wire and
+/// decoded representations use different physical arrow types.
 fn validate_remote_schema(
     expected: &ArrowSchema,
     actual: &ArrowSchema,
@@ -176,7 +240,8 @@ fn validate_remote_schema(
         .zip(actual.fields().iter())
         .enumerate()
     {
-        if expected_field == actual_field {
+        // Field metadata does not participate in the semantic comparison.
+        if fields_semantically_equal(expected_field, actual_field) {
             continue;
         }
 
@@ -197,7 +262,6 @@ fn validate_remote_schema(
                 && expected_timezone != actual_timezone
                 && expected_field.name() == actual_field.name()
                 && expected_field.is_nullable() == actual_field.is_nullable()
-                && expected_field.metadata() == actual_field.metadata()
         );
         if !timezone_only_difference {
             return Err(remote_schema_mismatch(format!(
@@ -266,15 +330,53 @@ impl Drop for SubscriberRollbackGuard<'_> {
     }
 }
 
-#[derive(Debug, Hash, PartialOrd, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
     /// In logical plan phase it only contains one input
     input: LogicalPlan,
+    /// Schema exposed to the local stage.
+    output_schema: DFSchemaRef,
     /// If this plan is a placeholder
     is_placeholder: bool,
     partition_cols: AliasMapping,
     /// Assigned after dist-plan rewriting so rewriters only deal with plan shape.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
+}
+
+impl PartialOrd for MergeScanLogicalPlan {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let Self {
+            input,
+            output_schema,
+            is_placeholder,
+            partition_cols,
+            remote_dyn_filter_producer_id,
+        } = self;
+        let Self {
+            input: other_input,
+            output_schema: other_output_schema,
+            is_placeholder: other_is_placeholder,
+            partition_cols: other_partition_cols,
+            remote_dyn_filter_producer_id: other_remote_dyn_filter_producer_id,
+        } = other;
+
+        let ordering = (
+            input,
+            is_placeholder,
+            partition_cols,
+            remote_dyn_filter_producer_id,
+        )
+            .partial_cmp(&(
+                other_input,
+                other_is_placeholder,
+                other_partition_cols,
+                other_remote_dyn_filter_producer_id,
+            ));
+        match ordering {
+            Some(std::cmp::Ordering::Equal) if output_schema != other_output_schema => None,
+            ordering => ordering,
+        }
+    }
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -289,7 +391,7 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
     }
 
     fn schema(&self) -> &datafusion_common::DFSchemaRef {
-        self.input.schema()
+        &self.output_schema
     }
 
     // Prevent further optimization
@@ -315,13 +417,21 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
+    /// Creates a merge scan with the input plan's schema.
     pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
         Self {
+            output_schema: input.schema().clone(),
             input,
             is_placeholder,
             partition_cols,
             remote_dyn_filter_producer_id: None,
         }
+    }
+
+    /// Replaces the schema exposed to the local stage.
+    pub(crate) fn with_output_schema(mut self, output_schema: DFSchemaRef) -> Self {
+        self.output_schema = output_schema;
+        self
     }
 
     pub(crate) fn with_remote_dyn_filter_producer_id(
@@ -407,7 +517,8 @@ impl MergeScanExec {
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
-        let arrow_schema = maybe_amend_json2_field(arrow_schema);
+        let arrow_schema = Arc::new(arrow_schema.clone());
+        let output_partition_count = Self::output_partition_count(regions.len(), target_partition);
 
         // States the output ordering of the plan.
         //
@@ -417,7 +528,7 @@ impl MergeScanExec {
         //
         // Otherwise, we need to use the default ordering.
         let eq_properties = if let LogicalPlan::Sort(sort) = &plan
-            && target_partition >= regions.len()
+            && output_partition_count >= regions.len()
         {
             let lex_ordering = sort
                 .expr
@@ -456,7 +567,7 @@ impl MergeScanExec {
                 }
             })
             .collect();
-        let partitioning = Partitioning::Hash(partition_exprs, target_partition);
+        let partitioning = Partitioning::Hash(partition_exprs, output_partition_count);
 
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
@@ -483,6 +594,28 @@ impl MergeScanExec {
         })
     }
 
+    /// Conservative row-count upper bound for all selected regions.
+    ///
+    /// This is not an expected cardinality: DataFusion receives it as an
+    /// inexact estimate only because `Statistics` has no upper-bound precision.
+    fn estimated_num_rows(&self) -> Precision<usize> {
+        if self.regions.is_empty() {
+            return Precision::Inexact(0);
+        }
+
+        let Some(rows_per_region) = remote_plan_row_bound(&self.plan) else {
+            return Precision::Absent;
+        };
+        rows_per_region
+            .checked_mul(self.regions.len())
+            .map_or(Precision::Absent, Precision::Inexact)
+    }
+
+    /// Number of partitions populated by the region striping in [`Self::to_stream`].
+    fn output_partition_count(num_regions: usize, target_partition: usize) -> usize {
+        num_regions.max(1).min(target_partition.max(1))
+    }
+
     pub fn to_stream(
         &self,
         context: Arc<TaskContext>,
@@ -497,7 +630,8 @@ impl MergeScanExec {
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
-        let target_partition = self.target_partition;
+        let target_partition =
+            Self::output_partition_count(self.regions.len(), self.target_partition);
         let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
         let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
             self.captured_remote_dyn_filters()
@@ -663,6 +797,19 @@ impl MergeScanExec {
                         stream.next().instrument(region_span.clone()).await
                     };
                     let Some(batch) = batch else {
+                        // The remote Flight stream publishes its terminal metrics
+                        // immediately after EOF. Capture them before leaving the
+                        // loop so the final verbose snapshot is not lost.
+                        if let Some(metrics) = stream.metrics() {
+                            let load = region_scan_load(&metrics);
+                            let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
+                            let value = read_meter!(c, s, load, current_channel as u8);
+                            metric.record_greptime_exec_cost(value as usize);
+                            sub_stage_metrics_moved
+                                .lock()
+                                .unwrap()
+                                .insert(region_id, metrics);
+                        }
                         break;
                     };
                     let poll_elapsed = poll_timer.elapsed();
@@ -730,18 +877,6 @@ impl MergeScanExec {
                         metric.first_consume_time(),
                         do_get_cost
                     );
-                }
-
-                // process metrics after all data is drained.
-                if let Some(metrics) = stream.metrics() {
-                    let load = region_scan_load(&metrics);
-                    let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                    let value = read_meter!(c, s, load, current_channel as u8);
-                    metric.record_greptime_exec_cost(value as usize);
-
-                    // record metrics from sub sgates
-                    let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
-                    sub_stage_metrics.insert(region_id, metrics);
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
@@ -834,7 +969,7 @@ impl MergeScanExec {
             metric: self.metric.clone(),
             properties: Arc::new(PlanProperties::new(
                 self.properties.eq_properties.clone(),
-                Partitioning::Hash(overlaps, self.target_partition),
+                Partitioning::Hash(overlaps, self.partition_count()),
                 self.properties.emission_type,
                 self.properties.boundedness,
             )),
@@ -885,7 +1020,7 @@ impl MergeScanExec {
     }
 
     pub fn partition_count(&self) -> usize {
-        self.target_partition
+        Self::output_partition_count(self.regions.len(), self.target_partition)
     }
 
     pub fn region_count(&self) -> usize {
@@ -900,44 +1035,6 @@ impl MergeScanExec {
             .cloned()
             .collect()
     }
-}
-
-// If the schema has JSON2 field, AND the field is of empty Struct datatype, amend it with Binary
-// datatype.
-// This is a very hacky way to make it possible to query the whole JSON2 column. Because when
-// querying a whole JSON2 column, like in the SQL `select * from ...`, we can't concretize the JSON2
-// datatype from the query. Hence, the JSON2 datatype remains what in the column schema, i.e., empty
-// Struct. An empty Struct is not alignable like any other concretized JSON2 datatypes, so to make
-// the query work, we amend(rewrite) it to Binary datatype.
-// Why the Binary datatype? Because underlying the scan and projection stage, the JSON2 data are
-// variant shape, will be all converted to bytes.
-// Anyway, this is not clean nor elegant. TODO(LFC) Maybe make it into some plan analyzer rule?
-fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
-    let schema = schema.clone();
-    let mut new_fields = Vec::with_capacity(schema.fields().len());
-    for field in schema.fields().iter() {
-        let new_field = if is_json2_extension_type(field)
-            && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
-        {
-            let is_legacy_json2 = is_legacy_json2_extension_type(field);
-            let mut new_field = field.as_ref().clone();
-            new_field.set_data_type(DataType::Binary);
-            if is_legacy_json2 {
-                // Pre-type-hint JSON2 is identified partly by its Struct data type. Promote the
-                // ephemeral field before rewriting it to Binary so later checks retain its JSON2
-                // identity.
-                new_field = new_field.with_extension_type(Json2ExtensionType::default());
-            }
-            Arc::new(new_field)
-        } else {
-            field.clone()
-        };
-        new_fields.push(new_field);
-    }
-    Arc::new(ArrowSchema::new_with_metadata(
-        new_fields,
-        schema.metadata().clone(),
-    ))
 }
 
 #[cfg(test)]
@@ -1153,6 +1250,16 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+        if partition.is_some() {
+            return Ok(Statistics::new_unknown(&self.arrow_schema));
+        }
+
+        let mut statistics = Statistics::new_unknown(&self.arrow_schema);
+        statistics.num_rows = self.estimated_num_rows();
+        Ok(statistics)
+    }
+
     fn name(&self) -> &str {
         "MergeScanExec"
     }
@@ -1301,10 +1408,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use arrow::array::{Int64Array, TimestampMillisecondArray};
-    use arrow_schema::extension::{
-        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
-    };
-    use arrow_schema::{DataType as TestArrowDataType, Field, Fields, TimeUnit};
+    use arrow_schema::{DataType as TestArrowDataType, Field, TimeUnit};
     use async_trait::async_trait;
     use common_base::Plugins;
     use common_meta::peer::Peer;
@@ -1324,7 +1428,6 @@ mod tests {
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
-    use datatypes::extension::json::JsonExtensionType;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
@@ -1354,36 +1457,10 @@ mod tests {
         QueryId::from(Uuid::from_u128(value))
     }
 
-    #[test]
-    fn test_amend_legacy_json2_field_preserves_json2_identity() {
-        let field = Field::new("j", DataType::Struct(Fields::empty()), true).with_metadata(
-            StdHashMap::from([
-                (
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    JsonExtensionType::NAME.to_string(),
-                ),
-                (
-                    EXTENSION_TYPE_METADATA_KEY.to_string(),
-                    serde_json::json!({
-                        "json_structure_settings": { "Structured": null }
-                    })
-                    .to_string(),
-                ),
-            ]),
-        );
-
-        let schema = maybe_amend_json2_field(&ArrowSchema::new(vec![field]));
-        let field = schema.field(0);
-        assert_eq!(&DataType::Binary, field.data_type());
-        assert_eq!(Some(Json2ExtensionType::NAME), field.extension_type_name());
-        assert!(is_json2_extension_type(field));
-    }
-
     fn merge_scan_exec_with_sorted_input(
         region_count: u64,
         target_partition: usize,
     ) -> MergeScanExec {
-        let session_state = SessionStateBuilder::new().build();
         let plan = LogicalPlanBuilder::empty(true)
             .project(vec![lit(1i64).alias("ts")])
             .unwrap()
@@ -1391,10 +1468,20 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let schema = plan.schema().as_arrow().clone();
         let regions = (0..region_count)
             .map(|region_number| RegionId::new(1024, region_number as u32))
             .collect();
+
+        merge_scan_exec_with_plan(regions, plan, target_partition)
+    }
+
+    fn merge_scan_exec_with_plan(
+        regions: Vec<RegionId>,
+        plan: LogicalPlan,
+        target_partition: usize,
+    ) -> MergeScanExec {
+        let session_state = SessionStateBuilder::new().build();
+        let schema = plan.schema().as_arrow().clone();
 
         MergeScanExec::new(
             &session_state,
@@ -1532,6 +1619,118 @@ mod tests {
         let exec = merge_scan_exec_with_sorted_input(3, 4);
 
         assert!(exec.properties().output_ordering().is_some());
+    }
+
+    #[test]
+    fn merge_scan_reports_populated_partition_count() {
+        let cases = [(0, 10, 1), (1, 10, 1), (3, 2, 2), (5, 10, 5), (3, 0, 1)];
+
+        for (region_count, target, expected) in cases {
+            let exec = merge_scan_exec_with_sorted_input(region_count, target);
+            assert_eq!(exec.partition_count(), expected);
+            assert_eq!(
+                exec.properties().output_partitioning().partition_count(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn merge_scan_reports_only_deterministic_plan_bounds() {
+        use datafusion::functions_aggregate::expr_fn::count;
+        use datafusion_expr::GroupingSet;
+
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let limited = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), limited, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(100)
+        );
+
+        let large_bound = i32::MAX as usize + 1;
+        let large_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(large_bound))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(vec![RegionId::new(1024, 1)], large_limit, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(large_bound)
+        );
+
+        let uncapped = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), uncapped.clone(), 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
+        assert_eq!(
+            merge_scan_exec_with_plan(Vec::new(), uncapped, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(0)
+        );
+
+        let global_aggregate = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(0))
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions.clone(), global_aggregate, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(2)
+        );
+
+        let grouping_sets = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .aggregate(
+                vec![Expr::GroupingSet(GroupingSet::GroupingSets(vec![
+                    vec![],
+                    vec![col("col")],
+                ]))],
+                Vec::<Expr>::new(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(regions, grouping_sets, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
     }
 
     #[test]
@@ -2693,9 +2892,12 @@ mod tests {
     }
 
     #[test]
-    fn merge_scan_remote_schema_identity_rejects_json_vs_plain_binary_field() {
-        // A JSON column must not be accepted as compatible with a plain Binary
-        // column lacking the JSON extension metadata.
+    fn merge_scan_remote_schema_identity_ignores_json_extension_metadata_when_physical_type_matches()
+     {
+        // Field metadata (including the JSON extension identity) is not part
+        // of the semantic field identity: a JSON column in its binary wire
+        // form and a plain Binary column share the same name, physical type,
+        // and nullability, so they validate as equal.
         let expected = ArrowSchema::new(vec![
             Field::new("j", TestArrowDataType::Binary, true).with_metadata(json_field_metadata(
                 true,
@@ -2703,11 +2905,26 @@ mod tests {
             )),
         ]);
         let actual = ArrowSchema::new(vec![Field::new("j", TestArrowDataType::Binary, true)]);
-        assert!(validate_remote_schema(&expected, &actual, "test").is_err());
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+
+        // The JSON compatibility exemption is scoped to JSON columns only: a
+        // pair of non-JSON fields with different physical types is still
+        // rejected even though one side is Binary.
+        let plain_binary = ArrowSchema::new(vec![Field::new("v", TestArrowDataType::Binary, true)]);
+        let plain_struct = ArrowSchema::new(vec![Field::new(
+            "v",
+            TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(Field::new(
+                "a",
+                TestArrowDataType::Utf8View,
+                true,
+            ))])),
+            true,
+        )]);
+        assert!(validate_remote_schema(&plain_binary, &plain_struct, "test").is_err());
     }
 
     #[test]
-    fn merge_scan_remote_schema_identity_rejects_field_metadata_and_nullability_mismatch() {
+    fn merge_scan_remote_schema_identity_ignores_field_metadata_but_rejects_nullability_mismatch() {
         let expected = expected_int64_schema();
         let metadata_mismatch = ArrowSchema::new_with_metadata(
             vec![
@@ -2730,8 +2947,40 @@ mod tests {
             ],
             expected.metadata().clone(),
         );
-        assert!(validate_remote_schema(&expected, &metadata_mismatch, "test").is_err());
+        // Field metadata is auxiliary and does not participate in the
+        // semantic field comparison.
+        assert!(validate_remote_schema(&expected, &metadata_mismatch, "test").is_ok());
         assert!(validate_remote_schema(&expected, &nullability_mismatch, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_ignores_skipping_index_field_metadata() {
+        // Regression: a remote stream may advertise auxiliary field metadata
+        // (e.g. `greptime:skipping_index`) that the expected schema does not
+        // carry. Field metadata is not part of the semantic field identity
+        // (name + data type + nullability) and must not fail validation.
+        let skipping_index_metadata = StdHashMap::from([(
+            "greptime:skipping_index".to_string(),
+            r#"{"granularity":1,"false-positive-rate-in-10000":100,"index-type":"BloomFilter"}"#
+                .to_string(),
+        )]);
+        let expected =
+            ArrowSchema::new(vec![Field::new("value", TestArrowDataType::Float64, true)]);
+        let actual_with_metadata = ArrowSchema::new(vec![
+            Field::new("value", TestArrowDataType::Float64, true)
+                .with_metadata(skipping_index_metadata),
+        ]);
+        assert!(validate_remote_schema(&expected, &actual_with_metadata, "test").is_ok());
+
+        // A real data type mismatch is still rejected.
+        let wrong_type =
+            ArrowSchema::new(vec![Field::new("value", TestArrowDataType::Int64, true)]);
+        assert!(validate_remote_schema(&expected, &wrong_type, "test").is_err());
+
+        // A name mismatch is still rejected.
+        let wrong_name =
+            ArrowSchema::new(vec![Field::new("other", TestArrowDataType::Float64, true)]);
+        assert!(validate_remote_schema(&expected, &wrong_name, "test").is_err());
     }
 
     #[test]
@@ -2767,9 +3016,13 @@ mod tests {
                 "different".to_string(),
             )])),
         ]);
-        for actual in [&different_unit, &different_name, &nullability, &metadata] {
+        for actual in [&different_unit, &different_name, &nullability] {
             assert!(validate_remote_schema(&expected, actual, "test").is_err());
         }
+        // Field metadata is non-semantic and is ignored even for timezone
+        // pairs: a metadata difference on an otherwise timezone-only
+        // difference is accepted.
+        assert!(validate_remote_schema(&expected, &metadata, "test").is_ok());
     }
 
     #[test]

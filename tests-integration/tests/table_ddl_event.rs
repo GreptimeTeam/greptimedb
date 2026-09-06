@@ -16,27 +16,47 @@ use std::sync::Arc;
 #[cfg(feature = "enterprise")]
 use std::time::Duration;
 
+use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::greptime_request::Request;
+use api::v1::value::ValueData;
+use api::v1::{
+    AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef, CreateTableExpr, DdlRequest,
+    Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType, alter_table_expr,
+};
 use client::OutputData;
+use common_catalog::consts::MITO_ENGINE;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PAYLOAD_COLUMN, PHYSICAL_TABLE_ID_COLUMN, PROCEDURE_ID_COLUMN,
     PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN, TABLE_NAME_COLUMN, TYPE_COLUMN,
 };
+#[cfg(feature = "enterprise")]
+use common_event_recorder::{PersistentEventContext, TriggerReason};
+#[cfg(feature = "enterprise")]
+use common_procedure::ProcedureContext;
 use common_test_util::temp_dir::create_temp_dir;
 use frontend::instance::Instance;
 use meta_srv::gc::GcSchedulerOptions;
 use mito2::gc::GcConfig;
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::{Channel, QueryContext};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
+use tests_integration::test_util::setup_authenticated_grpc_database;
 
 use crate::event_recorder_test_util::{
-    assert_eventually_eq, assert_single_event, find_eventually_string, find_eventually_u32,
+    assert_eventually_eq, assert_procedure_actor, assert_single_event, find_eventually_string,
+    find_eventually_u32,
 };
 
 const EVENTS_TABLE: &str = "greptime_private.events";
 const TABLE: &str = "table_ddl_events";
 const PHYSICAL_TABLE: &str = "table_ddl_events_phy";
 const LOGICAL_TABLE: &str = "table_ddl_events_logical";
+const AUTO_TABLE: &str = "table_ddl_events_auto";
+const AUTO_INFLUX_TABLE: &str = "table_ddl_events_auto_influx";
+const GRPC_TABLE: &str = "table_ddl_events_grpc";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_ddl_procedure_events() {
@@ -70,17 +90,144 @@ async fn test_table_ddl_procedure_events() {
         .await;
     let frontend = cluster.fe_instance().clone();
 
-    // Act / Assert: Create Table retains its rich submitted row and records the
-    // created table ID when it completes.
-    run_sql(
+    auto_create_table(&frontend, AUTO_TABLE, Channel::Prometheus).await;
+    let auto_create_procedure_id =
+        submitted_procedure_id(&frontend, "create_table", AUTO_TABLE).await;
+    assert_event_context(
         &frontend,
-        &format!(
-            "CREATE TABLE {TABLE} (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)"
-        ),
+        "create_table",
+        &auto_create_procedure_id,
+        "auto_create",
+        Some("prometheus"),
     )
     .await;
+
+    auto_create_table(&frontend, AUTO_INFLUX_TABLE, Channel::Influx).await;
+    let auto_influx_create_procedure_id =
+        submitted_procedure_id(&frontend, "create_table", AUTO_INFLUX_TABLE).await;
+    assert_event_context(
+        &frontend,
+        "create_table",
+        &auto_influx_create_procedure_id,
+        "auto_create",
+        Some("influx"),
+    )
+    .await;
+
+    // gRPC DDL bypasses the SQL statement executor, so it must set its own
+    // manual trigger reason before submitting the table procedure.
+    GrpcQueryHandler::do_query(
+        frontend.as_ref(),
+        Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(CreateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: GRPC_TABLE.to_string(),
+                column_defs: vec![
+                    ColumnDef {
+                        name: "host".to_string(),
+                        data_type: ColumnDataType::String as i32,
+                        is_nullable: true,
+                        semantic_type: SemanticType::Tag as i32,
+                        ..Default::default()
+                    },
+                    ColumnDef {
+                        name: "ts".to_string(),
+                        data_type: ColumnDataType::TimestampMillisecond as i32,
+                        is_nullable: false,
+                        semantic_type: SemanticType::Timestamp as i32,
+                        ..Default::default()
+                    },
+                ],
+                time_index: "ts".to_string(),
+                engine: MITO_ENGINE.to_string(),
+                ..Default::default()
+            })),
+        }),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Grpc,
+        )),
+    )
+    .await
+    .unwrap();
+    let grpc_create_procedure_id =
+        submitted_procedure_id(&frontend, "create_table", GRPC_TABLE).await;
+    assert_procedure_actor(&frontend, &grpc_create_procedure_id, Some("greptime")).await;
+    assert_event_context(
+        &frontend,
+        "create_table",
+        &grpc_create_procedure_id,
+        "manual",
+        Some("grpc"),
+    )
+    .await;
+    GrpcQueryHandler::do_query(
+        frontend.as_ref(),
+        Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: GRPC_TABLE.to_string(),
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
+                    add_columns: vec![AddColumn {
+                        column_def: Some(ColumnDef {
+                            name: "value".to_string(),
+                            data_type: ColumnDataType::Float64 as i32,
+                            is_nullable: true,
+                            semantic_type: SemanticType::Field as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                })),
+            })),
+        }),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Grpc,
+        )),
+    )
+    .await
+    .unwrap();
+    let grpc_alter_procedure_id =
+        submitted_procedure_id(&frontend, "alter_table", GRPC_TABLE).await;
+    assert_event_context(
+        &frontend,
+        "alter_table",
+        &grpc_alter_procedure_id,
+        "manual",
+        Some("grpc"),
+    )
+    .await;
+
+    // Act / Assert: Create Table retains its rich submitted row and records the
+    // created table ID when it completes.
+    let (actor_db, _actor_grpc_server) = setup_authenticated_grpc_database(
+        frontend.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
+    )
+    .await;
+    actor_db
+        .sql(format!(
+            "CREATE TABLE {TABLE} (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)"
+        ))
+        .await
+        .unwrap();
     let table_id = find_table_id(&frontend, TABLE).await;
     let create_table_procedure_id = submitted_procedure_id(&frontend, "create_table", TABLE).await;
+    assert_procedure_actor(&frontend, &create_table_procedure_id, Some(PROCEDURE_ACTOR)).await;
+    assert_event_context(
+        &frontend,
+        "create_table",
+        &create_table_procedure_id,
+        "manual",
+        Some("grpc"),
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "create_table",
@@ -93,29 +240,36 @@ async fn test_table_ddl_procedure_events() {
 +--------------+------------------+",
     )
     .await;
-    assert_id_terminal_event(
+    assert_terminal_event(
         &frontend,
         "create_table",
         &create_table_procedure_id,
-        table_id,
         "Succeeded",
-        "\
-+--------------+
-| type         |
-+--------------+
-| create_table |
-+--------------+",
+        Some(TABLE),
+        Some(table_id),
     )
     .await;
 
-    // Act / Assert: Alter and Truncate have a rich submitted row and lightweight
-    // terminal lifecycle row.
-    run_sql(
+    // Act / Assert: Alter and Truncate retain their submitted locators on terminal rows.
+    run_sql_with_context(
         &frontend,
         &format!("ALTER TABLE {TABLE} ADD COLUMN extra STRING"),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
     )
     .await;
     let alter_table_procedure_id = submitted_procedure_id(&frontend, "alter_table", TABLE).await;
+    assert_event_context(
+        &frontend,
+        "alter_table",
+        &alter_table_procedure_id,
+        "manual",
+        Some("httpsql"),
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "alter_table",
@@ -128,11 +282,13 @@ async fn test_table_ddl_procedure_events() {
 +-------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(
+    assert_terminal_event(
         &frontend,
         "alter_table",
         &alter_table_procedure_id,
         "Succeeded",
+        Some(TABLE),
+        Some(table_id),
     )
     .await;
     run_sql(
@@ -140,9 +296,26 @@ async fn test_table_ddl_procedure_events() {
         &format!("INSERT INTO {TABLE} VALUES ('a', 0, 1, 'b')"),
     )
     .await;
-    run_sql(&frontend, &format!("TRUNCATE TABLE {TABLE}")).await;
+    run_sql_with_context(
+        &frontend,
+        &format!("TRUNCATE TABLE {TABLE}"),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
+    )
+    .await;
     let truncate_table_procedure_id =
         submitted_procedure_id(&frontend, "truncate_table", TABLE).await;
+    assert_event_context(
+        &frontend,
+        "truncate_table",
+        &truncate_table_procedure_id,
+        "manual",
+        Some("httpsql"),
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "truncate_table",
@@ -155,18 +328,37 @@ async fn test_table_ddl_procedure_events() {
 +----------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(
+    assert_terminal_event(
         &frontend,
         "truncate_table",
         &truncate_table_procedure_id,
         "Succeeded",
+        Some(TABLE),
+        Some(table_id),
     )
     .await;
 
     // Act / Assert: Drop records the table name, while Undrop and Purge use the
     // table ID as their submitted locator.
-    run_sql(&frontend, &format!("DROP TABLE {TABLE}")).await;
+    run_sql_with_context(
+        &frontend,
+        &format!("DROP TABLE {TABLE}"),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
+    )
+    .await;
     let drop_table_procedure_id = submitted_procedure_id(&frontend, "drop_table", TABLE).await;
+    assert_event_context(
+        &frontend,
+        "drop_table",
+        &drop_table_procedure_id,
+        "manual",
+        Some("httpsql"),
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "drop_table",
@@ -179,11 +371,13 @@ async fn test_table_ddl_procedure_events() {
 +------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(
+    assert_terminal_event(
         &frontend,
         "drop_table",
         &drop_table_procedure_id,
         "Succeeded",
+        Some(TABLE),
+        Some(table_id),
     )
     .await;
     #[cfg(feature = "enterprise")]
@@ -191,10 +385,23 @@ async fn test_table_ddl_procedure_events() {
         let (undrop_table_procedure_id, _) = cluster
             .metasrv
             .ddl_manager()
-            .submit_undrop_table_task(common_meta::rpc::ddl::UndropTableTask { table_id })
+            .submit_undrop_table_task(
+                common_meta::rpc::ddl::UndropTableTask { table_id },
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    TriggerReason::Manual,
+                )),
+            )
             .await
             .unwrap();
         let undrop_table_procedure_id = undrop_table_procedure_id.to_string();
+        assert_event_context(
+            &frontend,
+            "undrop_table",
+            &undrop_table_procedure_id,
+            "manual",
+            None,
+        )
+        .await;
         assert_id_submitted_event(
             &frontend,
             "undrop_table",
@@ -207,23 +414,36 @@ async fn test_table_ddl_procedure_events() {
 +--------------+",
         )
         .await;
-        assert_lightweight_terminal_event(
+        assert_terminal_event(
             &frontend,
             "undrop_table",
             &undrop_table_procedure_id,
             "Succeeded",
+            Some(TABLE),
+            Some(table_id),
         )
         .await;
         run_sql(&frontend, &format!("DROP TABLE {TABLE}")).await;
         let (purge_table_procedure_id, _) = cluster
             .metasrv
             .ddl_manager()
-            .submit_purge_dropped_table_task(common_meta::rpc::ddl::PurgeDroppedTableTask {
-                table_id,
-            })
+            .submit_purge_dropped_table_task(
+                common_meta::rpc::ddl::PurgeDroppedTableTask { table_id },
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    TriggerReason::Manual,
+                )),
+            )
             .await
             .unwrap();
         let purge_table_procedure_id = purge_table_procedure_id.to_string();
+        assert_event_context(
+            &frontend,
+            "purge_dropped_table",
+            &purge_table_procedure_id,
+            "manual",
+            None,
+        )
+        .await;
         assert_id_submitted_event(
             &frontend,
             "purge_dropped_table",
@@ -236,11 +456,13 @@ async fn test_table_ddl_procedure_events() {
 +---------------------+",
         )
         .await;
-        assert_lightweight_terminal_event(
+        assert_terminal_event(
             &frontend,
             "purge_dropped_table",
             &purge_table_procedure_id,
             "Succeeded",
+            Some(TABLE),
+            Some(table_id),
         )
         .await;
     }
@@ -255,16 +477,29 @@ async fn test_table_ddl_procedure_events() {
     )
     .await;
     let physical_table_id = find_table_id(&frontend, PHYSICAL_TABLE).await;
-    run_sql(
+    run_sql_with_context(
         &frontend,
         &format!(
             "CREATE TABLE {LOGICAL_TABLE} (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE=metric WITH (\"on_physical_table\" = \"{PHYSICAL_TABLE}\")"
         ),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
     )
     .await;
     let logical_table_id = find_table_id(&frontend, LOGICAL_TABLE).await;
     let create_logical_tables_procedure_id =
         submitted_procedure_id(&frontend, "create_logical_tables", LOGICAL_TABLE).await;
+    assert_event_context(
+        &frontend,
+        "create_logical_tables",
+        &create_logical_tables_procedure_id,
+        "manual",
+        Some("httpsql"),
+    )
+    .await;
 
     // Assert: logical Create emits one submitted row per logical table and
     // preserves the logical and physical table IDs on its terminal row.
@@ -297,14 +532,27 @@ async fn test_table_ddl_procedure_events() {
     .await;
 
     // Act / Assert: logical Alter preserves the one-row-per-logical-table submitted
-    // contract and emits a lightweight terminal row.
-    run_sql(
+    // contract and retains the logical-table locator on its terminal row.
+    run_sql_with_context(
         &frontend,
         &format!("ALTER TABLE {LOGICAL_TABLE} ADD COLUMN rack STRING PRIMARY KEY"),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
     )
     .await;
     let alter_logical_tables_procedure_id =
         submitted_procedure_id(&frontend, "alter_logical_tables", LOGICAL_TABLE).await;
+    assert_event_context(
+        &frontend,
+        "alter_logical_tables",
+        &alter_logical_tables_procedure_id,
+        "manual",
+        Some("httpsql"),
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "alter_logical_tables",
@@ -317,22 +565,111 @@ async fn test_table_ddl_procedure_events() {
 +----------------------+--------------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(
+    assert_terminal_event(
         &frontend,
         "alter_logical_tables",
         &alter_logical_tables_procedure_id,
         "Succeeded",
+        Some(LOGICAL_TABLE),
+        None,
     )
     .await;
 }
 
 async fn run_sql(instance: &Arc<Instance>, sql: &str) {
-    let output = instance
-        .do_query(sql, QueryContext::arc())
+    run_sql_with_context(instance, sql, QueryContext::arc()).await;
+}
+
+async fn auto_create_table(instance: &Arc<Instance>, table_name: &str, channel: Channel) {
+    instance
+        .handle_row_inserts(
+            RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: table_name.to_string(),
+                    rows: Some(Rows {
+                        schema: vec![
+                            api::v1::ColumnSchema {
+                                column_name: "host".to_string(),
+                                datatype: ColumnDataType::String as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "ts".to_string(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "val".to_string(),
+                                datatype: ColumnDataType::Float64 as i32,
+                                semantic_type: SemanticType::Field as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                        ],
+                        rows: vec![Row {
+                            values: vec![
+                                ValueData::StringValue("host".to_string()).into(),
+                                ValueData::TimestampMillisecondValue(0).into(),
+                                ValueData::F64Value(1.0).into(),
+                            ],
+                        }],
+                    }),
+                }],
+            },
+            Arc::new(QueryContext::with_channel("greptime", "public", channel)),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+}
+
+async fn run_sql_with_context(
+    instance: &Arc<Instance>,
+    sql: &str,
+    query_context: Arc<QueryContext>,
+) {
+    let output = SqlQueryHandler::do_query(instance.as_ref(), sql, query_context)
         .await
         .remove(0)
         .unwrap();
     assert!(matches!(output.data, OutputData::AffectedRows(_)), "{sql}");
+}
+
+async fn assert_event_context(
+    instance: &Arc<Instance>,
+    event_type: &str,
+    procedure_id: &str,
+    reason: &str,
+    protocol: Option<&str>,
+) {
+    let event_filter = format!(
+        "FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_get_string({}, 'type') = 'Submitted'",
+        TYPE_COLUMN.name(),
+        PROCEDURE_ID_COLUMN.name(),
+        PROCEDURE_TRIGGER_COLUMN.name(),
+    );
+    assert_single_event(
+        instance,
+        &format!("SELECT count(*) AS event_count {event_filter}"),
+    )
+    .await;
+
+    let actual = find_eventually_string(
+        instance,
+        &format!("SELECT json_to_string(event_context) AS event_context {event_filter}"),
+        "event_context",
+    )
+    .await;
+    let expected = match protocol {
+        Some(protocol) => format!(r#"{{"protocol":"{protocol}","reason":"{reason}"}}"#),
+        None => format!(r#"{{"reason":"{reason}"}}"#),
+    };
+    assert_eq!(expected, actual);
 }
 
 async fn find_table_id(instance: &Arc<Instance>, table_name: &str) -> u32 {
@@ -398,27 +735,46 @@ async fn assert_id_submitted_event(
     assert_eventually_eq(instance, &query, expected).await;
 }
 
-async fn assert_id_terminal_event(
+async fn assert_terminal_event(
     instance: &Arc<Instance>,
     event_type: &str,
     procedure_id: &str,
-    table_id: u32,
     terminal_trigger: &str,
-    expected: &str,
+    table_name: Option<&str>,
+    table_id: Option<u32>,
 ) {
+    let table_name_predicate = table_name.map_or_else(
+        || format!("{} IS NULL", TABLE_NAME_COLUMN.name()),
+        |table_name| format!("{} = '{table_name}'", TABLE_NAME_COLUMN.name()),
+    );
+    let catalog_and_schema_predicate = table_name.map_or_else(
+        || {
+            format!(
+                "{} IS NULL AND {} IS NULL",
+                CATALOG_NAME_COLUMN.name(),
+                SCHEMA_NAME_COLUMN.name(),
+            )
+        },
+        |_| {
+            format!(
+                "{} = 'greptime' AND {} = 'public'",
+                CATALOG_NAME_COLUMN.name(),
+                SCHEMA_NAME_COLUMN.name(),
+            )
+        },
+    );
+    let table_id_predicate = table_id.map_or_else(
+        || format!("{} IS NULL", TABLE_ID_COLUMN.name()),
+        |table_id| format!("{} = {table_id}", TABLE_ID_COLUMN.name()),
+    );
     let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND {} = {table_id} AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL",
-        TYPE_COLUMN.name(),
+        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND json_is_null({}) AND {catalog_and_schema_predicate} AND {table_name_predicate} AND {table_id_predicate}",
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
         PROCEDURE_TRIGGER_COLUMN.name(),
-        TABLE_ID_COLUMN.name(),
         PAYLOAD_COLUMN.name(),
-        CATALOG_NAME_COLUMN.name(),
-        SCHEMA_NAME_COLUMN.name(),
-        TABLE_NAME_COLUMN.name(),
     );
-    assert_eventually_eq(instance, &query, expected).await;
+    assert_single_event(instance, &query).await;
 }
 
 async fn assert_logical_terminal_event(
@@ -442,24 +798,4 @@ async fn assert_logical_terminal_event(
         PAYLOAD_COLUMN.name(),
     );
     assert_eventually_eq(instance, &query, expected).await;
-}
-
-async fn assert_lightweight_terminal_event(
-    instance: &Arc<Instance>,
-    event_type: &str,
-    procedure_id: &str,
-    terminal_trigger: &str,
-) {
-    let query = format!(
-        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL AND {} IS NULL",
-        TYPE_COLUMN.name(),
-        PROCEDURE_ID_COLUMN.name(),
-        PROCEDURE_TRIGGER_COLUMN.name(),
-        PAYLOAD_COLUMN.name(),
-        CATALOG_NAME_COLUMN.name(),
-        SCHEMA_NAME_COLUMN.name(),
-        TABLE_NAME_COLUMN.name(),
-        TABLE_ID_COLUMN.name(),
-    );
-    assert_single_event(instance, &query).await;
 }

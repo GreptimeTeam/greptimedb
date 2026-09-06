@@ -420,14 +420,14 @@ impl Procedure for DropTableProcedure {
         {
             return None;
         }
+        let task = &self.data.task;
+        let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
+            .with_table_id(task.table_id);
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
-                let task = &self.data.task;
-                let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
-                    .with_table_id(task.table_id);
                 TableDdlEvent::drop_table_submitted(locator, task.drop_if_exists)
             }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::DropTable),
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::DropTable, [locator]),
         };
 
         Some(Box::new(event))

@@ -34,7 +34,9 @@ use datafusion::common::DFSchemaRef;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
-pub use histogram_fold::{HistogramFold, HistogramFoldExec, HistogramFoldStream};
+pub use histogram_fold::{
+    HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
+};
 pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;

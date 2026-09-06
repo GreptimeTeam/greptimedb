@@ -110,11 +110,4 @@ mod tests {
         // seeking past the portion returns an error
         assert!(reader.read(31..32).await.is_err());
     }
-
-    #[tokio::test]
-    async fn is_eof_returns_true_at_end_of_portion() {
-        let data: Vec<u8> = (0..100).collect();
-        let reader = PartialReader::new(data, 10, 30);
-        let _ = reader.read(0..20).await.unwrap();
-    }
 }

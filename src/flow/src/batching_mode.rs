@@ -44,6 +44,8 @@ pub struct BatchingModeOptions {
     /// The gRPC connection timeout
     #[serde(with = "humantime_serde")]
     pub grpc_conn_timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub experimental_flight_do_get_timeout: Duration,
     /// The gRPC max retry number
     pub experimental_grpc_max_retries: u32,
     /// Flow wait for available frontend timeout,
@@ -72,6 +74,7 @@ impl Default for BatchingModeOptions {
             slow_query_threshold: Duration::from_secs(60),
             experimental_min_refresh_duration: Duration::new(5, 0),
             grpc_conn_timeout: Duration::from_secs(5),
+            experimental_flight_do_get_timeout: Duration::from_secs(10),
             experimental_grpc_max_retries: 3,
             experimental_frontend_scan_timeout: Duration::from_secs(30),
             experimental_max_filter_num_per_query: 20,

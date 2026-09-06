@@ -40,7 +40,7 @@ impl State for CloseDowngradedRegion {
     async fn next(
         &mut self,
         ctx: &mut Context,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         if let Err(err) = self.close_downgraded_leader_region(ctx).await {
             let downgrade_leader_datanode = &ctx.persistent_ctx.from_peer;
@@ -52,7 +52,7 @@ impl State for CloseDowngradedRegion {
             ctx.persistent_ctx.region_ids,
             ctx.persistent_ctx.from_peer,
             ctx.persistent_ctx.to_peer,
-            ctx.persistent_ctx.trigger_reason,
+            ctx.trigger_reason(procedure_ctx.event_context.as_ref()),
             ctx.volatile_ctx.metrics,
         );
         Ok((Box::new(RegionMigrationEnd), Status::done()))

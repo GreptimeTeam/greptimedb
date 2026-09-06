@@ -96,6 +96,10 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "new_idc", "idc99", "id
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-", "idc", "host") == 3;
 
+-- Issue 8969 --
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') sum by (foo) (label_replace(test, "foo", "$1", "host", "(.*)")) * 0.8;
+
 DROP TABLE test;
 
 CREATE TABLE test (

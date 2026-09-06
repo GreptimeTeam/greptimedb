@@ -102,6 +102,7 @@ impl TestingEnv {
         ProcedureContext {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
         }
     }
 
@@ -264,6 +265,7 @@ pub fn procedure_context_with_receivers(
             receivers,
             inner: MockContextProvider::default(),
         }),
+        event_context: None,
     }
 }
 

@@ -18,9 +18,11 @@ use api::helper::to_pb_time_unit;
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{
     BuildIndexRequest, CompactRequest, CompactionTimeRange, FlushRequest, RegionRequestHeader,
+    TruncateRequest, Unflushed, truncate_request,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
+use common_catalog::consts::METRIC_ENGINE;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
@@ -34,10 +36,12 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use store_api::storage::RegionId;
 use table::requests::{BuildIndexTableRequest, CompactTableRequest, FlushTableRequest};
+use table::table_name::TableName;
 
 use crate::error::{
     CatalogSnafu, FindRegionLeaderSnafu, FindTablePartitionRuleSnafu, JoinTaskSnafu,
-    RequestRegionSnafu, Result, TableNotFoundSnafu, UnsupportedRegionRequestSnafu,
+    NotSupportedSnafu, RequestRegionSnafu, Result, TableNotFoundSnafu,
+    UnsupportedRegionRequestSnafu,
 };
 use crate::region_req_factory::RegionRequestFactory;
 
@@ -206,6 +210,76 @@ impl Requester {
         info!("Handle region manual compaction request: {region_id}");
         self.do_request(vec![request], None, &ctx).await
     }
+
+    /// Discard all unflushed data from the region.
+    pub async fn handle_discard_unflushed_data(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        let request = RegionRequestBody::Truncate(TruncateRequest {
+            region_id: region_id.into(),
+            kind: Some(truncate_request::Kind::Unflushed(Unflushed {})),
+        });
+
+        info!("Handle region discard unflushed data request: {region_id}");
+        self.do_request(vec![request], None, &ctx).await
+    }
+
+    /// Discard all unflushed data from all regions of the table.
+    pub async fn handle_discard_unflushed_data_by_table(
+        &self,
+        table_name: TableName,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        let table = self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+                None,
+            )
+            .await
+            .context(CatalogSnafu)?;
+        let table = table.with_context(|| TableNotFoundSnafu {
+            table_name: table_name.to_string(),
+        })?;
+        let table_info = table.table_info();
+        ensure_discard_unflushed_supported(
+            &table_info.meta.engine,
+            table_info.is_physical_table(),
+        )?;
+
+        let partitions = &self
+            .partition_manager
+            .find_physical_partition_info(table_info.ident.table_id)
+            .await
+            .with_context(|_| FindTablePartitionRuleSnafu {
+                table_name: table_name.to_string(),
+            })?
+            .partitions;
+        let requests = partitions
+            .iter()
+            .map(|partition| {
+                RegionRequestBody::Truncate(TruncateRequest {
+                    region_id: partition.id.into(),
+                    kind: Some(truncate_request::Kind::Unflushed(Unflushed {})),
+                })
+            })
+            .collect();
+
+        info!("Handle table discard unflushed data request: {table_name}");
+        self.do_request(
+            requests,
+            Some(build_db_string(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+            )),
+            &ctx,
+        )
+        .await
+    }
 }
 
 fn to_pb_compaction_time_range(range: TimestampRange) -> Result<CompactionTimeRange> {
@@ -291,6 +365,7 @@ impl Requester {
             RegionRequestBody::Flush(req) => req.region_id,
             RegionRequestBody::Compact(req) => req.region_id,
             RegionRequestBody::BuildIndex(req) => req.region_id,
+            RegionRequestBody::Truncate(req) => req.region_id,
             _ => {
                 error!("Unsupported region request: {:?}", req);
                 return UnsupportedRegionRequestSnafu {}.fail();
@@ -329,6 +404,16 @@ impl Requester {
     }
 }
 
+fn ensure_discard_unflushed_supported(engine: &str, is_physical_table: bool) -> Result<()> {
+    ensure!(
+        engine != METRIC_ENGINE || is_physical_table,
+        NotSupportedSnafu {
+            feat: "discarding unflushed data from a Metric Engine logical table"
+        }
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::TimeUnit;
@@ -349,6 +434,15 @@ mod tests {
         assert_eq!(1, pb_range.start);
         assert_eq!(3, pb_range.end);
         assert_eq!(TimeUnit::Second as i32, pb_range.time_unit);
+    }
+
+    #[test]
+    fn test_discard_unflushed_rejects_metric_logical_table() {
+        let error = ensure_discard_unflushed_supported(METRIC_ENGINE, false).unwrap_err();
+        assert!(matches!(error, crate::error::Error::NotSupported { .. }));
+
+        ensure_discard_unflushed_supported(METRIC_ENGINE, true).unwrap();
+        ensure_discard_unflushed_supported("mito", false).unwrap();
     }
 
     #[test]

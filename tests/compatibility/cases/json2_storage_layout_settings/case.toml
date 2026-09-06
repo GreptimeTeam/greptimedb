@@ -1,0 +1,8 @@
+name = "json2_storage_layout_settings"
+reason = "Verify JSON2 storage layout settings in Arrow extension metadata survive restarts and upgrades."
+introduced_by = "PR #8895"
+topologies = ["distributed", "standalone"]
+from_range = [">=v1.3.0"]
+to_range = [">=v1.3.0"]
+features = ["json2", "table", "metadata", "read"]
+owner = "query"

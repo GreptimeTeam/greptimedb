@@ -195,7 +195,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
         };
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
-        let schema = optimized_plan.schema().as_arrow();
+        let schema = merge_scan.schema().as_arrow();
         let query_ctx = session_state
             .config()
             .get_extension()

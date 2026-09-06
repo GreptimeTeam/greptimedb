@@ -22,10 +22,17 @@
 
 use std::sync::Arc;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use common_recordbatch::DfRecordBatch;
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use datatypes::arrow::array::{
+    ArrayRef, BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
+    UInt64Array,
+};
+use datatypes::arrow::compute::{SortColumn, SortOptions};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;
-use mito2::memtable::bulk::part::BulkPartConverter;
+use mito2::memtable::bulk::part::{BulkPartConverter, sort_primary_key_record_batch};
 use mito2::memtable::bulk::part_reader::BulkPartBatchIter;
 use mito2::memtable::bulk::{BulkMemtable, BulkMemtableConfig};
 use mito2::memtable::time_series::TimeSeriesMemtable;
@@ -38,6 +45,111 @@ use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 use mito2::test_util::memtable_util;
 
 const DEFAULT_BATCH_SIZE: usize = 8 * 1024;
+
+fn primary_key_sort_batch(
+    series_count: usize,
+    samples_per_series: usize,
+    sorted_within_series: bool,
+) -> DfRecordBatch {
+    let num_rows = series_count * samples_per_series;
+    let primary_keys = (0..series_count)
+        .map(|series| format!("series_{series:08}").into_bytes())
+        .collect::<Vec<_>>();
+    let mut primary_key_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+    let mut timestamps = Vec::with_capacity(num_rows);
+    let mut sequences = Vec::with_capacity(num_rows);
+
+    for series_order in 0..series_count {
+        // 17 is coprime to the power-of-two cardinalities used below and gives a deterministic
+        // non-lexical series order.
+        let series = series_order * 17 % series_count;
+        for sample_order in 0..samples_per_series {
+            let sample = if sorted_within_series {
+                sample_order
+            } else {
+                sample_order * 37 % samples_per_series
+            };
+            primary_key_builder
+                .append(primary_keys[series].as_slice())
+                .unwrap();
+            timestamps.push(sample as i64);
+            sequences.push((series * samples_per_series + sample_order) as u64);
+        }
+    }
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from_iter_values(0..num_rows as i64)),
+        Arc::new(TimestampMillisecondArray::from(timestamps)),
+        Arc::new(primary_key_builder.finish()),
+        Arc::new(UInt64Array::from(sequences)),
+        Arc::new(UInt8Array::from_value(1, num_rows)),
+    ];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("value", DataType::Int64, false),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(
+            "__primary_key",
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+            false,
+        ),
+        Field::new("__sequence", DataType::UInt64, false),
+        Field::new("__op_type", DataType::UInt8, false),
+    ]));
+    DfRecordBatch::try_new(schema, columns).unwrap()
+}
+
+fn lexsort_primary_key_record_batch(batch: &DfRecordBatch) -> DfRecordBatch {
+    let total_columns = batch.num_columns();
+    let sort_columns = vec![
+        SortColumn {
+            values: batch.column(total_columns - 3).clone(),
+            options: Some(SortOptions {
+                descending: false,
+                nulls_first: true,
+            }),
+        },
+        SortColumn {
+            values: batch.column(total_columns - 4).clone(),
+            options: Some(SortOptions {
+                descending: false,
+                nulls_first: true,
+            }),
+        },
+        SortColumn {
+            values: batch.column(total_columns - 2).clone(),
+            options: Some(SortOptions {
+                descending: true,
+                nulls_first: true,
+            }),
+        },
+    ];
+    let indices = datatypes::arrow::compute::lexsort_to_indices(&sort_columns, None).unwrap();
+    datatypes::arrow::compute::take_record_batch(batch, &indices).unwrap()
+}
+
+fn primary_key_sort(c: &mut Criterion) {
+    let mut group = c.benchmark_group("primary_key_sort");
+    group.sample_size(20);
+
+    for (name, series_count, samples_per_series, sorted_within_series) in [
+        ("sorted_runs", 512, 16, true),
+        ("shuffled_runs", 512, 16, false),
+        ("high_cardinality", 8192, 1, true),
+    ] {
+        let batch = primary_key_sort_batch(series_count, samples_per_series, sorted_within_series);
+        group.throughput(Throughput::Elements(batch.num_rows() as u64));
+        group.bench_function(format!("{name}/arrow_lexsort"), |b| {
+            b.iter(|| lexsort_primary_key_record_batch(&batch));
+        });
+        group.bench_function(format!("{name}/rank_scatter"), |b| {
+            b.iter(|| sort_primary_key_record_batch(&batch).unwrap());
+        });
+    }
+}
 
 /// Writes rows.
 fn write_rows(c: &mut Criterion) {
@@ -391,6 +503,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    primary_key_sort,
     write_rows,
     full_scan,
     filter_1_host,

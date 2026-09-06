@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_time::timestamp::div_mod_units;
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::{Expr, Literal, Operator};
 use datafusion::physical_plan::PhysicalExpr;
@@ -29,9 +30,10 @@ use datatypes::arrow::array::{
     RecordBatch, StringArrayType,
 };
 use datatypes::arrow::compute::filter_record_batch;
-use datatypes::arrow::datatypes::{DataType, UInt32Type};
+use datatypes::arrow::datatypes::{DataType, TimeUnit, UInt32Type};
 use datatypes::arrow::error::ArrowError;
 use datatypes::compute::or_kleene;
+use datatypes::data_type::{ConcreteDataType, DataType as _};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use regex::Regex;
@@ -339,6 +341,141 @@ impl SimpleFilterEvaluator {
             array.data_type()
         )))
     }
+
+    /// Casts the filter's timestamp literal into the unit of the `target`
+    /// timestamp type, so it can be evaluated against a column stored in that
+    /// unit (e.g. an old-unit SST after the time index unit was widened).
+    ///
+    /// When the literal is not representable in `target`'s unit (e.g.
+    /// `ts = 7_000_500us` against a millisecond column), the outcome keeps the
+    /// row set instead of rounding the literal: `=` prunes / `!=` matches, and
+    /// inequalities strengthen the operator (e.g. `>= 2_500_500us` becomes
+    /// `> 2500ms`) so the excluded boundary row stays excluded.
+    ///
+    /// Returns `None` when the filter doesn't compare against a tz-naive
+    /// timestamp literal, or `target` is not a timestamp type.
+    pub fn cast_timestamp_unit(&self, target: &ConcreteDataType) -> Option<TimestampUnitCast> {
+        let target_unit = match target.as_arrow_type() {
+            DataType::Timestamp(unit, _) => unit,
+            _ => return None,
+        };
+
+        // An `OR` chain of equalities (an IN list): convert each literal
+        // with `=` semantics; literals not representable in the target unit
+        // cannot match any row and simply drop out of the chain.
+        if self.op == Operator::Or {
+            let mut literal_list = Vec::with_capacity(self.literal_list.len());
+            for literal in &self.literal_list {
+                let scalar = ScalarValue::try_from_array(literal.get().0, 0).ok()?;
+                let Some((value, unit)) = timestamp_scalar_parts(&scalar) else {
+                    continue;
+                };
+                let Some(value) = value else {
+                    continue;
+                };
+                let cast = div_mod_units(value, unit.into(), target_unit.into())?;
+                if cast.remainder == 0 {
+                    literal_list.push(timestamp_scalar(cast.quotient, target_unit)?);
+                }
+            }
+            if literal_list.is_empty() {
+                return Some(TimestampUnitCast::Pruned);
+            }
+            let literal = literal_list[0].clone();
+            return Some(TimestampUnitCast::Filter(Self {
+                column_name: self.column_name.clone(),
+                literal,
+                op: Operator::Or,
+                literal_list,
+                regex: None,
+                regex_negative: false,
+            }));
+        }
+
+        let scalar = ScalarValue::try_from_array(self.literal.get().0, 0).ok()?;
+        let (value, unit) = timestamp_scalar_parts(&scalar)?;
+        let Some(value) = value else {
+            // A NULL literal never compares true (arrow comparison
+            // semantics: null results are filtered out).
+            return Some(TimestampUnitCast::Pruned);
+        };
+        if unit == target_unit {
+            return Some(TimestampUnitCast::Filter(self.clone()));
+        }
+        let cast = div_mod_units(value, unit.into(), target_unit.into())?;
+        let divisible = cast.remainder == 0;
+        let literal = timestamp_scalar(cast.quotient, target_unit)?;
+        let filter = |op: Operator| Self {
+            column_name: self.column_name.clone(),
+            literal: literal.clone(),
+            op,
+            literal_list: vec![],
+            regex: None,
+            regex_negative: false,
+        };
+
+        Some(match self.op {
+            Operator::Eq if divisible => TimestampUnitCast::Filter(filter(Operator::Eq)),
+            Operator::Eq => TimestampUnitCast::Pruned,
+            Operator::NotEq if divisible => TimestampUnitCast::Filter(filter(Operator::NotEq)),
+            Operator::NotEq => TimestampUnitCast::Matched,
+            // v > L holds exactly for v > quotient, whether or not L is
+            // representable in the target unit.
+            Operator::Gt => TimestampUnitCast::Filter(filter(Operator::Gt)),
+            Operator::GtEq if divisible => TimestampUnitCast::Filter(filter(Operator::GtEq)),
+            // L strictly between two target values: v >= L is v > quotient.
+            Operator::GtEq => TimestampUnitCast::Filter(filter(Operator::Gt)),
+            Operator::Lt if divisible => TimestampUnitCast::Filter(filter(Operator::Lt)),
+            // L strictly between two target values: v < L is v <= quotient.
+            Operator::Lt => TimestampUnitCast::Filter(filter(Operator::LtEq)),
+            // v <= L holds exactly for v <= quotient.
+            Operator::LtEq => TimestampUnitCast::Filter(filter(Operator::LtEq)),
+            // Regex predicates don't apply to timestamps.
+            _ => return None,
+        })
+    }
+}
+
+/// The result of casting a [`SimpleFilterEvaluator`] to a different timestamp
+/// unit, preserving the predicate's semantics on rows stored in that unit.
+/// See [`SimpleFilterEvaluator::cast_timestamp_unit`].
+#[derive(Debug, Clone)]
+pub enum TimestampUnitCast {
+    /// The cast filter; evaluates column values stored in the target unit.
+    Filter(SimpleFilterEvaluator),
+    /// No value in the target unit satisfies the filter.
+    Pruned,
+    /// Every value in the target unit satisfies the filter.
+    Matched,
+}
+
+/// Extracts the value and unit from a tz-naive timestamp scalar.
+fn timestamp_scalar_parts(scalar: &ScalarValue) -> Option<(Option<i64>, TimeUnit)> {
+    let (value, unit, timezone) = match scalar {
+        ScalarValue::TimestampSecond(v, tz) => (*v, TimeUnit::Second, tz),
+        ScalarValue::TimestampMillisecond(v, tz) => (*v, TimeUnit::Millisecond, tz),
+        ScalarValue::TimestampMicrosecond(v, tz) => (*v, TimeUnit::Microsecond, tz),
+        ScalarValue::TimestampNanosecond(v, tz) => (*v, TimeUnit::Nanosecond, tz),
+        _ => return None,
+    };
+    // A timezone-aware literal doesn't compare against a tz-naive column;
+    // leave it to the caller instead of guessing the intended semantics.
+    (timezone.is_none()).then_some((value, unit))
+}
+
+/// Builds a tz-naive timestamp literal for `value` in `unit`.
+pub fn timestamp_scalar_value(value: i64, unit: TimeUnit) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), None),
+    }
+}
+
+/// Builds a one-element scalar array holding `value` in `unit`.
+fn timestamp_scalar(value: i64, unit: TimeUnit) -> Option<Scalar<ArrayRef>> {
+    timestamp_scalar_value(value, unit).to_scalar().ok()
 }
 
 /// Evaluate the predicate on the input [RecordBatch], and return a new [RecordBatch].
@@ -482,6 +619,7 @@ mod test {
     use datafusion::logical_expr::{BinaryExpr, col, lit};
     use datafusion::physical_expr::create_physical_expr;
     use datafusion_common::{Column, DFSchema};
+    use datatypes::arrow::array::{TimestampMillisecondArray, TimestampNanosecondArray};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
     use super::*;
@@ -876,5 +1014,219 @@ mod test {
             right: Box::new("^api$".lit()),
         });
         SimpleFilterEvaluator::try_new(&expr).unwrap()
+    }
+
+    fn ts_us(v: i64) -> ScalarValue {
+        ScalarValue::TimestampMicrosecond(Some(v), None)
+    }
+
+    fn cast_to_ms(expr: &Expr) -> Option<TimestampUnitCast> {
+        SimpleFilterEvaluator::try_new(expr)
+            .unwrap()
+            .cast_timestamp_unit(&ConcreteDataType::timestamp_millisecond_datatype())
+    }
+
+    /// Evaluates a cast `Filter` outcome against millisecond values and
+    /// returns the mask.
+    fn eval_ms_mask(cast: Option<TimestampUnitCast>, values: &[i64]) -> Vec<bool> {
+        let filter = match cast.expect("cast must apply") {
+            TimestampUnitCast::Filter(filter) => filter,
+            other => panic!("expected Filter outcome, got {other:?}"),
+        };
+        let array = Arc::new(TimestampMillisecondArray::from(values.to_vec())) as ArrayRef;
+        filter.evaluate_array(&array).unwrap().iter().collect()
+    }
+
+    #[test]
+    fn cast_timestamp_unit_converts_representable_literal() {
+        // ts = 7_000_000us evaluated against a ms column becomes ts = 7000ms.
+        assert_eq!(
+            vec![false, true, false],
+            eval_ms_mask(
+                cast_to_ms(&col("ts").eq(lit(ts_us(7_000_000)))),
+                &[6_999, 7_000, 7_001]
+            )
+        );
+        // != complements =.
+        assert_eq!(
+            vec![true, false, true],
+            eval_ms_mask(
+                cast_to_ms(&col("ts").not_eq(lit(ts_us(7_000_000)))),
+                &[6_999, 7_000, 7_001]
+            )
+        );
+    }
+
+    #[test]
+    fn cast_timestamp_unit_prunes_non_representable_equality() {
+        // 7_000_500us is not a whole millisecond: no ms row can equal it,
+        // and every ms row satisfies `!=`.
+        assert!(matches!(
+            cast_to_ms(&col("ts").eq(lit(ts_us(7_000_500)))),
+            Some(TimestampUnitCast::Pruned)
+        ));
+        assert!(matches!(
+            cast_to_ms(&col("ts").not_eq(lit(ts_us(7_000_500)))),
+            Some(TimestampUnitCast::Matched)
+        ));
+    }
+
+    #[test]
+    fn cast_timestamp_unit_strengthens_inequalities() {
+        // 2_500_500us is strictly between 2500ms and 2501ms: the cast must
+        // not round the literal to a boundary the original predicate
+        // excludes (>= 2500ms would wrongly match 2500ms).
+        let values = vec![2_499, 2_500, 2_501];
+        assert_eq!(
+            vec![false, false, true],
+            eval_ms_mask(cast_to_ms(&col("ts").gt(lit(ts_us(2_500_500)))), &values)
+        );
+        assert_eq!(
+            vec![false, false, true],
+            eval_ms_mask(cast_to_ms(&col("ts").gt_eq(lit(ts_us(2_500_500)))), &values)
+        );
+        assert_eq!(
+            vec![true, true, false],
+            eval_ms_mask(cast_to_ms(&col("ts").lt(lit(ts_us(2_500_500)))), &values)
+        );
+        assert_eq!(
+            vec![true, true, false],
+            eval_ms_mask(cast_to_ms(&col("ts").lt_eq(lit(ts_us(2_500_500)))), &values)
+        );
+
+        // Representable boundary keeps the original operator.
+        let values = vec![2_499, 2_500, 2_501];
+        assert_eq!(
+            vec![false, false, true],
+            eval_ms_mask(cast_to_ms(&col("ts").gt(lit(ts_us(2_500_000)))), &values)
+        );
+        assert_eq!(
+            vec![false, true, true],
+            eval_ms_mask(cast_to_ms(&col("ts").gt_eq(lit(ts_us(2_500_000)))), &values)
+        );
+        assert_eq!(
+            vec![true, false, false],
+            eval_ms_mask(cast_to_ms(&col("ts").lt(lit(ts_us(2_500_000)))), &values)
+        );
+        assert_eq!(
+            vec![true, true, false],
+            eval_ms_mask(cast_to_ms(&col("ts").lt_eq(lit(ts_us(2_500_000)))), &values)
+        );
+    }
+
+    #[test]
+    fn cast_timestamp_unit_handles_negative_instants() {
+        // -2_500_500us floors to -2501ms with remainder 500us: only rows
+        // with instant >= -2.5005ms may match >= / >.
+        let values = vec![-2_502, -2_501, -2_500];
+        assert_eq!(
+            vec![false, false, true],
+            eval_ms_mask(
+                cast_to_ms(&col("ts").gt_eq(lit(ts_us(-2_500_500)))),
+                &values
+            )
+        );
+        assert_eq!(
+            vec![false, false, true],
+            eval_ms_mask(cast_to_ms(&col("ts").gt(lit(ts_us(-2_500_500)))), &values)
+        );
+        assert_eq!(
+            vec![true, true, false],
+            eval_ms_mask(
+                cast_to_ms(&col("ts").lt_eq(lit(ts_us(-2_500_500)))),
+                &values
+            )
+        );
+        // Exactly representable negative literal: -2_500_000us == -2500ms.
+        assert_eq!(
+            vec![false, false, true],
+            eval_ms_mask(cast_to_ms(&col("ts").eq(lit(ts_us(-2_500_000)))), &values)
+        );
+    }
+
+    #[test]
+    fn cast_timestamp_unit_or_chain_drops_unrepresentable_literals() {
+        // Only 7_000_000us is a whole millisecond; 7_000_500us cannot match.
+        let expr = col("ts")
+            .eq(lit(ts_us(7_000_500)))
+            .or(col("ts").eq(lit(ts_us(7_000_000))));
+        assert_eq!(
+            vec![false, true],
+            eval_ms_mask(cast_to_ms(&expr), &[6_999, 7_000])
+        );
+
+        // A chain where no literal is representable matches nothing.
+        let expr = col("ts")
+            .eq(lit(ts_us(7_000_500)))
+            .or(col("ts").eq(lit(ts_us(6_000_500))));
+        assert!(matches!(cast_to_ms(&expr), Some(TimestampUnitCast::Pruned)));
+    }
+
+    #[test]
+    fn cast_timestamp_unit_null_literal_prunes() {
+        // A NULL literal never compares true.
+        assert!(matches!(
+            cast_to_ms(&col("ts").eq(lit(ScalarValue::TimestampMicrosecond(None, None)))),
+            Some(TimestampUnitCast::Pruned)
+        ));
+    }
+
+    #[test]
+    fn cast_timestamp_unit_same_unit_returns_filter_directly() {
+        // A literal already in the target unit is returned unchanged.
+        let expr = col("ts").eq(lit(ts_us(7_000_000)));
+        let filter = SimpleFilterEvaluator::try_new(&expr).unwrap();
+        let cast = filter
+            .cast_timestamp_unit(&ConcreteDataType::timestamp_microsecond_datatype())
+            .unwrap();
+        let TimestampUnitCast::Filter(f) = cast else {
+            panic!("expected Filter, got {cast:?}")
+        };
+        assert_eq!(filter.op, f.op);
+        assert_eq!(filter.column_name(), f.column_name());
+        assert_eq!(
+            ts_us(7_000_000),
+            ScalarValue::try_from_array(f.literal.get().0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn cast_timestamp_unit_rejects_non_timestamps() {
+        // Non-timestamp target type.
+        assert!(
+            SimpleFilterEvaluator::try_new(&col("ts").gt(lit(ts_us(1))))
+                .unwrap()
+                .cast_timestamp_unit(&ConcreteDataType::int64_datatype())
+                .is_none()
+        );
+        // Non-timestamp literal against a timestamp target.
+        assert!(cast_to_ms(&col("ts").gt(lit(42_i64))).is_none());
+    }
+
+    #[test]
+    fn cast_timestamp_unit_to_finer_unit() {
+        // 5 seconds against a nanosecond column becomes 5_000_000_000ns.
+        let filter = SimpleFilterEvaluator::try_new(
+            &col("ts").eq(lit(ScalarValue::TimestampSecond(Some(5), None))),
+        )
+        .unwrap()
+        .cast_timestamp_unit(&ConcreteDataType::timestamp_nanosecond_datatype())
+        .and_then(|cast| match cast {
+            TimestampUnitCast::Filter(filter) => Some(filter),
+            _ => None,
+        })
+        .unwrap();
+        let array = Arc::new(TimestampNanosecondArray::from(vec![
+            4_999_999_999,
+            5_000_000_000,
+        ])) as ArrayRef;
+        assert_eq!(
+            vec![false, true],
+            filter
+                .evaluate_array(&array)
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+        );
     }
 }

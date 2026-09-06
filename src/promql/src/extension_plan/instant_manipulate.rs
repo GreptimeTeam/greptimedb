@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_query::prelude::{greptime_native_histogram, greptime_value};
 use datafusion::arrow::array::{Array, TimestampMillisecondArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -52,6 +53,15 @@ use crate::metrics::PROMQL_SERIES_COUNT;
 
 const MAX_INSTANT_MANIPULATE_OUTPUT_POINTS: usize = 1_000_000;
 
+fn mixed_sample_fields(field: Option<&str>) -> [Option<&str>; 2] {
+    let companion = match field {
+        Some(field) if field == greptime_value() => Some(greptime_native_histogram()),
+        Some(field) if field == greptime_native_histogram() => Some(greptime_value()),
+        _ => None,
+    };
+    [field, companion]
+}
+
 /// Manipulate the input record batch to make it suitable for Instant Operator.
 ///
 /// This plan will try to align the input time series, for every timestamp between
@@ -66,7 +76,7 @@ pub struct InstantManipulate {
     time_index_column: String,
     // Planner-provided tag-column hint for execution fast paths.
     tag_columns: Vec<String>,
-    /// A optional column for validating staleness
+    /// Primary sample column used to derive the columns checked for staleness.
     field_column: Option<String>,
     input: LogicalPlan,
     unfix: Option<UnfixIndices>,
@@ -97,9 +107,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
         }
 
         let mut exprs = vec![col(&self.time_index_column)];
-        if let Some(field) = &self.field_column {
-            exprs.push(col(field));
-        }
+        exprs.extend(self.staleness_field_columns().map(col));
         exprs
     }
 
@@ -116,7 +124,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
 
         let mut required = output_columns.to_vec();
         required.push(input_schema.index_of_column_by_name(None, &self.time_index_column)?);
-        if let Some(field) = &self.field_column {
+        for field in self.staleness_field_columns() {
             required.push(input_schema.index_of_column_by_name(None, field)?);
         }
 
@@ -221,6 +229,21 @@ impl InstantManipulate {
 
     pub const fn name() -> &'static str {
         "InstantManipulate"
+    }
+
+    fn staleness_field_columns(&self) -> impl Iterator<Item = &str> {
+        let [field, companion] = mixed_sample_fields(self.field_column.as_deref());
+        [
+            field,
+            companion.filter(|companion| {
+                self.input
+                    .schema()
+                    .index_of_column_by_name(None, companion)
+                    .is_some()
+            }),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     fn resolve_tag_columns(input: &LogicalPlan, tag_columns: &[String]) -> Vec<String> {
@@ -385,11 +408,9 @@ impl ExecutionPlan for InstantManipulateExec {
             .column_with_name(&self.time_index_column)
             .expect("time index column not found")
             .0;
-        let field_index = self
-            .field_column
-            .as_ref()
-            .and_then(|name| schema.column_with_name(name))
-            .map(|x| x.0);
+        let field_indices = mixed_sample_fields(self.field_column.as_deref()).map(|field| {
+            field.and_then(|field| schema.column_with_name(field).map(|(index, _)| index))
+        });
         let tsid_index = schema
             .column_with_name("__tsid")
             .filter(|(_, field)| field.data_type() == &DataType::UInt64)
@@ -400,7 +421,7 @@ impl ExecutionPlan for InstantManipulateExec {
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index,
-            field_index,
+            field_indices,
             tsid_index,
             reuse_tsid_column: self.reuse_tsid_column && tsid_index.is_some(),
             schema,
@@ -467,7 +488,7 @@ pub struct InstantManipulateStream {
     interval: Millisecond,
     // Column index of TIME INDEX column's position in schema
     time_index: usize,
-    field_index: Option<usize>,
+    field_indices: [Option<usize>; 2],
     tsid_index: Option<usize>,
     reuse_tsid_column: bool,
 
@@ -532,11 +553,16 @@ impl InstantManipulateStream {
             return Ok(input);
         }
 
-        // Field column for staleness checks, classified once per batch.
-        let stale_sample_column = self
-            .field_index
-            .map(|index| input.column(index).as_ref())
-            .and_then(prometheus_stale_sample_column);
+        // Field columns for staleness checks, classified once per batch.
+        let stale_sample_columns = self.field_indices.map(|index| {
+            index.and_then(|index| prometheus_stale_sample_column(input.column(index).as_ref()))
+        });
+        let is_stale = |row| {
+            stale_sample_columns
+                .iter()
+                .flatten()
+                .any(|column| is_prometheus_stale_sample(*column, row))
+        };
 
         // Optimize iteration range based on actual data bounds
         let first_ts = ts_column.value(0);
@@ -581,9 +607,7 @@ impl InstantManipulateStream {
                 let curr = ts_column.value(cursor);
                 match curr.cmp(&expected_ts) {
                     Ordering::Equal => {
-                        if stale_sample_column
-                            .is_some_and(|column| is_prometheus_stale_sample(column, cursor))
-                        {
+                        if is_stale(cursor) {
                             // Ignore the stale marker.
                         } else {
                             take_indices.push(cursor as u64);
@@ -615,9 +639,7 @@ impl InstantManipulateStream {
                     let prev_ts = ts_column.value(prev_cursor);
                     if prev_ts + self.lookback_delta > expected_ts {
                         // only use the point in the time range
-                        if stale_sample_column
-                            .is_some_and(|column| is_prometheus_stale_sample(column, prev_cursor))
-                        {
+                        if is_stale(prev_cursor) {
                             // Do not use a stale marker as the newest value.
                             continue;
                         }
@@ -626,9 +648,7 @@ impl InstantManipulateStream {
                         aligned_ts.push(expected_ts);
                     }
                 }
-            } else if stale_sample_column
-                .is_some_and(|column| is_prometheus_stale_sample(column, cursor))
-            {
+            } else if is_stale(cursor) {
                 // Do not use a stale marker as the newest value.
             } else {
                 // use this point

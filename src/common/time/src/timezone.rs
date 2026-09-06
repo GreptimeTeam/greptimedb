@@ -108,6 +108,15 @@ impl Timezone {
         }
     }
 
+    /// A named zone merely sitting at +00:00 today is not UTC: it may have been
+    /// elsewhere at the timestamp being converted.
+    pub fn is_utc(&self) -> bool {
+        match self {
+            Self::Offset(offset) => offset.local_minus_utc() == 0,
+            Self::Named(tz) => matches!(tz, Tz::UTC),
+        }
+    }
+
     /// Returns the number of seconds to add to convert from UTC to the local time.
     pub fn local_minus_utc(&self) -> i64 {
         match self {

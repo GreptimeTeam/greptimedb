@@ -14,3 +14,6 @@
 
 pub mod array;
 pub(crate) mod builder;
+pub mod variant;
+
+pub use builder::json2_physical_data_type;

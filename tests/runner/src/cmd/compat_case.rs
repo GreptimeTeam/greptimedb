@@ -43,6 +43,17 @@ pub struct CaseMetadata {
     /// Must match `[a-z0-9_]+`.
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Optional old-stage server configuration sidecars.
+    #[serde(default)]
+    pub old_config: Option<OldConfigMetadata>,
+}
+
+/// Optional configuration sidecars for the old compatibility stage.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OldConfigMetadata {
+    /// Datanode TOML sidecar, resolved relative to the compatibility case directory.
+    pub datanode: PathBuf,
 }
 
 impl CaseMetadata {
@@ -52,6 +63,13 @@ impl CaseMetadata {
         self.namespace
             .clone()
             .unwrap_or_else(|| sanitize_namespace(case_dir_name))
+    }
+
+    /// Returns the old-stage datanode sidecar reference, if configured.
+    pub fn old_datanode_overlay(&self) -> Option<&Path> {
+        self.old_config
+            .as_ref()
+            .map(|config| config.datanode.as_path())
     }
 }
 
@@ -470,6 +488,74 @@ mod tests {
     }
 
     #[test]
+    fn test_case_metadata_parses_old_datanode_overlay() {
+        let metadata: CaseMetadata = toml::from_str(
+            r#"
+            name = "case"
+            reason = "reason"
+            introduced_by = "test"
+            topologies = ["distributed"]
+            from_range = ["*"]
+            to_range = ["*"]
+            features = ["table"]
+            owner = "team"
+
+            [old_config]
+            datanode = "old-datanode.overlay.toml"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            metadata.old_datanode_overlay(),
+            Some(Path::new("old-datanode.overlay.toml"))
+        );
+    }
+
+    #[test]
+    fn test_case_metadata_rejects_empty_old_config() {
+        let error = toml::from_str::<CaseMetadata>(
+            r#"
+            name = "case"
+            reason = "reason"
+            introduced_by = "test"
+            topologies = ["distributed"]
+            from_range = ["*"]
+            to_range = ["*"]
+            features = ["table"]
+            owner = "team"
+
+            [old_config]
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing field `datanode`"));
+    }
+
+    #[test]
+    fn test_case_metadata_rejects_unknown_old_config_fields() {
+        let error = toml::from_str::<CaseMetadata>(
+            r#"
+            name = "case"
+            reason = "reason"
+            introduced_by = "test"
+            topologies = ["distributed"]
+            from_range = ["*"]
+            to_range = ["*"]
+            features = ["table"]
+            owner = "team"
+
+            [old_config]
+            unsupported = "value"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `unsupported`"));
+    }
+
+    #[test]
     fn test_validate_cases_metadata_rejects_empty_required_vectors() {
         let case = CompatCase {
             metadata: CaseMetadata {
@@ -482,6 +568,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "team".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -503,6 +590,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("bad_constraint"),
             namespace: "bad_constraint".to_string(),
@@ -524,6 +612,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -539,6 +628,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -563,6 +653,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
+                old_config: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -578,6 +669,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
+                old_config: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -599,6 +691,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "team".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),

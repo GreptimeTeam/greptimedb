@@ -16,8 +16,9 @@
 mod tests;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError};
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{FrontendWorkloads, HeartbeatRequest, HeartbeatResponse, NodeInfo, Peer};
@@ -93,34 +94,88 @@ pub trait FrontendHeartbeatExtension: Send + Sync {
 }
 
 /// A shareable, ordered registry of frontend heartbeat extensions.
+///
+/// Registration is available until [`FrontendHeartbeatExtensions::freeze`] is called. After that,
+/// membership is immutable so every heartbeat consumer observes the same extensions.
 #[derive(Clone, Default)]
 pub struct FrontendHeartbeatExtensions {
     inner: Arc<StdMutex<FrontendHeartbeatExtensionsInner>>,
 }
 
+/// The reason a frontend heartbeat extension was not registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationError {
+    /// An extension with the same name is already registered.
+    Duplicate,
+    /// The registry is frozen and no longer accepts registrations.
+    Frozen,
+}
+
+impl Display for RegistrationError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Duplicate => formatter.write_str("heartbeat extension is already registered"),
+            Self::Frozen => formatter.write_str("heartbeat extension registry is frozen"),
+        }
+    }
+}
+
+impl std::error::Error for RegistrationError {}
+
 #[derive(Default)]
 struct FrontendHeartbeatExtensionsInner {
     names: HashSet<String>,
     extensions: Vec<Arc<dyn FrontendHeartbeatExtension>>,
+    frozen: bool,
 }
 
 impl FrontendHeartbeatExtensions {
+    fn lock(&self) -> MutexGuard<'_, FrontendHeartbeatExtensionsInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Registers an extension without replacing an existing extension of the same name.
     ///
-    /// Returns `true` for a new registration and `false` for an idempotent duplicate.
+    /// Returns `true` for a new registration and `false` for an idempotent duplicate or when the
+    /// registry is frozen. Use [`FrontendHeartbeatExtensions::try_register`] when the rejection
+    /// reason must not be discarded.
     pub fn register(&self, extension: Arc<dyn FrontendHeartbeatExtension>) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        self.try_register(extension).is_ok()
+    }
+
+    /// Registers an extension and returns the reason when registration is rejected.
+    ///
+    /// If the registry is already frozen, this method returns [`RegistrationError::Frozen`]
+    /// without calling [`FrontendHeartbeatExtension::name`]. If freezing races with name
+    /// evaluation, the registry state is checked again before insertion.
+    pub fn try_register(
+        &self,
+        extension: Arc<dyn FrontendHeartbeatExtension>,
+    ) -> std::result::Result<(), RegistrationError> {
+        if self.lock().frozen {
+            return Err(RegistrationError::Frozen);
+        }
+
         let name = extension.name().to_string();
+        let mut inner = self.lock();
+        if inner.frozen {
+            return Err(RegistrationError::Frozen);
+        }
         if !inner.names.insert(name) {
-            return false;
+            return Err(RegistrationError::Duplicate);
         }
         inner.extensions.push(extension);
-        true
+        Ok(())
+    }
+
+    /// Prevents further registrations while preserving the current registration order.
+    pub fn freeze(&self) {
+        self.lock().frozen = true;
     }
 
     /// Returns the registered extensions in registration order.
     pub fn extensions(&self) -> Vec<Arc<dyn FrontendHeartbeatExtension>> {
-        self.inner.lock().unwrap().extensions.clone()
+        self.lock().extensions.clone()
     }
 
     /// Returns response handlers in extension registration order.
@@ -133,7 +188,7 @@ impl FrontendHeartbeatExtensions {
 
     /// Returns the number of registered extensions.
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().extensions.len()
+        self.lock().extensions.len()
     }
 
     /// Returns whether no extension is registered.

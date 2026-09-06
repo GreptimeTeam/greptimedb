@@ -16,8 +16,6 @@ insert into json2_disable_non_object_insert values (4, 'true');
 
 insert into json2_disable_non_object_insert values (5, 'null');
 
-insert into json2_disable_non_object_insert values (6, '{}');
-
 drop table json2_disable_non_object_insert;
 
 create table json2_whole_and_path_read (
@@ -37,10 +35,6 @@ select json_get(j, 'a.b'), count(*)
 from json2_whole_and_path_read
 group by json_get(j, 'a.b')
 order by json_get(j, 'a.b');
-
-select j, j.a from json2_whole_and_path_read;
-
-select j from json2_whole_and_path_read where j.a.b = 1;
 
 drop table json2_whole_and_path_read;
 

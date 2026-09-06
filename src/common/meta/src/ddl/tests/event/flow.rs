@@ -19,8 +19,8 @@ use api::v1::{ColumnSchema, Row, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::Event;
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, PROCEDURE_ERROR_COLUMN,
-    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
+    ACTOR_COLUMN, CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN,
+    jsonb_value, procedure_event_column_schemas,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
@@ -94,9 +94,18 @@ fn test_flow_submitted_event_contracts() {
 #[test]
 fn test_flow_lifecycle_events_have_fixed_schema_and_null_intent() {
     for (event, event_type) in [
-        (FlowDdlEvent::create_lifecycle(), CREATE_FLOW_EVENT_TYPE),
-        (FlowDdlEvent::create_succeeded(None), CREATE_FLOW_EVENT_TYPE),
-        (FlowDdlEvent::drop_lifecycle(), DROP_FLOW_EVENT_TYPE),
+        (
+            FlowDdlEvent::create_lifecycle("greptime", "metrics"),
+            CREATE_FLOW_EVENT_TYPE,
+        ),
+        (
+            FlowDdlEvent::create_succeeded("greptime", "metrics", None),
+            CREATE_FLOW_EVENT_TYPE,
+        ),
+        (
+            FlowDdlEvent::drop_lifecycle("greptime", "metrics", 42),
+            DROP_FLOW_EVENT_TYPE,
+        ),
     ] {
         assert_event_contract(
             &event,
@@ -104,24 +113,28 @@ fn test_flow_lifecycle_events_have_fixed_schema_and_null_intent() {
             &flow_schema(),
             &[Row {
                 values: vec![
-                    Value { value_data: None },
-                    Value { value_data: None },
-                    Value { value_data: None },
+                    ValueData::StringValue("greptime".to_string()).into(),
+                    ValueData::StringValue("metrics".to_string()).into(),
+                    if event_type == DROP_FLOW_EVENT_TYPE {
+                        ValueData::U32Value(42).into()
+                    } else {
+                        Value { value_data: None }
+                    },
                 ],
             }],
         );
         assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
     }
 
-    let event = FlowDdlEvent::create_succeeded(Some(42));
+    let event = FlowDdlEvent::create_succeeded("greptime", "metrics", Some(42));
     assert_event_contract(
         &event,
         CREATE_FLOW_EVENT_TYPE,
         &flow_schema(),
         &[Row {
             values: vec![
-                Value { value_data: None },
-                Value { value_data: None },
+                ValueData::StringValue("greptime".to_string()).into(),
+                ValueData::StringValue("metrics".to_string()).into(),
                 ValueData::U32Value(42).into(),
             ],
         }],
@@ -148,7 +161,11 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
     );
     let succeeded = ProcedureEvent::new(
         procedure_id,
-        Box::new(FlowDdlEvent::create_succeeded(Some(42))),
+        Box::new(FlowDdlEvent::create_succeeded(
+            "greptime",
+            "metrics",
+            Some(42),
+        )),
         ProcedureState::Done { output: None },
         EventTrigger::Succeeded,
     );
@@ -170,8 +187,8 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
         "Done",
         "Succeeded",
         FlowEventLocator {
-            catalog_name: None,
-            flow_name: None,
+            catalog_name: Some("greptime"),
+            flow_name: Some("metrics"),
             flow_id: Some(42),
         },
     );
@@ -222,13 +239,10 @@ fn assert_procedure_event_contract(
     trigger: &str,
     locator: FlowEventLocator<'_>,
 ) {
-    let mut schema = vec![
-        PROCEDURE_ID_COLUMN.column_schema(),
-        PROCEDURE_STATE_COLUMN.column_schema(),
-        PROCEDURE_ERROR_COLUMN.column_schema(),
-        PROCEDURE_TRIGGER_COLUMN.column_schema(),
-    ];
+    let mut schema = procedure_event_column_schemas();
     schema.extend(flow_schema());
+    schema.push(ACTOR_COLUMN.column_schema());
+    schema.push(EVENT_CONTEXT_COLUMN.column_schema());
     assert_event_contract(
         event,
         event_type,
@@ -246,6 +260,8 @@ fn assert_procedure_event_contract(
                     .map(ValueData::U32Value)
                     .map(Into::into)
                     .unwrap_or(Value { value_data: None }),
+                Value { value_data: None },
+                Value { value_data: None },
             ],
         }],
     );

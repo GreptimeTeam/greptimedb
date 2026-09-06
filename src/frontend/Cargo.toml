@@ -52,7 +52,6 @@ common-version.workspace = true
 dashmap.workspace = true
 datafusion.workspace = true
 datafusion-expr.workspace = true
-datanode.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 hostname.workspace = true
@@ -91,11 +90,9 @@ tracing.workspace = true
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
-datanode.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
-meta-srv.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"

@@ -79,12 +79,18 @@ pub const TYPE_COLUMN: EventTableColumn =
 /// The canonical event payload column.
 pub const PAYLOAD_COLUMN: EventTableColumn =
     EventTableColumn::json_binary("payload", ColumnDataType::Binary, SemanticType::Field);
+/// The optional context describing why an event was triggered.
+pub const EVENT_CONTEXT_COLUMN: EventTableColumn =
+    EventTableColumn::json_binary("event_context", ColumnDataType::Binary, SemanticType::Field);
 /// The canonical event timestamp column.
 pub const TIMESTAMP_COLUMN: EventTableColumn = EventTableColumn::new(
     "timestamp",
     ColumnDataType::TimestampNanosecond,
     SemanticType::Timestamp,
 );
+/// The effective database user that initiated an event.
+pub const ACTOR_COLUMN: EventTableColumn =
+    EventTableColumn::new("actor", ColumnDataType::String, SemanticType::Field);
 /// The canonical procedure identifier envelope column.
 pub const PROCEDURE_ID_COLUMN: EventTableColumn =
     EventTableColumn::new("procedure_id", ColumnDataType::String, SemanticType::Field);
@@ -140,6 +146,25 @@ pub const LATEST_OFFSET_COLUMN: EventTableColumn =
 /// The canonical per-region GC report field.
 pub const GC_REPORT_COLUMN: EventTableColumn =
     EventTableColumn::json_binary("gc_report", ColumnDataType::Binary, SemanticType::Field);
+
+/// The canonical ADMIN function name field.
+pub const ADMIN_FUNCTION_NAME_COLUMN: EventTableColumn = EventTableColumn::new(
+    "admin_function_name",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical ADMIN function execution status field.
+pub const ADMIN_FUNCTION_STATUS_COLUMN: EventTableColumn = EventTableColumn::new(
+    "admin_function_status",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical ADMIN function output field.
+pub const ADMIN_FUNCTION_OUTPUT_COLUMN: EventTableColumn = EventTableColumn::json_binary(
+    "admin_function_output",
+    ColumnDataType::Binary,
+    SemanticType::Field,
+);
 
 /// The canonical table name field for table DDL events.
 pub const TABLE_NAME_COLUMN: EventTableColumn =
@@ -284,246 +309,4 @@ pub fn nullable_json(value: Option<&serde_json::Value>) -> Value {
 /// Builds a JSONB API value.
 pub fn jsonb_value(value: &serde_json::Value) -> Value {
     ValueData::BinaryValue(jsonb::Value::from(value).to_vec()).into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base_schema_preserves_names_types_semantics_extensions_and_order() {
-        assert_eq!(
-            base_column_schemas(),
-            vec![
-                ColumnSchema {
-                    column_name: "type".to_string(),
-                    datatype: ColumnDataType::String.into(),
-                    semantic_type: SemanticType::Tag.into(),
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "payload".to_string(),
-                    datatype: ColumnDataType::Binary.into(),
-                    semantic_type: SemanticType::Field.into(),
-                    datatype_extension: Some(ColumnDataTypeExtension {
-                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-                    }),
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "timestamp".to_string(),
-                    datatype: ColumnDataType::TimestampNanosecond.into(),
-                    semantic_type: SemanticType::Timestamp.into(),
-                    ..Default::default()
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn procedure_envelope_schema_preserves_names_types_semantics_and_order() {
-        assert_eq!(
-            procedure_event_column_schemas(),
-            vec![
-                ColumnSchema {
-                    column_name: "procedure_id".to_string(),
-                    datatype: ColumnDataType::String.into(),
-                    semantic_type: SemanticType::Field.into(),
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "procedure_state".to_string(),
-                    datatype: ColumnDataType::String.into(),
-                    semantic_type: SemanticType::Field.into(),
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "procedure_error".to_string(),
-                    datatype: ColumnDataType::String.into(),
-                    semantic_type: SemanticType::Field.into(),
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "procedure_trigger".to_string(),
-                    datatype: ColumnDataType::Binary.into(),
-                    semantic_type: SemanticType::Field.into(),
-                    datatype_extension: Some(ColumnDataTypeExtension {
-                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-                    }),
-                    ..Default::default()
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn shared_dimension_schema_preserves_names_types_semantics_and_order() {
-        assert_eq!(
-            column_schemas([&CATALOG_NAME_COLUMN, &SCHEMA_NAME_COLUMN]),
-            ["catalog_name", "schema_name"].map(|column_name| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            })
-        );
-    }
-
-    #[test]
-    fn flow_dimension_schema_preserves_names_types_semantics_and_order() {
-        assert_eq!(
-            column_schemas([&FLOW_NAME_COLUMN, &FLOW_ID_COLUMN]),
-            [
-                ("flow_name", ColumnDataType::String),
-                ("flow_id", ColumnDataType::Uint32),
-            ]
-            .map(|(column_name, datatype)| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: datatype.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            })
-        );
-    }
-
-    #[test]
-    fn table_dimension_schema_preserves_names_types_semantics_and_order() {
-        assert_eq!(
-            column_schemas([
-                &TABLE_NAME_COLUMN,
-                &TABLE_ID_COLUMN,
-                &PHYSICAL_TABLE_ID_COLUMN,
-            ]),
-            [
-                ("table_name", ColumnDataType::String),
-                ("table_id", ColumnDataType::Uint32),
-                ("physical_table_id", ColumnDataType::Uint32),
-            ]
-            .map(|(column_name, datatype)| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: datatype.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            })
-        );
-    }
-
-    #[test]
-    fn view_dimension_schema_preserves_names_types_semantics_and_order() {
-        assert_eq!(
-            column_schemas([&VIEW_NAME_COLUMN, &VIEW_ID_COLUMN]),
-            [
-                ("view_name", ColumnDataType::String),
-                ("view_id", ColumnDataType::Uint32),
-            ]
-            .map(|(column_name, datatype)| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: datatype.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            })
-        );
-    }
-
-    #[test]
-    fn region_dimension_schema_preserves_names_types_semantics_and_order() {
-        assert_field_columns(
-            [
-                &REGION_ID_COLUMN,
-                &REGION_NUMBER_COLUMN,
-                &REGION_MIGRATION_TRIGGER_REASON_COLUMN,
-                &REGION_MIGRATION_SRC_NODE_ID_COLUMN,
-                &REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
-                &REGION_MIGRATION_DST_NODE_ID_COLUMN,
-                &REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
-            ],
-            [
-                ("region_id", ColumnDataType::Uint64),
-                ("region_number", ColumnDataType::Uint32),
-                ("region_migration_trigger_reason", ColumnDataType::String),
-                ("region_migration_src_node_id", ColumnDataType::Uint64),
-                ("region_migration_src_peer_addr", ColumnDataType::String),
-                ("region_migration_dst_node_id", ColumnDataType::Uint64),
-                ("region_migration_dst_peer_addr", ColumnDataType::String),
-            ],
-        );
-    }
-
-    #[test]
-    fn repartition_dimension_schema_preserves_names_types_semantics_and_order() {
-        assert_field_columns(
-            [
-                &TABLE_NAME_COLUMN,
-                &TABLE_ID_COLUMN,
-                &PARENT_PROCEDURE_ID_COLUMN,
-                &REPARTITION_GROUP_ID_COLUMN,
-                &SOURCE_REGION_ID_COLUMN,
-                &SOURCE_REGION_NUMBER_COLUMN,
-                &SOURCE_PARTITION_EXPR_COLUMN,
-                &TARGET_REGION_ID_COLUMN,
-                &TARGET_REGION_NUMBER_COLUMN,
-                &TARGET_PARTITION_EXPR_COLUMN,
-            ],
-            [
-                ("table_name", ColumnDataType::String),
-                ("table_id", ColumnDataType::Uint32),
-                ("parent_procedure_id", ColumnDataType::String),
-                ("repartition_group_id", ColumnDataType::String),
-                ("source_region_id", ColumnDataType::Uint64),
-                ("source_region_number", ColumnDataType::Uint32),
-                ("source_partition_expr", ColumnDataType::String),
-                ("target_region_id", ColumnDataType::Uint64),
-                ("target_region_number", ColumnDataType::Uint32),
-                ("target_partition_expr", ColumnDataType::String),
-            ],
-        );
-    }
-
-    #[test]
-    fn wal_prune_schema_preserves_names_types_semantics_and_order() {
-        assert_field_columns(
-            [
-                &TOPIC_NAME_COLUMN,
-                &PRUNABLE_ENTRY_ID_COLUMN,
-                &LATEST_OFFSET_COLUMN,
-            ],
-            [
-                ("topic_name", ColumnDataType::String),
-                ("prunable_entry_id", ColumnDataType::Uint64),
-                ("latest_offset", ColumnDataType::Uint64),
-            ],
-        );
-    }
-
-    #[test]
-    fn nullable_values_preserve_types_and_nulls() {
-        assert_eq!(
-            nullable_string(Some("catalog")),
-            Value {
-                value_data: Some(ValueData::StringValue("catalog".to_string()))
-            }
-        );
-        assert_eq!(nullable_value(None), Value { value_data: None });
-        assert_eq!(
-            nullable_value(Some(ValueData::BoolValue(true))),
-            Value {
-                value_data: Some(ValueData::BoolValue(true))
-            }
-        );
-    }
-
-    fn assert_field_columns<const N: usize>(
-        columns: [&EventTableColumn; N],
-        expected: [(&str, ColumnDataType); N],
-    ) {
-        assert_eq!(
-            column_schemas(columns),
-            expected.map(|(column_name, datatype)| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: datatype.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            })
-        );
-    }
 }

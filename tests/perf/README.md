@@ -255,11 +255,12 @@ gh workflow run query-regression.yml \
   -f candidate_ref=<full-candidate-sha> \
   -f cargo_profile=nightly \
   -f http_timeout=300 \
-  -f runner=perf-regression-8-cores
+  -f runner=aliyun-ecs
 ```
 
-The selected ARC scale set must already be deployed with the runner-image
-digest built from the current query-regression Dockerfile.
+The `aliyun-ecs` path provisions a fresh ECS instance per run from the custom
+image built from the current query-regression Dockerfile; see
+`.github/runner-scale-sets/query-regression/README.md` for its configuration.
 
 ## Generator contract
 

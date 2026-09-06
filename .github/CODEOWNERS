@@ -6,8 +6,8 @@
 
 ## [Module] Database Engine
 /src/index @evenyag @discord9 @WenyXu 
-/src/mito2 @evenyag @v0y4g3r @waynexia
-/src/query @evenyag @waynexia @discord9
+/src/mito2 @evenyag @v0y4g3r
+/src/query @evenyag @discord9
 
 ## [Module] Distributed
 /src/common/meta @MichaelScofield @WenyXu
@@ -20,8 +20,8 @@
 /src/store-api @v0y4g3r @evenyag
 
 ## [Module] Metrics Engine
-/src/metric-engine @waynexia @WenyXu
-/src/promql @waynexia @evenyag @discord9
+/src/metric-engine @WenyXu @v0y4g3r
+/src/promql @evenyag @discord9
 
 ## [Module] Flow
-/src/flow @discord9 @waynexia
+/src/flow @discord9 @WenyXu

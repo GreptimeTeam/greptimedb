@@ -680,16 +680,6 @@ mod tests {
     }
 
     #[test]
-    fn test_region_manifest_builder() {
-        // TODO(ruihang): port this test case
-    }
-
-    #[test]
-    fn test_encode_decode_region_checkpoint() {
-        // TODO(ruihang): port this test case
-    }
-
-    #[test]
     fn test_region_manifest_compatibility() {
         // Test deserializing RegionManifest from old schema where FileId is a UUID string
         let region_manifest_json = r#"{

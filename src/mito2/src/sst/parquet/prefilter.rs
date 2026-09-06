@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use datafusion_expr::Expr;
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::datatypes::SchemaRef;
@@ -272,15 +273,9 @@ pub(crate) fn build_primary_key_filter(
     expected_metadata: Option<&RegionMetadata>,
     predicate: Option<&Predicate>,
 ) -> Option<CachedPrimaryKeyFilter> {
-    let filters = predicate
+    let filters = simple_tag_filters(sst_metadata, expected_metadata, predicate)
         .into_iter()
-        .flat_map(|predicate| predicate.exprs())
-        .filter_map(|expr| SimpleFilterContext::new_opt(sst_metadata, expected_metadata, expr))
-        .filter_map(|filter_ctx| {
-            (filter_ctx.semantic_type() == SemanticType::Tag)
-                .then(|| filter_ctx.filter().as_filter().cloned())
-                .flatten()
-        })
+        .map(|(_, filter)| filter)
         .collect::<Vec<_>>();
     if filters.is_empty() {
         return None;
@@ -289,6 +284,33 @@ pub(crate) fn build_primary_key_filter(
     let codec = build_primary_key_codec(sst_metadata.as_ref());
     let filter = codec.primary_key_filter(sst_metadata, Arc::new(filters));
     Some(CachedPrimaryKeyFilter::new(filter))
+}
+
+/// Extracts simple tag filters that can be applied to encoded primary keys or series indexes.
+pub(crate) fn simple_tag_filters(
+    sst_metadata: &RegionMetadataRef,
+    expected_metadata: Option<&RegionMetadata>,
+    predicate: Option<&Predicate>,
+) -> Vec<(Expr, SimpleFilterEvaluator)> {
+    predicate
+        .into_iter()
+        .flat_map(|predicate| predicate.exprs())
+        .filter_map(|expr| {
+            SimpleFilterContext::new_opt(sst_metadata, expected_metadata, expr)
+                .map(|filter_ctx| (expr, filter_ctx))
+        })
+        .filter_map(|(expr, filter_ctx)| {
+            (filter_ctx.semantic_type() == SemanticType::Tag)
+                .then(|| {
+                    filter_ctx
+                        .filter()
+                        .as_filter()
+                        .cloned()
+                        .map(|filter| (expr.clone(), filter))
+                })
+                .flatten()
+        })
+        .collect()
 }
 
 /// How the parquet reader should apply each predicate.
@@ -373,13 +395,15 @@ pub(crate) fn build_bulk_filter_plan(
 ///
 /// With predicate prefiltering enabled, tag and timestamp predicates that lower to
 /// [`SimpleFilterEvaluator`] are an exception — the engine enforces them precisely in
-/// the prefilter pass. When it is disabled, all simple filters remain on the normal
-/// precise-filter path instead.
+/// the prefilter pass. A caller can postpone simple timestamp filters to the normal
+/// precise-filter path when the scan time range covers the SST. When predicate
+/// prefiltering is disabled, all simple filters remain on the normal path instead.
 pub(crate) fn build_reader_filter_plan(
     predicate: Option<&Predicate>,
     expected_metadata: Option<&RegionMetadata>,
     pre_filter_mode: PreFilterMode,
     enable_predicate_prefilter: bool,
+    postpone_time_index_filter: bool,
     read_format: &FlatReadFormat,
     codec: &Arc<dyn PrimaryKeyCodec>,
 ) -> ReaderFilterPlan {
@@ -432,6 +456,11 @@ pub(crate) fn build_reader_filter_plan(
                 remaining_simple_filters.push(filter_ctx);
                 continue;
             };
+
+            if postpone_time_index_filter && filter_ctx.semantic_type() == SemanticType::Timestamp {
+                remaining_simple_filters.push(filter_ctx);
+                continue;
+            }
 
             // If the column is stored as a separate parquet column and is already projected in the main read,
             // we can evaluate the simple filter directly during prefilter.
@@ -1457,9 +1486,7 @@ mod tests {
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             false,
@@ -1495,9 +1522,7 @@ mod tests {
         ));
         let legacy_read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "memtable",
             false,
@@ -1524,9 +1549,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let raw_pk_read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "memtable",
             true,
@@ -1560,9 +1583,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let full_read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -1578,6 +1599,7 @@ mod tests {
             None,
             PreFilterMode::SkipFields,
             true,
+            false,
             &full_read_format,
             &codec,
         );
@@ -1587,6 +1609,42 @@ mod tests {
             vec!["field_0"]
         );
 
+        let postponed_time_plan = build_reader_filter_plan(
+            Some(&Predicate::new(vec![
+                col("tag_0").eq(lit("a")),
+                col("field_0").gt(lit(1_u64)),
+                col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(1), None))),
+            ])),
+            None,
+            PreFilterMode::SkipFields,
+            true,
+            true,
+            &full_read_format,
+            &codec,
+        );
+        assert!(postponed_time_plan.prefilter_builder.is_some());
+        assert_eq!(
+            remaining_simple_filter_columns(&postponed_time_plan.remaining_simple_filters),
+            vec!["field_0", "ts"]
+        );
+
+        let postponed_time_only_plan = build_reader_filter_plan(
+            Some(&Predicate::new(vec![col("ts").gt_eq(lit(
+                ScalarValue::TimestampMillisecond(Some(1), None),
+            ))])),
+            None,
+            PreFilterMode::All,
+            true,
+            true,
+            &full_read_format,
+            &codec,
+        );
+        assert!(postponed_time_only_plan.prefilter_builder.is_none());
+        assert_eq!(
+            remaining_simple_filter_columns(&postponed_time_only_plan.remaining_simple_filters),
+            vec!["ts"]
+        );
+
         let metric_metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
@@ -1594,7 +1652,7 @@ mod tests {
         let ts = metric_metadata.time_index_column().column_id;
         let projected_read_format = FlatReadFormat::new(
             metric_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([field_0, ts]),
+            ReadColumns::new([field_0, ts]),
             None,
             "test",
             true,
@@ -1606,6 +1664,7 @@ mod tests {
             None,
             PreFilterMode::All,
             true,
+            false,
             &projected_read_format,
             &metric_codec,
         );
@@ -1629,6 +1688,7 @@ mod tests {
             None,
             PreFilterMode::All,
             false,
+            true,
             &projected_read_format,
             &metric_codec,
         );
@@ -1646,9 +1706,7 @@ mod tests {
         ));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             false,
@@ -1663,6 +1721,7 @@ mod tests {
             None,
             PreFilterMode::All,
             true,
+            false,
             &read_format,
             &codec,
         );
@@ -1671,6 +1730,7 @@ mod tests {
             None,
             PreFilterMode::All,
             true,
+            false,
             &read_format,
             &codec,
         );
@@ -1686,9 +1746,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -1734,9 +1792,7 @@ mod tests {
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             false,

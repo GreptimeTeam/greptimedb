@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{
@@ -76,13 +77,14 @@ impl PipelineTable {
         statement_executor: StatementExecutorRef,
         table: TableRef,
         query_engine: QueryEngineRef,
+        cache_ttl: Duration,
     ) -> Self {
         Self {
             inserter,
             statement_executor,
             table,
             query_engine,
-            cache: PipelineCache::new(),
+            cache: PipelineCache::new(cache_ttl),
         }
     }
 
@@ -262,21 +264,12 @@ impl PipelineTable {
         name: &str,
         input_version: PipelineVersion,
     ) -> Result<Arc<Pipeline>> {
-        if let Some(pipeline) = self.cache.get_pipeline_cache(schema, name, input_version)? {
-            return Ok(pipeline);
-        }
-
-        let pipeline_content = self.get_pipeline_str(schema, name, input_version).await?;
-        let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline_content.content)?);
-
-        self.cache.insert_pipeline_cache(
-            &pipeline_content.schema,
-            name,
-            Some(pipeline_content.version),
-            compiled_pipeline.clone(),
-            input_version.is_none(),
-        );
-        Ok(compiled_pipeline)
+        self.cache
+            .get_pipeline_with(schema, name, input_version, async {
+                let pipeline_content = self.get_pipeline_str(schema, name, input_version).await?;
+                Ok(Arc::new(Self::compile_pipeline(&pipeline_content.content)?))
+            })
+            .await
     }
 
     /// Get a original pipeline by name.
@@ -287,13 +280,19 @@ impl PipelineTable {
         name: &str,
         input_version: PipelineVersion,
     ) -> Result<PipelineContent> {
-        if let Some(pipeline) = self
-            .cache
-            .get_pipeline_str_cache(schema, name, input_version)?
-        {
-            return Ok(pipeline);
-        }
+        self.cache
+            .get_pipeline_str_with(schema, name, input_version, async {
+                self.load_pipeline_str(schema, name, input_version).await
+            })
+            .await
+    }
 
+    async fn load_pipeline_str(
+        &self,
+        schema: &str,
+        name: &str,
+        input_version: PipelineVersion,
+    ) -> Result<PipelineContent> {
         let mut pipeline_vec;
         match self.find_pipeline(name, input_version).await {
             Ok(p) => {
@@ -312,7 +311,8 @@ impl PipelineTable {
                             .inc();
                         return self
                             .cache
-                            .get_failover_cache(schema, name, input_version)?
+                            .get_failover_cache(schema, name, input_version)
+                            .await?
                             .context(PipelineNotFoundSnafu {
                                 name,
                                 version: input_version,
@@ -338,7 +338,8 @@ impl PipelineTable {
             let pipeline_content = pipeline_vec.remove(0);
 
             self.cache
-                .insert_pipeline_str_cache(&pipeline_content, input_version.is_none());
+                .insert_failover_cache(pipeline_content.clone(), input_version.is_none())
+                .await;
             return Ok(pipeline_content);
         }
 
@@ -359,12 +360,12 @@ impl PipelineTable {
         })?;
 
         self.cache
-            .insert_pipeline_str_cache(&pipeline_content, input_version.is_none());
+            .insert_failover_cache(pipeline_content.clone(), input_version.is_none())
+            .await;
         Ok(pipeline_content)
     }
 
     /// Insert a pipeline into the pipeline table and compile it.
-    /// The compiled pipeline will be inserted into the cache.
     /// Newly created pipelines will be saved under empty schema.
     pub async fn insert_and_compile(
         &self,
@@ -378,25 +379,14 @@ impl PipelineTable {
             .insert_pipeline_to_pipeline_table(name, content_type, pipeline)
             .await?;
 
-        {
-            self.cache.insert_pipeline_cache(
-                EMPTY_SCHEMA_NAME,
-                name,
-                Some(TimestampNanosecond(version)),
-                compiled_pipeline.clone(),
-                true,
-            );
-
-            let pipeline_content = PipelineContent {
+        self.cache
+            .on_pipeline_created(PipelineContent {
                 name: name.to_string(),
                 content: pipeline.to_string(),
                 version: TimestampNanosecond(version),
                 schema: EMPTY_SCHEMA_NAME.to_string(),
-            };
-
-            self.cache
-                .insert_pipeline_str_cache(&pipeline_content, true);
-        }
+            })
+            .await;
 
         Ok((version, compiled_pipeline))
     }
@@ -464,8 +454,7 @@ impl PipelineTable {
             output
         );
 
-        // remove cache with version and latest
-        self.cache.remove_cache(name, version);
+        self.cache.invalidate(name, version).await;
 
         Ok(Some(()))
     }

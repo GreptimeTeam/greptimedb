@@ -100,3 +100,4 @@ store-api.workspace = true
 table = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio-stream.workspace = true
+toml.workspace = true

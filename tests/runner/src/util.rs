@@ -285,25 +285,55 @@ pub fn setup_etcd(client_ports: Vec<u16>, peer_port: Option<u16>, etcd_version: 
     }
 }
 
-/// Stop and remove the etcd container
-pub fn stop_rm_etcd() {
+/// Stop and remove the etcd container, failing if it cannot be confirmed absent.
+pub fn stop_rm_etcd_checked() -> Result<(), String> {
     let status = std::process::Command::new("docker")
-        .args(["container", "stop", "etcd"])
-        .status();
-    if status.is_err() {
-        panic!("Failed to stop etcd: {:?}", status);
-    } else {
-        println!("Stopped etcd");
-    }
-    // rm the container
-    let status = std::process::Command::new("docker")
-        .args(["container", "rm", "etcd"])
-        .status();
-    if status.is_err() {
-        panic!("Failed to remove etcd container: {:?}", status);
-    } else {
+        .args(["container", "rm", "--force", "etcd"])
+        .status()
+        .map_err(|error| format!("Failed to run Docker while removing etcd: {error}"))?;
+    if status.success() {
         println!("Removed etcd container");
+        return Ok(());
     }
+
+    let listed = std::process::Command::new("docker")
+        .args([
+            "container",
+            "ls",
+            "--all",
+            "--filter",
+            "name=^/etcd$",
+            "--format",
+            "{{.ID}}",
+        ])
+        .output()
+        .map_err(|error| {
+            format!(
+                "Docker failed to remove etcd ({status}) and could not verify its absence: {error}"
+            )
+        })?;
+    if !listed.status.success() {
+        return Err(format!(
+            "Docker failed to remove etcd ({status}) and listing containers failed: {}",
+            String::from_utf8_lossy(&listed.stderr).trim()
+        ));
+    }
+    if String::from_utf8_lossy(&listed.stdout).trim().is_empty() {
+        println!("Etcd container is already absent");
+        return Ok(());
+    }
+
+    Err(format!(
+        "Docker failed to remove etcd container (status {status}); the container still exists"
+    ))
+}
+
+/// Stop and remove the etcd container.
+///
+/// Legacy callers retain panic-on-cleanup-failure behavior. Compatibility
+/// profiles use [`stop_rm_etcd_checked`] to report the failure structurally.
+pub fn stop_rm_etcd() {
+    stop_rm_etcd_checked().unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// Set up a PostgreSQL server in docker.

@@ -219,6 +219,20 @@ fn build_clean_unit_suffix(unit: &str) -> (Option<String>, Option<String>) {
     )
 }
 
+/// Converts a UCUM unit to its Prometheus/OpenMetrics unit word.
+pub(crate) fn ucum_to_openmetrics_unit(unit: &str) -> String {
+    if unit == "1" {
+        return "ratios".to_string();
+    }
+
+    match build_clean_unit_suffix(unit) {
+        (Some(main), Some(per)) => format!("{main}_per_{per}"),
+        (Some(main), None) => main,
+        (None, Some(per)) => format!("per_{per}"),
+        (None, None) => String::new(),
+    }
+}
+
 fn build_unit_suffixes(unit: &str) -> (String, String) {
     let (main, per) = unit.split_once('/').unwrap_or((unit, ""));
     let main_unit_suffix = unit_suffix(main, &UNIT_MAP);

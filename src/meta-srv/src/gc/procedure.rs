@@ -24,6 +24,7 @@ use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::lock_key::{RegionLock, TableLock};
 use common_meta::peer::Peer;
+use common_meta::rpc::ddl::TriggerReason;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
@@ -1071,10 +1072,18 @@ impl Procedure for BatchGcProcedure {
         }
 
         let event = match &ctx.trigger {
-            // Keep normal GC low-noise; only terminal events with meaningful reports are recorded.
-            EventTrigger::Submitted
-            | EventTrigger::Recovered
-            | EventTrigger::ChildSubmitted { .. } => return None,
+            // Keep scheduled GC low-noise; record submitted manual requests for auditability.
+            EventTrigger::Submitted => ctx
+                .event_context
+                .is_some_and(|context| context.reason == TriggerReason::Manual)
+                .then(|| {
+                    BatchGcEvent::with_config(
+                        &self.data.regions,
+                        self.data.full_file_listing,
+                        self.data.timeout,
+                    )
+                })?,
+            EventTrigger::Recovered | EventTrigger::ChildSubmitted { .. } => return None,
             EventTrigger::Succeeded => {
                 let ProcedureState::Done {
                     output: Some(output),

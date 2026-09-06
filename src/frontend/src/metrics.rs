@@ -45,6 +45,14 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Failed writes of the synthesized OTLP resource descriptor table; these
+    /// surface as OTLP partial-success warnings, not request failures.
+    pub static ref OTLP_RESOURCE_INFO_WRITE_ERRORS: IntCounter = register_int_counter!(
+        "greptime_frontend_otlp_resource_info_write_errors",
+        "frontend otlp resource descriptor write errors"
+    )
+    .unwrap();
+
     /// The number of OpenTelemetry traces send by frontend node.
     pub static ref OTLP_TRACES_ROWS: IntCounter = register_int_counter!(
         "greptime_frontend_otlp_traces_rows",

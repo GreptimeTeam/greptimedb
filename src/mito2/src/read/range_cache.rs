@@ -31,7 +31,7 @@ use datatypes::value::scalar_value_to_timestamp;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
-use store_api::storage::{FileId, RegionId, TimeSeriesRowSelector};
+use store_api::storage::{FileId, RegionId, SequenceRange, TimeSeriesRowSelector};
 use table::predicate::is_string_timestamp_literal;
 use tokio::sync::{mpsc, oneshot};
 
@@ -63,6 +63,10 @@ pub(crate) struct ScanRequestFingerprint {
     append_mode: bool,
     filter_deleted: bool,
     merge_mode: MergeMode,
+    /// Exact sequence range applied row-level on SST reads, or `None` for scans
+    /// without row-level sequence filtering. Kept in the cache key so filtered
+    /// range results are never reused for scans with a different (or no) range.
+    sequence_range: Option<SequenceRange>,
     stage: RangeScanStage,
     /// We keep the partition expr version to ensure we won't reuse the fingerprint after we change the partition expr.
     /// We store the version instead of the whole partition expr or partition expr filters.
@@ -86,6 +90,7 @@ pub(crate) struct ScanRequestFingerprintBuilder {
     pub(crate) append_mode: bool,
     pub(crate) filter_deleted: bool,
     pub(crate) merge_mode: MergeMode,
+    pub(crate) sequence_range: Option<SequenceRange>,
     pub(crate) partition_expr_version: u64,
 }
 
@@ -100,6 +105,7 @@ impl ScanRequestFingerprintBuilder {
             append_mode,
             filter_deleted,
             merge_mode,
+            sequence_range,
             partition_expr_version,
         } = self;
 
@@ -114,6 +120,7 @@ impl ScanRequestFingerprintBuilder {
             append_mode,
             filter_deleted,
             merge_mode,
+            sequence_range,
             stage: RangeScanStage::Data,
             partition_expr_version,
         }
@@ -164,6 +171,7 @@ impl ScanRequestFingerprint {
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
+            sequence_range: self.sequence_range,
             stage: self.stage,
             partition_expr_version: self.partition_expr_version,
         }
@@ -177,6 +185,7 @@ impl ScanRequestFingerprint {
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
+            sequence_range: self.sequence_range,
             stage: RangeScanStage::CandidateSeries,
             partition_expr_version: self.partition_expr_version,
         }
@@ -190,6 +199,7 @@ impl ScanRequestFingerprint {
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
+            sequence_range: self.sequence_range,
             stage: RangeScanStage::SeriesData(range),
             partition_expr_version: self.partition_expr_version,
         }
@@ -311,8 +321,9 @@ pub(crate) fn collect_partition_range_row_groups(
 
 /// Returns the timestamp range where all time-only predicates are guaranteed true.
 ///
-/// Returns `Some(min_to_max)` for empty input (vacuously true everywhere).
-/// Returns `None` if any expression contains an unsupported shape: `OR`, `NOT`,
+/// Returns `None` for empty input because there is no time-filter implication
+/// that cache-key normalization or prefilter postponement can use. It also
+/// returns `None` if any expression contains an unsupported shape: `OR`, `NOT`,
 /// `IN`, non-literal RHS, unsupported operator, column-name mismatch, an `=`
 /// literal that cannot be represented exactly in the column unit, or overflow
 /// during bound adjustment.
@@ -330,6 +341,10 @@ pub(crate) fn implied_time_range_from_exprs(
     ts_col_unit: TimeUnit,
     exprs: &[&Expr],
 ) -> Option<TimestampRange> {
+    if exprs.is_empty() {
+        return None;
+    }
+
     let mut acc = TimestampRange::min_to_max();
     for expr in exprs {
         let r = implied_time_range_from_expr(ts_col_name, ts_col_unit, expr)?;
@@ -522,7 +537,7 @@ fn build_range_cache_key_inner(
         return None;
     }
 
-    let fingerprint = stream_ctx.scan_fingerprint.as_ref()?;
+    let fingerprint = stream_ctx.input.scan_fingerprint()?;
 
     // Dyn filters can change at runtime, so we can't cache when they're present.
     let has_dyn_filters = stream_ctx
@@ -541,25 +556,21 @@ fn build_range_cache_key_inner(
 
     // If the implied range covers this partition's `FileTimeRange`, drop
     // time-only predicates from the cache key so that queries with different
-    // but equally-covering time bounds share an entry. `None` means some
-    // time-only predicate had an unsupported shape (e.g. `OR`), so we keep
-    // them in the key.
+    // but equally-covering time bounds share an entry. `None` means there is no
+    // analyzable time-only predicate or some predicate had an unsupported shape
+    // (e.g. `OR`), so we keep the fingerprint unchanged. When `time_filters` is
+    // already empty, cloning the fingerprint is equivalent to stripping them.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let (file_min, file_max) = range_meta.time_range;
-    let covers = match &stream_ctx.scan_implied_time_range {
+    let covers = match stream_ctx.input.implied_time_range() {
         // An empty implied range can never cover a non-empty file range, so
-        // short-circuit. We also skip the unit asserts because
-        // `TimestampRange::empty()` uses `Timestamp::default()` (millisecond),
-        // which would falsely trip the asserts for non-ms time index columns.
+        // short-circuit.
         Some(implied) if !implied.is_empty() => {
-            // The `contains` check is sound only when `file_min`/`file_max`
-            // share the implied range's unit (the time index column's unit).
-            // Mito stores time index values in that unit; assert to catch any
-            // future drift.
-            if let Some(ts) = implied.start().as_ref().or(implied.end().as_ref()) {
-                assert_eq!(file_min.unit(), ts.unit());
-                assert_eq!(file_max.unit(), ts.unit());
-            }
+            // `file_min`/`file_max` may use a different unit than the implied
+            // range: after the time index unit was widened, pre-alter files
+            // still carry the old unit while the implied range uses the
+            // current column unit. `Timestamp` comparisons normalize units,
+            // so `contains` compares instants and stays sound across units.
             implied.contains(&file_min) && implied.contains(&file_max)
         }
         _ => false,
@@ -852,7 +863,7 @@ pub fn bench_cache_flat_range_stream(
     let cache_strategy = CacheStrategy::EnableAll(cache_manager);
 
     let fingerprint = ScanRequestFingerprintBuilder {
-        read_columns: ReadColumns::from_deduped_column_ids(std::iter::empty()),
+        read_columns: ReadColumns::new(std::iter::empty()),
         read_column_types: vec![],
         filters: vec![],
         time_filters: vec![],
@@ -860,6 +871,7 @@ pub fn bench_cache_flat_range_stream(
         append_mode: false,
         filter_deleted: false,
         merge_mode: MergeMode::LastRow,
+        sequence_range: None,
         partition_expr_version: 0,
     }
     .build();
@@ -916,7 +928,7 @@ mod tests {
         filter_deleted: bool,
         partition_expr_version: u64,
     ) -> ScanRequestFingerprint {
-        let read_columns = ReadColumns::from_deduped_column_ids([1, 2]);
+        let read_columns = ReadColumns::new([1, 2]);
         ScanRequestFingerprintBuilder {
             read_columns,
             read_column_types: vec![None, None],
@@ -926,6 +938,7 @@ mod tests {
             append_mode: false,
             filter_deleted,
             merge_mode: MergeMode::LastRow,
+            sequence_range: None,
             partition_expr_version,
         }
         .build()
@@ -975,11 +988,12 @@ mod tests {
             partition_time_range.0.value(),
             partition_time_range.1.value(),
         );
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_predicate(predicate)
             .with_time_range(query_time_range)
             .with_files(vec![file])
-            .with_cache(test_cache_strategy());
+            .with_cache(test_cache_strategy())
+            .build();
         let range_meta = RangeMeta {
             time_range: partition_time_range,
             indices: smallvec![SourceIndex {
@@ -993,16 +1007,9 @@ mod tests {
             num_rows: 10,
         };
         let partition_range = range_meta.new_partition_range(0);
-        let (scan_fingerprint, scan_implied_time_range) =
-            match crate::read::scan_region::build_scan_fingerprint(&input) {
-                Some(b) => (Some(b.fingerprint), b.implied_time_range),
-                None => (None, None),
-            };
         let stream_ctx = StreamContext {
             input,
             ranges: vec![range_meta],
-            scan_fingerprint,
-            scan_implied_time_range,
             query_start: Instant::now(),
         };
 
@@ -1212,7 +1219,7 @@ mod tests {
         )
         .await;
 
-        assert!(ctx_a.scan_implied_time_range.is_none());
+        assert!(ctx_a.input.implied_time_range().is_none());
         let key_a = build_range_cache_key(&ctx_a, &part_a).unwrap();
         let key_b = build_range_cache_key(&ctx_b, &part_b).unwrap();
         assert_ne!(key_a.scan, key_b.scan);
@@ -1234,13 +1241,17 @@ mod tests {
         );
 
         let (mut ctx, part_range) = new_stream_context(
-            vec![col("ts").gt_eq(ts_lit(1500)), col("k0").eq(lit("foo"))],
+            vec![
+                col("ts").gt_eq(ts_lit(1500)),
+                col("ts").lt(ts_lit(1500)),
+                col("k0").eq(lit("foo")),
+            ],
             TimestampRange::with_unit(1500, 3000, TimeUnit::Millisecond),
             partition,
         )
         .await;
 
-        ctx.scan_implied_time_range = Some(TimestampRange::empty());
+        assert!(ctx.input.implied_time_range().unwrap().is_empty());
         ctx.ranges[0].time_range = (
             Timestamp::new(1_000_000_000, TimeUnit::Nanosecond),
             Timestamp::new(2_000_000_000, TimeUnit::Nanosecond),
@@ -1248,6 +1259,57 @@ mod tests {
 
         let key = build_range_cache_key(&ctx, &part_range).unwrap();
         // Empty implied range cannot cover, so time filters stay in the key.
+        assert!(!key.scan.time_filters().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_unit_file_range_is_compared_by_instant() {
+        // After the time index unit was widened, pre-alter files keep the old
+        // unit while `scan_implied_time_range` uses the current column unit.
+        // The coverage decision must compare instants across units instead of
+        // asserting unit equality (which panicked here for widened regions).
+        let partition = (
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+
+        // Covering: the implied range [0, 3000)ms contains the file range
+        // [1s, 2s] expressed in microseconds; time filters are dropped from
+        // the key.
+        let (mut ctx, part_range) = new_stream_context(
+            vec![
+                col("ts").gt_eq(ts_lit(0)),
+                col("ts").lt(ts_lit(3000)),
+                col("k0").eq(lit("foo")),
+            ],
+            TimestampRange::with_unit(0, 3000, TimeUnit::Millisecond),
+            partition,
+        )
+        .await;
+        ctx.ranges[0].time_range = (
+            Timestamp::new_microsecond(1_000_000),
+            Timestamp::new_microsecond(2_000_000),
+        );
+        let key = build_range_cache_key(&ctx, &part_range).unwrap();
+        assert!(key.scan.time_filters().is_empty());
+
+        // Not covering: the implied range [1500, 3000)ms excludes the file's
+        // 1s lower bound; time filters stay in the key.
+        let (mut ctx, part_range) = new_stream_context(
+            vec![
+                col("ts").gt_eq(ts_lit(1500)),
+                col("ts").lt(ts_lit(3000)),
+                col("k0").eq(lit("foo")),
+            ],
+            TimestampRange::with_unit(1500, 3000, TimeUnit::Millisecond),
+            partition,
+        )
+        .await;
+        ctx.ranges[0].time_range = (
+            Timestamp::new_microsecond(1_000_000),
+            Timestamp::new_microsecond(2_000_000),
+        );
+        let key = build_range_cache_key(&ctx, &part_range).unwrap();
         assert!(!key.scan.time_filters().is_empty());
     }
 
@@ -1312,7 +1374,7 @@ mod tests {
 
         assert_eq!(
             implied_time_range_from_exprs("ts", TimeUnit::Millisecond, &[]),
-            Some(TimestampRange::min_to_max())
+            None
         );
     }
 

@@ -148,6 +148,7 @@ impl Default for FlownodeOptions {
                 memory_pool_size: MemoryLimit::default(),
                 experimental_enable_memory_ledger: false,
                 enable_per_region_metrics: false,
+                ..Default::default()
             },
             memory: MemoryOptions::default(),
         }

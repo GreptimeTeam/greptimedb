@@ -24,7 +24,7 @@ use common_procedure::{Context, EventContext, EventTrigger, LockKey, Procedure, 
 use common_telemetry::{debug, error, info, warn};
 pub use executor::make_alter_region_request;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
@@ -40,7 +40,7 @@ use crate::ddl::event::table::{
     TableDdlEvent, TableDdlEventType, TableDdlLocator, alter_table_kind_name,
 };
 use crate::ddl::utils::{extract_column_metadatas, map_to_procedure_error, sync_follower_regions};
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
@@ -88,6 +88,7 @@ impl AlterLogicalTablesProcedure {
     pub fn new(
         tasks: Vec<AlterTableTask>,
         physical_table_id: TableId,
+        logical_table_ids: Vec<TableId>,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -97,6 +98,7 @@ impl AlterLogicalTablesProcedure {
                 tasks,
                 table_info_values: vec![],
                 physical_table_id,
+                logical_table_ids,
                 physical_table_info: None,
                 physical_columns: vec![],
                 table_cache_keys_to_invalidate: vec![],
@@ -145,6 +147,26 @@ impl AlterLogicalTablesProcedure {
                 "There are {} alter tasks, {} of them were already finished.",
                 num_tasks, num_skipped
             );
+        }
+
+        // Locks are fixed at submission. A logical table that resolves to an
+        // id outside the locked set here was dropped and recreated in between,
+        // so this procedure holds no lock for it. Procedures restored from
+        // pre-upgrade state have no recorded ids and keep the old behavior.
+        if !self.data.logical_table_ids.is_empty() {
+            for value in &table_info_values {
+                let table_id = value.get_inner_ref().table_info.ident.table_id;
+                ensure!(
+                    self.data.logical_table_ids.contains(&table_id),
+                    error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "logical table {} (id {table_id}) is not covered by the \
+                             procedure locks; retry the statement",
+                            value.get_inner_ref().table_info.name
+                        ),
+                    }
+                );
+            }
         }
 
         // Updates the procedure state.
@@ -305,17 +327,29 @@ impl Procedure for AlterLogicalTablesProcedure {
         // CatalogLock, SchemaLock,
         // TableLock
         // TableNameLock(s)
-        let mut lock_key = Vec::with_capacity(2 + 1 + self.data.tasks.len());
+        let mut lock_key = Vec::with_capacity(2 + 1 + self.data.logical_table_ids.len());
         let table_ref = self.data.tasks[0].table_ref();
         lock_key.push(CatalogLock::Read(table_ref.catalog).into());
         lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
         lock_key.push(TableLock::Write(self.data.physical_table_id).into());
-        lock_key.extend(
-            self.data
-                .table_info_values
-                .iter()
-                .map(|table| TableLock::Write(table.table_info.ident.table_id).into()),
-        );
+        if self.data.logical_table_ids.is_empty() {
+            // Pre-upgrade procedure state has no `logical_table_ids`, but a
+            // dump taken after `Prepare` still carries the resolved table
+            // snapshots — recover the logical locks from them.
+            lock_key.extend(
+                self.data
+                    .table_info_values
+                    .iter()
+                    .map(|table| TableLock::Write(table.table_info.ident.table_id).into()),
+            );
+        } else {
+            lock_key.extend(
+                self.data
+                    .logical_table_ids
+                    .iter()
+                    .map(|table_id| TableLock::Write(*table_id).into()),
+            );
+        }
 
         LockKey::new(lock_key)
     }
@@ -330,6 +364,11 @@ impl Procedure for AlterLogicalTablesProcedure {
         if ctx.trigger != EventTrigger::Submitted {
             return Some(Box::new(TableDdlEvent::lifecycle(
                 TableDdlEventType::AlterLogicalTables,
+                self.data.tasks.iter().map(|task| {
+                    let table_ref = task.table_ref();
+                    TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
+                        .with_physical_table_id(self.data.physical_table_id)
+                }),
             )));
         }
 
@@ -361,18 +400,23 @@ pub struct AlterTablesData {
     table_info_values: Vec<DeserializedValueWithBytes<TableInfoValue>>,
     /// Physical table info
     physical_table_id: TableId,
+    /// Logical table ids resolved at submission time, so `lock_key` can name
+    /// them before `Prepare` runs (procedure locks are fixed at submission).
+    /// Empty when restored from pre-upgrade procedure state.
+    #[serde(default)]
+    logical_table_ids: Vec<TableId>,
     physical_table_info: Option<DeserializedValueWithBytes<TableInfoValue>>,
     physical_columns: Vec<ColumnMetadata>,
     table_cache_keys_to_invalidate: Vec<CacheIdent>,
 }
 
 impl AlterTablesData {
-    /// Clears all data fields except `state` and `table_cache_keys_to_invalidate` after metadata update.
-    /// This is done to avoid persisting unnecessary data after the update metadata step.
+    /// Clears metadata snapshots after the update metadata step.
+    ///
+    /// Keep the tasks and physical table ID until the procedure finishes: lifecycle
+    /// events use them to retain the logical table locator.
     fn clear_metadata_fields(&mut self) {
-        self.tasks.clear();
         self.table_info_values.clear();
-        self.physical_table_id = 0;
         self.physical_table_info = None;
         self.physical_columns.clear();
     }

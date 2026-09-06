@@ -21,7 +21,7 @@ use tinytemplate::TinyTemplate;
 
 use crate::cmd::bare::ServerAddr;
 use crate::cmd::compat_case::Version;
-use crate::env::bare::{Env, GreptimeDBContext, ServiceProvider};
+use crate::env::bare::{CompatConfigStage, Env, GreptimeDBContext, ServiceProvider};
 use crate::util;
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
@@ -305,6 +305,7 @@ impl ServerMode {
         sqlness_home: &Path,
         db_ctx: &GreptimeDBContext,
         id: usize,
+        compat_stage: &CompatConfigStage,
     ) -> String {
         let mut tt = TinyTemplate::new();
 
@@ -365,9 +366,34 @@ impl ServerMode {
         };
 
         let rendered = tt.render(self.name(), &ctx).unwrap();
+        let rendered = match (self, compat_stage) {
+            (ServerMode::Datanode { .. }, CompatConfigStage::Old(overlay)) => overlay
+                .apply_to_rendered_baseline(&rendered)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "Failed to apply old datanode overlay {}: {error}",
+                        overlay.source().display()
+                    )
+                }),
+            _ => rendered,
+        };
 
+        let stage_suffix = match compat_stage {
+            CompatConfigStage::Baseline => "baseline",
+            CompatConfigStage::Old(_) => "old",
+            CompatConfigStage::Current => "current",
+        };
         let conf_file = data_home
-            .join(format!("{}-{}-{}.toml", self.name(), id, db_ctx.time()))
+            .join(if matches!(self, ServerMode::Datanode { .. }) {
+                format!(
+                    "{}-{}-{}-{stage_suffix}.toml",
+                    self.name(),
+                    id,
+                    db_ctx.time()
+                )
+            } else {
+                format!("{}-{}-{}.toml", self.name(), id, db_ctx.time())
+            })
             .display()
             .to_string();
         println!(
@@ -387,6 +413,7 @@ impl ServerMode {
         db_ctx: &GreptimeDBContext,
         id: usize,
         arg_style: GrpcArgStyle,
+        compat_stage: &CompatConfigStage,
     ) -> Vec<String> {
         let mut args = env
             .extra_args()
@@ -410,7 +437,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, db_ctx, id, compat_stage),
                     format!("--http-addr={http_addr}"),
                     format!("{}={rpc_bind_addr}", arg_style.bind_addr_arg()),
                     format!("--mysql-addr={mysql_addr}"),
@@ -439,7 +466,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, db_ctx, id, compat_stage),
                 ]);
             }
             ServerMode::Metasrv {
@@ -461,7 +488,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, db_ctx, id, compat_stage),
                 ]);
 
                 if matches!(
@@ -540,7 +567,7 @@ impl ServerMode {
                     format!("--log-dir={}/logs", data_home.display()),
                     format!("--node-id={node_id}"),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, db_ctx, id, compat_stage),
                     format!("--metasrv-addrs={metasrv_addr}"),
                 ]);
             }
@@ -573,8 +600,10 @@ impl ServerMode {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use super::*;
+    use crate::cmd::datanode_overlay::{DatanodeOverlay, DatanodeProtectionPolicy};
     use crate::env::bare::{StoreConfig, WalConfig};
 
     fn test_env(sqlness_home: &Path) -> (Env, GreptimeDBContext) {
@@ -598,6 +627,19 @@ mod tests {
         let db_ctx = GreptimeDBContext::new(WalConfig::RaftEngine, store_config);
 
         (env, db_ctx)
+    }
+
+    fn old_stage(temp_dir: &Path) -> CompatConfigStage {
+        std::fs::write(
+            temp_dir.join("old-datanode.toml"),
+            "old_only = \"applied\"\nmode = \"standalone\"\n",
+        )
+        .unwrap();
+        let overlay = DatanodeOverlay::load(temp_dir, Path::new("old-datanode.toml"))
+            .unwrap()
+            .prepare(&DatanodeProtectionPolicy::for_wal(&WalConfig::RaftEngine))
+            .unwrap();
+        CompatConfigStage::Old(Arc::new(overlay))
     }
 
     fn has_arg(args: &[String], name: &str) -> bool {
@@ -641,7 +683,14 @@ mod tests {
             postgres_addr: "127.0.0.1:4003".to_string(),
         };
         assert_uses_style(
-            &standalone.get_args(temp_dir, env, db_ctx, 0, style),
+            &standalone.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             false,
         );
@@ -654,7 +703,14 @@ mod tests {
             metasrv_addr: "127.0.0.1:4001".to_string(),
         };
         assert_uses_style(
-            &frontend.get_args(temp_dir, env, db_ctx, 0, style),
+            &frontend.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             true,
         );
@@ -665,7 +721,14 @@ mod tests {
             http_addr: "127.0.0.1:4200".to_string(),
         };
         assert_uses_style(
-            &metasrv.get_args(temp_dir, env, db_ctx, 0, style),
+            &metasrv.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             true,
         );
@@ -678,7 +741,14 @@ mod tests {
             node_id: 0,
         };
         assert_uses_style(
-            &datanode.get_args(temp_dir, env, db_ctx, 0, style),
+            &datanode.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             true,
         );
@@ -691,7 +761,14 @@ mod tests {
             node_id: 0,
         };
         assert_uses_style(
-            &flownode.get_args(temp_dir, env, db_ctx, 0, style),
+            &flownode.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             true,
         );
@@ -759,14 +836,79 @@ mod tests {
             node_id: 0,
         };
 
-        let metasrv_config =
-            std::fs::read_to_string(metasrv.generate_config_file(temp_dir.path(), &db_ctx, 0))
-                .unwrap();
-        let datanode_config =
-            std::fs::read_to_string(datanode.generate_config_file(temp_dir.path(), &db_ctx, 0))
-                .unwrap();
+        let metasrv_config = std::fs::read_to_string(metasrv.generate_config_file(
+            temp_dir.path(),
+            &db_ctx,
+            0,
+            &CompatConfigStage::Baseline,
+        ))
+        .unwrap();
+        let datanode_config = std::fs::read_to_string(datanode.generate_config_file(
+            temp_dir.path(),
+            &db_ctx,
+            0,
+            &CompatConfigStage::Baseline,
+        ))
+        .unwrap();
 
         assert!(metasrv_config.contains("[gc]\nenable = true"));
         assert!(datanode_config.contains("[region_engine.mito.gc]\nenable = true"));
+    }
+
+    #[test]
+    fn test_datanode_rendering_applies_only_old_stage_with_distinct_filenames() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_, db_ctx) = test_env(temp_dir.path());
+        let datanode = ServerMode::Datanode {
+            rpc_bind_addr: "127.0.0.1:4301".to_string(),
+            rpc_server_addr: "127.0.0.1:4301".to_string(),
+            http_addr: "127.0.0.1:4300".to_string(),
+            metasrv_addr: "127.0.0.1:4201".to_string(),
+            node_id: 0,
+        };
+        let baseline_path = datanode.generate_config_file(
+            temp_dir.path(),
+            &db_ctx,
+            0,
+            &CompatConfigStage::Baseline,
+        );
+        let old_path =
+            datanode.generate_config_file(temp_dir.path(), &db_ctx, 0, &old_stage(temp_dir.path()));
+        let current_path =
+            datanode.generate_config_file(temp_dir.path(), &db_ctx, 0, &CompatConfigStage::Current);
+
+        let baseline = std::fs::read_to_string(&baseline_path).unwrap();
+        let old = std::fs::read_to_string(&old_path).unwrap();
+        let current = std::fs::read_to_string(&current_path).unwrap();
+        assert!(baseline_path.ends_with("-baseline.toml"));
+        assert!(old_path.ends_with("-old.toml"));
+        assert!(current_path.ends_with("-current.toml"));
+        assert!(!baseline.contains("old_only"));
+        assert!(old.contains("old_only = \"applied\""));
+        assert!(!current.contains("old_only"));
+        assert_eq!(
+            toml::from_str::<toml::Value>(&old).unwrap()["mode"].as_str(),
+            toml::from_str::<toml::Value>(&baseline).unwrap()["mode"].as_str()
+        );
+    }
+
+    #[test]
+    fn test_non_datanode_ignores_old_overlay() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_, db_ctx) = test_env(temp_dir.path());
+        let metasrv = ServerMode::Metasrv {
+            rpc_bind_addr: "127.0.0.1:4201".to_string(),
+            rpc_server_addr: "127.0.0.1:4201".to_string(),
+            http_addr: "127.0.0.1:4200".to_string(),
+        };
+        let config_path =
+            metasrv.generate_config_file(temp_dir.path(), &db_ctx, 0, &old_stage(temp_dir.path()));
+
+        assert!(!config_path.ends_with("-old.toml"));
+        assert!(
+            !std::fs::read_to_string(config_path)
+                .unwrap()
+                .contains("old_only")
+        );
     }
 }

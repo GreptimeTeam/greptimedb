@@ -15,6 +15,7 @@
 use api::v1::Rows;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
+use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
@@ -131,6 +132,67 @@ async fn scan_last_row(
     sort_batches_and_print(&batches, &["tag_0", "ts"])
 }
 
+async fn new_flat_last_row_engine(
+    selector_result_cache_size: ReadableSize,
+) -> (TestEnv, MitoEngine, RegionId) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            selector_result_cache_size,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("sst_format", "flat")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_for_key("a", 0, 11, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, Some(16)).await;
+
+    (env, engine, region_id)
+}
+
+fn mixed_time_filters() -> Vec<datafusion_expr::Expr> {
+    let ts_lit = |value| lit(ScalarValue::TimestampMillisecond(Some(value), None));
+    vec![col("ts").gt_eq(ts_lit(0)), col("ts").not_eq(ts_lit(10_000))]
+}
+
+const LAST_ROW_AT_NINE: &str = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 9.0     | 1970-01-01T00:00:09 |
++-------+---------+---------------------+";
+
+const LAST_ROW_AT_TEN: &str = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 10.0    | 1970-01-01T00:00:10 |
++-------+---------+---------------------+";
+
 #[tokio::test]
 async fn test_last_row_append_mode_disabled() {
     test_last_row(false, false).await;
@@ -149,6 +211,28 @@ async fn test_last_row_flat_format_append_mode_disabled() {
 #[tokio::test]
 async fn test_last_row_flat_format_append_mode_enabled() {
     test_last_row(true, true).await;
+}
+
+#[tokio::test]
+async fn test_last_row_flat_format_non_tag_filter_without_selector_cache() {
+    let (_env, engine, region_id) = new_flat_last_row_engine(ReadableSize(0)).await;
+
+    let filtered = scan_last_row(&engine, region_id, mixed_time_filters()).await;
+    assert_eq!(LAST_ROW_AT_NINE, filtered);
+}
+
+#[tokio::test]
+async fn test_last_row_flat_format_non_tag_filter_does_not_reuse_selector_cache() {
+    let (_env, engine, region_id) = new_flat_last_row_engine(ReadableSize::mb(1)).await;
+
+    let unfiltered = scan_last_row(&engine, region_id, vec![]).await;
+    assert_eq!(LAST_ROW_AT_TEN, unfiltered);
+
+    let filtered = scan_last_row(&engine, region_id, mixed_time_filters()).await;
+    assert_eq!(LAST_ROW_AT_NINE, filtered);
+
+    let unfiltered = scan_last_row(&engine, region_id, vec![]).await;
+    assert_eq!(LAST_ROW_AT_TEN, unfiltered);
 }
 
 #[tokio::test]

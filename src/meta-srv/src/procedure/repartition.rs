@@ -801,7 +801,7 @@ impl Procedure for RepartitionProcedure {
             let start = self.state.as_any().downcast_ref::<RepartitionStart>()?;
             RepartitionEvent::submitted(&self.context.persistent_ctx, start)
         } else {
-            RepartitionEvent::lifecycle()
+            RepartitionEvent::lifecycle(&self.context.persistent_ctx)
         };
         Some(Box::new(event))
     }
@@ -1270,6 +1270,7 @@ mod tests {
                 lifecycle_state: &state,
                 trigger: EventTrigger::Submitted,
                 event_type_filter: all.clone(),
+                event_context: None,
             })
             .unwrap();
         assert_eq!(submitted.event_type(), REPARTITION_EVENT_TYPE);
@@ -1283,6 +1284,7 @@ mod tests {
                 event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
                     REPARTITION_EVENT_TYPE.to_string(),
                 ]))),
+                event_context: None,
             })
             .unwrap();
         assert_eq!(allowed.event_type(), REPARTITION_EVENT_TYPE);
@@ -1293,6 +1295,7 @@ mod tests {
                 lifecycle_state: &state,
                 trigger: EventTrigger::Succeeded,
                 event_type_filter: all,
+                event_context: None,
             })
             .unwrap();
         assert_eq!(succeeded.json_payload().unwrap(), serde_json::Value::Null);
@@ -1304,6 +1307,7 @@ mod tests {
             event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
                 "another_event".to_string()
             ]))),
+            event_context: None,
         });
         assert!(filtered.is_none());
 
@@ -1312,6 +1316,7 @@ mod tests {
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
             event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+            event_context: None,
         });
         assert!(empty.is_none());
     }

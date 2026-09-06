@@ -16,4 +16,4 @@ mod alter;
 pub mod error;
 pub mod util;
 
-pub use alter::{alter_expr_to_request, create_table_schema};
+pub use alter::{alter_expr_to_request, annotation_alter_family, create_table_schema};

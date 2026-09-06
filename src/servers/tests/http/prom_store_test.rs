@@ -44,7 +44,7 @@ use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store;
-use servers::prom_store::{Metrics, snappy_compress};
+use servers::prom_store::snappy_compress;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;
@@ -145,10 +145,6 @@ impl PromStoreProtocolHandler for DummyInstance {
             resp_metrics: Default::default(),
             body: response.encode_to_vec(),
         })
-    }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
-        unimplemented!();
     }
 }
 

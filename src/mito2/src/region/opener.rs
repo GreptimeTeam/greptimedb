@@ -20,8 +20,10 @@ use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+use arrow_schema::extension::ExtensionType;
 use common_telemetry::{debug, error, info, warn};
 use common_wal::options::WalOptions;
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use log_store::kafka::log_store::KafkaLogStore;
@@ -32,6 +34,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{is_object_storage, normalize_dir};
 use parquet::file::metadata::PageIndexPolicy;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
 use store_api::metadata::{
@@ -49,14 +52,14 @@ use crate::config::MitoConfig;
 use crate::engine::region_hook::RegionHookRef;
 use crate::error;
 use crate::error::{
-    EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu, ObjectStoreNotFoundSnafu,
-    RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
+    DataTypeMismatchSnafu, EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu,
+    ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
 };
 use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
+use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_memtable};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
@@ -90,6 +93,41 @@ fn initial_pruned_entry_id(wal_options: &WalOptions) -> EntryId {
         WalOptions::Kafka(options) => options.initial_pruned_entry_id.unwrap_or(0),
         WalOptions::RaftEngine | WalOptions::Noop => 0,
     }
+}
+
+fn maybe_upgrade_json2_layout(metadata: RegionMetadataRef) -> Result<RegionMetadataRef> {
+    let mut upgrades = Vec::new();
+    for (index, column) in metadata.column_metadatas.iter().enumerate() {
+        if !column.column_schema.data_type.is_json2() {
+            continue;
+        }
+        let Some(extension) = column
+            .column_schema
+            .extension_type::<Json2ExtensionType>()
+            .context(DataTypeMismatchSnafu)?
+        else {
+            continue;
+        };
+        if extension.metadata().is_version_2() {
+            continue;
+        }
+        upgrades.push((index, extension.metadata().json_settings().clone()));
+    }
+
+    if upgrades.is_empty() {
+        return Ok(metadata);
+    }
+
+    let mut upgraded = metadata.as_ref().clone();
+    for (index, settings) in upgrades {
+        let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings)));
+        upgraded.column_metadatas[index]
+            .column_schema
+            .with_extension_type(&extension);
+    }
+
+    let builder = RegionMetadataBuilder::from_existing(upgraded);
+    Ok(Arc::new(builder.build().context(InvalidMetadataSnafu)?))
 }
 
 /// A fetcher to retrieve partition expr for a region.
@@ -323,6 +361,7 @@ impl RegionOpener {
             options.sst_format = Some(FormatType::PrimaryKey);
             FormatType::PrimaryKey
         };
+        ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
         let mut region_manifest_options =
             RegionManifestOptions::new(config, &region_dir, &object_store);
@@ -474,8 +513,10 @@ impl RegionOpener {
         } else {
             manifest.metadata.clone()
         };
+        let metadata = maybe_upgrade_json2_layout(metadata)?;
         // Updates the region options with the manifest.
         sanitize_region_options(&manifest, &mut region_options);
+        ensure_json2_not_use_time_series_memtable(&metadata, &region_options)?;
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
@@ -832,6 +873,7 @@ where
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
     let replay_from_entry_id = flushed_entry_id + 1;
+    let region_metadata = version_control.current().version.metadata.clone();
 
     let mut wal_stream = wal_entry_reader.read(provider, replay_from_entry_id)?;
     while let Some(res) = wal_stream.next().await {
@@ -876,7 +918,16 @@ where
         }
 
         for bulk_entry in entry.bulk_entries {
-            let part = BulkPart::try_from(bulk_entry)?;
+            let mut part = BulkPart::try_from(bulk_entry)?;
+            // The entry may miss columns added by a concurrent alter if it was
+            // written by a writer with a stale schema (older versions kept the
+            // stale raw data when filling missing columns). Fills missing
+            // columns like the write path, otherwise the memtable rejects the
+            // batch. Skips sparse batches as they don't carry tag columns by
+            // design.
+            if region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse {
+                part.fill_missing_columns(&region_metadata)?;
+            }
             rows_replayed += part.num_rows();
             // During replay, we should adopt the sequence from WAL.
             let bulk_sequence_from_wal = part.sequence;
@@ -897,6 +948,9 @@ where
         region_write_ctx.set_next_entry_id(last_entry_id + 1);
         region_write_ctx.write_memtable().await;
         region_write_ctx.write_bulk().await;
+        // Publish the replayed sequences only after all rows (including bulk
+        // parts) are installed, matching the write path ordering.
+        region_write_ctx.publish_sequence_and_entry_id();
     }
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest
@@ -1305,23 +1359,31 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use arrow_schema::extension::ExtensionType;
     use common_base::readable_size::ReadableSize;
+    use common_error::ext::WhateverResult;
     use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use datatypes::arrow::array::{ArrayRef, BinaryArray, Int64Array};
     use datatypes::arrow::record_batch::RecordBatch;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use object_store::ObjectStore;
     use object_store::services::{Fs, Memory, S3};
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
+    use store_api::metadata::RegionMetadataBuilder;
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        initial_pruned_entry_id, preload_parquet_meta_cache_for_files, sanitize_region_options,
-        supports_open_region_object_storage_requirement,
+        initial_pruned_entry_id, maybe_upgrade_json2_layout, preload_parquet_meta_cache_for_files,
+        sanitize_region_options, supports_open_region_object_storage_requirement,
     };
     use crate::cache::CacheManager;
     use crate::cache::file_cache::{FileType, IndexKey};
@@ -1373,6 +1435,38 @@ mod tests {
                 initial_pruned_entry_id: Some(42),
             }))
         );
+    }
+
+    #[test]
+    fn test_upgrade_json2_layout() -> WhateverResult<()> {
+        let settings = JsonSettings::try_new(vec![], Some(3))?;
+        let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new_v1(settings.clone())));
+        let mut column = ColumnSchema::new(
+            "field_0",
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+            true,
+        );
+        column.with_extension_type(&extension);
+
+        let mut metadata = sst_region_metadata();
+        metadata.column_metadatas[2].column_schema = column;
+        let builder = RegionMetadataBuilder::from_existing(metadata);
+        let metadata = Arc::new(builder.build()?);
+
+        let upgraded = maybe_upgrade_json2_layout(metadata)?;
+        let column = &upgraded.column_metadatas[2].column_schema;
+        let extension = column.extension_type::<Json2ExtensionType>()?.unwrap();
+        assert!(extension.metadata().is_version_2());
+        assert_eq!(&settings, extension.metadata().json_settings());
+
+        let arrow_schema = upgraded.schema.arrow_schema();
+        let field = arrow_schema.field_with_name("field_0").unwrap();
+        let extension = field.try_extension_type::<Json2ExtensionType>().unwrap();
+        assert!(extension.metadata().is_version_2());
+
+        let unchanged = maybe_upgrade_json2_layout(upgraded.clone())?;
+        assert!(Arc::ptr_eq(&upgraded, &unchanged));
+        Ok(())
     }
 
     #[test]
