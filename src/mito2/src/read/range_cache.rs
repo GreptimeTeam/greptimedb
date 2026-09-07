@@ -60,6 +60,7 @@ pub(crate) struct ScanRequestFingerprint {
     /// Filters with the time index column.
     time_filters: Option<Arc<Vec<String>>>,
     series_row_selector: Option<TimeSeriesRowSelector>,
+    series_row_selector_after_merge: bool,
     append_mode: bool,
     filter_deleted: bool,
     merge_mode: MergeMode,
@@ -87,6 +88,7 @@ pub(crate) struct ScanRequestFingerprintBuilder {
     pub(crate) filters: Vec<String>,
     pub(crate) time_filters: Vec<String>,
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
+    pub(crate) series_row_selector_after_merge: bool,
     pub(crate) append_mode: bool,
     pub(crate) filter_deleted: bool,
     pub(crate) merge_mode: MergeMode,
@@ -102,6 +104,7 @@ impl ScanRequestFingerprintBuilder {
             filters,
             time_filters,
             series_row_selector,
+            series_row_selector_after_merge,
             append_mode,
             filter_deleted,
             merge_mode,
@@ -117,6 +120,7 @@ impl ScanRequestFingerprintBuilder {
             }),
             time_filters: (!time_filters.is_empty()).then(|| Arc::new(time_filters)),
             series_row_selector,
+            series_row_selector_after_merge,
             append_mode,
             filter_deleted,
             merge_mode,
@@ -168,6 +172,7 @@ impl ScanRequestFingerprint {
             inner: Arc::clone(&self.inner),
             time_filters: None,
             series_row_selector: self.series_row_selector,
+            series_row_selector_after_merge: self.series_row_selector_after_merge,
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
@@ -182,6 +187,7 @@ impl ScanRequestFingerprint {
             inner: Arc::clone(&self.inner),
             time_filters: self.time_filters.clone(),
             series_row_selector: self.series_row_selector,
+            series_row_selector_after_merge: self.series_row_selector_after_merge,
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
@@ -196,6 +202,7 @@ impl ScanRequestFingerprint {
             inner: Arc::clone(&self.inner),
             time_filters: self.time_filters.clone(),
             series_row_selector: self.series_row_selector,
+            series_row_selector_after_merge: self.series_row_selector_after_merge,
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
@@ -868,6 +875,7 @@ pub fn bench_cache_flat_range_stream(
         filters: vec![],
         time_filters: vec![],
         series_row_selector: None,
+        series_row_selector_after_merge: false,
         append_mode: false,
         filter_deleted: false,
         merge_mode: MergeMode::LastRow,
@@ -925,6 +933,7 @@ mod tests {
         filters: Vec<String>,
         time_filters: Vec<String>,
         series_row_selector: Option<TimeSeriesRowSelector>,
+        series_row_selector_after_merge: bool,
         filter_deleted: bool,
         partition_expr_version: u64,
     ) -> ScanRequestFingerprint {
@@ -935,6 +944,7 @@ mod tests {
             filters,
             time_filters,
             series_row_selector,
+            series_row_selector_after_merge,
             append_mode: false,
             filter_deleted,
             merge_mode: MergeMode::LastRow,
@@ -949,7 +959,7 @@ mod tests {
         let key = RangeScanCacheKey {
             region_id,
             row_groups: vec![],
-            scan: test_scan_fingerprint(vec![], vec![], None, false, 0),
+            scan: test_scan_fingerprint(vec![], vec![], None, false, false, 0),
         };
 
         let metrics_set = ExecutionPlanMetricsSet::new();
@@ -1441,9 +1451,31 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_and_clears_time_filters() {
+    fn selector_after_merge_changes_fingerprint() {
+        let ordinary = test_scan_fingerprint(
+            vec!["k0 = 'foo'".to_string()],
+            vec![],
+            Some(TimeSeriesRowSelector::LastRow),
+            false,
+            true,
+            0,
+        );
+        let after_merge = test_scan_fingerprint(
+            vec!["k0 = 'foo'".to_string()],
+            vec![],
+            Some(TimeSeriesRowSelector::LastRow),
+            true,
+            true,
+            0,
+        );
+
+        assert_ne!(ordinary, after_merge);
+    }
+
+    #[test]
+    fn true_selector_after_merge_is_preserved_by_fingerprint_transforms() {
         let normalized =
-            test_scan_fingerprint(vec!["k0 = 'foo'".to_string()], vec![], None, true, 0);
+            test_scan_fingerprint(vec!["k0 = 'foo'".to_string()], vec![], None, false, true, 0);
 
         assert!(normalized.time_filters().is_empty());
 
@@ -1452,16 +1484,23 @@ mod tests {
             vec!["ts >= 1000".to_string()],
             Some(TimeSeriesRowSelector::LastRow),
             true,
+            true,
             7,
         );
 
         let reset = fingerprint.without_time_filters();
+        let candidate = fingerprint.for_candidate_series();
+        let series_data = fingerprint.for_series_data(SeriesRange::new(0, 1).unwrap());
 
         assert_eq!(reset.read_columns(), fingerprint.read_columns());
         assert_eq!(reset.read_column_types(), fingerprint.read_column_types());
         assert_eq!(reset.filters(), fingerprint.filters());
         assert!(reset.time_filters().is_empty());
         assert_eq!(reset.series_row_selector, fingerprint.series_row_selector);
+        assert!(fingerprint.series_row_selector_after_merge);
+        assert!(reset.series_row_selector_after_merge);
+        assert!(candidate.series_row_selector_after_merge);
+        assert!(series_data.series_row_selector_after_merge);
         assert_eq!(reset.append_mode, fingerprint.append_mode);
         assert_eq!(reset.filter_deleted, fingerprint.filter_deleted);
         assert_eq!(reset.merge_mode, fingerprint.merge_mode);

@@ -318,7 +318,7 @@ mod test {
     use mito2::config::MitoConfig;
     use store_api::region_engine::{PrepareRequest, QueryScanContext};
     use store_api::region_request::{RegionFlushRequest, RegionPutRequest, RegionRequest};
-    use store_api::storage::TimeSeriesDistribution;
+    use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
     use super::*;
     use crate::config::EngineConfig;
@@ -429,6 +429,8 @@ mod test {
         let scan_req = ScanRequest {
             projection,
             filters: vec![],
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            series_row_selector_after_merge: true,
             ..Default::default()
         };
 
@@ -444,6 +446,11 @@ mod test {
             &[11, 10, 9, 8, 0, 1, 4]
         );
         assert_eq!(scan_req.filters.len(), 1);
+        assert_eq!(
+            scan_req.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+        assert!(scan_req.series_row_selector_after_merge);
         assert_eq!(
             scan_req.filters[0],
             logical_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)

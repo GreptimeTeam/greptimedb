@@ -2770,6 +2770,7 @@ mod tests {
                 filters: vec!["tag_0 = 1".to_string()],
                 time_filters: vec![],
                 series_row_selector: None,
+                series_row_selector_after_merge: false,
                 append_mode: false,
                 filter_deleted: true,
                 merge_mode: crate::region::options::MergeMode::LastRow,

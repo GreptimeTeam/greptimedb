@@ -112,6 +112,11 @@ pub struct ScanRequest {
     pub limit: Option<usize>,
     /// Optional hint to select rows from time-series.
     pub series_row_selector: Option<TimeSeriesRowSelector>,
+    /// Whether the row selector must run only after cross-source merge and deduplication.
+    ///
+    /// This is required by instant-derived LastRow scans. Ordinary selector users
+    /// keep the default `false` and may use source-local selector optimization.
+    pub series_row_selector_after_merge: bool,
     /// Optional constraint on the sequence number of the rows to read.
     /// If set, only rows with a sequence number **lesser or equal** to this value
     /// will be returned.
@@ -203,6 +208,13 @@ impl Display for ScanRequest {
                 "{}series_row_selector: {}",
                 delimiter.as_str(),
                 series_row_selector
+            )?;
+        }
+        if self.series_row_selector_after_merge {
+            write!(
+                f,
+                "{}series_row_selector_after_merge: true",
+                delimiter.as_str()
             )?;
         }
         if let Some(sequence) = &self.memtable_max_sequence {
@@ -324,12 +336,13 @@ mod tests {
 
         let request = ScanRequest {
             snapshot_on_scan: true,
+            series_row_selector_after_merge: true,
             exact_sequence_range: true,
             ..Default::default()
         };
         assert_eq!(
             request.to_string(),
-            "ScanRequest { snapshot_on_scan: true, exact_sequence_range: true }"
+            "ScanRequest { series_row_selector_after_merge: true, snapshot_on_scan: true, exact_sequence_range: true }"
         );
 
         let request = ScanRequest {

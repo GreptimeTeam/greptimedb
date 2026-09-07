@@ -1571,8 +1571,13 @@ pub fn build_flat_file_range_scan_stream(
             let build_reader_start = Instant::now();
             let Some(mut reader) = range
                 .flat_reader(
-                    // LastRow must run after cross-source merge and deduplication.
-                    None,
+                    if stream_ctx.input.sequence_range.is_none()
+                        && !stream_ctx.input.series_row_selector_after_merge
+                    {
+                        stream_ctx.input.series_row_selector
+                    } else {
+                        None
+                    },
                     fetch_metrics.as_deref(),
                 )
                 .await?

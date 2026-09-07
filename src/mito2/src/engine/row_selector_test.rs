@@ -442,7 +442,17 @@ async fn test_last_row_returns_older_put_after_newest_delete_across_ssts() {
         .await;
         flush_region(&engine, region_id, None).await;
 
-        let scanner = last_row_scanner(&engine, region_id).await;
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                    series_row_selector_after_merge: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(2, scanner.num_files());
         assert_eq!(0, scanner.num_memtables());
         assert_eq!(
