@@ -178,10 +178,6 @@ impl WorkerGroup {
             WriteBufferManagerImpl::new(config.global_write_buffer_size.as_bytes() as usize)
                 .with_notifier(flush_sender.clone()),
         );
-        // Adapts the default bulk memtable encode threshold to the write buffer size.
-        crate::memtable::bulk::set_global_write_buffer_bytes(
-            config.global_write_buffer_size.as_bytes() as usize,
-        );
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
             config.index.staging_size.as_bytes(),
@@ -401,10 +397,6 @@ impl WorkerGroup {
                     .with_notifier(flush_sender.clone()),
             )
         });
-        // Adapts the default bulk memtable encode threshold to the write buffer size.
-        crate::memtable::bulk::set_global_write_buffer_bytes(
-            config.global_write_buffer_size.as_bytes() as usize,
-        );
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));

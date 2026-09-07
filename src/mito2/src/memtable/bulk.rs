@@ -105,36 +105,16 @@ static ENCODE_BYTES_THRESHOLD_OVERRIDE: LazyLock<Option<usize>> = LazyLock::new(
         .and_then(|v| v.parse().ok())
 });
 
-/// Global write buffer size in bytes used to adapt the default encode bytes
-/// threshold. Set on engine start; 0 means uninitialized (e.g. in tests) and
-/// falls back to [DEFAULT_ENCODE_BYTES_THRESHOLD].
-static GLOBAL_WRITE_BUFFER_BYTES: AtomicUsize = AtomicUsize::new(0);
-
-/// Sets the global write buffer size used to derive the default encode bytes
-/// threshold for bulk memtables.
-pub(crate) fn set_global_write_buffer_bytes(bytes: usize) {
-    GLOBAL_WRITE_BUFFER_BYTES.store(bytes, Ordering::Relaxed);
-}
-
 /// Computes the encode bytes threshold adapted to the global write buffer size:
-/// `max(64MB, min(global_write_buffer_size / 32, 512MB))`.
+/// `max(64 MiB, min(global_write_buffer_size / 32, 512 MiB))`.
 fn adaptive_encode_bytes_threshold(global_write_buffer_bytes: usize) -> usize {
     (global_write_buffer_bytes / ENCODE_BYTES_THRESHOLD_DIVISOR)
         .clamp(DEFAULT_ENCODE_BYTES_THRESHOLD, MAX_ENCODE_BYTES_THRESHOLD)
 }
 
 /// Returns the default bytes threshold for encoding parts.
-/// `GREPTIME_BULK_ENCODE_BYTES_THRESHOLD` takes precedence if set; otherwise the
-/// threshold adapts to the global write buffer size.
 fn default_encode_bytes_threshold() -> usize {
-    if let Some(threshold) = *ENCODE_BYTES_THRESHOLD_OVERRIDE {
-        return threshold;
-    }
-    let buffer_bytes = GLOBAL_WRITE_BUFFER_BYTES.load(Ordering::Relaxed);
-    if buffer_bytes == 0 {
-        return DEFAULT_ENCODE_BYTES_THRESHOLD;
-    }
-    adaptive_encode_bytes_threshold(buffer_bytes)
+    ENCODE_BYTES_THRESHOLD_OVERRIDE.unwrap_or(DEFAULT_ENCODE_BYTES_THRESHOLD)
 }
 
 /// Configuration for bulk memtable.
@@ -148,9 +128,7 @@ pub struct BulkMemtableConfig {
     /// Row threshold for encoding parts.
     #[serde_as(as = "DisplayFromStr")]
     pub encode_row_threshold: usize,
-    /// Bytes threshold for encoding parts. Defaults to an adaptive value derived
-    /// from the global write buffer size; `GREPTIME_BULK_ENCODE_BYTES_THRESHOLD`
-    /// overrides the default.
+    /// Bytes threshold for encoding parts.
     #[serde_as(as = "DisplayFromStr")]
     pub encode_bytes_threshold: usize,
     /// Maximum number of groups for parallel merging.
@@ -171,6 +149,15 @@ impl Default for BulkMemtableConfig {
 }
 
 impl BulkMemtableConfig {
+    /// Returns the default config adapted to `global_write_buffer_bytes`.
+    pub(crate) fn default_for_write_buffer_size(global_write_buffer_bytes: usize) -> Self {
+        Self {
+            encode_bytes_threshold: ENCODE_BYTES_THRESHOLD_OVERRIDE
+                .unwrap_or_else(|| adaptive_encode_bytes_threshold(global_write_buffer_bytes)),
+            ..Default::default()
+        }
+    }
+
     fn sanitize(mut self) -> Self {
         if self.merge_threshold == 0 {
             self.merge_threshold = DEFAULT_MERGE_THRESHOLD;
