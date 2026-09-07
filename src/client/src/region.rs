@@ -149,14 +149,17 @@ impl RegionRequester {
             .body
             .as_ref()
             .with_context(|| MissingFieldSnafu { field: "body" })?;
-        let is_bulk_insert = matches!(request_body, region_request::Body::BulkInsert(_));
+        let is_insert = matches!(
+            request_body,
+            region_request::Body::Inserts(_) | region_request::Body::BulkInsert(_)
+        );
         let request_type = request_body.as_ref().to_string();
         let _timer = metrics::METRIC_REGION_REQUEST_GRPC
             .with_label_values(&[request_type.as_str()])
             .start_timer();
 
         let (addr, mut client) = self.client.raw_region_client()?;
-        if is_bulk_insert {
+        if is_insert {
             if self.send_compression {
                 client = client.send_compressed(CompressionEncoding::Zstd);
             }
@@ -473,7 +476,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_bulk_insert_only_uses_transport_compression() {
+    async fn test_inserts_and_bulk_insert_use_transport_compression() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let zstd_headers = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -493,7 +496,13 @@ mod test {
         });
         let client = Client::with_urls([addr.to_string()]);
         let requester = RegionRequester::new(client.clone(), true, true);
+        let send_only_requester = RegionRequester::new(client.clone(), true, false);
+        let accept_only_requester = RegionRequester::new(client.clone(), false, true);
         let disabled_requester = RegionRequester::new(client, false, false);
+        let inserts = || RegionRequest {
+            body: Some(region_request::Body::Inserts(Default::default())),
+            ..Default::default()
+        };
         let bulk_insert = || RegionRequest {
             body: Some(region_request::Body::BulkInsert(
                 BulkInsertRequest::default(),
@@ -501,6 +510,9 @@ mod test {
             ..Default::default()
         };
 
+        requester.handle(inserts()).await.unwrap();
+        send_only_requester.handle(inserts()).await.unwrap();
+        accept_only_requester.handle(inserts()).await.unwrap();
         requester.handle(bulk_insert()).await.unwrap();
         disabled_requester.handle(bulk_insert()).await.unwrap();
         requester
@@ -514,7 +526,14 @@ mod test {
             .unwrap();
 
         assert_eq!(
-            vec![(true, true), (false, false), (false, false)],
+            vec![
+                (true, true),
+                (true, false),
+                (false, true),
+                (true, true),
+                (false, false),
+                (false, false)
+            ],
             *zstd_headers.lock().unwrap()
         );
         server.abort();
