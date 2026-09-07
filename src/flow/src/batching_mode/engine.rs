@@ -1293,10 +1293,12 @@ mod tests {
         }
     }
 
+    type TestExecutionResult = crate::Result<Option<Arc<dyn crate::BatchingExecution>>>;
+
     struct TestExecutionFactory {
         entered: Option<Arc<Notify>>,
         release: Option<Arc<Notify>>,
-        result: std::sync::Mutex<Option<crate::Result<Option<Arc<dyn crate::BatchingExecution>>>>>,
+        result: std::sync::Mutex<Option<TestExecutionResult>>,
     }
 
     #[async_trait::async_trait]

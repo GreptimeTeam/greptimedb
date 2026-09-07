@@ -1542,6 +1542,7 @@ impl BatchingTask {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn gen_query_with_time_window_with_values(
         &self,
         engine: QueryEngineRef,
