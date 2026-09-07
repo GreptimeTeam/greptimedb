@@ -12,20 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::Rows;
+use api::v1::value::ValueData;
+use api::v1::{Rows, Value};
 use common_base::readable_size::ReadableSize;
+use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_recordbatch::RecordBatches;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
+use datatypes::arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::read::scan_region::Scanner;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
+    CreateRequestBuilder, TestEnv, build_delete_rows_for_key, build_rows_for_key, delete_rows,
+    flush_region, put_rows, rows_schema,
 };
 
 async fn test_last_row(append_mode: bool, flat_format: bool) {
@@ -192,6 +197,231 @@ const LAST_ROW_AT_TEN: &str = "\
 +-------+---------+---------------------+
 | a     | 10.0    | 1970-01-01T00:00:10 |
 +-------+---------+---------------------+";
+
+async fn new_merge_last_row_engine(
+    flat_format: bool,
+) -> (
+    TestEnv,
+    MitoEngine,
+    RegionId,
+    Vec<api::v1::ColumnSchema>,
+    Vec<api::v1::ColumnSchema>,
+) {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let sst_format = if flat_format { "flat" } else { "primary_key" };
+    let request = CreateRequestBuilder::new()
+        .insert_option("sst_format", sst_format)
+        .build();
+    let schema = rows_schema(&request);
+    let delete_schema = crate::test_util::delete_rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    (env, engine, region_id, schema, delete_schema)
+}
+
+fn value_row(key: &str, value: f64, timestamp: i64) -> api::v1::Row {
+    api::v1::Row {
+        values: vec![
+            Value {
+                value_data: Some(ValueData::StringValue(key.to_string())),
+            },
+            Value {
+                value_data: Some(ValueData::F64Value(value)),
+            },
+            Value {
+                value_data: Some(ValueData::TimestampMillisecondValue(timestamp)),
+            },
+        ],
+    }
+}
+
+async fn last_row_scanner(engine: &MitoEngine, region_id: RegionId) -> Scanner {
+    engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+}
+
+async fn scan_last_row_batches(scanner: &Scanner) -> RecordBatches {
+    RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap()
+}
+
+fn last_row_values(batches: &RecordBatches) -> Vec<(String, f64, i64)> {
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let tags = batch
+            .column_by_name("tag_0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let fields = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let timestamps = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        for index in 0..batch.num_rows() {
+            rows.push((
+                tags.value(index).to_string(),
+                fields.value(index),
+                timestamps.value(index),
+            ));
+        }
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    rows
+}
+
+#[tokio::test]
+async fn test_last_row_merge_deduplicates_same_timestamp_across_ssts() {
+    for flat_format in [false, true] {
+        let (_env, engine, region_id, schema, _delete_schema) =
+            new_merge_last_row_engine(flat_format).await;
+
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: vec![value_row("a", 1.0, 1000)],
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema,
+                rows: vec![value_row("a", 2.0, 1000)],
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+
+        let scanner = last_row_scanner(&engine, region_id).await;
+        assert_eq!(2, scanner.num_files());
+        assert_eq!(0, scanner.num_memtables());
+        assert_eq!(
+            vec![("a".to_string(), 2.0, 1000)],
+            last_row_values(&scan_last_row_batches(&scanner).await)
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_last_row_returns_stale_marker_and_preserves_ordinary_nan() {
+    for flat_format in [false, true] {
+        let (_env, engine, region_id, schema, _delete_schema) =
+            new_merge_last_row_engine(flat_format).await;
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: vec![value_row("a", 1.0, 1000), value_row("b", f64::NAN, 1000)],
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema,
+                rows: vec![value_row(
+                    "a",
+                    f64::from_bits(PROMETHEUS_STALE_NAN_BITS),
+                    1000,
+                )],
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+
+        let scanner = last_row_scanner(&engine, region_id).await;
+        assert_eq!(2, scanner.num_files());
+        assert_eq!(0, scanner.num_memtables());
+        let values = last_row_values(&scan_last_row_batches(&scanner).await);
+        assert_eq!(2, values.len(), "unexpected LastRow values: {values:?}");
+        assert_eq!("a", values[0].0);
+        assert_eq!(PROMETHEUS_STALE_NAN_BITS, values[0].1.to_bits());
+        assert_eq!(1000, values[0].2);
+        assert_eq!("b", values[1].0);
+        assert!(values[1].1.is_nan());
+        assert_ne!(PROMETHEUS_STALE_NAN_BITS, values[1].1.to_bits());
+    }
+}
+
+#[tokio::test]
+async fn test_last_row_delete_wins_across_ssts() {
+    for flat_format in [false, true] {
+        let (_env, engine, region_id, schema, delete_schema) =
+            new_merge_last_row_engine(flat_format).await;
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema,
+                rows: vec![value_row("a", 1.0, 1000)],
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+        delete_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: delete_schema,
+                rows: build_delete_rows_for_key("a", 1, 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+
+        let scanner = last_row_scanner(&engine, region_id).await;
+        assert_eq!(2, scanner.num_files());
+        assert_eq!(0, scanner.num_memtables());
+        assert!(last_row_values(&scan_last_row_batches(&scanner).await).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_last_row_empty_region_returns_empty() {
+    let (_env, engine, region_id, _schema, _delete_schema) = new_merge_last_row_engine(false).await;
+    let scanner = last_row_scanner(&engine, region_id).await;
+    assert!(last_row_values(&scan_last_row_batches(&scanner).await).is_empty());
+}
 
 #[tokio::test]
 async fn test_last_row_append_mode_disabled() {

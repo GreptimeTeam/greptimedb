@@ -18,6 +18,7 @@ use api::v1::SemanticType;
 use arrow_schema::SortOptions;
 use common_function::aggrs::aggr_wrapper::aggr_state_func_name;
 use common_recordbatch::OrderOption;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{Column, Result};
@@ -90,13 +91,24 @@ impl ScanHintRule {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         };
 
+        // LastRow is only sound when every predicate already attached to this
+        // scan is restricted to columns that preserve the series' last row.
+        // In particular, do not infer this from a Filter node above the scan:
+        // only the filters that DataFusion actually pushed to this scan matter.
+        let filters_preserve_last_row = if rewriter.inside_single_evaluation {
+            Self::filters_preserve_last_row(&table_scan, original)
+        } else {
+            true
+        };
+        let use_last_row = rewriter.inside_single_evaluation && filters_preserve_last_row;
+
         #[cfg(feature = "vector_index")]
         let has_vector_hint = rewriter.vector_search.need_rewrite();
         #[cfg(not(feature = "vector_index"))]
         let has_vector_hint = false;
         let has_hint = rewriter.order_expr.is_some()
             || rewriter.ts_row_selector.is_some()
-            || rewriter.inside_single_evaluation
+            || use_last_row
             || has_vector_hint;
         if !has_hint {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
@@ -107,8 +119,11 @@ impl ScanHintRule {
         // the shared catalog provider. This keeps order/vector/legacy hints
         // local as well as the new LastRow hint.
         let adapter = original.clone_for_scan();
-        Self::apply_hints(&adapter, rewriter, &table_scan);
-        if rewriter.inside_single_evaluation {
+        Self::apply_hints(&adapter, rewriter, &table_scan, use_last_row);
+        if use_last_row {
+            // Apply the instant-derived hint after the aggregate hint. Both
+            // select LastRow today, and this ordering preserves the existing
+            // aggregate selector when the instant guard rejects a scan.
             adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow);
         }
         table_scan.source =
@@ -116,13 +131,36 @@ impl ScanHintRule {
         Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
     }
 
+    fn filters_preserve_last_row(
+        table_scan: &datafusion_expr::logical_plan::TableScan,
+        provider: &DummyTableProvider,
+    ) -> bool {
+        let metadata = provider.region_metadata();
+        for filter in &table_scan.filters {
+            let Some(filter) = SimpleFilterEvaluator::try_new(filter) else {
+                return false;
+            };
+            let Some(column_metadata) = metadata.column_by_name(filter.column_name()) else {
+                return false;
+            };
+            if !matches!(
+                column_metadata.semantic_type,
+                SemanticType::Tag | SemanticType::Timestamp
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+
     fn apply_hints(
         adapter: &DummyTableProvider,
         rewriter: &mut ScanHintRewriter,
         table_scan: &datafusion_expr::logical_plan::TableScan,
+        use_last_row: bool,
     ) {
         #[cfg(not(feature = "vector_index"))]
-        let _ = table_scan;
+        let _ = (table_scan, use_last_row);
         if let Some(order_expr) = &rewriter.order_expr {
             Self::set_order_hint(adapter, order_expr);
         }
@@ -130,7 +168,7 @@ impl ScanHintRule {
             Self::set_time_series_row_selector_hint(adapter, group_by_cols, order_by_col);
         }
         #[cfg(feature = "vector_index")]
-        if rewriter.inside_single_evaluation {
+        if use_last_row {
             // LastRow and vector search are mutually exclusive for one scan:
             // vector search would bypass the ordinary sort/limit path needed by
             // the single-evaluation semantics. Still consume the queued hint so
@@ -453,10 +491,11 @@ mod test {
 
     use datafusion::functions_aggregate::first_last::last_value_udaf;
     use datafusion_common::tree_node::TreeNodeRecursion;
-    use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
+    use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams, Cast};
     use datafusion_expr::expr_fn::scalar_subquery;
-    use datafusion_expr::{Extension, LogicalPlan, LogicalPlanBuilder, col};
+    use datafusion_expr::{Extension, LogicalPlan, LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
+    use datatypes::arrow::datatypes::DataType;
     use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
     use store_api::storage::{RegionId, TimeSeriesRowSelector};
 
@@ -491,6 +530,29 @@ mod test {
 
     fn instant_plan(provider: Arc<DummyTableProvider>, end: i64) -> LogicalPlan {
         instant_plan_named(provider, "t", end)
+    }
+
+    fn instant_plan_with_filters(
+        provider: Arc<DummyTableProvider>,
+        filters: Vec<Expr>,
+    ) -> LogicalPlan {
+        let scan = scan_plan(provider, "t");
+        let LogicalPlan::TableScan(mut scan) = scan else {
+            unreachable!();
+        };
+        scan.filters = filters;
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                1000,
+                1000,
+                "ts".to_string(),
+                vec![],
+                Some("v0".to_string()),
+                LogicalPlan::TableScan(scan),
+            )),
+        })
     }
 
     fn scan_plan(provider: Arc<DummyTableProvider>, table_name: &str) -> LogicalPlan {
@@ -588,6 +650,85 @@ mod test {
 
         assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
         assert_eq!(provider.scan_request().series_row_selector, None);
+    }
+
+    #[test]
+    fn single_evaluation_with_tag_filter_sets_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan_with_filters(provider, vec![col("k0").eq(lit("tag"))]);
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+    }
+
+    #[test]
+    fn single_evaluation_with_timestamp_filter_sets_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan_with_filters(provider, vec![col("ts").gt_eq(lit(1_i64))]);
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow)
+        );
+    }
+
+    #[test]
+    fn single_evaluation_with_cast_timestamp_filter_does_not_set_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let filter = Expr::Cast(Cast::new(Box::new(col("ts")), DataType::Int64)).gt(lit(1_i64));
+        let plan = instant_plan_with_filters(provider, vec![filter]);
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+    }
+
+    #[test]
+    fn single_evaluation_with_multi_column_timestamp_filter_does_not_set_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan_with_filters(provider, vec![col("ts").gt(col("k0"))]);
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+    }
+
+    #[test]
+    fn single_evaluation_with_field_filter_does_not_set_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan_with_filters(provider, vec![col("v0").gt(lit(1.0_f64))]);
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+    }
+
+    #[test]
+    fn single_evaluation_with_unknown_filter_does_not_set_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = instant_plan_with_filters(provider, vec![col("unknown").eq(lit(1_i64))]);
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
     }
 
     #[test]
