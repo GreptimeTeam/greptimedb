@@ -62,6 +62,7 @@ pub(crate) fn spawn_series_index_tasks(
     store: ObjectStore,
     state: Arc<SeriesIndexTaskState>,
     purge_receiver: async_channel::Receiver<PurgeRequest>,
+    interval: Duration,
 ) -> JoinHandle<()> {
     common_runtime::spawn_global(run_index_purge_task(
         worker_id,
@@ -69,7 +70,13 @@ pub(crate) fn spawn_series_index_tasks(
         purge_receiver.clone(),
     ));
     common_runtime::spawn_global(async move {
-        SeriesIndexTask { worker_id, state }.run().await;
+        SeriesIndexTask {
+            worker_id,
+            state,
+            interval,
+        }
+        .run()
+        .await;
         // Snapshots may retain senders after the worker stops.
         purge_receiver.close();
     })
@@ -79,6 +86,7 @@ pub(crate) fn spawn_series_index_tasks(
 struct SeriesIndexTask {
     worker_id: u32,
     state: Arc<SeriesIndexTaskState>,
+    interval: Duration,
 }
 
 impl SeriesIndexTask {
@@ -86,7 +94,7 @@ impl SeriesIndexTask {
     async fn run(mut self) {
         let worker_id = self.worker_id;
         info!("Start series-index background task, worker: {worker_id}");
-        let interval = Duration::from_secs(5 * 60);
+        let interval = self.interval;
         let mut timer = tokio::time::interval_at(Instant::now() + interval, interval);
         timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
         while self.state.is_running() {
@@ -111,6 +119,7 @@ impl SeriesIndexTask {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use object_store::ObjectStore;
     use object_store::services::Memory;
@@ -124,7 +133,7 @@ mod tests {
         let (_purger, receiver) = series_index_channel(store.clone());
         let state = Arc::new(SeriesIndexTaskState::new());
         state.stop();
-        spawn_series_index_tasks(0, store, state, receiver.clone())
+        spawn_series_index_tasks(0, store, state, receiver.clone(), Duration::from_secs(30))
             .await
             .unwrap();
         assert!(receiver.is_closed());

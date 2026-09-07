@@ -604,7 +604,13 @@ impl<S: LogStore> WorkerStarter<S> {
             .map(|(store, state)| {
                 let (purger, purge_receiver) = series_index_channel(store.clone());
                 series_index_purger = Some(purger);
-                spawn_series_index_tasks(self.id, store, state, purge_receiver)
+                spawn_series_index_tasks(
+                    self.id,
+                    store,
+                    state,
+                    purge_receiver,
+                    self.config.experimental_series_index_maintenance_interval,
+                )
             });
         let now = self.time_provider.current_time_millis();
         let id_string = self.id.to_string();
