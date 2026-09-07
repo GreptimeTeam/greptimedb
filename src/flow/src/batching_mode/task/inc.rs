@@ -73,7 +73,7 @@ impl BatchingTask {
     /// table that cannot be resolved, is not the mito engine, or lacks the
     /// option — this returns `false` so the caller keeps the historical
     /// `memtable_only` mode instead of upgrading.
-    pub(crate) async fn sequence_range_capable(&self) -> Result<bool, Error> {
+    pub async fn sequence_range_capable(&self) -> Result<bool, Error> {
         for name in &self.config.source_table_names {
             let table = match self
                 .config

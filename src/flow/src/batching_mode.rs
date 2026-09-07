@@ -28,15 +28,15 @@ pub enum IncrementalMode {
     SequenceRange,
 }
 
-mod checkpoint;
+pub(crate) mod batching_execution;
+pub(crate) mod checkpoint;
 pub(crate) mod engine;
 mod eval_schedule;
 pub(crate) mod frontend_client;
-pub(crate) mod persistence;
-mod state;
+pub(crate) mod state;
 mod table_creator;
-mod task;
-mod time_window;
+pub(crate) mod task;
+pub(crate) mod time_window;
 pub(crate) mod utils;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

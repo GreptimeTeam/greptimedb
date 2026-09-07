@@ -57,7 +57,6 @@ use tonic::{Request, Response, Status};
 use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
 use crate::adapter::{FlowStreamingEngineRef, create_worker};
 use crate::batching_mode::engine::BatchingEngine;
-use crate::batching_mode::persistence::FactoryPlugin;
 use crate::error::{
     CacheRequiredSnafu, DatafusionSnafu, ExternalSnafu, ListFlowsSnafu, ParseAddrSnafu,
     ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu, to_status_with_last_err,
@@ -66,7 +65,7 @@ use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{Error, FlownodeOptions, FrontendClient, StreamingEngine};
+use crate::{BatchingExecutionFactory, Error, FlownodeOptions, FrontendClient, StreamingEngine};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
@@ -405,14 +404,14 @@ impl FlownodeBuilder {
             self.build_manager(query_engine_factory.query_engine())
                 .await?,
         );
-        let batching = Arc::new(BatchingEngine::new_with_persistence(
+        let batching = Arc::new(BatchingEngine::new_with_execution(
             self.frontend_client.clone(),
             query_engine_factory.query_engine(),
             self.flow_metadata_manager.clone(),
             self.table_meta.clone(),
             self.catalog_manager.clone(),
             self.opts.flow.batching_mode.clone(),
-            self.plugins.get::<FactoryPlugin>(),
+            self.plugins.get::<Arc<dyn BatchingExecutionFactory>>(),
         ));
         let dual = Arc::new(FlowDualEngine::new(
             manager.clone(),

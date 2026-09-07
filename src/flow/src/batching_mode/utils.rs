@@ -1345,7 +1345,7 @@ impl ColumnMatcherRewriter {
             return self.modify_project_exprs_with_partial(exprs);
         }
 
-        // Ordinary values are persistence-owned columns, not flow outputs. Remove them from the
+        // Ordinary values are execution-owned columns, not flow outputs. Remove them from the
         // effective sink sequence while deciding whether the existing auto-column rules apply.
         // This keeps those columns from hiding an auto-created update_at column that precedes them.
         let effective_sink_columns = self
@@ -1428,7 +1428,7 @@ impl ColumnMatcherRewriter {
             &effective_sink_columns,
         )?;
 
-        // Put persistence-owned values back at their physical sink positions only after matching
+        // Put execution-owned values back at their physical sink positions only after matching
         // flow expressions against the effective sequence.
         let mut exprs = exprs;
         for (idx, column) in self.schema.column_schemas().iter().enumerate() {

@@ -463,7 +463,7 @@ impl FrontendClient {
 
     /// Execute a flow query and return terminal metrics. `snapshot_seqs` are
     /// optional read upper bounds used only by snapshot-fenced repair chunks.
-    pub(crate) async fn query_with_terminal_metrics(
+    pub async fn query_with_terminal_metrics(
         &self,
         catalog: &str,
         schema: &str,
@@ -666,7 +666,7 @@ fn wrap_standalone_output_with_terminal_metrics(
 
 /// Describe a peer of frontend
 #[derive(Debug, Default, Clone)]
-pub(crate) enum PeerDesc {
+pub enum PeerDesc {
     /// The query failed before a frontend peer was selected.
     #[default]
     Unknown,

@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
-use bytes::Bytes;
 use catalog::memory::MemoryCatalogManager;
 use catalog::{DeregisterTableRequest, RegisterTableRequest};
 use client::OutputWithMetrics;
@@ -25,12 +22,12 @@ use common_error::ext::BoxedError;
 use common_error::mock::MockError;
 use common_error::status_code::StatusCode;
 use common_query::Output;
+use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
-use common_recordbatch::{RecordBatch, RecordBatchStream};
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{
-    TimestampMillisecondVector, TimestampNanosecondVector, UInt32Vector, VectorRef,
+    StringVector, TimestampMillisecondVector, TimestampNanosecondVector, UInt32Vector, VectorRef,
 };
 use pretty_assertions::assert_eq;
 use query::options::{
@@ -49,7 +46,6 @@ use crate::batching_mode::checkpoint::{
     FlowCheckpointDecision, FlowQueryFallbackReason,
 };
 use crate::batching_mode::eval_schedule::{FlowMissedTickPolicy, FlowScheduleConfig};
-use crate::batching_mode::persistence::{BatchingAttempt, BatchingPersistence, RestoreOutcome};
 use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::time_window::find_time_window_expr;
 use crate::test_utils::create_test_query_engine;
@@ -59,6 +55,68 @@ fn incremental_batch_opts() -> Arc<BatchingModeOptions> {
         experimental_enable_incremental_read: true,
         ..Default::default()
     })
+}
+
+struct CountingExecution {
+    calls: std::sync::atomic::AtomicUsize,
+    active: std::sync::atomic::AtomicUsize,
+    max_active: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::BatchingExecution for CountingExecution {
+    async fn execute_once(
+        &self,
+        _task: &BatchingTask,
+        _engine: &QueryEngineRef,
+        _frontend: &Arc<FrontendClient>,
+        _max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let active = self
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        tokio::task::yield_now().await;
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        ExecuteOnceOutcome {
+            new_query: None,
+            result: Ok(None),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_execution_delegate_dispatch_is_serialized() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(CountingExecution {
+        calls: Default::default(),
+        active: Default::default(),
+        max_active: Default::default(),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+
+    let first = task.execute_once_serialized(&query_engine, &frontend, None);
+    let second = task.execute_once_serialized(&query_engine, &frontend, None);
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.unwrap(), None);
+    assert_eq!(second.unwrap(), None);
+    assert_eq!(execution.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        execution
+            .max_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the existing execution_lock must span delegate execution"
+    );
 }
 
 async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPlan) {
@@ -554,6 +612,35 @@ fn register_twe_sink(query_engine: &QueryEngineRef, table_name: &str, table_id: 
     memory_catalog.register_table_sync(request).unwrap();
 }
 
+fn register_twe_sink_with_metadata(query_engine: &QueryEngineRef, table_name: &str, table_id: u32) {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("time_window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+        ColumnSchema::new("metadata", CDT::string_datatype(), false),
+    ]));
+    let columns: Vec<VectorRef> = vec![
+        Arc::new(UInt32Vector::from_slice([1_u32])),
+        Arc::new(TimestampMillisecondVector::from_slice([0_i64])),
+        Arc::new(StringVector::from_slice(&["existing"])),
+    ];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::table(table_name, recordbatch);
+    let request = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id,
+        table,
+    };
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog.register_table_sync(request).unwrap();
+}
+
 fn register_scheduled_now_sink(query_engine: &QueryEngineRef, table_name: &str, table_id: u32) {
     let schema = Arc::new(Schema::new(vec![
         ColumnSchema::new("ts", CDT::timestamp_nanosecond_datatype(), false).with_time_index(true),
@@ -944,7 +1031,6 @@ fn test_apply_query_result_to_state_advances_full_snapshot_to_incremental() {
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
-        false,
     );
 
     assert_eq!(
@@ -976,7 +1062,6 @@ fn test_apply_query_result_to_state_stays_full_snapshot_when_incremental_disable
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
-        false,
     );
 
     // Should NOT claim advancement to incremental; should fallback with correct reason.
@@ -1008,7 +1093,6 @@ fn test_apply_query_result_to_state_rejects_unproved_watermark() {
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
-        false,
     );
 
     assert_eq!(
@@ -1034,7 +1118,6 @@ fn test_apply_query_result_to_state_reports_missing_watermark() {
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
-        false,
     );
 
     assert_eq!(
@@ -1065,7 +1148,6 @@ fn test_apply_query_result_to_state_advances_incremental_subset() {
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::IncrementalDelta,
-        false,
     );
 
     assert_eq!(
@@ -1101,7 +1183,6 @@ fn test_scoped_base_repair_with_dirty_backlog_starts_fenced_repair_from_full_sna
         &result,
         std::time::Duration::from_millis(1),
         &QueryCoverage::ScopedBaseRepair,
-        false,
     );
 
     assert_eq!(
@@ -1161,7 +1242,6 @@ fn test_fenced_repair_chunk_with_pending_windows_stays_full_snapshot() {
         &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high },
-        false,
     );
 
     assert_eq!(
@@ -1218,7 +1298,6 @@ fn test_continued_fenced_repair_uses_pending_snapshot_not_later_live_dirty() {
         &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high },
-        false,
     );
     assert_eq!(
         decision,
@@ -1256,7 +1335,6 @@ fn test_final_fenced_repair_chunk_advances_to_high() {
         &output_with_region_watermarks([(1_u64, Some(10_u64)), (2_u64, Some(20_u64))]),
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high: high.clone() },
-        false,
     );
 
     assert_eq!(
@@ -1331,7 +1409,6 @@ fn test_fenced_repair_chunk_watermark_mismatch_restores_pending_but_consumes_inf
         &output_with_region_watermarks([(1_u64, Some(11_u64)), (2_u64, Some(20_u64))]),
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high },
-        false,
     );
 
     assert_eq!(
@@ -1375,7 +1452,6 @@ async fn test_fenced_repair_mismatch_next_plan_is_scoped_base_repair() {
             &output_with_region_watermarks([(1_u64, Some(11_u64)), (2_u64, Some(20_u64))]),
             std::time::Duration::from_millis(1),
             &QueryCoverage::FencedRepairChunk { high },
-            false,
         );
         assert_eq!(
             decision,
@@ -1422,7 +1498,6 @@ fn test_apply_query_failure_to_state_falls_back_from_incremental() {
         std::time::Duration::from_millis(1),
         &QueryCoverage::IncrementalDelta,
         FlowQueryFallbackReason::IncrementalQueryFailure,
-        false,
     );
 
     assert_eq!(
@@ -1450,7 +1525,6 @@ fn test_apply_query_failure_to_state_records_full_snapshot_failure() {
         std::time::Duration::from_millis(1),
         &QueryCoverage::UnfilteredFull,
         FlowQueryFallbackReason::QueryFailure,
-        false,
     );
 
     assert_eq!(
@@ -1485,11 +1559,11 @@ fn test_query_failure_reason_distinguishes_fenced_repair_stale_fence() {
     let generic_err = flow_error_with_status(StatusCode::Unexpected);
     assert_eq!(
         BatchingTask::query_failure_reason(&generic_err, &QueryCoverage::ScopedBaseRepair),
-        FlowQueryFallbackReason::QueryFailure
+        FlowQueryFallbackReason::QueryFailure,
     );
     assert_eq!(
         BatchingTask::query_failure_reason(&generic_err, &QueryCoverage::IncrementalDelta),
-        FlowQueryFallbackReason::IncrementalQueryFailure
+        FlowQueryFallbackReason::IncrementalQueryFailure,
     );
 }
 
@@ -1542,7 +1616,6 @@ async fn test_fenced_repair_stale_fence_next_plan_is_scoped_base_repair() {
             std::time::Duration::from_millis(1),
             &QueryCoverage::FencedRepairChunk { high },
             FlowQueryFallbackReason::SnapshotFenceExpired,
-            false,
         );
         assert_eq!(
             decision,
@@ -1605,7 +1678,6 @@ fn test_fenced_repair_transient_non_stale_failure_retries_same_high() {
         std::time::Duration::from_millis(1),
         &QueryCoverage::FencedRepairChunk { high: high.clone() },
         FlowQueryFallbackReason::QueryFailure,
-        false,
     );
 
     assert_eq!(
@@ -2048,6 +2120,44 @@ async fn test_full_snapshot_seeding_applies_expire_after_retention_filter() {
 }
 
 #[tokio::test]
+async fn test_forced_full_snapshot_keeps_retention_without_dirty_windows() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .expire_after = Some(expire_after_for_retention_filter_test());
+    let sink_schema = aggregate_time_window_sink_schema();
+
+    let plan = task
+        .gen_query_with_time_window_with_values(
+            query_engine,
+            &sink_schema,
+            &[],
+            false,
+            None,
+            &BTreeMap::new(),
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("forced full snapshot must not require a dirty signal");
+
+    assert!(matches!(plan.coverage, QueryCoverage::UnfilteredFull));
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+    let plan_text = plan.plan.to_string();
+    assert!(
+        plan_text.contains("Filter: ts >= TimestampMillisecond("),
+        "forced full snapshot retains the configured retention predicate: {plan_text}"
+    );
+}
+
+#[tokio::test]
 async fn test_incremental_plan_does_not_add_dirty_window_filter() {
     let TestTaskParts {
         task,
@@ -2165,7 +2275,6 @@ async fn test_successful_incremental_checkpoint_fallback_consumes_unscoped_dirty
             &result,
             std::time::Duration::from_millis(1),
             &plan_info.coverage,
-            false,
         )
     };
     assert_eq!(
@@ -2423,7 +2532,6 @@ async fn test_unsafe_incremental_plan_skip_restores_dirty_without_query() {
             &dml_plan,
             &dirty_restore,
             &QueryCoverage::IncrementalDelta,
-            None,
         )
         .await
         .unwrap();
@@ -2575,229 +2683,6 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
     );
 }
 
-struct TestIncrementalPersistence;
-
-#[async_trait::async_trait]
-impl BatchingPersistence for TestIncrementalPersistence {
-    async fn restore(&self) -> crate::Result<RestoreOutcome> {
-        Ok(RestoreOutcome::TrustedCheckpoint(BTreeMap::from([
-            (1_u64, 10_u64),
-            (2_u64, 20_u64),
-        ])))
-    }
-
-    async fn begin_attempt(&self) -> crate::Result<BatchingAttempt> {
-        Ok(BatchingAttempt::default())
-    }
-
-    async fn persist(
-        &self,
-        _attempt: BatchingAttempt,
-        _validated_checkpoints: BTreeMap<u64, u64>,
-    ) -> crate::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ModeledSink {
-    a: u64,
-    b: u64,
-}
-
-struct StatefulRepairHandler {
-    sink: Arc<std::sync::Mutex<ModeledSink>>,
-    query_engine: QueryEngineRef,
-}
-
-struct RepairOutputStream {
-    schema: Arc<Schema>,
-    metrics: RecordBatchMetrics,
-}
-
-impl futures::Stream for RepairOutputStream {
-    type Item = common_recordbatch::error::Result<RecordBatch>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(None)
-    }
-}
-
-impl RecordBatchStream for RepairOutputStream {
-    fn name(&self) -> &str {
-        "StatefulRepairHandler"
-    }
-
-    fn schema(&self) -> datatypes::schema::SchemaRef {
-        self.schema.clone()
-    }
-
-    fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
-        None
-    }
-
-    fn metrics(&self) -> Option<RecordBatchMetrics> {
-        Some(self.metrics.clone())
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
-    for StatefulRepairHandler
-{
-    async fn do_query(
-        &self,
-        query: api::v1::greptime_request::Request,
-        ctx: QueryContextRef,
-    ) -> std::result::Result<Output, BoxedError> {
-        let api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
-            query: Some(api::v1::query_request::Query::InsertIntoPlan(insert)),
-        }) = query
-        else {
-            panic!("expected an InsertIntoPlan request");
-        };
-
-        let incremental_mode = ctx.extension(FLOW_INCREMENTAL_MODE);
-        if incremental_mode.is_some() {
-            assert_eq!(incremental_mode, Some(FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY));
-            let after_seqs = ctx
-                .extension(FLOW_INCREMENTAL_AFTER_SEQS)
-                .expect("incremental mode must carry sequence bounds");
-            assert_eq!(
-                serde_json::from_str::<BTreeMap<u64, u64>>(after_seqs).unwrap(),
-                BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
-            );
-
-            // This models the boundary failure: the incremental A+B delta is
-            // sent to the sink, but only A is applied before the sink errors.
-            let mut sink = self.sink.lock().unwrap();
-            assert_eq!((sink.a, sink.b), (10, 20));
-            sink.a = 11;
-            return Err(BoxedError::new(MockError::new(StatusCode::Unexpected)));
-        }
-
-        assert!(
-            ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS).is_none(),
-            "full repair must not carry incremental sequence bounds"
-        );
-        let decoder = self
-            .query_engine
-            .engine_context(ctx.clone())
-            .new_plan_decoder()
-            .unwrap();
-        let catalog = Arc::new(
-            catalog::table_source::dummy_catalog::DummyCatalogList::new_with_query_ctx(
-                self.query_engine.engine_state().catalog_manager().clone(),
-                ctx.clone(),
-            ),
-        );
-        let logical_plan = decoder
-            .decode(Bytes::from(insert.logical_plan), catalog, false)
-            .await
-            .unwrap();
-        assert!(
-            !logical_plan.to_string().contains("Filter"),
-            "full repair must not include a dirty-window predicate: {logical_plan}"
-        );
-
-        // The fixture's source timestamps share one window; this models the
-        // unfiltered A+B sink repair explicitly rather than asserting source
-        // rows for distinct windows.
-        let mut sink = self.sink.lock().unwrap();
-        assert_eq!(sink.a, 11);
-        assert_eq!(sink.b, 20);
-        sink.b = 21;
-        let metrics = RecordBatchMetrics {
-            region_watermarks: vec![
-                RegionWatermarkEntry {
-                    region_id: 1,
-                    watermark: Some(11),
-                },
-                RegionWatermarkEntry {
-                    region_id: 2,
-                    watermark: Some(21),
-                },
-            ],
-            ..Default::default()
-        };
-        Ok(Output::new_with_stream(Box::pin(RepairOutputStream {
-            schema: aggregate_time_window_sink_schema(),
-            metrics,
-        })))
-    }
-}
-
-#[tokio::test]
-async fn test_persistence_full_repair_retries_unfiltered_snapshot_after_partial_sink_failure() {
-    let TestTaskParts {
-        mut task,
-        query_engine,
-        ..
-    } = new_time_window_test_task_with_query(
-        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
-    )
-    .await;
-    let sink_table = "incremental_failure_repair_sink";
-    Arc::get_mut(&mut task.config)
-        .expect("test task config should be uniquely owned")
-        .sink_table_name[2] = sink_table.to_string();
-    register_twe_sink(&query_engine, sink_table, 9103);
-    task.set_persistence(Some(Arc::new(TestIncrementalPersistence)))
-        .await
-        .unwrap();
-    {
-        let mut state = task.state.write().unwrap();
-        // Only A is dirty. B is intentionally absent from the dirty signal;
-        // the later full repair must nevertheless repair the modeled A+B sink.
-        state
-            .dirty_time_windows
-            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
-    }
-
-    let sink = Arc::new(std::sync::Mutex::new(ModeledSink { a: 10, b: 20 }));
-    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
-        Arc::new(StatefulRepairHandler {
-            sink: sink.clone(),
-            query_engine: query_engine.clone(),
-        });
-    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
-        Arc::downgrade(&handler),
-        QueryOptions::default(),
-    ));
-
-    let first = task
-        .execute_once_serialized(&query_engine, &frontend_client, Some(2))
-        .await;
-    assert!(
-        first.is_err(),
-        "the partial incremental sink write must fail"
-    );
-    assert_eq!(*sink.lock().unwrap(), ModeledSink { a: 11, b: 20 });
-    {
-        let state = task.state.read().unwrap();
-        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
-        assert_eq!(
-            state.checkpoints(),
-            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
-        );
-        assert!(state.full_repair_required());
-    }
-
-    let second = task
-        .execute_once_serialized(&query_engine, &frontend_client, Some(2))
-        .await
-        .expect("the unfiltered full repair should succeed");
-    assert!(second.is_some());
-    assert_eq!(*sink.lock().unwrap(), ModeledSink { a: 11, b: 21 });
-    let state = task.state.read().unwrap();
-    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
-    assert_eq!(
-        state.checkpoints(),
-        &BTreeMap::from([(1_u64, 11_u64), (2_u64, 21_u64)])
-    );
-    assert!(!state.full_repair_required());
-}
-
 #[tokio::test]
 async fn test_unscoped_failure_restores_consumed_dirty_signal() {
     assert_unscoped_failure_restore(dirty_marker(), DirtyTimeWindows::default(), 1, 0).await;
@@ -2868,6 +2753,73 @@ async fn test_scoped_plan_generation_failure_restores_consumed_dirty_windows() {
         .await;
 
     assert!(result.is_err());
+    let state = task.state.read().unwrap();
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(5)
+    );
+}
+
+#[tokio::test]
+async fn test_validate_sink_table_schema_with_values_accepts_typed_metadata() {
+    let sink_table = "metadata_validation_sink";
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .sink_table_name[2] = sink_table.to_string();
+    register_twe_sink_with_metadata(&query_engine, sink_table, 9104);
+
+    let values = BTreeMap::from([(
+        "metadata".to_string(),
+        datafusion_common::ScalarValue::Utf8(Some("typed".to_string())),
+    )]);
+    assert!(
+        task.validate_sink_table_schema_with_values(&query_engine, &values)
+            .await
+            .is_ok()
+    );
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+}
+
+#[tokio::test]
+async fn test_validate_sink_table_schema_with_values_rejects_output_mismatch_without_dirty_change()
+{
+    let sink_table = "metadata_validation_mismatch_sink";
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .sink_table_name[2] = sink_table.to_string();
+    register_number_only_sink(&query_engine, sink_table);
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+
+    let values = BTreeMap::from([(
+        "metadata".to_string(),
+        datafusion_common::ScalarValue::Utf8(Some("typed".to_string())),
+    )]);
+    assert!(
+        task.validate_sink_table_schema_with_values(&query_engine, &values)
+            .await
+            .is_err()
+    );
     let state = task.state.read().unwrap();
     assert_eq!(state.dirty_time_windows.len(), 1);
     assert_eq!(

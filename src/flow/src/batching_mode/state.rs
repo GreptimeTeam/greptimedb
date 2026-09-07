@@ -35,19 +35,6 @@ use crate::metrics::{
 };
 use crate::{Error, FlowId};
 
-#[derive(Debug, Clone)]
-pub(crate) struct TaskStateCheckpointSnapshot {
-    pub(crate) checkpoint_mode: CheckpointMode,
-    pub(crate) checkpoints: BTreeMap<u64, u64>,
-    pub(crate) pending_fenced_repair: Option<FencedRepair>,
-    pub(crate) full_repair_required: bool,
-    pub(crate) dirty_time_windows: DirtyTimeWindows,
-    pub(crate) last_update_time: Instant,
-    pub(crate) last_query_duration: Duration,
-    pub(crate) last_exec_time_millis: Option<i64>,
-    pub(crate) exec_state: ExecState,
-}
-
 pub struct TaskState {
     /// Query context
     pub(crate) query_ctx: QueryContextRef,
@@ -64,7 +51,6 @@ pub struct TaskState {
     pub(crate) dirty_time_windows: DirtyTimeWindows,
     checkpoint_mode: CheckpointMode,
     pending_fenced_repair: Option<FencedRepair>,
-    full_repair_required: bool,
     /// Region id -> last consumed watermark sequence. Incremental scans use
     /// this as the next lower sequence bound for each source region.
     checkpoints: BTreeMap<u64, u64>,
@@ -97,7 +83,6 @@ impl TaskState {
             dirty_time_windows,
             checkpoint_mode: CheckpointMode::FullSnapshot,
             pending_fenced_repair: None,
-            full_repair_required: false,
             checkpoints: Default::default(),
             incremental_disabled: false,
             exec_state: ExecState::Idle,
@@ -140,70 +125,17 @@ impl TaskState {
         self.start_time_millis
     }
 
+    /// Pending dirty work, without permitting mutation of the task state.
+    pub fn dirty_time_windows(&self) -> &DirtyTimeWindows {
+        &self.dirty_time_windows
+    }
+
     pub fn checkpoint_mode(&self) -> CheckpointMode {
         self.checkpoint_mode
     }
 
     pub fn checkpoints(&self) -> &BTreeMap<u64, u64> {
         &self.checkpoints
-    }
-
-    pub(crate) fn checkpoint_snapshot(&self) -> TaskStateCheckpointSnapshot {
-        TaskStateCheckpointSnapshot {
-            checkpoint_mode: self.checkpoint_mode,
-            checkpoints: self.checkpoints.clone(),
-            pending_fenced_repair: self.pending_fenced_repair.clone(),
-            full_repair_required: self.full_repair_required,
-            dirty_time_windows: self.dirty_time_windows.clone(),
-            last_update_time: self.last_update_time,
-            last_query_duration: self.last_query_duration,
-            last_exec_time_millis: self.last_exec_time_millis,
-            exec_state: self.exec_state.clone(),
-        }
-    }
-
-    pub(crate) fn restore_checkpoint_snapshot(&mut self, snapshot: TaskStateCheckpointSnapshot) {
-        let live_dirty = self.dirty_time_windows.clone();
-        self.checkpoint_mode = snapshot.checkpoint_mode;
-        self.checkpoints = snapshot.checkpoints;
-        self.pending_fenced_repair = snapshot.pending_fenced_repair;
-        self.full_repair_required = snapshot.full_repair_required;
-        self.dirty_time_windows = snapshot.dirty_time_windows;
-        self.dirty_time_windows.add_dirty_windows(&live_dirty);
-        self.last_update_time = snapshot.last_update_time;
-        self.last_query_duration = snapshot.last_query_duration;
-        self.last_exec_time_millis = snapshot.last_exec_time_millis;
-        self.exec_state = snapshot.exec_state;
-    }
-
-    pub(crate) fn request_full_repair(&mut self) {
-        self.full_repair_required = true;
-    }
-
-    pub(crate) fn full_repair_required(&self) -> bool {
-        self.full_repair_required
-    }
-
-    pub(crate) fn commit_checkpoint_candidate(
-        &mut self,
-        candidate: &TaskStateCheckpointSnapshot,
-        successful_full_repair: bool,
-    ) {
-        let live_dirty = self.dirty_time_windows.clone();
-        self.checkpoint_mode = candidate.checkpoint_mode;
-        self.checkpoints = candidate.checkpoints.clone();
-        self.pending_fenced_repair = candidate.pending_fenced_repair.clone();
-        self.full_repair_required = if successful_full_repair {
-            false
-        } else {
-            candidate.full_repair_required
-        };
-        self.dirty_time_windows = candidate.dirty_time_windows.clone();
-        self.dirty_time_windows.add_dirty_windows(&live_dirty);
-        self.last_update_time = candidate.last_update_time;
-        self.last_query_duration = candidate.last_query_duration;
-        self.last_exec_time_millis = candidate.last_exec_time_millis;
-        self.exec_state = candidate.exec_state.clone();
     }
 
     /// Returns the in-progress fenced repair, if the task is repairing dirty

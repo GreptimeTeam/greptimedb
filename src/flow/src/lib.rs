@@ -43,16 +43,21 @@ mod test_utils;
 
 pub use adapter::flownode_impl::FlowDualEngineRef;
 pub use adapter::{FlowConfig, FlowStreamingEngineRef, StreamingEngine};
-pub use batching_mode::IncrementalMode;
-pub use batching_mode::frontend_client::{FrontendClient, GrpcQueryHandlerWithBoxedError};
-pub use batching_mode::persistence::{
-    BatchingAttempt, BatchingMetadataColumn, BatchingPersistence, BatchingQueryExecutor, Factory,
-    FactoryPlugin, PersistenceContext, RestoreOutcome, SinkLayout,
+pub use batching_mode::batching_execution::{BatchingExecution, BatchingExecutionFactory};
+pub use batching_mode::frontend_client::{
+    FrontendClient, GrpcQueryHandlerWithBoxedError, PeerDesc,
 };
+pub use batching_mode::task::{
+    BatchingTask, DirtyRestore, ExecuteOnceOutcome, PlanInfo, QueryCoverage, TaskArgs,
+};
+pub use batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
+pub use batching_mode::utils::sql_to_df_plan;
+pub use batching_mode::{BatchingModeOptions, IncrementalMode};
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
 pub use server::{
     FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder, FrontendInvoker,
 };
+pub use transform::register_function_to_query_engine;
 
 pub use crate::adapter::FlownodeOptions;
