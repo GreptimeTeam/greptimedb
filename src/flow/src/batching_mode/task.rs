@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::{CreateTableExpr, TableName};
 use catalog::CatalogManagerRef;
+use client::OutputWithMetrics;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
@@ -677,6 +678,76 @@ impl BatchingTask {
         coverage: &QueryCoverage,
         attempt: Option<&crate::batching_mode::persistence::BatchingAttempt>,
     ) -> Result<Option<(usize, Duration)>, Error> {
+        let flow_id = self.config.flow_id;
+        let Some((res, elapsed)) = self
+            .execute_plan_unlocked(engine, frontend_client, plan, dirty_restore, coverage)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        if let Err(err) = &res {
+            let decision = {
+                let mut state = self.state.write().unwrap();
+                let reason = Self::query_failure_reason(err, coverage);
+                Self::apply_query_failure_to_state(
+                    &mut state,
+                    elapsed,
+                    coverage,
+                    reason,
+                    attempt.is_some(),
+                )
+            };
+            if let Some(decision) = decision {
+                Self::record_checkpoint_decision(flow_id, decision);
+            }
+        }
+
+        let res = res?;
+        let (affected_rows, _) = res.output.extract_rows_and_cost();
+        let (decision, checkpoint_txn) = {
+            let mut state = self.state.write().unwrap();
+            let snapshot = state.checkpoint_snapshot();
+            let repair_required = snapshot.full_repair_required;
+            let decision = Self::apply_query_result_to_state(
+                &mut state,
+                &res,
+                elapsed,
+                coverage,
+                repair_required,
+            );
+            let eligible = matches!(
+                decision,
+                crate::batching_mode::checkpoint::FlowCheckpointDecision::AdvancedFromFullSnapshot { .. }
+                    | crate::batching_mode::checkpoint::FlowCheckpointDecision::AdvancedIncremental { .. }
+                    | crate::batching_mode::checkpoint::FlowCheckpointDecision::CompletedFullRepair { .. }
+            );
+            if eligible {
+                let candidate = state.checkpoint_snapshot();
+                state.restore_checkpoint_snapshot(snapshot.clone());
+                Some((snapshot, candidate))
+            } else {
+                None
+            }
+            .map_or((decision, None), |txn| (decision, Some(txn)))
+        };
+        if let Some((snapshot, candidate)) = checkpoint_txn {
+            self.persist_checkpoint_candidate(snapshot, candidate, attempt, dirty_restore.clone())
+                .await?;
+        }
+        Self::record_checkpoint_decision(flow_id, decision);
+
+        Ok(Some((affected_rows, elapsed)))
+    }
+
+    async fn execute_plan_unlocked(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        plan: &LogicalPlan,
+        dirty_restore: &DirtyRestore,
+        coverage: &QueryCoverage,
+    ) -> Result<Option<(Result<OutputWithMetrics, Error>, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
 
@@ -841,20 +912,6 @@ impl BatchingTask {
                 "Failed to execute Flow {flow_id} on frontend {peer_label}, result: {err:?}, elapsed: {:?} with query: {}",
                 elapsed, &plan
             );
-            let decision = {
-                let mut state = self.state.write().unwrap();
-                let reason = Self::query_failure_reason(err, coverage);
-                Self::apply_query_failure_to_state(
-                    &mut state,
-                    elapsed,
-                    coverage,
-                    reason,
-                    attempt.is_some(),
-                )
-            };
-            if let Some(decision) = decision {
-                Self::record_checkpoint_decision(flow_id, decision);
-            }
         }
 
         // record slow query
@@ -869,49 +926,21 @@ impl BatchingTask {
                 .observe(elapsed.as_secs_f64());
         }
 
-        let res = res?;
-        let (affected_rows, _) = res.output.extract_rows_and_cost();
-        debug!(
-            "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
-            elapsed,
-            res.region_watermark_map()
-        );
-        METRIC_FLOW_ROWS
-            .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
-            .inc_by(affected_rows as _);
-        let (decision, checkpoint_txn) = {
-            let mut state = self.state.write().unwrap();
-            let snapshot = state.checkpoint_snapshot();
-            let repair_required = snapshot.full_repair_required;
-            let decision = Self::apply_query_result_to_state(
-                &mut state,
-                &res,
-                elapsed,
-                coverage,
-                repair_required,
-            );
-            let eligible = matches!(
-                decision,
-                crate::batching_mode::checkpoint::FlowCheckpointDecision::AdvancedFromFullSnapshot { .. }
-                    | crate::batching_mode::checkpoint::FlowCheckpointDecision::AdvancedIncremental { .. }
-                    | crate::batching_mode::checkpoint::FlowCheckpointDecision::CompletedFullRepair { .. }
-            );
-            if eligible {
-                let candidate = state.checkpoint_snapshot();
-                state.restore_checkpoint_snapshot(snapshot.clone());
-                Some((snapshot, candidate))
-            } else {
-                None
+        match res {
+            Ok(res) => {
+                let (affected_rows, _) = res.output.extract_rows_and_cost();
+                debug!(
+                    "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
+                    elapsed,
+                    res.region_watermark_map()
+                );
+                METRIC_FLOW_ROWS
+                    .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
+                    .inc_by(affected_rows as _);
+                Ok(Some((Ok(res), elapsed)))
             }
-            .map_or((decision, None), |txn| (decision, Some(txn)))
-        };
-        if let Some((snapshot, candidate)) = checkpoint_txn {
-            self.persist_checkpoint_candidate(snapshot, candidate, attempt, dirty_restore.clone())
-                .await?;
+            Err(err) => Ok(Some((Err(err), elapsed))),
         }
-        Self::record_checkpoint_decision(flow_id, decision);
-
-        Ok(Some((affected_rows, elapsed)))
     }
 
     /// Restore dirty windows consumed by a failed query so they are retried on
