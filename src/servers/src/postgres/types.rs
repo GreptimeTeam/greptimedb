@@ -255,7 +255,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
         &ConcreteDataType::Json(_) => Ok(Type::JSON),
         ConcreteDataType::List(list) => match list.item_type() {
-            &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
+            &ConcreteDataType::Null(_) => Ok(Type::TEXT_ARRAY),
             &ConcreteDataType::Boolean(_) => Ok(Type::BOOL_ARRAY),
             &ConcreteDataType::Int8(_) => Ok(Type::INT2_ARRAY),
             &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt8(_) => Ok(Type::INT2_ARRAY),
@@ -1299,6 +1299,12 @@ mod test {
     use super::*;
     use crate::SqlPlan;
     use crate::postgres::handler::PgSqlPlan;
+
+    #[test]
+    fn test_null_array_maps_to_text_array() {
+        let array = ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::null_datatype()));
+        assert_eq!(Type::TEXT_ARRAY, type_gt_to_pg(&array).unwrap());
+    }
 
     #[test]
     fn test_schema_convert() {
