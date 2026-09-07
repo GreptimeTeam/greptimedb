@@ -1543,7 +1543,7 @@ mod tests {
                     first_batch_elapsed_ns: Some(20),
                     elapsed_ns: 80,
                 }],
-                scanner_explain: "SeqScanExec: prefilter_columns_read=[hostname]".to_string(),
+                scanner_explain: "SeqScan: region=1024(0)".to_string(),
             }],
             summary: BenchmarkResultSummary {
                 runs: 1,
@@ -1564,7 +1564,7 @@ mod tests {
         assert_eq!(2, actual["runs"][0]["config"]["projection"][1]);
         assert_eq!(100, actual["runs"][0]["partitions"][0]["rows"]);
         assert_eq!(
-            "SeqScanExec: prefilter_columns_read=[hostname]",
+            "SeqScan: region=1024(0)",
             actual["runs"][0]["scanner_explain"]
         );
         assert_eq!(90, actual["summary"]["mean_elapsed_ns"]);
