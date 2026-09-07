@@ -88,7 +88,7 @@ impl IncrementalAggregateMergeColumn {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncrementalAggregateMergeOp {
     Sum,
     Min,
@@ -99,6 +99,10 @@ pub enum IncrementalAggregateMergeOp {
     BitOr,
     BitXor,
     AvgDeltaMerge,
+    StateDeltaMerge {
+        function_name: &'static str,
+        params: Vec<Expr>,
+    },
 }
 
 /// Analysis result for an incremental aggregate plan.
@@ -351,6 +355,14 @@ fn merge_op_for_aggregate_expr(
         return Err(format!("unsupported aggregate NULL treatment: {aggr_expr}"));
     }
 
+    let state_delta_merge = |function_name, params| {
+        Ok(IncrementalAggregateMergeOp::StateDeltaMerge {
+            function_name,
+            params,
+        })
+    };
+    let is_type = |expr: &Expr, data_type| expr.get_type(input_schema).ok() == Some(data_type);
+
     match aggr_func.func.name().to_ascii_lowercase().as_str() {
         "sum" | "count" => Ok(IncrementalAggregateMergeOp::Sum),
         "min" => Ok(IncrementalAggregateMergeOp::Min),
@@ -360,16 +372,36 @@ fn merge_op_for_aggregate_expr(
         "bit_and" => Ok(IncrementalAggregateMergeOp::BitAnd),
         "bit_or" => Ok(IncrementalAggregateMergeOp::BitOr),
         "bit_xor" => Ok(IncrementalAggregateMergeOp::BitXor),
-        "avg_state" => match aggr_func.params.args.as_slice() {
-            [_] => Ok(IncrementalAggregateMergeOp::AvgDeltaMerge),
-            _ => Err(aggr_expr.to_string()),
-        },
-        "avg_merge" => match aggr_func.params.args.as_slice() {
-            [arg] if arg.get_type(input_schema).ok() == Some(ArrowDataType::Binary) => {
-                Ok(IncrementalAggregateMergeOp::AvgDeltaMerge)
+        // Preserve state-family parameters; value coercion is handled by the aggregate.
+        "avg_state" if aggr_func.params.args.len() == 1 => {
+            Ok(IncrementalAggregateMergeOp::AvgDeltaMerge)
+        }
+        "hll" if aggr_func.params.args.len() == 1 => state_delta_merge("__hll_delta_merge", vec![]),
+        "stddev_pop_state" if aggr_func.params.args.len() == 1 => {
+            state_delta_merge("__stddev_pop_state_delta_merge", vec![])
+        }
+        "uddsketch_state" if aggr_func.params.args.len() == 3 => {
+            let [bucket_size, error_rate, _] = aggr_func.params.args.as_slice() else {
+                unreachable!();
+            };
+            if !matches!(bucket_size, Expr::Literal(ScalarValue::Int64(Some(_)), _))
+                || !matches!(error_rate, Expr::Literal(ScalarValue::Float64(Some(_)), _))
+            {
+                return Err(aggr_expr.to_string());
             }
-            _ => Err(aggr_expr.to_string()),
-        },
+            state_delta_merge(
+                "__uddsketch_state_delta_merge",
+                vec![bucket_size.clone(), error_rate.clone()],
+            )
+        }
+        // AVG's binary merge form is admitted because its state argument is
+        // already the aggregate result stored by the sink.
+        "avg_merge"
+            if aggr_func.params.args.len() == 1
+                && is_type(&aggr_func.params.args[0], ArrowDataType::Binary) =>
+        {
+            Ok(IncrementalAggregateMergeOp::AvgDeltaMerge)
+        }
         _ => Err(aggr_expr.to_string()),
     }
 }
@@ -547,7 +579,7 @@ pub fn analyze_incremental_aggregate_plan(
             merge_columns.push(IncrementalAggregateMergeColumn {
                 input_field_name: input_field_name.clone(),
                 output_field_name,
-                merge_op,
+                merge_op: merge_op.clone(),
             });
         }
     }
@@ -657,10 +689,13 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
     let delta_alias = "__flow_delta";
     let sink_alias = "__flow_sink";
 
-    let state_merge = analysis
-        .merge_columns
-        .iter()
-        .any(|column| matches!(column.merge_op, IncrementalAggregateMergeOp::AvgDeltaMerge));
+    let state_merge = analysis.merge_columns.iter().any(|column| {
+        matches!(
+            &column.merge_op,
+            IncrementalAggregateMergeOp::AvgDeltaMerge
+                | IncrementalAggregateMergeOp::StateDeltaMerge { .. }
+        )
+    });
     let mut selected_columns = analysis.group_key_names.clone();
     selected_columns.extend(
         analysis
@@ -804,8 +839,9 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
             group_exprs.push(expr);
         } else if let Some(merge_col) = merge_columns.get(output_field_name) {
             if matches!(
-                merge_col.merge_op,
+                &merge_col.merge_op,
                 IncrementalAggregateMergeOp::AvgDeltaMerge
+                    | IncrementalAggregateMergeOp::StateDeltaMerge { .. }
             ) {
                 state_aggr_exprs.push(build_state_delta_merge_expr(engine, merge_col)?);
             } else {
@@ -866,29 +902,46 @@ fn build_state_delta_merge_expr(
     engine: &QueryEngineRef,
     merge_col: &IncrementalAggregateMergeColumn,
 ) -> Result<Expr, Error> {
+    let (function_name, params) = match &merge_col.merge_op {
+        IncrementalAggregateMergeOp::AvgDeltaMerge => ("__avg_state_delta_merge", vec![]),
+        IncrementalAggregateMergeOp::StateDeltaMerge {
+            function_name,
+            params,
+        } => (*function_name, params.clone()),
+        _ => {
+            return InvalidQuerySnafu {
+                reason: "non-state aggregate passed to state delta merge".to_string(),
+            }
+            .fail();
+        }
+    };
     let Some(udaf) = engine
         .engine_state()
-        .aggr_function("__avg_state_delta_merge")
+        .aggr_function(function_name)
         .or_else(|| {
             engine
                 .engine_state()
                 .session_state()
                 .aggregate_functions()
-                .get("__avg_state_delta_merge")
+                .get(function_name)
                 .map(|udaf| udaf.as_ref().clone())
         })
     else {
         return InvalidQuerySnafu {
-            reason: "Aggregate function __avg_state_delta_merge is not registered".to_string(),
+            reason: format!("Aggregate function {function_name} is not registered"),
         }
         .fail();
     };
-    Ok(udaf
-        .call(vec![
-            qualified_col("__flow_delta", merge_col.input_field_name.clone()),
-            qualified_col("__flow_sink", merge_col.output_field_name.clone()),
-        ])
-        .alias(merge_col.output_field_name.clone()))
+    let mut args = params;
+    args.push(qualified_col(
+        "__flow_delta",
+        merge_col.input_field_name.clone(),
+    ));
+    args.push(qualified_col(
+        "__flow_sink",
+        merge_col.output_field_name.clone(),
+    ));
+    Ok(udaf.call(args).alias(merge_col.output_field_name.clone()))
 }
 
 fn build_left_join_merge_expr(
@@ -898,7 +951,7 @@ fn build_left_join_merge_expr(
 ) -> Result<Expr, Error> {
     let left = qualified_col(delta_alias, merge_col.input_field_name.clone());
     let right = qualified_col(sink_alias, merge_col.output_field_name.clone());
-    let merged = match merge_col.merge_op {
+    let merged = match merge_col.merge_op.clone() {
         IncrementalAggregateMergeOp::Sum => when(is_null(left.clone()), right.clone())
             .when(is_null(right.clone()), left.clone())
             .otherwise(binary_expr(left.clone(), Operator::Plus, right.clone()))
@@ -947,7 +1000,8 @@ fn build_left_join_merge_expr(
             .with_context(|_| DatafusionSnafu {
                 context: "Failed to build BIT_XOR merge expression".to_string(),
             })?,
-        IncrementalAggregateMergeOp::AvgDeltaMerge => {
+        IncrementalAggregateMergeOp::AvgDeltaMerge
+        | IncrementalAggregateMergeOp::StateDeltaMerge { .. } => {
             return InvalidQuerySnafu {
                 reason: "state aggregate must be built with its delta UDAF".to_string(),
             }
