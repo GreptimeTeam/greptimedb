@@ -417,6 +417,7 @@ impl RegionOpener {
         Ok(Arc::new(MitoRegion {
             region_id,
             version_control,
+            series_index_version_control: Default::default(),
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
@@ -431,6 +432,7 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
                 self.file_ref_manager.clone(),
+                None,
             ),
             provider,
             last_flush_millis: AtomicI64::new(now),
@@ -546,6 +548,7 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
+            None,
         );
         // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
@@ -647,6 +650,7 @@ impl RegionOpener {
         let region = MitoRegion {
             region_id: self.region_id,
             version_control: version_control.clone(),
+            series_index_version_control: Default::default(),
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(

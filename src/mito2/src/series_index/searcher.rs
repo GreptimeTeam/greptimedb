@@ -306,6 +306,7 @@ mod tests {
             object_store,
             path,
             SeriesIndexWriterOptions { row_group_size },
+            None,
         )
         .await
         .unwrap();

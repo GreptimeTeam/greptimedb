@@ -14,7 +14,14 @@
 
 //! Series index writer and searcher.
 
+// These components are consumed by the upcoming query and maintenance integration.
+#[allow(dead_code)]
+mod catalog;
+#[allow(dead_code)]
+mod purger;
 mod searcher;
+#[allow(dead_code)]
+mod version;
 mod writer;
 
 use futures::stream::BoxStream;
@@ -23,6 +30,7 @@ use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
     DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
 };
+pub(crate) use version::{SeriesIndexVersion, SeriesIndexVersionControl};
 pub use writer::{
     SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,
 };

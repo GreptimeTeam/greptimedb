@@ -14,9 +14,14 @@
 
 //! Per-SST series row-range index.
 
+mod deleter;
 mod searcher;
 mod writer;
 
+pub use deleter::RangeIndexDeleter;
+// Used by the upcoming query and index-building integration.
+#[allow(unused_imports)]
+pub(crate) use deleter::range_index_path;
 pub use searcher::SstRangeIndexSearcher;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,

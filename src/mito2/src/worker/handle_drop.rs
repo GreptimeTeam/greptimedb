@@ -128,6 +128,7 @@ where
 
         // Marks region version as dropped
         region.version_control.mark_dropped();
+        region.series_index_version_control.mark_dropped();
         info!(
             "Region {} is dropped logically, but some files are not deleted yet",
             region_id
