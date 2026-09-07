@@ -53,7 +53,30 @@ cargo build -p cmd --bin greptime
 - `--enable-wal`: Enable WAL replay when opening the region. Default: disabled. When enabled, scanbench uses the log store configured in the `[wal]` section of the config TOML (raft-engine or Kafka). When disabled or when no WAL is configured, a `NoopLogStore` is used.
 - `--pprof-file`: Output flamegraph path (Unix only).
 - `--pprof-after-warmup`: Start profiling after the first iteration, using it as a warmup. Requires `--pprof-file`. Default: disabled.
-- `--verbose` / `-v`: Enable verbose output.
+- `--verbose` / `-v`: Print scanner metrics plus per-partition row counts,
+  first-batch latency, total elapsed time, and partition skew. Parquet scanner
+  metrics also identify the physical prefilter columns and split fetch metrics
+  into `primary_key_io`, `prefilter_io`, and `projection_io`. Prefilter timing
+  separates column read/decode, predicate evaluation, and selection construction.
+
+### Verbose prefilter diagnostics
+
+The `fetch_metrics` object in scanner explain output includes these additional
+fields when prefiltering runs:
+
+- `prefilter_columns_read`: physical columns decoded for predicate cache misses.
+- `prefilter_candidate_rows`, `prefilter_selected_rows`, and
+  `prefilter_filtered_rows`: prefilter selectivity.
+- `prefilter_rows_read` and `prefilter_batches_read`: work actually decoded;
+  these can be lower than candidate rows when the predicate-result cache hits.
+- `prefilter_column_read_elapsed`, `prefilter_filter_eval_elapsed`, and
+  `prefilter_selection_elapsed`: time spent reading/decoding columns, evaluating
+  predicates, and constructing the row selection.
+- `prefilter_result_cache_hits` and `prefilter_result_cache_misses`: reuse of
+  cached predicate masks.
+- `primary_key_io`, `prefilter_io`, and `projection_io`: cache/store requests,
+  bytes, and fetch elapsed time attributed to the three Parquet read phases. The
+  existing top-level fetch fields remain totals across all phases.
 
 ## Scan Config JSON
 

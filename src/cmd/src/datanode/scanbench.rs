@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use colored::Colorize;
@@ -70,6 +70,16 @@ impl<T: DisplayAs + ?Sized> fmt::Display for VerboseScannerDisplay<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt_as(DisplayFormatType::Verbose, f)
     }
+}
+
+struct PartitionScanStats {
+    partition: usize,
+    rows: u64,
+    batches: u64,
+    array_mem_size: u64,
+    estimated_size: u64,
+    first_batch_elapsed: Option<Duration>,
+    elapsed: Duration,
 }
 
 /// Scan benchmark command - benchmarks scanning a region directly from storage.
@@ -637,6 +647,8 @@ impl ScanbenchCommand {
             let metrics_set = ExecutionPlanMetricsSet::new();
 
             let mut scan_futures = FuturesUnordered::new();
+            let setup_elapsed = start.elapsed();
+            let scan_start = Instant::now();
 
             for partition_idx in 0..num_partitions {
                 let mut stream = scanner
@@ -645,12 +657,19 @@ impl ScanbenchCommand {
                     .context(error::BuildCliSnafu)?;
 
                 scan_futures.push(tokio::spawn(async move {
+                    let partition_start = Instant::now();
                     let mut rows = 0u64;
+                    let mut batches = 0u64;
                     let mut array_mem_size = 0u64;
                     let mut estimated_size = 0u64;
+                    let mut first_batch_elapsed = None;
                     while let Some(batch_result) = stream.next().await {
                         match batch_result {
                             Ok(batch) => {
+                                if first_batch_elapsed.is_none() {
+                                    first_batch_elapsed = Some(partition_start.elapsed());
+                                }
+                                batches += 1;
                                 rows += batch.num_rows() as u64;
                                 let df_batch = batch.df_record_batch();
                                 array_mem_size += df_batch.get_array_memory_size() as u64;
@@ -662,13 +681,22 @@ impl ScanbenchCommand {
                             }
                         }
                     }
-                    Ok::<(u64, u64, u64), BoxedError>((rows, array_mem_size, estimated_size))
+                    Ok::<PartitionScanStats, BoxedError>(PartitionScanStats {
+                        partition: partition_idx,
+                        rows,
+                        batches,
+                        array_mem_size,
+                        estimated_size,
+                        first_batch_elapsed,
+                        elapsed: partition_start.elapsed(),
+                    })
                 }));
             }
 
             let mut total_rows = 0u64;
             let mut total_array_mem_size = 0u64;
             let mut total_estimated_size = 0u64;
+            let mut partition_stats = Vec::with_capacity(num_partitions);
             while let Some(task) = scan_futures.next().await {
                 let result = task
                     .map_err(|e| {
@@ -678,12 +706,13 @@ impl ScanbenchCommand {
                         ))
                     })
                     .context(error::BuildCliSnafu)?;
-                let (rows, array_mem_size, estimated_size) =
-                    result.context(error::BuildCliSnafu)?;
-                total_rows += rows;
-                total_array_mem_size += array_mem_size;
-                total_estimated_size += estimated_size;
+                let stats = result.context(error::BuildCliSnafu)?;
+                total_rows += stats.rows;
+                total_array_mem_size += stats.array_mem_size;
+                total_estimated_size += stats.estimated_size;
+                partition_stats.push(stats);
             }
+            let scan_elapsed = scan_start.elapsed();
 
             let elapsed = start.elapsed();
             total_rows_all += total_rows;
@@ -700,6 +729,47 @@ impl ScanbenchCommand {
             );
 
             if self.verbose {
+                partition_stats.sort_unstable_by_key(|stats| stats.partition);
+                for stats in &partition_stats {
+                    let first_batch = stats
+                        .first_batch_elapsed
+                        .map(|elapsed| format!("{elapsed:?}"))
+                        .unwrap_or_else(|| "n/a".to_string());
+                    println!(
+                        "    partition {}: rows={}, batches={}, first_batch={}, elapsed={:?}, array_mem_size={}, estimated_size={}",
+                        stats.partition,
+                        stats.rows,
+                        stats.batches,
+                        first_batch,
+                        stats.elapsed,
+                        format_bytes(stats.array_mem_size),
+                        format_bytes(stats.estimated_size),
+                    );
+                }
+                if !partition_stats.is_empty() {
+                    let total_partition_elapsed = partition_stats
+                        .iter()
+                        .map(|stats| stats.elapsed)
+                        .sum::<Duration>();
+                    let mean_partition_elapsed =
+                        total_partition_elapsed / partition_stats.len() as u32;
+                    let max_partition_elapsed = partition_stats
+                        .iter()
+                        .map(|stats| stats.elapsed)
+                        .max()
+                        .unwrap_or_default();
+                    let skew = max_partition_elapsed.as_secs_f64()
+                        / mean_partition_elapsed.as_secs_f64().max(f64::EPSILON);
+                    println!(
+                        "  {} Timing: setup={:?}, scan={:?}, mean_partition={:?}, max_partition={:?}, partition_skew={:.2}x",
+                        "ℹ".blue(),
+                        setup_elapsed,
+                        scan_elapsed,
+                        mean_partition_elapsed,
+                        max_partition_elapsed,
+                        skew,
+                    );
+                }
                 println!(
                     "  {} Scanner explain: {}",
                     "ℹ".blue(),
