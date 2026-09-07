@@ -2263,6 +2263,7 @@ enable = true
 
 [otlp]
 enable = true
+enable_metrics_batching = false
 experimental_enable_exponential_histogram = false
 trace_ingest_chunk_size = 512
 experimental_enable_resource_info = true
