@@ -3,6 +3,7 @@ reason = "Verify persisted AVG1 binary states are decoded, merged, and reproduce
 introduced_by = "PR #9035"
 topologies = ["distributed", "standalone"]
 from_range = ["*"]
+# The runner compares core versions only, so this also admits other 1.3.0 prereleases.
 to_range = [">=v1.3.0-alpha.1"]
 features = ["table", "query", "aggregate"]
 owner = "query"
