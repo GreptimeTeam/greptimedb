@@ -58,9 +58,6 @@ use crate::mysql::writer;
 use crate::mysql::writer::{create_mysql_column, handle_err};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
-const MYSQL_NATIVE_PASSWORD: &str = "mysql_native_password";
-const MYSQL_CLEAR_PASSWORD: &str = "mysql_clear_password";
-
 /// Parameters for the prepared statement
 enum Params<'a> {
     /// Parameters passed through protocol
@@ -349,19 +346,11 @@ impl MysqlInstanceShim {
     }
 
     fn auth_plugin(&self) -> &'static str {
-        self.auth_plugin_for_method(
-            self.user_provider
-                .as_ref()
-                .map(|provider| provider.mysql_auth_method())
-                .unwrap_or(MysqlAuthMethod::NativePassword),
-        )
-    }
-
-    fn auth_plugin_for_method(&self, method: MysqlAuthMethod) -> &'static str {
-        match method {
-            MysqlAuthMethod::NativePassword => MYSQL_NATIVE_PASSWORD,
-            MysqlAuthMethod::ClearPassword => MYSQL_CLEAR_PASSWORD,
-        }
+        self.user_provider
+            .as_ref()
+            .map(|provider| provider.mysql_auth_method())
+            .unwrap_or(MysqlAuthMethod::NativePassword)
+            .plugin_name()
     }
 }
 
@@ -383,7 +372,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
     async fn auth_plugin_for_username(&self, user: &[u8]) -> &'static str {
         if user == BEARER_TOKEN_USER.as_bytes() {
-            return MYSQL_CLEAR_PASSWORD;
+            return MysqlAuthMethod::ClearPassword.plugin_name();
         }
         self.auth_plugin()
     }
@@ -410,7 +399,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .map(|addr| addr.to_string());
         if let Some(user_provider) = &self.user_provider {
             let result = if username.as_ref() == BEARER_TOKEN_USER {
-                if auth_plugin != MYSQL_CLEAR_PASSWORD {
+                if auth_plugin != MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN {
                     warn!("Bearer-token MySQL authentication requires mysql_clear_password");
                     return false;
                 }
@@ -426,8 +415,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             } else {
                 let user_id = Identity::UserId(&username, addr.as_deref());
                 let password = match auth_plugin {
-                    MYSQL_NATIVE_PASSWORD => Password::MysqlNativePassword(auth_data, salt),
-                    MYSQL_CLEAR_PASSWORD => {
+                    MysqlAuthMethod::NATIVE_PASSWORD_PLUGIN => {
+                        Password::MysqlNativePassword(auth_data, salt)
+                    }
+                    MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN => {
                         // The raw bytes received could be represented in C-like string, ended in '\0'.
                         // We must "trim" it to get the real password string.
                         let password = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);

@@ -131,6 +131,19 @@ pub enum MysqlAuthMethod {
     ClearPassword,
 }
 
+impl MysqlAuthMethod {
+    pub const NATIVE_PASSWORD_PLUGIN: &'static str = "mysql_native_password";
+    pub const CLEAR_PASSWORD_PLUGIN: &'static str = "mysql_clear_password";
+
+    /// Returns the MySQL authentication plugin name sent on the wire.
+    pub const fn plugin_name(self) -> &'static str {
+        match self {
+            Self::NativePassword => Self::NATIVE_PASSWORD_PLUGIN,
+            Self::ClearPassword => Self::CLEAR_PASSWORD_PLUGIN,
+        }
+    }
+}
+
 pub enum PgAuthInfo {
     ScramSha256 {
         verifier: PgScramSha256Verifier,
