@@ -42,7 +42,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::metrics;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::event::{
-    RECONCILE_TABLE_EVENT_TYPE, ReconciliationEvent, ReconciliationLocator,
+    RECONCILE_TABLE_EVENT_TYPE, ReconcileTableEvent, ReconciliationLocator,
 };
 use crate::reconciliation::reconcile_table::reconciliation_start::ReconciliationStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
@@ -373,7 +373,7 @@ impl Procedure for ReconcileTableProcedure {
             persistent_ctx.table_id,
         );
         let event = match ctx.trigger {
-            EventTrigger::Submitted => ReconciliationEvent::table_submitted(
+            EventTrigger::Submitted => ReconcileTableEvent::table_submitted(
                 locator,
                 persistent_ctx.resolve_strategy,
                 persistent_ctx.is_subprocedure,
@@ -384,7 +384,7 @@ impl Procedure for ReconcileTableProcedure {
             EventTrigger::Failed | EventTrigger::Poisoned => {
                 Self::result_event(locator, &self.context.volatile_ctx.result_summary, false)
             }
-            _ => ReconciliationEvent::table_lifecycle(locator),
+            _ => ReconcileTableEvent::table_lifecycle(locator),
         };
         Some(Box::new(event))
     }
@@ -395,8 +395,8 @@ impl ReconcileTableProcedure {
         locator: ReconciliationLocator,
         summary: &ReconcileTableResultSummary,
         complete: bool,
-    ) -> ReconciliationEvent {
-        ReconciliationEvent::table_result(
+    ) -> ReconcileTableEvent {
+        ReconcileTableEvent::table_result(
             locator,
             complete,
             summary.metadata_state(),
