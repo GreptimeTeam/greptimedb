@@ -323,7 +323,7 @@ mod tests {
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn object_store() -> ObjectStore {
-        ObjectStore::new(Memory::default()).unwrap().finish()
+        ObjectStore::new(Memory::default()).unwrap()
     }
 
     fn series(table_id: u32, tsid: u64) -> MetricSeriesId {

@@ -27,7 +27,7 @@ derive_builder = { workspace = true, optional = true }
 futures.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
-opendal = { version = "0.57", features = [
+opendal = { version = "0.58", features = [
     "layers-tracing",
     "layers-prometheus",
     "services-azblob",
@@ -37,6 +37,7 @@ opendal = { version = "0.57", features = [
     "services-oss",
     "services-s3",
 ] }
+opendal-http-transport-reqwest = "0.58"
 prometheus.workspace = true
 reqwest.workspace = true
 serde.workspace = true

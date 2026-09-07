@@ -1413,9 +1413,7 @@ mod tests {
     }
 
     fn build_fs_object_store() -> ObjectStore {
-        ObjectStore::new(Fs::default().root("/tmp"))
-            .unwrap()
-            .finish()
+        ObjectStore::new(Fs::default().root("/tmp")).unwrap()
     }
 
     #[test]
@@ -1497,8 +1495,7 @@ mod tests {
                 .region("us-east-1")
                 .disable_ec2_metadata(),
         )
-        .unwrap()
-        .finish();
+        .unwrap();
 
         assert!(supports_open_region_object_storage_requirement(
             &object_store
@@ -1553,7 +1550,7 @@ mod tests {
     async fn test_preload_parquet_meta_cache_uses_file_cache() {
         let env = TestEnv::new().await;
 
-        let local_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let local_store = ObjectStore::new(Memory::default()).unwrap();
         let write_cache = env
             .create_write_cache(local_store, ReadableSize::mb(1024))
             .await;
@@ -1604,7 +1601,7 @@ mod tests {
         let path_type = PathType::Bare;
         let remote_path = file_handle.file_path(table_dir, path_type);
 
-        let source_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let source_store = ObjectStore::new(Memory::default()).unwrap();
         source_store
             .write(&remote_path, parquet_bytes)
             .await
@@ -1688,7 +1685,7 @@ mod tests {
         let remote_path = file_handle.file_path(table_dir, path_type);
 
         // Even if the remote object store has the file, we should not preload from it.
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         object_store
             .write(&remote_path, b"noop".as_slice())
             .await
@@ -1763,9 +1760,8 @@ mod tests {
         let file_path = file_handle.file_path(table_dir, path_type);
 
         let root = create_temp_dir("parquet-meta-preload");
-        let object_store = ObjectStore::new(Fs::default().root(root.path().to_str().unwrap()))
-            .unwrap()
-            .finish();
+        let object_store =
+            ObjectStore::new(Fs::default().root(root.path().to_str().unwrap())).unwrap();
         object_store.write(&file_path, parquet_bytes).await.unwrap();
 
         let region_file_id = file_handle.file_id();
