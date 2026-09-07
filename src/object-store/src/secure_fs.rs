@@ -21,6 +21,7 @@ use std::{fmt, io};
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, DirEntry, OpenOptions, ReadDir};
+use opendal::layers::SimulateLayer;
 use opendal::raw::*;
 use opendal::{
     Buffer, BytesRange, Capability, EntryMode, Error, ErrorKind, Metadata, OperationContext,
@@ -107,6 +108,7 @@ impl SecureFsRoot {
             OperationContext::default(),
             Arc::new(SecureFsBackend::new(self.clone())) as Servicer,
         )
+        .layer(SimulateLayer::default())
     }
 }
 
@@ -631,9 +633,37 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use opendal::raw::oio::List;
     use opendal::raw::{OpList, Service};
-    use opendal::{ErrorKind, OperationContext};
+    use opendal::{BytesRange, ErrorKind, OperationContext};
 
     use super::{LIST_BATCH_SIZE, SecureFsBackend, SecureFsRoot, read_list_entry};
+
+    #[tokio::test]
+    async fn test_operator_suffix_reads_final_bytes() {
+        let temp_dir = create_temp_dir("secure_fs_operator_suffix");
+        std::fs::write(temp_dir.path().join("file"), b"0123456789").unwrap();
+        let operator = SecureFsRoot::open(temp_dir.path())
+            .unwrap()
+            .build_operator();
+
+        assert_eq!(
+            Bytes::from_static(b"789"),
+            operator
+                .read_with("file")
+                .range(7..10)
+                .await
+                .unwrap()
+                .to_bytes()
+        );
+        assert_eq!(
+            Bytes::from_static(b"789"),
+            operator
+                .read_with("file")
+                .range(BytesRange::Suffix { size: 3 })
+                .await
+                .unwrap()
+                .to_bytes()
+        );
+    }
 
     #[tokio::test]
     async fn test_lister_streams_entries() {
