@@ -33,18 +33,18 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, TryStreamExt};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::SequenceNumber;
-use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
 use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::BoxedRecordBatchStream;
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
 };
-use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::sst::parquet::format::{FIXED_POS_COLUMN_NUM, PrimaryKeyArray};
 
 /// Checks whether interleaving the selected rows from byte columns would overflow
 /// i32 offsets. Similar to arrow-rs `interleave_bytes()`, accumulates offsets and
@@ -305,6 +305,10 @@ pub struct BatchBuilder {
 impl BatchBuilder {
     /// Create a new [`BatchBuilder`] with the provided `stream_count` and `batch_size`
     pub fn new(schema: SchemaRef, stream_count: usize, batch_size: usize) -> Self {
+        // A real flat-format schema always has at least 4 columns (time index
+        // plus the 3 internal columns); the `>= 3` check below only keeps
+        // `primary_key_column_index` (`num_columns - 3`) from underflowing on
+        // generic schemas without internal columns.
         let primary_key_column_idx = (schema.fields.len() >= 3)
             .then(|| primary_key_column_index(schema.fields.len()))
             .filter(|&column_idx| schema.field(column_idx).name() == PRIMARY_KEY_COLUMN_NAME);
@@ -763,41 +767,77 @@ struct SortColumns {
 }
 
 impl SortColumns {
-    /// Creates a new [SortColumns] from a [RecordBatch] and the position of the time index column.
+    /// Creates a new [SortColumns] from a [RecordBatch] in the flat format.
     ///
-    /// # Panics
-    /// Panics if the input batch doesn't have correct internal columns.
-    fn new(batch: &RecordBatch) -> Self {
+    /// Returns an error if the batch doesn't carry the flat-format internal
+    /// columns (time index, `__primary_key`, `__sequence`) of the expected
+    /// types at the fixed trailing positions. Unlike [BatchBuilder], which
+    /// falls back to plain `interleave` on generic schemas, row comparison
+    /// fundamentally requires these columns, so a batch without them is
+    /// rejected with an error instead of a panic.
+    fn try_new(batch: &RecordBatch) -> Result<Self> {
         let num_columns = batch.num_columns();
+        ensure!(
+            num_columns >= FIXED_POS_COLUMN_NUM,
+            InvalidRecordBatchSnafu {
+                reason: format!(
+                    "flat merge batch only has {num_columns} columns, expect at least {FIXED_POS_COLUMN_NUM}"
+                ),
+            }
+        );
         let primary_key = batch
             .column(primary_key_column_index(num_columns))
             .as_any()
             .downcast_ref::<PrimaryKeyArray>()
-            .unwrap()
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!(
+                    "expected a {PRIMARY_KEY_COLUMN_NAME} column of type Dictionary(UInt32, Binary) at index {}",
+                    primary_key_column_index(num_columns),
+                ),
+            })?
             .clone();
         let primary_key_values = primary_key
             .values()
             .as_any()
             .downcast_ref::<BinaryArray>()
-            .unwrap()
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!(
+                    "expected Binary {PRIMARY_KEY_COLUMN_NAME} dictionary values, got {}",
+                    primary_key.values().data_type()
+                ),
+            })?
             .clone();
         let timestamp = batch.column(time_index_column_index(num_columns));
-        let (timestamp, _unit) = timestamp_array_to_primitive(timestamp).unwrap();
+        let (timestamp, _unit) =
+            timestamp_array_to_primitive(timestamp).with_context(|| InvalidRecordBatchSnafu {
+                reason: format!(
+                    "expected a timestamp time index column at index {}, got {}",
+                    time_index_column_index(num_columns),
+                    batch
+                        .column(time_index_column_index(num_columns))
+                        .data_type(),
+                ),
+            })?;
         let sequence = batch
             .column(sequence_column_index(num_columns))
             .as_any()
             .downcast_ref::<UInt64Array>()
-            .unwrap()
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!(
+                    "expected a UInt64 {SEQUENCE_COLUMN_NAME} column at index {}",
+                    sequence_column_index(num_columns),
+                ),
+            })?
             .clone();
 
-        Self {
+        Ok(Self {
             primary_key,
             primary_key_values,
             timestamp,
             sequence,
             #[cfg(test)]
             primary_key_lookups: Cell::new(0),
-        }
+        })
     }
 
     fn primary_key_at(&self, index: usize) -> &[u8] {
@@ -923,6 +963,12 @@ impl Ord for RowCursor {
 /// Iterator to merge multiple sorted iterators into a single sorted iterator.
 ///
 /// All iterators must be sorted by primary key, time index, sequence desc.
+///
+/// Input batches must be in the flat format: the last four columns are time
+/// index, `__primary_key`, `__sequence` and `__op_type`. Row comparison
+/// decodes these internal columns and returns an error on batches that don't
+/// match the flat format; the name-based gate in [BatchBuilder] only makes
+/// output assembly degrade gracefully on generic schemas, not sorting.
 pub struct FlatMergeIterator {
     /// The merge algorithm to maintain heaps.
     algo: MergeAlgo<IterNode>,
@@ -1059,6 +1105,12 @@ impl Iterator for FlatMergeIterator {
 /// Iterator to merge multiple sorted iterators into a single sorted iterator.
 ///
 /// All iterators must be sorted by primary key, time index, sequence desc.
+///
+/// Input batches must be in the flat format: the last four columns are time
+/// index, `__primary_key`, `__sequence` and `__op_type`. Row comparison
+/// decodes these internal columns and returns an error on batches that don't
+/// match the flat format; the name-based gate in [BatchBuilder] only makes
+/// output assembly degrade gracefully on generic schemas, not sorting.
 pub struct FlatMergeReader {
     /// The merge algorithm to maintain heaps.
     algo: MergeAlgo<StreamNode>,
@@ -1316,7 +1368,7 @@ impl GenericNode<BoxedRecordBatchIterator> {
     /// Returns the fetched new batch.
     fn advance_batch(&mut self) -> Result<Option<RecordBatch>> {
         let batch = self.advance_inner_iter()?;
-        let columns = batch.as_ref().map(SortColumns::new);
+        let columns = batch.as_ref().map(SortColumns::try_new).transpose()?;
         self.cursor = columns.map(RowCursor::new);
 
         Ok(batch)
@@ -1355,7 +1407,7 @@ impl GenericNode<BoxedRecordBatchStream> {
     /// Returns the fetched new batch.
     async fn advance_batch(&mut self) -> Result<Option<RecordBatch>> {
         let batch = self.advance_inner_iter().await?;
-        let columns = batch.as_ref().map(SortColumns::new);
+        let columns = batch.as_ref().map(SortColumns::try_new).transpose()?;
         self.cursor = columns.map(RowCursor::new);
 
         Ok(batch)
@@ -1395,7 +1447,10 @@ mod tests {
 
     use api::v1::OpType;
     use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
-    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt8Array, UInt64Array};
+    use datatypes::arrow::array::{
+        DictionaryArray, Int64Array, StringArray, StringDictionaryBuilder,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
+    };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
     use futures::FutureExt;
@@ -1937,7 +1992,7 @@ mod tests {
             &[OpType::Put, OpType::Put],
             &[11, 12],
         );
-        let mut cursor = RowCursor::new(SortColumns::new(&batch));
+        let mut cursor = RowCursor::new(SortColumns::try_new(&batch).unwrap());
 
         assert!(!cursor.is_last_row());
         cursor.advance();
@@ -2115,6 +2170,167 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_iterator_empty_primary_keys() {
+        // Tables without tags produce batches whose primary keys are all empty
+        // byte strings.
+        let batch1 = create_test_record_batch(
+            &[b"", b""],
+            &[1000, 3000],
+            &[21, 23],
+            &[OpType::Put, OpType::Put],
+            &[11, 13],
+        );
+        let batch2 = create_test_record_batch(
+            &[b"", b""],
+            &[2000, 4000],
+            &[22, 24],
+            &[OpType::Put, OpType::Put],
+            &[12, 14],
+        );
+
+        let schema = batch1.schema();
+        let iter1 = Box::new(new_test_iter(vec![batch1]));
+        let iter2 = Box::new(new_test_iter(vec![batch2]));
+
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter);
+
+        let num_rows: usize = result.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(4, num_rows);
+        let mut timestamps = Vec::new();
+        for batch in &result {
+            let pk_idx = primary_key_column_index(batch.num_columns());
+            // All rows share the same empty primary key, so each output
+            // dictionary must contain a single empty value.
+            let expected_keys = vec![b"".as_slice(); batch.num_rows()];
+            assert_primary_key_dictionary(batch.column(pk_idx).as_ref(), &expected_keys, &[b""]);
+            let timestamp = batch
+                .column(time_index_column_index(batch.num_columns()))
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            timestamps.extend(timestamp.values().iter().copied());
+        }
+        // Rows are merged by timestamp since all primary keys are equal.
+        assert_eq!(vec![1000, 2000, 3000, 4000], timestamps);
+    }
+
+    /// Creates a test RecordBatch with an extra dictionary-encoded string tag
+    /// column, mirroring the flat input schema of tables with string tags.
+    fn create_test_record_batch_with_dict_tag(
+        tags: &[&str],
+        primary_keys: &[&[u8]],
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+        field_values: &[i64],
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "tag0",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+                true,
+            ),
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        for tag in tags {
+            tag_builder.append(tag).unwrap();
+        }
+        let tag = Arc::new(tag_builder.finish());
+
+        let field1 = Arc::new(Int64Array::from_iter_values(field_values.iter().copied()));
+        let timestamp = Arc::new(TimestampMillisecondArray::from_iter_values(
+            timestamps.iter().copied(),
+        ));
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for key in primary_keys {
+            pk_builder.append(key).unwrap();
+        }
+        let primary_key = Arc::new(pk_builder.finish());
+        let sequence = Arc::new(UInt64Array::from_iter_values(sequences.iter().copied()));
+        let op_type = Arc::new(UInt8Array::from_iter_values(
+            op_types.iter().map(|&v| v as u8),
+        ));
+
+        RecordBatch::try_new(
+            schema,
+            vec![tag, field1, timestamp, primary_key, sequence, op_type],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_merge_iterator_dictionary_encoded_tag_column() {
+        // String tag columns are dictionary-encoded in the flat input schema,
+        // and each source may carry a different dictionary.
+        let batch1 = create_test_record_batch_with_dict_tag(
+            &["us-west", "eu-west"],
+            &[b"k1", b"k2"],
+            &[1000, 2000],
+            &[21, 22],
+            &[OpType::Put, OpType::Put],
+            &[11, 12],
+        );
+        let batch2 = create_test_record_batch_with_dict_tag(
+            &["us-east", "eu-west"],
+            &[b"k1", b"k2"],
+            &[1500, 2500],
+            &[23, 24],
+            &[OpType::Put, OpType::Put],
+            &[13, 14],
+        );
+
+        let schema = batch1.schema();
+        let iter1 = Box::new(new_test_iter(vec![batch1]));
+        let iter2 = Box::new(new_test_iter(vec![batch2]));
+
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter);
+
+        // Rows merged by (primary key, timestamp): (k1, 1000), (k1, 1500),
+        // (k2, 2000), (k2, 2500).
+        let num_rows: usize = result.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(4, num_rows);
+        let mut tags = Vec::new();
+        let mut timestamps = Vec::new();
+        for batch in &result {
+            let tag = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<DictionaryArray<UInt32Type>>()
+                .unwrap();
+            let tag_values = tag.values().as_any().downcast_ref::<StringArray>().unwrap();
+            tags.extend(
+                tag.keys()
+                    .iter()
+                    .map(|key| tag_values.value(key.unwrap() as usize)),
+            );
+            let timestamp = batch
+                .column(time_index_column_index(batch.num_columns()))
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            timestamps.extend(timestamp.values().iter().copied());
+        }
+        assert_eq!(vec!["us-west", "us-east", "eu-west", "eu-west"], tags);
+        assert_eq!(vec![1000, 1500, 2000, 2500], timestamps);
+    }
+
+    #[test]
     fn test_merge_iterator_retry_after_row_boundary_error_removes_source() {
         let (first, second, pending) = boundary_test_batches();
         let schema = first.schema();
@@ -2244,6 +2460,33 @@ mod tests {
         assert_eq!(batch, output_batch);
     }
 
+    #[test]
+    fn test_merge_iterator_rejects_batch_without_internal_columns() {
+        // A generic schema without the flat-format internal columns cannot
+        // drive row comparison; the merger must return an error instead of
+        // panicking.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field1", DataType::Int64, false),
+            Field::new("field2", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(Int64Array::from(vec![3, 4])),
+            ],
+        )
+        .unwrap();
+        let iter = Box::new(new_test_iter(vec![batch]));
+
+        let result = FlatMergeIterator::new(schema, vec![iter], 1024);
+
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::InvalidRecordBatch { .. })
+        ));
+    }
+
     fn assert_primary_key_dictionary(
         array: &dyn Array,
         expected_decoded: &[&[u8]],
@@ -2367,8 +2610,8 @@ mod tests {
             &[11, 12],
         );
 
-        let columns1 = SortColumns::new(&batch1);
-        let columns2 = SortColumns::new(&batch2);
+        let columns1 = SortColumns::try_new(&batch1).unwrap();
+        let columns2 = SortColumns::try_new(&batch2).unwrap();
 
         let cursor1 = RowCursor::new(columns1);
         let cursor2 = RowCursor::new(columns2);
@@ -2382,8 +2625,8 @@ mod tests {
     fn test_row_cursor_caches_current_primary_key() {
         let batch1 = create_test_record_batch(&[b"k1"], &[1000], &[1], &[OpType::Put], &[11]);
         let batch2 = create_test_record_batch(&[b"k2"], &[1000], &[1], &[OpType::Put], &[12]);
-        let cursor1 = RowCursor::new(SortColumns::new(&batch1));
-        let cursor2 = RowCursor::new(SortColumns::new(&batch2));
+        let cursor1 = RowCursor::new(SortColumns::try_new(&batch1).unwrap());
+        let cursor2 = RowCursor::new(SortColumns::try_new(&batch2).unwrap());
 
         for _ in 0..5 {
             assert_eq!(Ordering::Less, cursor1.cmp(&cursor2));
