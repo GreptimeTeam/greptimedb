@@ -2160,8 +2160,9 @@ mod tests {
     };
     use crate::error;
     use crate::metrics::{
-        FLOW_NOTIFICATION_DROPPED, METRIC_FAILURE_VALUE, METRIC_ROW_BATCH_SUBMISSIONS,
-        METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED, METRIC_SUCCESS_VALUE,
+        FLOW_NOTIFICATION_DROPPED, METRIC_CANCELLED_VALUE, METRIC_FAILURE_VALUE,
+        METRIC_ROW_BATCH_SUBMISSIONS, METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED,
+        METRIC_SUCCESS_VALUE,
     };
     use crate::prom_row_builder::rows_to_aligned_record_batch;
 
@@ -3145,7 +3146,7 @@ mod tests {
         let _guard = METRIC_ASSERTION_LOCK.lock().await;
         let protocol = MetricRowBatchProtocol::Otlp;
         let cancelled_wait = METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
-            .with_label_values(&[protocol.as_str(), "cancelled"]);
+            .with_label_values(&[protocol.as_str(), METRIC_CANCELLED_VALUE]);
         let successful_wait = METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
             .with_label_values(&[protocol.as_str(), METRIC_SUCCESS_VALUE]);
         let failed_wait = METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
