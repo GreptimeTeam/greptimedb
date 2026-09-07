@@ -24,7 +24,11 @@ mod searcher;
 mod version;
 mod writer;
 
+pub(crate) use catalog::load_version_control;
 use futures::stream::BoxStream;
+pub(crate) use purger::{
+    IndexFilePurger, SeriesIndexTaskState, run_index_purge_task, series_index_channel,
+};
 pub use searcher::SeriesIndexSearcher;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,

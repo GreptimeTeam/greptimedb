@@ -474,6 +474,11 @@ experimental_manifest_keep_removed_file_ttl = "1h"
 ## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
 
+## Root below `data_home` for loading range and series indexes stored locally.
+## An empty value disables series-index loading and cleanup.
+## Under development; do not enable this feature.
+experimental_series_index_root = ""
+
 ## Max number of running background flush jobs (default: 1/2 of cpu cores).
 ## @toml2docs:none-default="Auto"
 #+ max_background_flushes = 4

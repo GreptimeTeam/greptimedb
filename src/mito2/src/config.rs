@@ -88,6 +88,9 @@ pub struct MitoConfig {
     // Background job configs:
     /// Max number of running background index build jobs (default: 1/8 of cpu cores).
     pub max_background_index_builds: usize,
+    /// Under development; do not enable. Root directory for loading series indexes, currently stored
+    /// on the local filesystem. Empty disables the feature.
+    pub experimental_series_index_root: String,
     /// Max number of running background flush jobs (default: 1/2 of cpu cores).
     pub max_background_flushes: usize,
     /// Max number of running background compaction jobs (default: 1/4 of cpu cores).
@@ -205,6 +208,7 @@ impl Default for MitoConfig {
             experimental_manifest_keep_removed_file_ttl: Duration::from_secs(60 * 60),
             compress_manifest: false,
             max_background_index_builds: divide_num_cpus(8),
+            experimental_series_index_root: String::new(),
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
             max_background_purges: get_total_cpu_cores(),
@@ -289,6 +293,15 @@ impl MitoConfig {
             let cpu_cores = get_total_cpu_cores();
             warn!("Sanitize max background purges 0 to {}", cpu_cores);
             self.max_background_purges = cpu_cores;
+        }
+
+        if !self.experimental_series_index_root.trim().is_empty()
+            && Path::new(&self.experimental_series_index_root).is_relative()
+        {
+            self.experimental_series_index_root = Path::new(data_home)
+                .join(&self.experimental_series_index_root)
+                .display()
+                .to_string();
         }
 
         if self.global_write_buffer_reject_size <= self.global_write_buffer_size {
@@ -400,6 +413,21 @@ mod tests {
         config.adjust_buffer_and_cache_size(ReadableSize::gb(64));
         assert_eq!(ReadableSize::mb(512), config.sst_meta_cache_size);
         assert_eq!(ReadableSize::mb(128), config.prefilter_result_cache_size);
+    }
+
+    #[test]
+    fn test_series_index_root_config() {
+        assert!(
+            MitoConfig::default()
+                .experimental_series_index_root
+                .is_empty()
+        );
+        let mut config: MitoConfig =
+            toml::from_str("experimental_series_index_root = 'indexes'").unwrap();
+        config.sanitize("/data").unwrap();
+        assert_eq!(config.experimental_series_index_root, "/data/indexes");
+        let restored: MitoConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(config, restored);
     }
 
     #[test]
