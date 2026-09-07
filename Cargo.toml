@@ -161,6 +161,7 @@ futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "32f467fa2ba2b3588a58381a24af83de09fbb00a" }
 hex = "0.4"
+hostname = "0.4.0"
 http = "1"
 humantime = "2.1"
 humantime-serde = "1.1"
@@ -220,10 +221,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-url = "2.3"
-# Branch: feat/request-timeout
-hostname = "0.4.0"
-rskafka = { git = "https://github.com/GreptimeTeam/rskafka.git", rev = "5f9494104f7b43a619d6c42e2a2082e39a7b72aa", features = [
+rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "80f42eb15eb9419579a376bdf4411893a7da2728", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
@@ -260,6 +258,7 @@ tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
+url = "2.3"
 # Pin below 0.14.5 to avoid the `connection_timeout_future` "async fn resumed after
 # completion" panic (greptimedb#8265 / grpc-rust#2522). Remove once tonic ships a fix.
 tonic = { version = "0.14, <0.14.5", features = ["tls-aws-lc", "gzip", "zstd"] }
