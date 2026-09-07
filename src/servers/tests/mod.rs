@@ -18,7 +18,6 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
@@ -169,7 +168,13 @@ impl SqlQueryHandler for DummyInstance {
     }
 
     async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
-        Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
+        Ok(self
+            .query_engine
+            .engine_state()
+            .catalog_manager()
+            .schema_exists(catalog, schema, None)
+            .await
+            .unwrap())
     }
 }
 

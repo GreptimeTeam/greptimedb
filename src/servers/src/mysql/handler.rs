@@ -388,6 +388,25 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         salt: &[u8],
         auth_data: &[u8],
     ) -> bool {
+        <Self as AsyncMysqlShim<W>>::authenticate_with_database(
+            self,
+            auth_plugin,
+            username,
+            salt,
+            auth_data,
+            None,
+        )
+        .await
+    }
+
+    async fn authenticate_with_database(
+        &self,
+        auth_plugin: &str,
+        username: &[u8],
+        salt: &[u8],
+        auth_data: &[u8],
+        database: Option<&[u8]>,
+    ) -> bool {
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
 
@@ -408,7 +427,17 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     warn!("Bearer token is not valid UTF-8");
                     return false;
                 };
-                let catalog = self.session.catalog();
+                let catalog = if let Some(database) = database {
+                    let Ok(database) = std::str::from_utf8(database) else {
+                        warn!("MySQL database is not valid UTF-8");
+                        return false;
+                    };
+                    parse_optional_catalog_and_schema_from_db_string(database)
+                        .0
+                        .unwrap_or_else(|| self.session.catalog())
+                } else {
+                    self.session.catalog()
+                };
                 user_provider
                     .authenticate_bearer_token(token, &catalog)
                     .await

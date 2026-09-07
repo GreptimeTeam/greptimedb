@@ -20,6 +20,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use auth::{BEARER_TOKEN_USER, Identity, Password, UserInfoRef, UserProvider};
+use catalog::RegisterSchemaRequest;
+use catalog::memory::MemoryCatalogManager;
 use chrono::{Datelike, NaiveDate};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::Output;
@@ -34,6 +36,8 @@ use datatypes::value::Value;
 use datatypes::vectors::{Int32Vector, TimestampMicrosecondVector, TimestampSecondVector};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
+use query::QueryEngineFactory;
+use query::options::QueryOptions;
 use query::parser::PromQuery;
 use query::query_engine::DescribeResult;
 use servers::error::Result;
@@ -47,8 +51,8 @@ use sql::statements::statement::Statement;
 use table::TableRef;
 use table::test_util::MemTable;
 
-use crate::create_testing_sql_query_handler;
 use crate::mysql::{MysqlTextRow, TestingData, all_datatype_testing_data};
+use crate::{DummyInstance, create_testing_sql_query_handler};
 
 #[derive(Default)]
 struct MysqlOpts<'a> {
@@ -59,6 +63,7 @@ struct MysqlOpts<'a> {
 
 #[derive(Default)]
 struct BearerProvider {
+    catalog: &'static str,
     authentications: AtomicUsize,
     authorizations: AtomicUsize,
 }
@@ -83,7 +88,7 @@ impl UserProvider for BearerProvider {
         catalog: &str,
     ) -> auth::error::Result<UserInfoRef> {
         assert_eq!("signed-token", token);
-        assert_eq!("greptime", catalog);
+        assert_eq!(self.catalog, catalog);
         self.authentications.fetch_add(1, Ordering::Relaxed);
         Ok(auth::userinfo_by_name(Some("alice".to_string())))
     }
@@ -94,7 +99,7 @@ impl UserProvider for BearerProvider {
         schema: &str,
         user_info: &UserInfoRef,
     ) -> auth::error::Result<()> {
-        assert_eq!("greptime", catalog);
+        assert_eq!(self.catalog, catalog);
         assert_eq!(DEFAULT_SCHEMA_NAME, schema);
         assert_eq!("alice", user_info.username());
         self.authorizations.fetch_add(1, Ordering::Relaxed);
@@ -382,35 +387,85 @@ async fn test_server_require_secure_client_secure_with_pkcs8_priv_key() -> Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_bearer_token_auth_over_clear_password() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let provider = Arc::new(BearerProvider::default());
-    let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let mut server = create_mysql_server_with_query_handler(
-        query_handler,
-        MysqlOpts::default(),
-        Some(provider.clone()),
-    )?;
-    server.start("127.0.0.1:0".parse().unwrap()).await?;
-    let port = server.bind_addr().unwrap().port();
-
-    let client_opts = mysql_async::OptsBuilder::default()
-        .ip_or_hostname("127.0.0.1")
-        .tcp_port(port)
-        .prefer_socket(false)
-        .user(Some(BEARER_TOKEN_USER.to_string()))
-        .pass(Some("signed-token".to_string()))
-        .db_name(Some(DEFAULT_SCHEMA_NAME.to_string()))
-        .enable_cleartext_plugin(true);
-    let mut connection = Conn::new(client_opts).await.unwrap();
-    let value: u32 = connection
-        .query_first("SELECT uint32s FROM numbers LIMIT 1")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(0, value);
-    assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
-    assert_eq!(1, provider.authorizations.load(Ordering::Relaxed));
-
-    server.shutdown().await?;
+    for tls in [false, true] {
+        for (database, catalog) in [
+            (None, "greptime"),
+            (Some("public"), "greptime"),
+            (Some("greptime-public"), "greptime"),
+            (Some("tenant-public"), "tenant"),
+        ] {
+            let provider = Arc::new(BearerProvider {
+                catalog,
+                ..Default::default()
+            });
+            let catalog_manager =
+                MemoryCatalogManager::new_with_table(MemTable::default_numbers_table());
+            catalog_manager.register_catalog_sync("tenant").unwrap();
+            catalog_manager
+                .register_schema_sync(RegisterSchemaRequest {
+                    catalog: "tenant".to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                })
+                .unwrap();
+            let query_handler = Arc::new(DummyInstance::new(
+                QueryEngineFactory::new(
+                    catalog_manager,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    QueryOptions::default(),
+                )
+                .query_engine(),
+            ));
+            let server_tls = if tls {
+                TlsOption {
+                    mode: servers::tls::TlsMode::Require,
+                    cert_path: "tests/ssl/server.crt".to_string(),
+                    key_path: "tests/ssl/server-rsa.key".to_string(),
+                    ..Default::default()
+                }
+            } else {
+                TlsOption::default()
+            };
+            let mut server = create_mysql_server_with_query_handler(
+                query_handler,
+                MysqlOpts {
+                    tls: server_tls,
+                    ..Default::default()
+                },
+                Some(provider.clone()),
+            )?;
+            server.start("127.0.0.1:0".parse().unwrap()).await?;
+            let port = server.bind_addr().unwrap().port();
+            let mut client_opts = mysql_async::OptsBuilder::default()
+                .ip_or_hostname("127.0.0.1")
+                .tcp_port(port)
+                .prefer_socket(false)
+                .user(Some(BEARER_TOKEN_USER.to_string()))
+                .pass(Some("signed-token".to_string()))
+                .db_name(database.map(str::to_string))
+                .enable_cleartext_plugin(true);
+            if tls {
+                client_opts = client_opts.ssl_opts(
+                    SslOpts::default()
+                        .with_danger_skip_domain_validation(true)
+                        .with_danger_accept_invalid_certs(true),
+                );
+            }
+            let mut connection = Conn::new(client_opts).await.unwrap();
+            let value: u32 = connection.query_first("SELECT 1").await.unwrap().unwrap();
+            assert_eq!(1, value);
+            assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
+            assert_eq!(
+                usize::from(database.is_some()),
+                provider.authorizations.load(Ordering::Relaxed)
+            );
+            connection.disconnect().await.unwrap();
+            server.shutdown().await?;
+        }
+    }
     Ok(())
 }
 
