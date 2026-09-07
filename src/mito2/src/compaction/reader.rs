@@ -12,26 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
-use datatypes::extension::json::is_json2_extension_type;
-use datatypes::types::json_type::JsonNativeType;
-use parquet::arrow::parquet_to_arrow_schema;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManagerRef, CacheStrategy};
-use crate::error::{
-    DataTypeMismatchSnafu, ParquetToArrowSchemaSnafu, Result, TimeRangePredicateOverflowSnafu,
+use crate::compaction::json2::{
+    Json2RewritePlans, collect_json2_rewrite_plans_from_parquet, rewrite_json2_schema,
 };
+use crate::error::{InvalidRecordBatchSnafu, Result, TimeRangePredicateOverflowSnafu};
 use crate::read::FlatSource;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::read_columns::ReadColumns;
@@ -40,6 +39,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
+use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
 
 /// Builders to create [BoxedRecordBatchStream] for compaction.
 pub(crate) struct CompactionSstReaderBuilder<'a> {
@@ -57,20 +57,24 @@ impl CompactionSstReaderBuilder<'_> {
     /// Build a [FlatSource] that yields Arrow `RecordBatch`s from reading all the input SST files,
     /// for compaction. The schema of the [FlatSource] is unified.
     pub(crate) async fn build_flat_sst_reader(self) -> Result<FlatSource> {
-        let scan_input = self.build_scan_input().await?;
+        let parquet_metadata = self.collect_parquet_metadata().await?;
+        let plans = collect_json2_rewrite_plans_from_parquet(&self.metadata, &parquet_metadata)?;
+        let scan_input = self.build_scan_input(&parquet_metadata, &plans)?;
 
         let schema = scan_input.mapper.output_schema();
-        let schema = schema.arrow_schema();
+        let schema = rewrite_json2_schema(schema.arrow_schema(), &plans);
 
         let stream = SeqScan::new(scan_input)
             .build_flat_reader_for_compaction()
             .await?;
-        Ok(FlatSource::new_stream(schema.clone(), stream))
+        Ok(FlatSource::new_stream(schema, stream))
     }
 
-    async fn build_scan_input(self) -> Result<ScanInput> {
-        let schema = self.metadata.schema.arrow_schema();
-        let parquet_metadata = self.collect_parquet_metadata().await?;
+    fn build_scan_input(
+        self,
+        parquet_metadata: &[Arc<ParquetMetaData>],
+        plans: &Json2RewritePlans,
+    ) -> Result<ScanInput> {
         let batch_size = crate::batch_size::estimate_batch_size(
             parquet_metadata
                 .iter()
@@ -84,38 +88,6 @@ impl CompactionSstReaderBuilder<'_> {
                     (row_group.num_rows() as u64, uncompressed_bytes)
                 }),
         );
-        let json_type_hint = if schema.fields().iter().any(is_json2_extension_type) {
-            let mut json_type_hint = schema
-                .fields()
-                .iter()
-                .filter(|&field| is_json2_extension_type(field))
-                .map(|field| (field.name().clone(), JsonNativeType::Null))
-                .collect::<HashMap<_, _>>();
-
-            for metadata in &parquet_metadata {
-                let file_metadata = metadata.file_metadata();
-                let schema = parquet_to_arrow_schema(
-                    file_metadata.schema_descr(),
-                    file_metadata.key_value_metadata(),
-                )
-                .context(ParquetToArrowSchemaSnafu {
-                    file: "compaction input",
-                })?;
-                for field in schema.fields() {
-                    let Some(merged) = json_type_hint.get_mut(field.name()) else {
-                        continue;
-                    };
-
-                    let json_type = JsonNativeType::try_from(field.data_type())
-                        .context(DataTypeMismatchSnafu)?;
-                    merged.merge(&json_type);
-                }
-            }
-
-            Some(json_type_hint)
-        } else {
-            None
-        };
 
         let projection = (0..self.metadata.column_metadatas.len()).collect();
         let read_column_ids = self
@@ -124,24 +96,39 @@ impl CompactionSstReaderBuilder<'_> {
             .iter()
             .map(|x| x.column_id)
             .collect::<Vec<_>>();
-        let json_target_types = json_type_hint
-            .as_ref()
-            .map(|hint| {
-                hint.iter()
-                    .filter_map(|(col_name, json_type)| {
-                        self.metadata
-                            .column_by_name(col_name)
-                            .map(|col| (col.column_id, json_type.clone()))
-                    })
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let read_columns =
-            ReadColumns::new(read_column_ids).with_json_target_types(json_target_types);
-        let mapper =
-            FlatProjectionMapper::new_with_read_columns(&self.metadata, projection, read_columns)?;
+
+        let mut json2_target_layouts = BTreeMap::new();
+        for (name, plan) in plans {
+            let Some(column) = self.metadata.column_by_name(name) else {
+                continue;
+            };
+            let extension_metadata = column
+                .column_schema
+                .metadata()
+                .get(EXTENSION_TYPE_METADATA_KEY)
+                .cloned()
+                .with_context(|| InvalidRecordBatchSnafu {
+                    reason: format!("JSON2 target column '{name}' has no extension metadata"),
+                })?;
+            json2_target_layouts.insert(
+                column.column_id,
+                Json2TargetLayout {
+                    extension_metadata,
+                    target_layout: plan.target_layout.clone(),
+                },
+            );
+        }
+        let read_columns = ReadColumns::new(read_column_ids);
+        let targets: Json2RewriteTargets = Arc::new(json2_target_layouts);
+        let mapper = FlatProjectionMapper::new_with_json2_rewrite_targets(
+            &self.metadata,
+            projection,
+            read_columns,
+            &targets,
+        )?;
 
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
+            .with_json2_rewrite_targets(targets)
             .with_files(self.inputs.to_vec())
             .with_compaction(true)
             .with_batch_size(batch_size)

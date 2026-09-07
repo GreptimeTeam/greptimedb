@@ -52,7 +52,9 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
 use object_store::ObjectStore;
-use object_store::layers::mock::MockLayer;
+use object_store::layers::mock::{
+    Buffer, Deleter, Metadata, MockLayer, MockLayerBuilder, OpDelete, Result as MockResult, Writer,
+};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
@@ -67,6 +69,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
+use tokio::sync::Notify;
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
@@ -75,6 +78,7 @@ use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::manifest::storage::{is_checkpoint_file, is_delta_file};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::sst::FormatType;
@@ -84,6 +88,133 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
+
+/// Controls a mock object-store layer that blocks a checkpoint task once.
+#[derive(Clone)]
+pub(crate) struct CheckpointTaskBlocker {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    armed: Arc<AtomicBool>,
+}
+
+impl CheckpointTaskBlocker {
+    /// Blocks normal manifest checkpoint cleanup at batch-delete close.
+    pub(crate) fn block_cleanup() -> (Self, MockLayer) {
+        let blocker = Self {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            armed: Arc::new(AtomicBool::new(true)),
+        };
+        let factory_blocker = blocker.clone();
+        let layer = MockLayerBuilder::default()
+            .deleter_factory(Arc::new(move |inner| {
+                Box::new(BlockingCheckpointDeleter {
+                    inner,
+                    blocker: factory_blocker.clone(),
+                    has_manifest_cleanup_target: false,
+                })
+            }))
+            .build()
+            .unwrap();
+        (blocker, layer)
+    }
+
+    /// Blocks publication of `_last_checkpoint` at writer close.
+    pub(crate) fn block_last_checkpoint_write() -> (Self, MockLayer) {
+        let blocker = Self {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            armed: Arc::new(AtomicBool::new(true)),
+        };
+        let factory_blocker = blocker.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _args, inner| {
+                Box::new(BlockingCheckpointWriter {
+                    path: path.to_string(),
+                    inner,
+                    blocker: factory_blocker.clone(),
+                })
+            }))
+            .build()
+            .unwrap();
+        (blocker, layer)
+    }
+
+    pub(crate) async fn wait_until_blocked(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    pub(crate) fn arm_next_close(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+
+    async fn block_once(&self) {
+        if self.armed.swap(false, Ordering::AcqRel) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
+struct BlockingCheckpointDeleter {
+    inner: Deleter,
+    blocker: CheckpointTaskBlocker,
+    has_manifest_cleanup_target: bool,
+}
+
+impl object_store::layers::mock::Delete for BlockingCheckpointDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        self.inner.delete(path, args).await?;
+        if is_manifest_checkpoint_file(path) {
+            self.has_manifest_cleanup_target = true;
+        }
+        Ok(())
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        if self.has_manifest_cleanup_target {
+            self.blocker.block_once().await;
+        }
+        self.inner.close().await
+    }
+}
+
+fn is_manifest_checkpoint_file(path: &str) -> bool {
+    // The mock deleter receives paths relative to the listed manifest
+    // directory, so the normal/staging directory segments are unavailable.
+    let path = Path::new(path);
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    is_delta_file(file_name) || is_checkpoint_file(file_name)
+}
+
+struct BlockingCheckpointWriter {
+    path: String,
+    inner: Writer,
+    blocker: CheckpointTaskBlocker,
+}
+
+impl object_store::layers::mock::Write for BlockingCheckpointWriter {
+    async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        if self.path.ends_with("_last_checkpoint") {
+            self.blocker.block_once().await;
+        }
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        self.inner.abort().await
+    }
+}
 
 pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
     Arc::new(NoopFilePurger)

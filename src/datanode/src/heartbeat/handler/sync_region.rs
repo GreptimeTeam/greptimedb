@@ -103,11 +103,18 @@ impl SyncRegionHandler {
 mod tests {
     use std::sync::Arc;
 
+    use common_error::ext::{BoxedError, RetryHint};
+    use common_error::status_code::StatusCode;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use mito2::engine::MITO_ENGINE_NAME;
+    use mito2::error::ManifestDeltaNotFoundSnafu;
+    use object_store::{Error as ObjectStoreError, ErrorKind};
+    use snafu::IntoError;
     use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
     use store_api::region_engine::{RegionRole, SyncRegionFromRequest};
     use store_api::storage::RegionId;
 
+    use crate::error::HandleRegionRequestSnafu;
     use crate::heartbeat::handler::sync_region::SyncRegionHandler;
     use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
     use crate::tests::{MockRegionEngine, mock_region_server};
@@ -200,5 +207,48 @@ mod tests {
         assert!(reply[0].exists);
         assert!(reply[0].ready);
         assert!(reply[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_sync_region_preserves_manifest_delta_not_found_retry_hint() {
+        let mock_region_server = mock_region_server();
+        let region_id = RegionId::new(1024, 1);
+        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |engine| {
+            engine.mock_role = Some(Some(RegionRole::Leader));
+            engine.handle_sync_region_mock_fn = Some(Box::new(|region_id, _request| {
+                let manifest_error = ManifestDeltaNotFoundSnafu {
+                    version: 1_u64,
+                    path: "manifest/00000000000000000001.json",
+                }
+                .into_error(ObjectStoreError::new(
+                    ErrorKind::NotFound,
+                    "mock listed manifest delta not found",
+                ));
+                Err(HandleRegionRequestSnafu { region_id }
+                    .into_error(BoxedError::new(manifest_error)))
+            }));
+        });
+        mock_region_server.register_test_region(region_id, mock_engine);
+
+        let handler_context =
+            HandlerContext::new_for_test(mock_region_server, Arc::new(MemoryKvBackend::new()));
+        let sync_region = common_meta::instruction::SyncRegion {
+            region_id,
+            request: SyncRegionFromRequest::from_manifest(Default::default()),
+        };
+
+        let reply = SyncRegionHandler
+            .handle(&handler_context, vec![sync_region])
+            .await
+            .unwrap()
+            .expect_sync_regions_reply();
+
+        assert_eq!(1, reply.len());
+        assert!(reply[0].exists);
+        assert!(!reply[0].ready);
+        let error = reply[0].error.as_ref().unwrap();
+        assert_eq!(StatusCode::StorageUnavailable, error.code);
+        assert_eq!(RetryHint::Retryable, error.retry_hint);
+        assert!(error.message.contains("00000000000000000001.json"));
     }
 }

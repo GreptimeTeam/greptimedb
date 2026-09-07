@@ -67,6 +67,20 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display(
+        "Manifest delta {} disappeared after it was listed, path: {}",
+        version,
+        path
+    ))]
+    ManifestDeltaNotFound {
+        version: ManifestVersion,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
@@ -1356,6 +1370,7 @@ impl Error {
     pub(crate) fn is_object_not_found(&self) -> bool {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            Error::ManifestDeltaNotFound { .. } => true,
             _ => false,
         }
     }
@@ -1397,7 +1412,9 @@ impl ErrorExt for Error {
 
         match self {
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
+            }
             WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
                 source.status_code()
             }
@@ -1592,7 +1609,8 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
-            | FlushableRegionState { .. } => RetryHint::Retryable,
+            | FlushableRegionState { .. }
+            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }

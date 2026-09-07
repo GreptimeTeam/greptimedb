@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod insert_assignment;
-
 use std::sync::Arc;
 
 use common_time::Timezone;
@@ -31,7 +29,7 @@ use session::context::QueryContextRef;
 
 use crate::QueryEngineContext;
 use crate::optimizer::ExtensionAnalyzerRule;
-use crate::optimizer::type_conversion::insert_assignment::rewrite_insert_assignments;
+use crate::optimizer::insert_assignment::rewrite_insert_assignments;
 use crate::plan::ExtractExpr;
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
@@ -46,7 +44,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
         &self,
         plan: LogicalPlan,
         ctx: &QueryEngineContext,
-        _config: &ConfigOptions,
+        config: &ConfigOptions,
     ) -> Result<LogicalPlan> {
         plan.transform_up_with_subqueries(|plan| match plan {
             LogicalPlan::Filter(filter) => {
@@ -129,7 +127,8 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             LogicalPlan::Dml(mut dml) if matches!(dml.op, WriteOp::Insert(_)) => {
                 dml.input = Arc::new(rewrite_insert_assignments(
                     dml.input.as_ref().clone(),
-                    ctx.query_ctx(),
+                    &ctx.query_ctx(),
+                    config,
                 )?);
                 Ok(Transformed::yes(LogicalPlan::Dml(dml)))
             }
@@ -324,7 +323,7 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
     )
 }
 
-fn cast_string_to_timestamp(
+pub(crate) fn cast_string_to_timestamp(
     string: &str,
     target_type: &DataType,
     timezone: Option<&Timezone>,

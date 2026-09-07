@@ -487,10 +487,14 @@ mod tests {
             .await;
 
         send_mock_reply(mailbox, rx, |id| {
-            Ok(new_open_region_reply(
+            Ok(new_open_region_reply_with_error(
                 id,
                 false,
-                Some("test mocked".to_string()),
+                Some(InstructionError {
+                    code: StatusCode::StorageUnavailable,
+                    message: "test mocked".to_string(),
+                    retry_hint: RetryHint::Retryable,
+                }),
             ))
         });
 

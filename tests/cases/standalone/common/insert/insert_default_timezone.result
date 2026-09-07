@@ -114,6 +114,27 @@ INSERT INTO test3 (ts, st, ts_ns) VALUES (
 
 Affected Rows: 1
 
+-- a NULL branch must not cancel the conversion for the whole column
+INSERT INTO test3 (ts, ts_ns)
+SELECT '2026-08-13 12:00:00.001' AS a, '2026-08-13 12:00:00.123456789' AS b
+UNION ALL
+SELECT '2026-08-14 12:00:00.001', NULL;
+
+Affected Rows: 2
+
+-- NULL in the first branch: the union's schema starts out as Null
+INSERT INTO test3 (ts, ts_ns)
+SELECT '2026-08-15 12:00:00.001' AS a, NULL AS b
+UNION ALL
+SELECT '2026-08-19 12:00:00.001', '2026-08-19 12:00:00.123456789';
+
+Affected Rows: 2
+
+-- the assignment cast also lands on non-literal VALUES expressions
+INSERT INTO test3 (ts, st) VALUES (concat('2026-08-20 ', '12:00:00.001'), now());
+
+Affected Rows: 1
+
 SELECT ts, ts_ns FROM test3 ORDER BY ts;
 
 +-------------------------+-------------------------------+
@@ -130,9 +151,42 @@ SELECT ts, ts_ns FROM test3 ORDER BY ts;
 | 2026-08-10T12:00:00.001 |                               |
 | 2026-08-11T12:00:00.001 |                               |
 | 2026-08-12T04:00:00.123 | 2026-08-12T04:00:00.123456789 |
+| 2026-08-13T04:00:00.001 | 2026-08-13T04:00:00.123456789 |
+| 2026-08-14T04:00:00.001 |                               |
+| 2026-08-15T04:00:00.001 |                               |
 | 2026-08-16T04:00:00.001 |                               |
 | 2026-08-17T04:00:00.001 |                               |
+| 2026-08-19T04:00:00.001 | 2026-08-19T04:00:00.123456789 |
+| 2026-08-20T04:00:00.001 |                               |
 +-------------------------+-------------------------------+
+
+-- UNION dedup keys must stay on the source strings: these two spell the same
+-- instant differently, so the source query yields two rows and both are kept.
+CREATE TABLE test4 (ts TIMESTAMP TIME INDEX) WITH ('append_mode'='true');
+
+Affected Rows: 0
+
+INSERT INTO test4 (ts)
+SELECT '2026-08-06 04:00:00' UNION SELECT '2026-08-06 04:00:00.000';
+
+Affected Rows: 2
+
+SELECT count(*) FROM test4;
+
++----------+
+| count(*) |
++----------+
+| 2        |
++----------+
+
+SELECT ts FROM test4 ORDER BY ts;
+
++---------------------+
+| ts                  |
++---------------------+
+| 2026-08-05T20:00:00 |
+| 2026-08-05T20:00:00 |
++---------------------+
 
 SET time_zone = 'UTC';
 
@@ -147,6 +201,10 @@ DROP TABLE test2;
 Affected Rows: 0
 
 DROP TABLE test3;
+
+Affected Rows: 0
+
+DROP TABLE test4;
 
 Affected Rows: 0
 

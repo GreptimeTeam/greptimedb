@@ -30,6 +30,7 @@ Affected Rows: 12
 
 -- Ensure the physical plan keeps the required repartition/order before folding buckets.
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -47,6 +48,7 @@ tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bu
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[sum(histogram_gap_bucket.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1],REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[le@0 as le, ts@1 as ts], aggr=[sum(histogram_gap_bucket.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=2 REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED

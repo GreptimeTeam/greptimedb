@@ -28,6 +28,8 @@ INSERT INTO customers VALUES
 -- and hash join generates filter on customer_id
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RoundRobinBatch\(REDACTED\),\sinput_partitions=\d+)\s+\| $1|
 -- SQLNESS REPLACE (=Hash.*) =REDACTED
 EXPLAIN SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (

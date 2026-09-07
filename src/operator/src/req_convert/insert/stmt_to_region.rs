@@ -31,8 +31,8 @@ use table::metadata::TableInfoRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
-    ColumnNotFoundSnafu, InvalidInsertRequestSnafu, InvalidSqlSnafu, MissingInsertBodySnafu,
-    ParseSqlSnafu, Result, SchemaReadOnlySnafu, TableNotFoundSnafu,
+    ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
+    SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
@@ -73,7 +73,6 @@ impl<'a> StatementToRegion<'a> {
             !common_catalog::consts::is_readonly_schema(&schema),
             SchemaReadOnlySnafu { name: schema }
         );
-
         let column_names = column_names(stmt, &table_schema);
         let column_count = column_names.len();
 
@@ -280,25 +279,7 @@ fn sql_value_to_value(
         )
         .context(crate::error::SqlCommonSnafu)?
     };
-    validate(&value)?;
     Ok(value)
-}
-
-fn validate(value: &Value) -> Result<()> {
-    match value {
-        Value::Json(value) => {
-            // Json object will be stored as Arrow struct in parquet, and it has the restriction:
-            // "Parquet does not support writing empty structs".
-            ensure!(
-                !value.is_empty_object(),
-                InvalidInsertRequestSnafu {
-                    reason: "empty json object is not supported, consider adding a dummy field"
-                }
-            );
-            Ok(())
-        }
-        _ => Ok(()),
-    }
 }
 
 fn replace_default(sql_val: &SqlValue) -> bool {

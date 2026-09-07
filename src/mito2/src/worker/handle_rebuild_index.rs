@@ -79,6 +79,7 @@ impl<S> RegionWorkerLoop<S> {
         IndexBuildTask {
             region_id: region.region_id,
             file: file.clone(),
+            target_region_metadata: version.metadata.clone(),
             source: IndexBuildSource::new(file_meta, version.metadata.schema_version),
             reason: build_type,
             access_layer: access_layer.clone(),

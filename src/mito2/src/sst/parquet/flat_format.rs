@@ -241,9 +241,8 @@ impl FlatReadFormat {
     }
 
     /// Enables wrapping binary `__primary_key` batches back to a dictionary in [`Self::convert_batch`].
-    pub(crate) fn set_pk_as_binary(&mut self) -> Result<()> {
-        self.pk_dict_wrap_schema = Some(self.output_arrow_schema()?);
-        Ok(())
+    pub(crate) fn set_pk_as_binary(&mut self, output_schema: SchemaRef) {
+        self.pk_dict_wrap_schema = Some(output_schema);
     }
 
     /// Index of a column in the projected batch by its column id.
@@ -306,19 +305,16 @@ impl FlatReadFormat {
             .project(projection)
             .context(ComputeArrowSnafu)?;
         let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
-        for (column_id, target_type) in self.json_target_types().iter() {
+        for (column_id, target) in self.json_target_types().iter() {
             let Some(index) = self.parquet_projected_index_by_id(*column_id) else {
                 continue;
             };
             let Some(field) = schema.fields().get(index) else {
                 continue;
             };
-            fields[index] = Arc::new(
-                field
-                    .as_ref()
-                    .clone()
-                    .with_data_type(ConcreteDataType::json2(target_type.clone()).as_arrow_type()),
-            );
+            let mut field = field.as_ref().clone();
+            field.set_data_type(ConcreteDataType::json2(target.clone()).as_arrow_type());
+            fields[index] = Arc::new(field);
         }
         schema.fields = fields.into();
         Ok(Arc::new(schema))
@@ -326,7 +322,7 @@ impl FlatReadFormat {
 
     /// Index of a column in the projected schema produced directly by parquet
     /// reading, before any primary-key-to-flat conversion.
-    fn parquet_projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
+    pub(crate) fn parquet_projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => p
                 .format_projection
@@ -359,7 +355,7 @@ impl FlatReadFormat {
         }
     }
 
-    /// Gets JSON2 target types keyed by column id.
+    /// Gets JSON2 read targets.
     pub(crate) fn json_target_types(&self) -> &JsonTargetTypes {
         self.read_cols.json_target_types()
     }
@@ -1012,9 +1008,8 @@ mod tests {
             false,
         )
         .unwrap();
-        read_format.set_pk_as_binary().unwrap();
-
         let output_schema = read_format.output_arrow_schema().unwrap();
+        read_format.set_pk_as_binary(output_schema.clone());
         let binary_schema = override_pk_field_to_binary(&output_schema);
 
         // The __primary_key field must preserve its field_id metadata after

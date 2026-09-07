@@ -56,7 +56,7 @@ Affected Rows: 0
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (?m)^.*RepartitionExec:\spartitioning=RoundRobinBatch.*\n
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN
@@ -261,7 +261,7 @@ GROUP BY
 +-+-+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (?m)^.*RepartitionExec:\spartitioning=RoundRobinBatch.*\n
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
@@ -578,7 +578,7 @@ GROUP BY
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (?m)^.*RepartitionExec:\spartitioning=RoundRobinBatch.*\n
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN
@@ -608,7 +608,7 @@ where
 +-+-+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (?m)^.*RepartitionExec:\spartitioning=RoundRobinBatch.*\n
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED

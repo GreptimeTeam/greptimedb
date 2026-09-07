@@ -47,6 +47,8 @@ ADMIN FLUSH_TABLE('sc_s');
 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RoundRobinBatch\(REDACTED\),\sinput_partitions=\d+)\s+\| $1|
 EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 
 +---------------+---------------------------------------------------------------------------------------------------------------+
@@ -81,11 +83,12 @@ EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 |               |         CoalescePartitionsExec                                                                                |
 |               |           FilterExec: mark@1 OR NOT mark@1 AND NULL                                                           |
 |               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 > v@1) IS NOT DISTINCT FROM true              |
-|               |               CoalescePartitionsExec                                                                          |
-|               |                 ProjectionExec: expr=[v@1 as v]                                                               |
-|               |                   MergeScanExec: REDACTED
-|               |               MergeScanExec: REDACTED
-|               |         MergeScanExec: REDACTED
+|               |               ProjectionExec: expr=[v@1 as v]                                                                 |
+|               |                 MergeScanExec: REDACTED
+|               |               RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
+|               |                 MergeScanExec: REDACTED
+|               |         RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
+|               |           MergeScanExec: REDACTED
 |               |                                                                                                               |
 +---------------+---------------------------------------------------------------------------------------------------------------+
 
@@ -100,6 +103,8 @@ SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RoundRobinBatch\(REDACTED\),\sinput_partitions=\d+)\s+\| $1|
 EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 
 +---------------+----------------------------------------------------------------------------------------------------+
@@ -135,11 +140,12 @@ EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 |               |         CoalescePartitionsExec                                                                     |
 |               |           FilterExec: NOT mark@1, projection=[v@0]                                                 |
 |               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 != v@1) IS NOT DISTINCT FROM false |
-|               |               CoalescePartitionsExec                                                               |
-|               |                 ProjectionExec: expr=[v@1 as v]                                                    |
-|               |                   MergeScanExec: REDACTED
-|               |               MergeScanExec: REDACTED
-|               |         MergeScanExec: REDACTED
+|               |               ProjectionExec: expr=[v@1 as v]                                                      |
+|               |                 MergeScanExec: REDACTED
+|               |               RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
+|               |                 MergeScanExec: REDACTED
+|               |         RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
+|               |           MergeScanExec: REDACTED
 |               |                                                                                                    |
 +---------------+----------------------------------------------------------------------------------------------------+
 

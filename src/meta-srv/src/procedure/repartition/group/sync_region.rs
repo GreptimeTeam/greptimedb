@@ -350,6 +350,9 @@ impl SyncRegion {
 mod tests {
     use std::assert_matches;
 
+    use common_error::ext::RetryHint;
+    use common_error::status_code::StatusCode;
+    use common_meta::instruction::InstructionError;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::region_engine::SyncRegionFromRequest;
@@ -359,7 +362,9 @@ mod tests {
     use crate::procedure::repartition::group::GroupPrepareResult;
     use crate::procedure::repartition::group::sync_region::SyncRegion;
     use crate::procedure::repartition::test_util::{TestingEnv, new_persistent_context};
-    use crate::procedure::test_util::{new_sync_region_reply, send_mock_reply};
+    use crate::procedure::test_util::{
+        new_sync_region_reply, new_sync_region_reply_with_error, send_mock_reply,
+    };
     use crate::service::mailbox::Channel;
 
     #[test]
@@ -451,6 +456,48 @@ mod tests {
             ..Default::default()
         }];
         let sync_region = SyncRegion { region_routes };
+
+        let err = sync_region.sync_regions(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::RetryLater { .. });
+    }
+
+    #[tokio::test]
+    async fn test_sync_regions_retryable_instruction_error() {
+        let mut env = TestingEnv::new();
+        let table_id = 1024;
+        let region_id = RegionId::new(table_id, 3);
+        let mut persistent_context = new_persistent_context(table_id, vec![], vec![]);
+        persistent_context.group_prepare_result = Some(test_prepare_result(table_id));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        env.mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
+            .await;
+        send_mock_reply(env.mailbox_ctx.mailbox().clone(), rx, move |id| {
+            Ok(new_sync_region_reply_with_error(
+                id,
+                region_id,
+                false,
+                true,
+                Some(InstructionError {
+                    code: StatusCode::StorageUnavailable,
+                    message: "manifest delta disappeared".to_string(),
+                    retry_hint: RetryHint::Retryable,
+                }),
+            ))
+        });
+
+        let mut ctx = env.create_context(persistent_context);
+        let sync_region = SyncRegion {
+            region_routes: vec![RegionRoute {
+                region: Region {
+                    id: region_id,
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            }],
+        };
 
         let err = sync_region.sync_regions(&mut ctx).await.unwrap_err();
         assert_matches!(err, Error::RetryLater { .. });

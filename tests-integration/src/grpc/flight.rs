@@ -17,34 +17,132 @@ mod test {
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::query_request::Query;
     use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, QueryRequest, SemanticType};
-    use arrow_flight::FlightDescriptor;
+    use arrow_flight::flight_service_server::FlightServiceServer;
+    use arrow_flight::{FlightData, FlightDescriptor, Ticket};
     use auth::user_provider_from_option;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
     use common_grpc::flight::do_put::DoPutMetadata;
     use common_grpc::flight::{FlightEncoder, FlightMessage};
     use common_query::OutputData;
-    use common_recordbatch::RecordBatch;
     use common_recordbatch::adapter::RegionWatermarkEntry;
+    use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
+    use common_telemetry::tracing_context::TracingContext;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
     use futures_util::StreamExt;
+    use hyper_util::rt::TokioIo;
     use itertools::Itertools;
     use servers::grpc::builder::GrpcServerBuilder;
+    use servers::grpc::flight::{
+        FlightCraft, FlightCraftWrapper, FlightRecordBatchSource, FlightRecordBatchStream,
+        TonicStream,
+    };
     use servers::grpc::greptime_handler::GreptimeRequestHandler;
     use servers::grpc::{FlightCompression, GrpcServerConfig};
     use servers::server::Server;
+    use tonic::Response;
+    use tonic::transport::Server as TonicServer;
+    use tower::service_fn;
 
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::grpc::query_and_expect;
     use crate::test_util::{StorageType, setup_grpc_server};
     use crate::tests::test_util::MockInstance;
 
+    struct SlowFlightCraft;
+
+    fn slow_recordbatch_stream() -> SendableRecordBatchStream {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "value",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let recordbatch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_vec(vec![1])) as VectorRef],
+        )
+        .unwrap();
+
+        RecordBatches::try_new(schema, vec![recordbatch])
+            .unwrap()
+            .as_stream()
+    }
+
+    #[async_trait::async_trait]
+    impl FlightCraft for SlowFlightCraft {
+        async fn do_get(
+            &self,
+            _: tonic::Request<Ticket>,
+        ) -> std::result::Result<Response<TonicStream<FlightData>>, tonic::Status> {
+            let stream = FlightRecordBatchStream::new(
+                FlightRecordBatchSource::initializer(async {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Ok(slow_recordbatch_stream())
+                }),
+                TracingContext::default(),
+                FlightCompression::default(),
+                session::context::QueryContext::arc(),
+            );
+
+            Ok(Response::new(Box::pin(stream)))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_do_get_timeout_does_not_cancel_slow_flight_stream() {
+        let (client_io, server_io) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            TonicServer::builder()
+                .add_service(FlightServiceServer::new(FlightCraftWrapper(
+                    SlowFlightCraft,
+                )))
+                .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(
+                    server_io,
+                )]))
+                .await
+                .unwrap();
+        });
+
+        let channel_manager = ChannelManager::with_config(ChannelConfig::new().timeout(None), None);
+        let mut client_io = Some(client_io);
+        channel_manager
+            .reset_with_connector(
+                "slow-flight",
+                service_fn(move |_| {
+                    let client_io = client_io.take();
+
+                    async move {
+                        client_io
+                            .map(TokioIo::new)
+                            .ok_or_else(|| std::io::Error::other("Client already taken"))
+                    }
+                }),
+            )
+            .unwrap();
+        let client = Client::with_manager_and_urls(channel_manager, ["slow-flight"]);
+        let mut flight_client = client.make_flight_client(false, false).unwrap();
+
+        let start = Instant::now();
+        let mut request = tonic::Request::new(Ticket::default());
+        request.set_timeout(Duration::from_secs(1));
+        let response = flight_client.mut_inner().do_get(request).await.unwrap();
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let mut stream = response.into_inner();
+
+        let start = Instant::now();
+        assert!(stream.message().await.unwrap().is_some());
+        assert!(start.elapsed() >= Duration::from_secs(1));
+
+        assert!(stream.message().await.unwrap().is_some());
+    }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_flight_do_put() {
         common_telemetry::init_default_ut_logging();

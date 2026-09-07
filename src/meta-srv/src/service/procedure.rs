@@ -26,6 +26,7 @@ use api::v1::meta::{
 use common_event_recorder::{PersistentEventContext, ProcedureEventInput};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
+use common_meta::peer::Peer;
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
@@ -195,7 +196,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
         let from_peer = self
             .lookup_datanode_peer(from_peer)
             .await?
-            .context(error::PeerUnavailableSnafu { peer_id: from_peer })?;
+            .unwrap_or_else(|| Peer::empty(from_peer));
         let to_peer = self
             .lookup_datanode_peer(to_peer)
             .await?

@@ -27,7 +27,8 @@ pub use etl::transform::GreptimeTransformer;
 pub use etl::transform::transformer::greptime::{GreptimePipelineParams, SchemaInfo};
 pub use etl::transform::transformer::identity_pipeline;
 pub use etl::{
-    Content, DispatchedTo, Pipeline, PipelineExecOutput, TransformedOutput, TransformerMode, parse,
+    Content, DispatchedTo, Pipeline, PipelineExecOutput, PipelineProcessOutput, TransformedOutput,
+    TransformerMode, parse,
 };
 pub use manager::{
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
