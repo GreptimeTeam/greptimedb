@@ -193,10 +193,10 @@ impl TableProvider for DfTableProviderAdapter {
         // recursive term on every iteration.
         let data_source = self.table.data_source();
         let stream_factory: StreamFactoryRef = Arc::new(move || {
-            let stream = data_source
+            data_source
                 .get_stream(request.clone())
-                .context(TablesRecordBatchSnafu)?;
-            Ok(stream)
+                .context(TablesRecordBatchSnafu)
+                .map_err(Into::into)
         });
 
         Ok(Arc::new(
