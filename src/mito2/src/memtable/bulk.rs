@@ -1654,20 +1654,20 @@ mod tests {
 
     #[test]
     fn test_adaptive_encode_bytes_threshold() {
-        // Below the lower bound: clamped to the default 64MB.
+        // Below the lower bound: clamped to the default 64 MiB.
         assert_eq!(
             DEFAULT_ENCODE_BYTES_THRESHOLD,
-            adaptive_encode_bytes_threshold(1024 * 1024 * 1024) // 1GB / 32 = 32MB
+            adaptive_encode_bytes_threshold(1024 * 1024 * 1024) // 1 GiB / 32 = 32 MiB
         );
         // In range: global_write_buffer_size / 32.
         assert_eq!(
             256 * 1024 * 1024,
-            adaptive_encode_bytes_threshold(8 * 1024 * 1024 * 1024) // 8GB / 32 = 256MB
+            adaptive_encode_bytes_threshold(8 * 1024 * 1024 * 1024) // 8 GiB / 32 = 256 MiB
         );
-        // Above the upper bound: clamped to 512MB.
+        // Above the upper bound: clamped to 512 MiB.
         assert_eq!(
             MAX_ENCODE_BYTES_THRESHOLD,
-            adaptive_encode_bytes_threshold(64 * 1024 * 1024 * 1024) // 64GB / 32 = 2GB
+            adaptive_encode_bytes_threshold(64 * 1024 * 1024 * 1024) // 64 GiB / 32 = 2 GiB
         );
     }
 
