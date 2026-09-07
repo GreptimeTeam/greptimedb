@@ -216,6 +216,10 @@ fn for_each_encoded_time(
                 Some(metric::Data::ExponentialHistogram(h))
                     if exponential_histogram_gate(h, metric_ctx).is_ok() =>
                 {
+                    // TODO: Before stabilizing exponential histogram ingestion, collect
+                    // accepted timestamps during metric encoding. This fully converts
+                    // each histogram only to discard its value, then the encoder repeats
+                    // the work. Reuse accepted timestamps without describing rejected points.
                     for point in &h.data_points {
                         if let Ok((_, ts)) = exponential_histogram_value(point) {
                             visit(ts);
