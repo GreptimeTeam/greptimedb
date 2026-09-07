@@ -434,7 +434,7 @@ impl StartCommand {
         // Some queries are expected to take long time.
         let mut channel_config = opts.datanode.client.channel_config();
         channel_config.timeout = None;
-        // Allow long-running Flight queries to adapt their receive windows.
+        // Source Flight streams and sink unary responses share pooled connections.
         channel_config.http2_adaptive_window = Some(true);
         if opts.grpc.flight_compression.transport_compression() {
             channel_config.accept_compression = true;
