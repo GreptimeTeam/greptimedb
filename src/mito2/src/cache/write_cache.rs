@@ -587,9 +587,9 @@ mod tests {
     #[tokio::test]
     async fn test_upload_uses_wrapped_remote_store() {
         let env = TestEnv::new().await;
-        let local_store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let original_store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let target_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let local_store = ObjectStore::new(Memory::default()).unwrap();
+        let original_store = ObjectStore::new(Memory::default()).unwrap();
+        let target_store = ObjectStore::new(Memory::default()).unwrap();
         let wrapper = Arc::new(RedirectUploadStoreWrapper {
             target_store: target_store.clone(),
             last_op_type: Mutex::new(None),

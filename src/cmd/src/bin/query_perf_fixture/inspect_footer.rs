@@ -156,13 +156,13 @@ async fn build_store(
     let operator = match destination {
         Some(destination) => match &destination.object_store {
             ObjectStoreConfig::File(_) => {
-                object_store::ObjectStore::new(Fs::default().root(&destination.data_home))?.finish()
+                object_store::ObjectStore::new(Fs::default().root(&destination.data_home))?
             }
             _ => new_raw_object_store(&destination.object_store, &destination.data_home).await?,
         },
         None => {
             let root = root.expect("root must be set when destination is None");
-            object_store::ObjectStore::new(Fs::default().root(&root.to_string_lossy()))?.finish()
+            object_store::ObjectStore::new(Fs::default().root(&root.to_string_lossy()))?
         }
     };
     Ok(Arc::new(object_store_opendal::OpendalStore::new(operator)))

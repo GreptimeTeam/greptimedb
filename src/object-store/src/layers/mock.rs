@@ -17,8 +17,10 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 pub use oio::*;
-pub use opendal::raw::{Layer, OpCopy, OpDelete, OpList, OpRead, OpWrite, Service, Servicer, oio};
-pub use opendal::{Buffer, Error, ErrorKind, Metadata, OperationContext, Result};
+pub use opendal::raw::{
+    Layer, OpCopy, OpDelete, OpList, OpRead, OpWrite, RpRead, Service, Servicer, oio,
+};
+pub use opendal::{Buffer, BytesRange, Error, ErrorKind, Metadata, OperationContext, Result};
 
 pub type MockWriterFactory = Arc<dyn Fn(&str, OpWrite, oio::Writer) -> oio::Writer + Send + Sync>;
 pub type MockReaderFactory = Arc<dyn Fn(&str, OpRead, oio::Reader) -> oio::Reader + Send + Sync>;
