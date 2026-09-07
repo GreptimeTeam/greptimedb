@@ -293,6 +293,10 @@ impl PendingRowsSchemaAlterer for Instance {
         if tables.is_empty() {
             return Ok(());
         }
+        self.inserter
+            .ensure_auto_create_allowed(&ctx)
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
 
         let create_type = auto_create_table_type_for_prom_remote_write(&ctx, with_metric_engine);
         if let Some(physical_table) = required_physical_table_for_create_type(&create_type) {
@@ -397,6 +401,10 @@ impl PendingRowsSchemaAlterer for Instance {
         if tables.is_empty() {
             return Ok(());
         }
+        self.inserter
+            .ensure_auto_create_allowed(&ctx)
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
 
         let alter_exprs: Vec<AlterTableExpr> = tables
             .iter()

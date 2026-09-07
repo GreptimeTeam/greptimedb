@@ -81,8 +81,10 @@ use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider,
-    setup_test_otlp_metrics_app_with_frontend_batched, setup_test_prom_app_with_frontend,
-    setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
+    setup_test_otlp_metrics_app_with_frontend_batched,
+    setup_test_otlp_metrics_app_with_frontend_batched_and_auto_create_table,
+    setup_test_prom_app_with_frontend, setup_test_prom_app_with_frontend_batched,
+    setup_test_prom_app_with_frontend_native_histogram,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
@@ -7091,6 +7093,75 @@ async fn test_otlp_metrics_batching_respects_existing_logical_table_placement() 
         &client,
         "SELECT greptime_value FROM default_seed",
         "[[1.0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_otlp_metrics_batching_preserves_disabled_auto_create_policy() {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_otlp_metrics_app_with_frontend_batched_and_auto_create_table(
+        StorageType::File,
+        "test_otlp_metrics_batching_preserves_disabled_auto_create_policy",
+        false,
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    let missing_response = send_otlp_metrics_json(
+        &client,
+        r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"missing_metric","gauge":{"dataPoints":[{"timeUnixNano":"1000000","asDouble":1.0}]}}]}]}]}"#,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, missing_response.status());
+    validate_data(
+        "otlp_batched_auto_create_disabled_missing_tables",
+        &client,
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('missing_metric', 'greptime_physical_table')",
+        "[[0]]",
+    )
+    .await;
+
+    for sql in [
+        r#"CREATE TABLE greptime_physical_table (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ("physical_metric_table" = "")"#,
+        r#"CREATE TABLE existing_metric (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ("on_physical_table" = "greptime_physical_table", "otlp_metric_compat" = "prom")"#,
+    ] {
+        let response = execute_sql(&client, sql).await;
+        assert_eq!(
+            StatusCode::OK,
+            response.status(),
+            "{}",
+            response.text().await
+        );
+    }
+
+    let existing_response = send_otlp_metrics_json(
+        &client,
+        r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"existing_metric","gauge":{"dataPoints":[{"timeUnixNano":"2000000","asDouble":2.0}]}}]}]}]}"#,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, existing_response.status());
+
+    let alter_response = send_otlp_metrics_json(
+        &client,
+        r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"existing_metric","gauge":{"dataPoints":[{"attributes":[{"key":"host","value":{"stringValue":"frontend"}}],"timeUnixNano":"3000000","asDouble":3.0}]}}]}]}]}"#,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, alter_response.status());
+    validate_data(
+        "otlp_batched_auto_create_disabled_existing_rows",
+        &client,
+        "SELECT greptime_value FROM existing_metric ORDER BY greptime_timestamp",
+        "[[2.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_auto_create_disabled_schema",
+        &client,
+        "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'existing_metric' AND column_name = 'host'",
+        "[[0]]",
     )
     .await;
 

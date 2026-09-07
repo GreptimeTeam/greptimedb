@@ -517,6 +517,17 @@ impl Inserter {
         })
     }
 
+    /// Ensures automatic table creation and schema evolution are allowed for the request.
+    pub fn ensure_auto_create_allowed(&self, ctx: &QueryContextRef) -> Result<()> {
+        if let Some(reason) = self.auto_create_disabled_reason(ctx)? {
+            return InvalidInsertRequestSnafu {
+                reason: reason.to_string(),
+            }
+            .fail();
+        }
+        Ok(())
+    }
+
     /// Returns whether a private system table may infer and reconcile its schema
     /// even when automatic table creation is disabled.
     fn is_auto_create_exempt_private_table(schema: &str, table: &str) -> bool {

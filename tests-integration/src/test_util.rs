@@ -478,7 +478,20 @@ pub async fn setup_test_otlp_metrics_app_with_frontend_batched(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    let instance = setup_standalone_instance(name, store_type).await;
+    setup_test_otlp_metrics_app_with_frontend_batched_and_auto_create_table(store_type, name, true)
+        .await
+}
+
+pub async fn setup_test_otlp_metrics_app_with_frontend_batched_and_auto_create_table(
+    store_type: StorageType,
+    name: &str,
+    auto_create_table: bool,
+) -> (Router, TestGuard) {
+    let instance = GreptimeDbStandaloneBuilder::new(name)
+        .with_default_store_type(store_type)
+        .with_auto_create_table(auto_create_table)
+        .build()
+        .await;
     let frontend = instance.fe_instance().clone();
     let mut options = instance.opts.clone();
     options.prom_store.with_metric_engine = true;
