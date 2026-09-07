@@ -1571,19 +1571,8 @@ pub fn build_flat_file_range_scan_stream(
             let build_reader_start = Instant::now();
             let Some(mut reader) = range
                 .flat_reader(
-                    // In exact `sequence_range` mode the row-group-level LastRow
-                    // shortcut would reduce each row group to its last-timestamp
-                    // row *before* the row-level sequence filter runs, silently
-                    // dropping in-range rows (a series with seq 1 at t1 and seq 2
-                    // at t2 under `(0, 1]` keeps only seq 2 and then filters it
-                    // out). Bypass the shortcut so the final per-row selector
-                    // (`FlatLastRowReader`, applied after source merging and the
-                    // sequence filter) selects on the filtered rows instead.
-                    if stream_ctx.input.sequence_range.is_some() {
-                        None
-                    } else {
-                        stream_ctx.input.series_row_selector
-                    },
+                    // LastRow must run after cross-source merge and deduplication.
+                    None,
                     fetch_metrics.as_deref(),
                 )
                 .await?

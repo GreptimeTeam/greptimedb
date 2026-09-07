@@ -417,6 +417,42 @@ async fn test_last_row_delete_wins_across_ssts() {
 }
 
 #[tokio::test]
+async fn test_last_row_returns_older_put_after_newest_delete_across_ssts() {
+    for flat_format in [false, true] {
+        let (_env, engine, region_id, schema, delete_schema) =
+            new_merge_last_row_engine(flat_format).await;
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema,
+                rows: vec![value_row("a", 1.0, 1000), value_row("a", 2.0, 2000)],
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+        delete_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: delete_schema,
+                rows: build_delete_rows_for_key("a", 2, 3),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+
+        let scanner = last_row_scanner(&engine, region_id).await;
+        assert_eq!(2, scanner.num_files());
+        assert_eq!(0, scanner.num_memtables());
+        assert_eq!(
+            vec![("a".to_string(), 1.0, 1000)],
+            last_row_values(&scan_last_row_batches(&scanner).await)
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_last_row_empty_region_returns_empty() {
     let (_env, engine, region_id, _schema, _delete_schema) = new_merge_last_row_engine(false).await;
     let scanner = last_row_scanner(&engine, region_id).await;
