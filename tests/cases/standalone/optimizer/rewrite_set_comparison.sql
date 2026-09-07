@@ -27,12 +27,16 @@ ADMIN FLUSH_TABLE('sc_s');
 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RoundRobinBatch\(REDACTED\),\sinput_partitions=\d+)\s+\| $1|
 EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 
 SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RoundRobinBatch\(REDACTED\),\sinput_partitions=\d+)\s+\| $1|
 EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 
 SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;

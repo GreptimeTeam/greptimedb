@@ -36,6 +36,8 @@ Affected Rows: 3
 -- and hash join generates filter on customer_id
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RoundRobinBatch\(REDACTED\),\sinput_partitions=\d+)\s+\| $1|
 -- SQLNESS REPLACE (=Hash.*) =REDACTED
 EXPLAIN SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (
@@ -71,7 +73,7 @@ WHERE c.tier IN ('gold', 'bronze');
 |               |   ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount]                                                           |
 |               |     CooperativeExec                                                                                                                             |
 |               |       MergeScanExec: REDACTED
-|               |   RepartitionExec: partitioning=RoundRobinBatch(20), input_partitions=1                                                                         |
+|               |   RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
 |               |     ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                                         |
 |               |       MergeScanExec: REDACTED
 |               |                                                                                                                                                 |

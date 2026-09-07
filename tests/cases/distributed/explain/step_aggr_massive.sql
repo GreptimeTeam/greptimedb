@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS base_table (
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (?m)^.*RepartitionExec:\spartitioning=RoundRobinBatch.*\n
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN
@@ -241,7 +241,7 @@ GROUP BY
   date_bin('60 seconds' :: INTERVAL, time) :: TIMESTAMP(0);
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (?m)^.*RepartitionExec:\spartitioning=RoundRobinBatch.*\n
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
@@ -434,7 +434,7 @@ GROUP BY
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (?m)^.*RepartitionExec:\spartitioning=RoundRobinBatch.*\n
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN
@@ -446,7 +446,7 @@ where
   time >= 0;
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (?m)^.*RepartitionExec:\spartitioning=RoundRobinBatch.*\n
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED

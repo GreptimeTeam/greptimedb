@@ -26,6 +26,7 @@ insert into histogram_gap_bucket values
 
 -- Ensure the physical plan keeps the required repartition/order before folding buckets.
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (-+) -

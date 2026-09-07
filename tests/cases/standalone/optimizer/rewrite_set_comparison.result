@@ -47,6 +47,8 @@ ADMIN FLUSH_TABLE('sc_s');
 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RoundRobinBatch\(REDACTED\),\sinput_partitions=\d+)\s+\| $1|
 EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 
 +---------------+---------------------------------------------------------------------------------------------------------------+
@@ -83,9 +85,9 @@ EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 |               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 > v@1) IS NOT DISTINCT FROM true              |
 |               |               ProjectionExec: expr=[v@1 as v]                                                                 |
 |               |                 MergeScanExec: REDACTED
-|               |               RepartitionExec: partitioning=RoundRobinBatch(20), input_partitions=1                           |
+|               |               RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
 |               |                 MergeScanExec: REDACTED
-|               |         RepartitionExec: partitioning=RoundRobinBatch(20), input_partitions=1                                 |
+|               |         RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
 |               |           MergeScanExec: REDACTED
 |               |                                                                                                               |
 +---------------+---------------------------------------------------------------------------------------------------------------+
@@ -101,6 +103,8 @@ SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE RoundRobinBatch\(\d+\) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RoundRobinBatch\(REDACTED\),\sinput_partitions=\d+)\s+\| $1|
 EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 
 +---------------+----------------------------------------------------------------------------------------------------+
@@ -138,9 +142,9 @@ EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 |               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 != v@1) IS NOT DISTINCT FROM false |
 |               |               ProjectionExec: expr=[v@1 as v]                                                      |
 |               |                 MergeScanExec: REDACTED
-|               |               RepartitionExec: partitioning=RoundRobinBatch(20), input_partitions=1                |
+|               |               RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
 |               |                 MergeScanExec: REDACTED
-|               |         RepartitionExec: partitioning=RoundRobinBatch(20), input_partitions=1                      |
+|               |         RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1|
 |               |           MergeScanExec: REDACTED
 |               |                                                                                                    |
 +---------------+----------------------------------------------------------------------------------------------------+

@@ -66,6 +66,7 @@ group by
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (?m)^\|_\|_SortExec:.*\n
+-- SQLNESS REPLACE (?m)^\|_\|_(RepartitionExec:\spartitioning=RoundRobinBatch\(\d+\),\sinput_partitions=\d+|CooperativeExec)_\|\n
 EXPLAIN SELECT
     rack,
     os,
