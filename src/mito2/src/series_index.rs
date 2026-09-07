@@ -38,7 +38,7 @@ pub use writer::{
 use crate::error::Result;
 pub(crate) use crate::series_index::catalog::load_version_control;
 pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
-pub(crate) use crate::series_index::task::{SeriesIndexTask, SeriesIndexTaskState};
+pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
 pub(crate) use crate::series_index::version::{SeriesIndexVersion, SeriesIndexVersionControl};
 
 pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";

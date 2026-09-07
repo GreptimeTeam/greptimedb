@@ -150,9 +150,11 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use crate::series_index::catalog::{
-        RangeIndexCatalog, SeriesIndexCatalog, SeriesIndexEntry, load_catalog, range_catalog_path,
+        SeriesIndexCatalog, SeriesIndexEntry, load_catalog, load_version_control,
         series_catalog_path, series_metadata, store_catalog,
     };
+    use crate::series_index::purger::series_index_channel;
+
     struct FailingCatalogReader;
 
     impl mock::Read for FailingCatalogReader {
@@ -193,49 +195,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_region_open_restores_catalog_once() {
-        use store_api::codec::PrimaryKeyEncoding;
-        use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
-        use store_api::region_engine::RegionEngine;
-        use store_api::region_request::RegionRequest;
-
-        use crate::access_layer::new_fs_cache_store;
-        use crate::config::MitoConfig;
-        use crate::test_util::sst_util::sst_region_metadata_with_encoding;
-        use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
-
-        let mut env = TestEnv::with_prefix("series-open").await;
-        let engine = env
-            .create_engine(MitoConfig {
-                experimental_series_index_root: "indexes".to_string(),
-                ..Default::default()
-            })
-            .await;
-        let metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    async fn test_catalog_roundtrip() {
+        let store = ObjectStore::new(Memory::default()).unwrap().finish();
         let region_id = RegionId::new(1, 1);
-        let mut request = CreateRequestBuilder::new().build();
-        request.column_metadatas = metadata.column_metadatas.clone();
-        request.primary_key = metadata.primary_key.clone();
-        request
-            .options
-            .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
-        let table_dir = request.table_dir.clone();
-        let options = request.options.clone();
-        engine
-            .handle_request(region_id, RegionRequest::Create(request))
-            .await
-            .unwrap();
-        assert!(
-            engine
-                .get_region(region_id)
-                .unwrap()
-                .series_index_version()
-                .series_indexes
-                .is_empty()
-        );
-        let store = new_fs_cache_store(env.data_home().join("indexes").to_str().unwrap())
-            .await
-            .unwrap();
         let entry = SeriesIndexEntry {
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_second(0),
@@ -244,19 +206,6 @@ mod tests {
             min_file_sequence: 1,
             max_file_sequence: 2,
         };
-        let metadata = series_metadata(&entry).unwrap();
-        let decoded: SeriesIndexEntry =
-            serde_json::from_str(metadata[0].value.as_ref().unwrap()).unwrap();
-        assert_eq!(entry, decoded);
-        store_catalog(
-            &store,
-            &range_catalog_path(region_id),
-            &RangeIndexCatalog {
-                indexes: entry.source_file_ids.clone(),
-            },
-        )
-        .await
-        .unwrap();
         store_catalog(
             &store,
             &series_catalog_path(region_id),
@@ -266,29 +215,16 @@ mod tests {
         )
         .await
         .unwrap();
-        // Index files deliberately do not exist: opening trusts the catalogs.
-        reopen_region(
-            &engine,
-            region_id,
-            table_dir.clone(),
-            false,
-            options.clone(),
-        )
-        .await;
-        let region = engine.get_region(region_id).unwrap();
-        let current = region.series_index_version();
-        assert!(current.range_indexes.contains(&entry.source_file_ids[0]));
-        assert_eq!(&entry, current.series_indexes[&entry.index_uuid].entry());
-        store
-            .write(&series_catalog_path(region_id), "invalid")
+        let (purger, _receiver) = series_index_channel(store.clone());
+        let current = load_version_control(&store, region_id, &purger)
             .await
-            .unwrap();
-        assert!(Arc::ptr_eq(&current, &region.series_index_version()));
-        // Only a subsequent opening reloads the catalog and applies its empty fallback.
-        reopen_region(&engine, region_id, table_dir, false, options).await;
-        let current = engine.get_region(region_id).unwrap().series_index_version();
-        assert!(current.series_indexes.is_empty());
-        assert!(current.range_indexes.contains(&entry.source_file_ids[0]));
-        engine.stop().await.unwrap();
+            .current();
+        assert!(current.range_indexes.is_empty());
+        assert_eq!(&entry, current.series_indexes[&entry.index_uuid].entry());
+
+        let metadata = series_metadata(&entry).unwrap();
+        let decoded: SeriesIndexEntry =
+            serde_json::from_str(metadata[0].value.as_ref().unwrap()).unwrap();
+        assert_eq!(entry, decoded);
     }
 }

@@ -80,7 +80,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::series_index::{
-    IndexFilePurger, SeriesIndexTask, SeriesIndexTaskState, series_index_channel,
+    IndexFilePurger, SeriesIndexTaskState, series_index_channel, spawn_series_index_tasks,
 };
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -603,10 +603,8 @@ impl<S: LogStore> WorkerStarter<S> {
             .zip(series_index_task_state.clone())
             .map(|(store, state)| {
                 let (purger, purge_receiver) = series_index_channel(store.clone());
-                series_index_purger = Some(purger.clone());
-                common_runtime::spawn_global(
-                    SeriesIndexTask::new(self.id, store, state, purge_receiver).run(),
-                )
+                series_index_purger = Some(purger);
+                spawn_series_index_tasks(self.id, store, state, purge_receiver)
             });
         let now = self.time_provider.current_time_millis();
         let id_string = self.id.to_string();
@@ -696,9 +694,9 @@ pub(crate) struct RegionWorker {
     sender: Sender<WorkerRequestWithTime>,
     /// Handle to the worker thread.
     handle: Mutex<Option<JoinHandle<()>>>,
-    /// Handle to the sequential series-index task.
+    /// Handle to the series-index maintenance task.
     series_index_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Controls the worker-owned series-index task.
+    /// Controls the worker-owned series-index maintenance task.
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
     /// Whether to run the worker thread.
     running: Arc<AtomicBool>,

@@ -16,9 +16,8 @@
 
 use std::fmt::{self, Debug, Formatter};
 
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use object_store::{ErrorKind, ObjectStore};
-use tokio::sync::mpsc;
 
 use crate::metrics::SERIES_INDEX_FILE_OPERATION_TOTAL;
 use crate::series_index::catalog::series_index_path;
@@ -47,7 +46,7 @@ pub(crate) struct PurgeRequest {
 #[derive(Clone)]
 pub(crate) struct IndexFilePurger {
     store: ObjectStore,
-    sender: mpsc::UnboundedSender<PurgeRequest>,
+    sender: async_channel::Sender<PurgeRequest>,
 }
 
 impl Debug for IndexFilePurger {
@@ -58,10 +57,10 @@ impl Debug for IndexFilePurger {
 
 impl IndexFilePurger {
     pub(crate) fn purge(&self, request: PurgeRequest) {
-        if let Err(error) = self.sender.send(request) {
+        if let Err(error) = self.sender.try_send(request) {
             let store = self.store.clone();
             common_runtime::spawn_global(async move {
-                let _ = purge_file(&store, error.0).await;
+                purge_file(&store, error.into_inner()).await;
             });
         }
     }
@@ -73,28 +72,38 @@ pub(crate) fn file_operation(index_type: IndexFileType, operation: &str, result:
         .inc();
 }
 
-pub(crate) async fn purge_file(store: &ObjectStore, request: PurgeRequest) -> bool {
+/// Processes queued deletions once each, independently of periodic maintenance.
+pub(crate) async fn run_index_purge_task(
+    worker_id: u32,
+    store: ObjectStore,
+    receiver: async_channel::Receiver<PurgeRequest>,
+) {
+    info!("Start series-index purge task, worker: {worker_id}");
+    while let Ok(request) = receiver.recv().await {
+        purge_file(&store, request).await;
+    }
+    info!("Stop series-index purge task, worker: {worker_id}");
+}
+
+async fn purge_file(store: &ObjectStore, request: PurgeRequest) {
     let path = series_index_path(request.file_id.region_id(), request.file_id.file_id());
     match store.delete(&path).await {
         Ok(()) => {
             file_operation(IndexFileType::Series, "delete", "success");
-            true
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {
             file_operation(IndexFileType::Series, "delete", "success");
-            true
         }
         Err(error) => {
             file_operation(IndexFileType::Series, "delete", "failure");
-            warn!(error; "Failed to delete series index, index_type: {}, path: {}, phase: deletion, retry: true", IndexFileType::Series.as_str(), path);
-            false
+            warn!(error; "Failed to delete series index, index_type: {}, path: {}, phase: deletion", IndexFileType::Series.as_str(), path);
         }
     }
 }
 
 pub(crate) fn series_index_channel(
     store: ObjectStore,
-) -> (IndexFilePurger, mpsc::UnboundedReceiver<PurgeRequest>) {
-    let (sender, receiver) = mpsc::unbounded_channel();
+) -> (IndexFilePurger, async_channel::Receiver<PurgeRequest>) {
+    let (sender, receiver) = async_channel::unbounded();
     (IndexFilePurger { store, sender }, receiver)
 }
