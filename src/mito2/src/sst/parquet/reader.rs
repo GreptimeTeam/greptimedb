@@ -598,6 +598,7 @@ impl ParquetReaderBuilder {
             self.postpone_time_index_filter,
             &read_format,
             &codec,
+            &parquet_meta,
         );
 
         if self.defer_optional_page_index
@@ -1975,7 +1976,10 @@ impl RowGroupReaderBuilder {
         &self,
         build_ctx: RowGroupBuildContext<'_>,
     ) -> Result<ProjectedRecordBatchStream> {
-        let prefilter_ctx = self.prefilter_builder.as_ref().map(|b| b.build());
+        let prefilter_ctx = self
+            .prefilter_builder
+            .as_ref()
+            .map(|b| b.build(build_ctx.row_group_idx));
 
         let Some(mut prefilter_ctx) = prefilter_ctx else {
             // No prefilter applicable, build stream with full projection.
