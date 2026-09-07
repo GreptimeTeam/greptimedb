@@ -453,6 +453,7 @@ mod test {
             let metadata = request.metadata();
             let sends_zstd = metadata
                 .get("grpc-encoding")
+                .and_then(|v| v.to_str().ok())
                 .is_some_and(|value| value == "zstd");
             let accepts_zstd = metadata
                 .get("grpc-accept-encoding")
