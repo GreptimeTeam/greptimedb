@@ -129,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_closes_purge_channel() {
-        let store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let store = ObjectStore::new(Memory::default()).unwrap();
         let (_purger, receiver) = series_index_channel(store.clone());
         let state = Arc::new(SeriesIndexTaskState::new());
         state.stop();

@@ -92,7 +92,7 @@ pub fn should_enable_gc(global_gc_enabled: bool, _object_store_scheme: &'static 
 ///
 /// If the storage is an object store, an `ObjectStoreFilePurger` is created, which
 /// only manages SST file references. Companion range indexes are deleted directly in either
-/// mode on final handle release when a deleter is provided.
+/// mode on final handle release when the SST is marked deleted and a deleter is provided.
 ///
 pub fn create_file_purger(
     gc_enabled: bool,
@@ -199,12 +199,12 @@ impl LocalFilePurger {
 
 impl FilePurger for LocalFilePurger {
     fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool) {
-        schedule_range_index_deletion(
-            &self.scheduler,
-            self.range_index_deleter.as_ref(),
-            file_meta.file_id,
-        );
         if is_delete {
+            schedule_range_index_deletion(
+                &self.scheduler,
+                self.range_index_deleter.as_ref(),
+                file_meta.file_id,
+            );
             self.delete_file(file_meta);
         } else if index_outdated {
             self.delete_index(file_meta);
@@ -246,17 +246,19 @@ fn schedule_range_index_deletion(
 }
 
 impl FilePurger for ObjectStoreFilePurger {
-    fn remove_file(&self, file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool, _index_outdated: bool) {
         // if not on local file system, instead inform the global file purger to remove the file reference.
         // notice that no matter whether the file is deleted or not, we need to remove the reference
         // because the file is no longer in use nonetheless.
         // for same reason, we don't care about index_outdated here.
         self.file_ref_manager.remove_file(&file_meta);
-        schedule_range_index_deletion(
-            &self.scheduler,
-            self.range_index_deleter.as_ref(),
-            file_meta.file_id,
-        );
+        if is_delete {
+            schedule_range_index_deletion(
+                &self.scheduler,
+                self.range_index_deleter.as_ref(),
+                file_meta.file_id,
+            );
+        }
     }
 
     fn new_file(&self, file_meta: &FileMeta) {
@@ -290,7 +292,10 @@ mod tests {
     #[case(false)]
     #[case(true)]
     #[tokio::test]
-    async fn test_range_index_purge_on_handle_release(#[case] gc_enabled: bool) {
+    async fn test_range_index_purge_on_handle_release(
+        #[case] gc_enabled: bool,
+        #[values(false, true)] is_delete: bool,
+    ) {
         common_telemetry::init_default_ut_logging();
 
         let dir = create_temp_dir("file-purge");
@@ -321,9 +326,7 @@ mod tests {
 
         let scheduler = Arc::new(LocalScheduler::new(3));
 
-        let index_store = ObjectStore::new(object_store::services::Memory::default())
-            .unwrap()
-            .finish();
+        let index_store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
         let owner = RegionId::new(9, 1);
         let index_path = crate::sst::range_index::range_index_path(owner, sst_file_id.file_id());
         index_store.write(&index_path, "range index").await.unwrap();
@@ -359,6 +362,9 @@ mod tests {
                 },
                 file_purger,
             );
+            if is_delete {
+                handle.mark_deleted();
+            }
             let reader = handle.clone();
             drop(handle);
             assert!(index_store.exists(&index_path).await.unwrap());
@@ -367,8 +373,11 @@ mod tests {
 
         scheduler.stop(true).await.unwrap();
 
-        assert!(object_store.exists(&path).await.unwrap());
-        assert!(!index_store.exists(&index_path).await.unwrap());
+        assert_eq!(
+            object_store.exists(&path).await.unwrap(),
+            gc_enabled || !is_delete
+        );
+        assert_eq!(index_store.exists(&index_path).await.unwrap(), !is_delete);
     }
 
     #[tokio::test]

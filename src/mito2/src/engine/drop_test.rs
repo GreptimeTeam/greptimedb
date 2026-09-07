@@ -193,11 +193,16 @@ async fn test_engine_drop_region_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::with_prefix("drop").await;
+    let index_root = env.data_home().join("series_index").display().to_string();
+    let index_store = crate::access_layer::new_fs_cache_store(&index_root)
+        .await
+        .unwrap();
     let listener = Arc::new(DropListener::new(Duration::from_millis(100)));
     let engine = env
         .create_engine_with(
             MitoConfig {
                 default_flat_format: flat_format,
+                experimental_series_index_root: index_root,
                 ..Default::default()
             },
             None,
@@ -258,6 +263,11 @@ async fn test_engine_drop_region_with_format(flat_format: bool) {
     flush_region(&engine, region_id, None).await;
 
     // drop the created region.
+    let catalogs = ["series-index.json", "range-index.json"]
+        .map(|name| format!("{}/{name}", region_id.as_u64()));
+    for path in &catalogs {
+        index_store.write(path, r#"{"indexes":[]}"#).await.unwrap();
+    }
     engine
         .handle_request(
             region_id,
@@ -270,6 +280,9 @@ async fn test_engine_drop_region_with_format(flat_format: bool) {
         .await
         .unwrap();
     assert!(!engine.is_region_exists(region_id));
+    for path in &catalogs {
+        assert!(!index_store.exists(path).await.unwrap());
+    }
 
     // Wait for drop task.
     listener.wait().await;

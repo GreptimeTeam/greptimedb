@@ -108,6 +108,20 @@ where
         .context(OpenDalSnafu)
 }
 
+/// Best-effort removal of both catalogs when dropping a region.
+pub(crate) async fn delete_catalogs(store: &ObjectStore, region_id: RegionId) {
+    for path in [
+        series_catalog_path(region_id),
+        range_catalog_path(region_id),
+    ] {
+        if let Err(error) = store.delete(&path).await
+            && error.kind() != ErrorKind::NotFound
+        {
+            warn!(error; "Failed to delete index catalog, path: {path}");
+        }
+    }
+}
+
 /// Restores the in-memory snapshot once when opening a region.
 pub(crate) async fn load_version_control(
     store: &ObjectStore,
@@ -158,7 +172,20 @@ mod tests {
     struct FailingCatalogReader;
 
     impl mock::Read for FailingCatalogReader {
-        async fn read(&mut self) -> mock::Result<mock::Buffer> {
+        async fn read(
+            &self,
+            _range: mock::BytesRange,
+        ) -> mock::Result<(mock::RpRead, mock::Buffer)> {
+            Err(mock::Error::new(
+                mock::ErrorKind::Unexpected,
+                "injected catalog read failure",
+            ))
+        }
+
+        async fn open(
+            &self,
+            _range: mock::BytesRange,
+        ) -> mock::Result<(mock::RpRead, Box<dyn mock::ReadStreamDyn>)> {
             Err(mock::Error::new(
                 mock::ErrorKind::Unexpected,
                 "injected catalog read failure",
@@ -168,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_catalog_returns_none_on_error() {
-        let store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let store = ObjectStore::new(Memory::default()).unwrap();
         let path = series_catalog_path(RegionId::new(1, 1));
         // Missing catalog.
         assert!(
@@ -196,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_catalog_roundtrip() {
-        let store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let store = ObjectStore::new(Memory::default()).unwrap();
         let region_id = RegionId::new(1, 1);
         let entry = SeriesIndexEntry {
             index_uuid: FileId::random(),
