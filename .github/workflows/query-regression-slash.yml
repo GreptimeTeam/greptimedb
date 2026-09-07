@@ -1,0 +1,121 @@
+name: Query Regression Command
+
+# Handler for `/query-regression`, dispatched by slash-command-dispatch.yml.
+# Requires github-actions[bot] as the dispatch sender, re-fetches the
+# comment by id, requires the current PR head to match the dispatcher
+# snapshot, admits an allowlisted admin, snapshots merge/head/base SHAs,
+# and calls the reusable Query Regression workflow.
+
+on:
+  repository_dispatch:
+    types: [query-regression-command]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  parse:
+    name: Admit dispatched query-regression command
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.admit.outputs.skip }}
+      reason: ${{ steps.admit.outputs.reason }}
+      case: ${{ steps.admit.outputs.case }}
+      pr_number: ${{ steps.admit.outputs.pr_number }}
+      base_sha: ${{ steps.admit.outputs.base_sha }}
+      candidate_sha: ${{ steps.admit.outputs.candidate_sha }}
+      head_sha: ${{ steps.admit.outputs.head_sha }}
+      head_repo: ${{ steps.admit.outputs.head_repo }}
+      base_repo: ${{ steps.admit.outputs.base_repo }}
+    steps:
+      - name: Checkout trusted admission script
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Admit dispatched command
+        id: admit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          COMMENT_ID: ${{ github.event.client_payload.github.payload.comment.id }}
+          COMMENT_ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          COMMAND_ARGS: ${{ github.event.client_payload.slash_command.args.unnamed.all || '' }}
+          PR_NUMBER: ${{ github.event.client_payload.github.payload.issue.number }}
+          DISPATCH_SENDER: ${{ github.event.sender.login }}
+          DISPATCH_HEAD_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
+          QUERY_REGRESSION_COMMENT_ALLOWLIST: ${{ vars.QUERY_REGRESSION_COMMENT_ALLOWLIST }}
+          # Never reference this secret in query-regression.yml: the ECS job
+          # would inherit it and could forge the admission marker.
+          QUERY_REGRESSION_ADMISSION_HMAC: ${{ secrets.QUERY_REGRESSION_ADMISSION_HMAC }}
+        run: python3 .github/scripts/query-regression-slash.py
+
+      - name: Summarize admission
+        if: always()
+        env:
+          SKIP: ${{ steps.admit.outputs.skip }}
+          REASON: ${{ steps.admit.outputs.reason }}
+          CASE: ${{ steps.admit.outputs.case }}
+          PR_NUMBER: ${{ steps.admit.outputs.pr_number }}
+          BASE_SHA: ${{ steps.admit.outputs.base_sha }}
+          CANDIDATE_SHA: ${{ steps.admit.outputs.candidate_sha }}
+          HEAD_SHA: ${{ steps.admit.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${SKIP}" == "true" ]]; then
+            printf 'Skipping query-regression command: %s\n' "${REASON}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          elif [[ "${SKIP}" == "false" ]]; then
+            {
+              printf 'Admitted `/query-regression` (`%s`) on PR #%s\n' "${CASE}" "${PR_NUMBER}"
+              printf -- '- Head SHA: `%s`\n' "${HEAD_SHA}"
+              printf -- '- Merge SHA: `%s`\n' "${CANDIDATE_SHA}"
+              printf -- '- Base SHA: `%s`\n' "${BASE_SHA}"
+            } | tee -a "${GITHUB_STEP_SUMMARY}"
+          else
+            printf 'Admission failed without a decision (the admit step crashed); see its logs.\n' \
+              | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            exit 1
+          fi
+
+      - name: Upload admission identity
+        if: ${{ steps.admit.outputs.skip == 'false' && steps.admit.outputs.candidate_sha != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: query-regression-admission
+          path: query-regression-admission.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      - name: Reply with admission result
+        if: ${{ !cancelled() && steps.admit.outputs.reply != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPLY: ${{ steps.admit.outputs.reply }}
+          PR_NUMBER: ${{ steps.admit.outputs.pr_number || github.event.client_payload.github.payload.issue.number }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${REPLY}" | gh pr comment "${PR_NUMBER}" --body-file -
+
+  query-regression:
+    name: Query regression from comment
+    needs: [parse]
+    if: ${{ needs.parse.outputs.skip == 'false' && needs.parse.outputs.candidate_sha != '' }}
+    uses: ./.github/workflows/query-regression.yml
+    # inherit is for Aliyun/GH PAT used by provision/teardown. Do not
+    # reference QUERY_REGRESSION_ADMISSION_HMAC in the reusable workflow.
+    secrets: inherit
+    with:
+      case: ${{ needs.parse.outputs.case }}
+      base_ref: ${{ needs.parse.outputs.base_sha }}
+      candidate_ref: ${{ needs.parse.outputs.candidate_sha }}
+      cargo_profile: nightly
+      runner: ${{ vars.QUERY_REGRESSION_PR_RUNNER || 'aliyun-ecs' }}
+      pr_number: ${{ needs.parse.outputs.pr_number }}
+      head_sha: ${{ needs.parse.outputs.head_sha }}
+      head_repo: ${{ needs.parse.outputs.head_repo }}
+      base_repo: ${{ needs.parse.outputs.base_repo }}
