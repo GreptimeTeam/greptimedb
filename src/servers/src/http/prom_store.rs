@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
 use api::v1::RowInsertRequests;
-use async_trait::async_trait;
 use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -45,7 +44,8 @@ use crate::http::extractor::PipelineInfo;
 use crate::http::header::{
     CONTENT_TYPE_PROTOBUF_STR, GREPTIME_DB_HEADER_METRICS, write_cost_header_map,
 };
-use crate::pending_rows_batcher::PendingRowsBatcher;
+use crate::metrics::METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS;
+use crate::pending_rows_batcher::{MetricRowBatchProtocol, MetricRowBatcher, MetricRowBatcherRef};
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::v2::decode_remote_write_v2;
 use crate::prom_remote_write::validation::PromValidationMode;
@@ -75,7 +75,7 @@ pub struct PromStoreState {
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
     pub experimental_enable_prometheus_native_histogram: bool,
-    pub pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pub pending_rows_batcher: Option<MetricRowBatcherRef>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -352,18 +352,6 @@ struct PromWriteV2Error {
 
 type PromWriteBatch = (QueryContextRef, RowInsertRequests);
 
-#[async_trait]
-trait PromWriteBatcher: Send + Sync {
-    async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64>;
-}
-
-#[async_trait]
-impl PromWriteBatcher for PendingRowsBatcher {
-    async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
-        PendingRowsBatcher::submit(self, requests, ctx).await
-    }
-}
-
 fn into_prom_write_batches(req: ContextReq, query_ctx: QueryContextRef) -> Vec<PromWriteBatch> {
     req.as_req_iter(query_ctx).collect()
 }
@@ -387,7 +375,7 @@ async fn preflight_prometheus_rows(
 /// sample/histogram headers even when a later table write fails.
 async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pending_rows_batcher: Option<MetricRowBatcherRef>,
     prom_store_with_metric_engine: bool,
     mut batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
@@ -401,7 +389,7 @@ async fn write_prometheus_rows_with_progress(
         let mut rows_written = 0;
         for (temp_ctx, reqs) in batches {
             let rows = batcher
-                .submit(reqs, temp_ctx)
+                .submit(reqs, temp_ctx, MetricRowBatchProtocol::Prometheus)
                 .await
                 .map_err(|error| PromWriteError {
                     error,
@@ -453,7 +441,7 @@ async fn write_prometheus_rows_with_progress(
 
 async fn write_prometheus_v2_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pending_rows_batcher: Option<MetricRowBatcherRef>,
     prom_store_with_metric_engine: bool,
     sample_batches: Vec<PromWriteBatch>,
     histogram_batches: Vec<PromWriteBatch>,
@@ -539,13 +527,18 @@ async fn write_prometheus_v2_rows_with_progress(
     })
 }
 
-async fn write_batched_prometheus_v2_rows_with_progress<B: PromWriteBatcher + ?Sized>(
+async fn write_batched_prometheus_v2_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
-    batcher: &B,
+    batcher: &dyn MetricRowBatcher,
     prom_store_with_metric_engine: bool,
     sample_batches: Vec<PromWriteBatch>,
     histogram_batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteV2Outcome, PromWriteV2Error> {
+    if !histogram_batches.is_empty() {
+        METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS
+            .with_label_values(&[MetricRowBatchProtocol::Prometheus.as_str()])
+            .inc();
+    }
     let sample_batch_count = sample_batches.len();
     let mut batches = sample_batches;
     batches.extend(histogram_batches);
@@ -563,7 +556,7 @@ async fn write_batched_prometheus_v2_rows_with_progress<B: PromWriteBatcher + ?S
     let mut batches = batches.into_iter();
     for (ctx, requests) in batches.by_ref().take(sample_batch_count) {
         let rows = batcher
-            .submit(requests, ctx)
+            .submit(requests, ctx, MetricRowBatchProtocol::Prometheus)
             .await
             .map_err(|error| PromWriteV2Error {
                 error,
@@ -769,6 +762,9 @@ mod tests {
     use session::context::{QueryContext, QueryContextRef};
 
     use super::*;
+    use crate::pending_rows_batcher::{
+        MetricRowBatchProtocol, MetricRowBatcher, MetricRowBatcherRef,
+    };
     use crate::prom_remote_write::validation::PromValidationMode;
     use crate::query_handler::PromStoreProtocolHandler;
 
@@ -850,16 +846,21 @@ mod tests {
     #[tokio::test]
     async fn test_mixed_v2_preflights_all_then_batches_only_samples() {
         let events = Arc::new(Mutex::new(Vec::new()));
+        let fallback = METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS
+            .with_label_values(&[MetricRowBatchProtocol::Prometheus.as_str()]);
+        let initial_fallbacks = fallback.get();
         let handler: PromStoreProtocolHandlerRef = Arc::new(RecordingPromStoreHandler {
             events: events.clone(),
         });
-        let batcher = RecordingPromWriteBatcher {
+        let batcher: MetricRowBatcherRef = Arc::new(RecordingMetricRowBatcher {
             events: events.clone(),
-        };
+            protocols: Arc::new(Mutex::new(Vec::new())),
+            rows_written: 1,
+        });
 
         let Ok(outcome) = write_batched_prometheus_v2_rows_with_progress(
             handler,
-            &batcher,
+            batcher.as_ref(),
             true,
             vec![test_prom_write_batch("sample")],
             vec![test_prom_write_batch("histogram")],
@@ -880,6 +881,67 @@ mod tests {
             ],
             *events.lock().unwrap()
         );
+        assert_eq!(initial_fallbacks + 1, fallback.get());
+    }
+
+    #[tokio::test]
+    async fn test_prometheus_write_dispatches_through_metric_row_batcher_ref() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let handler: PromStoreProtocolHandlerRef = Arc::new(RecordingPromStoreHandler {
+            events: events.clone(),
+        });
+        let protocols = Arc::new(Mutex::new(Vec::new()));
+        let batcher: MetricRowBatcherRef = Arc::new(RecordingMetricRowBatcher {
+            events: events.clone(),
+            protocols: protocols.clone(),
+            rows_written: 7,
+        });
+
+        let Ok(outcome) = write_prometheus_rows_with_progress(
+            handler,
+            Some(batcher),
+            true,
+            vec![test_prom_write_batch("sample")],
+        )
+        .await
+        else {
+            panic!("prometheus write through metric row batcher should succeed")
+        };
+
+        assert_eq!(7, outcome.rows_written);
+        assert_eq!(
+            vec!["pre:sample".to_string(), "batch:sample".to_string()],
+            *events.lock().unwrap()
+        );
+        assert_eq!(
+            vec![MetricRowBatchProtocol::Prometheus],
+            *protocols.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prometheus_write_propagates_metric_row_batcher_ref_error() {
+        let handler: PromStoreProtocolHandlerRef = Arc::new(RecordingPromStoreHandler {
+            events: Arc::new(Mutex::new(Vec::new())),
+        });
+        let batcher: MetricRowBatcherRef = Arc::new(FailingMetricRowBatcher);
+
+        let Err(write_error) = write_prometheus_rows_with_progress(
+            handler,
+            Some(batcher),
+            true,
+            vec![test_prom_write_batch("sample")],
+        )
+        .await
+        else {
+            panic!("metric row batcher error should propagate")
+        };
+
+        assert_eq!(0, write_error.rows_written);
+        assert!(matches!(
+            write_error.error,
+            error::Error::Internal { ref err_msg } if err_msg == "metric row batcher failed"
+        ));
     }
 
     fn test_prom_write_batch(table_name: &str) -> PromWriteBatch {
@@ -904,15 +966,40 @@ mod tests {
         ));
     }
 
-    struct RecordingPromWriteBatcher {
+    struct RecordingMetricRowBatcher {
         events: Arc<Mutex<Vec<String>>>,
+        protocols: Arc<Mutex<Vec<MetricRowBatchProtocol>>>,
+        rows_written: u64,
     }
 
     #[async_trait]
-    impl PromWriteBatcher for RecordingPromWriteBatcher {
-        async fn submit(&self, requests: RowInsertRequests, _ctx: QueryContextRef) -> Result<u64> {
+    impl MetricRowBatcher for RecordingMetricRowBatcher {
+        async fn submit(
+            &self,
+            requests: RowInsertRequests,
+            _ctx: QueryContextRef,
+            protocol: MetricRowBatchProtocol,
+        ) -> Result<u64> {
             record_write_event(&self.events, "batch", &requests);
-            Ok(prom_write_row_count(&requests))
+            self.protocols.lock().unwrap().push(protocol);
+            Ok(self.rows_written)
+        }
+    }
+
+    struct FailingMetricRowBatcher;
+
+    #[async_trait]
+    impl MetricRowBatcher for FailingMetricRowBatcher {
+        async fn submit(
+            &self,
+            _requests: RowInsertRequests,
+            _ctx: QueryContextRef,
+            _protocol: MetricRowBatchProtocol,
+        ) -> Result<u64> {
+            Err(error::InternalSnafu {
+                err_msg: "metric row batcher failed".to_string(),
+            }
+            .build())
         }
     }
 

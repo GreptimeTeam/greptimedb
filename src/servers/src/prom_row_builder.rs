@@ -199,9 +199,9 @@ pub(crate) fn identify_missing_columns_from_proto(
     Ok(missing)
 }
 
-/// Build a `Vec<ColumnSchema>` suitable for creating a new Prometheus logical table
+/// Build a `Vec<ColumnSchema>` suitable for creating a new metric logical table
 /// directly from the proto `rows.schema`, avoiding the round-trip through Arrow schema.
-pub fn build_prom_create_table_schema_from_proto(
+pub fn build_metric_create_table_schema_from_proto(
     rows_schema: &[ColumnSchema],
 ) -> Result<Vec<ColumnSchema>> {
     rows_schema
@@ -309,7 +309,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
     use super::{
-        build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
+        build_metric_create_table_schema_from_proto, identify_missing_columns_from_proto,
         rows_to_aligned_record_batch,
     };
 
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_prom_create_table_schema_from_proto() {
+    fn test_build_metric_create_table_schema_from_proto() {
         let rows_schema = vec![
             ColumnSchema {
                 column_name: "greptime_timestamp".to_string(),
@@ -550,7 +550,7 @@ mod tests {
             },
         ];
 
-        let schema = build_prom_create_table_schema_from_proto(&rows_schema).unwrap();
+        let schema = build_metric_create_table_schema_from_proto(&rows_schema).unwrap();
         assert_eq!(3, schema.len());
 
         assert_eq!("greptime_timestamp", schema[0].column_name);

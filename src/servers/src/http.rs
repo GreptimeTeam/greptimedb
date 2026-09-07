@@ -73,7 +73,7 @@ use crate::http::result::null_result::NullResponse;
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
-use crate::pending_rows_batcher::PendingRowsBatcher;
+use crate::pending_rows_batcher::MetricRowBatcherRef;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -682,7 +682,7 @@ impl HttpServerBuilder {
         prom_store_with_metric_engine: bool,
         prom_validation_mode: PromValidationMode,
         experimental_enable_prometheus_native_histogram: bool,
-        pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+        pending_rows_batcher: Option<MetricRowBatcherRef>,
     ) -> Self {
         let state = PromStoreState {
             prom_store_handler: handler,
@@ -717,6 +717,7 @@ impl HttpServerBuilder {
         handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
         experimental_enable_exponential_histogram: bool,
+        metric_row_batcher: Option<MetricRowBatcherRef>,
     ) -> Self {
         Self {
             router: self.router.nest(
@@ -725,6 +726,7 @@ impl HttpServerBuilder {
                     handler,
                     with_metric_engine,
                     experimental_enable_exponential_histogram,
+                    metric_row_batcher,
                 ),
             ),
             ..self
@@ -1392,6 +1394,7 @@ impl HttpServer {
         otlp_handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
         experimental_enable_exponential_histogram: bool,
+        metric_row_batcher: Option<MetricRowBatcherRef>,
     ) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
@@ -1405,6 +1408,7 @@ impl HttpServer {
                 with_metric_engine,
                 experimental_enable_exponential_histogram,
                 handler: otlp_handler,
+                metric_row_batcher,
             })
     }
 

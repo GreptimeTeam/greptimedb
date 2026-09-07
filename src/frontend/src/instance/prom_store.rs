@@ -387,7 +387,7 @@ impl PendingRowsSchemaAlterer for Instance {
         Ok(())
     }
 
-    async fn add_missing_prom_tag_columns_batch(
+    async fn add_missing_metric_tag_columns_batch(
         &self,
         catalog: &str,
         schema: &str,

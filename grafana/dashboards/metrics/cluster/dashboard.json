@@ -4362,7 +4362,7 @@
         "type": "prometheus",
         "uid": "${metrics}"
       },
-      "description": "Prometheus remote-write pending rows, batches, and workers. Rising pending rows indicate remote-write buffering backlog.",
+      "description": "Pending metric rows, batches, and workers. Rising pending rows indicate metric-row batching backlog.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4482,7 +4482,7 @@
           "refId": "C"
         }
       ],
-      "title": "Prom Store Backlog",
+      "title": "Metric Row Batching Backlog",
       "type": "timeseries"
     },
     {

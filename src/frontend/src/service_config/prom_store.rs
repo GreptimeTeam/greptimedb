@@ -16,6 +16,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use servers::pending_rows_batcher::{PendingRowsBatcherOptions, PendingRowsBatcherTuning};
 use servers::prom_remote_write::validation::PromValidationMode;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,18 +65,21 @@ fn default_flow_notification_queue_capacity() -> NonZeroUsize {
 }
 
 impl PromStoreOptions {
+    pub(crate) fn pending_rows_batcher_options(&self) -> Option<PendingRowsBatcherOptions> {
+        PendingRowsBatcherOptions::try_new(PendingRowsBatcherTuning {
+            flush_interval: self.pending_rows_flush_interval,
+            max_batch_rows: self.max_batch_rows,
+            max_concurrent_flushes: self.max_concurrent_flushes,
+            worker_channel_capacity: self.worker_channel_capacity,
+            max_inflight_requests: self.max_inflight_requests,
+            flow_notification_queue_capacity: self.flow_notification_queue_capacity,
+        })
+    }
+
     /// Returns whether the pending rows batcher can be enabled with these
-    /// options. Mirrors the enablement conditions of
-    /// `PendingRowsBatcher::try_new` in the servers crate, which returns
-    /// `None` when any of these knobs is zero.
+    /// options.
     pub fn pending_rows_batching_enabled(&self) -> bool {
-        self.enable
-            && self.with_metric_engine
-            && !self.pending_rows_flush_interval.is_zero()
-            && self.max_batch_rows > 0
-            && self.max_concurrent_flushes > 0
-            && self.worker_channel_capacity > 0
-            && self.max_inflight_requests > 0
+        self.enable && self.with_metric_engine && self.pending_rows_batcher_options().is_some()
     }
 }
 
@@ -132,5 +136,17 @@ mod tests {
             default.flow_notification_queue_capacity,
             default_flow_notification_queue_capacity()
         );
+    }
+
+    #[test]
+    fn test_pending_rows_options_validity_is_independent_of_prometheus_route() {
+        let options = PromStoreOptions {
+            enable: false,
+            pending_rows_flush_interval: Duration::from_secs(1),
+            ..Default::default()
+        };
+
+        assert!(options.pending_rows_batcher_options().is_some());
+        assert!(!options.pending_rows_batching_enabled());
     }
 }

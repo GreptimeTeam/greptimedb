@@ -777,7 +777,7 @@ mod tests {
         };
 
         let outcome =
-            OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc())
+            OpenTelemetryProtocolHandler::metrics(&*instance, request, None, QueryContext::arc())
                 .await
                 .unwrap();
         let warning = outcome

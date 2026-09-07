@@ -32,6 +32,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
 use crate::grpc::context_auth;
+use crate::pending_rows_batcher::MetricRowBatcherRef;
 use crate::query_handler::{MetricsIngestOutcome, OpenTelemetryProtocolHandlerRef};
 
 const EXPONENTIAL_HISTOGRAM_UNSUPPORTED: &str = "OTel Arrow exponential histograms are unsupported because the Arrow wire format omits zero_threshold";
@@ -39,14 +40,30 @@ const EXPONENTIAL_HISTOGRAM_UNSUPPORTED: &str = "OTel Arrow exponential histogra
 pub struct OtelArrowServiceHandler<T> {
     handler: T,
     user_provider: Option<UserProviderRef>,
+    with_metric_engine: bool,
+    metric_row_batcher: Option<MetricRowBatcherRef>,
 }
 
 impl<T> OtelArrowServiceHandler<T> {
-    pub fn new(handler: T, user_provider: Option<UserProviderRef>) -> Self {
+    pub fn new(
+        handler: T,
+        user_provider: Option<UserProviderRef>,
+        with_metric_engine: bool,
+        metric_row_batcher: Option<MetricRowBatcherRef>,
+    ) -> Self {
         Self {
             handler,
             user_provider,
+            with_metric_engine,
+            metric_row_batcher,
         }
+    }
+}
+
+fn otel_arrow_metric_context(with_metric_engine: bool) -> OtlpMetricCtx {
+    OtlpMetricCtx {
+        with_metric_engine,
+        ..Default::default()
     }
 }
 
@@ -90,11 +107,14 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
         context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
         let query_ctx = {
             let mut ctx = query_ctx.fork();
-            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx::default()));
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(otel_arrow_metric_context(
+                self.with_metric_engine,
+            )));
             Arc::new(ctx)
         };
 
         let handler = self.handler.clone();
+        let metric_row_batcher = self.metric_row_batcher.clone();
 
         // handles incoming requests
         common_runtime::spawn_global(async move {
@@ -144,7 +164,10 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                                 if !histogram.data_points.is_empty()
                         )
                     });
-                let outcome = match handler.metrics(request, query_ctx.clone()).await {
+                let outcome = match handler
+                    .metrics(request, metric_row_batcher.clone(), query_ctx.clone())
+                    .await
+                {
                     Ok(outcome) => outcome,
                     Err(error::Error::InvalidOtlpMetricInput { reason }) => {
                         let _ = sender
@@ -211,5 +234,11 @@ mod tests {
         assert_eq!(7, status.batch_id);
         assert_eq!(ArrowStatusCode::InvalidArgument as i32, status.status_code);
         assert_eq!(EXPONENTIAL_HISTOGRAM_UNSUPPORTED, status.status_message);
+    }
+
+    #[test]
+    fn otel_arrow_metric_context_uses_metric_engine_setting() {
+        assert!(otel_arrow_metric_context(true).with_metric_engine);
+        assert!(!otel_arrow_metric_context(false).with_metric_engine);
     }
 }

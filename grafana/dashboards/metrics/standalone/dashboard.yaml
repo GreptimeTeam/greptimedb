@@ -632,9 +632,9 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: stalling-[{{instance}}]-[{{pod}}]
-        - title: Prom Store Backlog
+        - title: Metric Row Batching Backlog
           type: timeseries
-          description: Prometheus remote-write pending rows, batches, and workers. Rising pending rows indicate remote-write buffering backlog.
+          description: Pending metric rows, batches, and workers. Rising pending rows indicate metric-row batching backlog.
           unit: short
           queries:
             - expr: sum by (instance, pod) (greptime_prom_store_pending_rows)

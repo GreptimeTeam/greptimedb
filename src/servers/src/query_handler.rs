@@ -54,6 +54,7 @@ use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
+use crate::pending_rows_batcher::MetricRowBatcherRef;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
@@ -141,6 +142,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
+        metric_row_batcher: Option<MetricRowBatcherRef>,
         ctx: QueryContextRef,
     ) -> Result<MetricsIngestOutcome>;
 

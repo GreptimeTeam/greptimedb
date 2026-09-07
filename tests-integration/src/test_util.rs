@@ -39,6 +39,7 @@ use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use frontend::instance::Instance;
+use frontend::server::Services;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
 use mito2::gc::GcConfig;
 use object_store::config::{
@@ -54,7 +55,10 @@ use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
-use servers::pending_rows_batcher::PendingRowsBatcher;
+use servers::pending_rows_batcher::{
+    MetricRowBatcherRef, PendingRowsBatchMode, PendingRowsBatcher, PendingRowsBatcherOptions,
+    PendingRowsBatcherTuning,
+};
 use servers::postgres::PostgresServer;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -469,6 +473,42 @@ pub async fn setup_test_http_app_with_frontend(
     setup_test_http_app_with_frontend_and_user_provider(store_type, name, None).await
 }
 
+/// Builds the real OTLP HTTP route with synchronous metric pending-row batching enabled.
+pub async fn setup_test_otlp_metrics_app_with_frontend_batched(
+    store_type: StorageType,
+    name: &str,
+) -> (Router, TestGuard) {
+    let instance = setup_standalone_instance(name, store_type).await;
+    let frontend = instance.fe_instance().clone();
+    let mut options = instance.opts.clone();
+    options.prom_store.with_metric_engine = true;
+    options.prom_store.pending_rows_flush_interval = Duration::from_millis(50);
+    options.otlp.enable = true;
+    options.otlp.enable_metrics_batching = true;
+
+    assert!(
+        servers::pending_rows_batcher::pending_rows_batch_sync_enabled(),
+        "OTLP batching integration tests require synchronous confirmation"
+    );
+    let services = Services::new(options.clone(), frontend.clone(), Plugins::new());
+    let frontend_options = options.clone().into();
+    let http_server =
+        services.http_server_builder(&frontend_options, services.server_memory_limiter.clone());
+    assert_eq!(
+        Some(true),
+        services.otlp_http_metric_batcher_configured(),
+        "production Services HTTP assembly must pass its batcher to OTLP"
+    );
+    let http_server = http_server
+        .with_greptime_config_options(options.to_toml().unwrap())
+        .build();
+
+    (
+        http_server.build(http_server.make_app()).unwrap(),
+        instance.guard,
+    )
+}
+
 pub async fn setup_test_http_app_with_frontend_and_slow_query_threshold(
     store_type: StorageType,
     name: &str,
@@ -490,7 +530,7 @@ pub async fn setup_test_http_app_with_frontend_and_slow_query_threshold(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone(), true, false)
+        .with_otlp_handler(instance.fe_instance().clone(), true, false, None)
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap())
         .build();
@@ -558,6 +598,7 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
             instance.fe_instance().clone(),
             true,
             experimental_enable_exponential_histogram,
+            None,
         )
         .with_prometheus_handler(instance.fe_instance().clone())
         .with_jaeger_handler(instance.fe_instance().clone())
@@ -671,20 +712,24 @@ async fn setup_test_prom_app_with_frontend_inner(
     // Mirror the production wiring at `frontend::server`: build the batcher from the
     // instance's managers. A short flush interval keeps the test responsive.
     let pending_rows_batcher = if enable_batcher {
-        PendingRowsBatcher::try_new(
+        Some(PendingRowsBatcher::new(
             frontend_ref.partition_manager().clone(),
             frontend_ref.node_manager().clone(),
             frontend_ref.catalog_manager().clone(),
             frontend_ref.table_flownode_set_cache().clone(),
             true,
             frontend_ref.clone(),
-            Duration::from_millis(50),
-            1000,
-            4,
-            64,
-            64,
-            std::num::NonZeroUsize::new(1024).unwrap(),
-        )
+            PendingRowsBatcherOptions::try_new(PendingRowsBatcherTuning {
+                flush_interval: Duration::from_millis(50),
+                max_batch_rows: 1000,
+                max_concurrent_flushes: 4,
+                worker_channel_capacity: 64,
+                max_inflight_requests: 64,
+                flow_notification_queue_capacity: std::num::NonZeroUsize::new(1024).unwrap(),
+            })
+            .unwrap(),
+            PendingRowsBatchMode::Synchronous,
+        ))
     } else {
         None
     };
@@ -697,7 +742,7 @@ async fn setup_test_prom_app_with_frontend_inner(
             true,
             PromValidationMode::Strict,
             experimental_enable_prometheus_native_histogram,
-            pending_rows_batcher,
+            pending_rows_batcher.map(|batcher| batcher as MetricRowBatcherRef),
         )
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
@@ -825,7 +870,12 @@ async fn setup_grpc_server_for_frontend_instance_with(
         .database_handler(greptime_request_handler)
         .flight_handler(flight_handler)
         .prometheus_handler(fe_instance_ref.clone(), user_provider.clone())
-        .otel_arrow_handler(OtelArrowServiceHandler::new(fe_instance_ref, user_provider))
+        .otel_arrow_handler(OtelArrowServiceHandler::new(
+            fe_instance_ref,
+            user_provider,
+            true,
+            None,
+        ))
         .with_tls_config(grpc_config.tls)
         .unwrap();
 

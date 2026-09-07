@@ -38,7 +38,10 @@ use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
-use servers::pending_rows_batcher::{PendingRowsBatcher, pending_rows_batch_sync_enabled};
+use servers::pending_rows_batcher::{
+    MetricRowBatcherRef, PendingRowsBatchMode, PendingRowsBatcher, PendingRowsBatcherOptions,
+    pending_rows_batch_sync_enabled,
+};
 use servers::postgres::PostgresServer;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::{Server, ServerHandlers};
@@ -61,7 +64,79 @@ where
     plugins: Plugins,
     flight_handler: Option<FlightCraftRef>,
     internal_flight_handler: Option<FlightCraftRef>,
+    metric_batching: ResolvedMetricBatching,
+    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    #[cfg(any(test, feature = "testing"))]
+    metric_batcher_wiring: MetricBatcherWiring,
     pub server_memory_limiter: ServerMemoryLimiter,
+}
+
+#[cfg(any(test, feature = "testing"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetricBatchConsumer {
+    PrometheusHttp,
+    OtlpHttp,
+    ExternalOtelArrow,
+    InternalOtelArrow,
+}
+
+#[cfg(any(test, feature = "testing"))]
+type MetricBatcherWiring =
+    Arc<std::sync::Mutex<Vec<(MetricBatchConsumer, Option<MetricRowBatcherRef>)>>>;
+
+struct ResolvedMetricBatching {
+    options: Option<PendingRowsBatcherOptions>,
+    batch_mode: PendingRowsBatchMode,
+    with_metric_engine: bool,
+    prometheus_enabled: bool,
+    otlp_enabled: bool,
+    http_batch_consumer_enabled: bool,
+}
+
+/// Metric HTTP consumers registered outside OSS [`Services`] route assembly.
+///
+/// This input only describes route ownership. Runtime [`FrontendOptions`] remain
+/// authoritative for Metric Engine, batching mode, tuning, and protocol behavior.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalMetricHttpConsumers {
+    /// An external Prometheus HTTP route consumes the shared metric batcher.
+    pub prometheus: bool,
+    /// An external OTLP HTTP route consumes the shared metric batcher.
+    pub otlp: bool,
+}
+
+impl ResolvedMetricBatching {
+    fn batcher_enabled(&self) -> bool {
+        self.prometheus_enabled || self.otlp_enabled
+    }
+}
+
+fn resolve_metric_batching(
+    opts: &FrontendOptions,
+    external_http_consumers: ExternalMetricHttpConsumers,
+    batch_mode: PendingRowsBatchMode,
+) -> ResolvedMetricBatching {
+    let prom = &opts.prom_store;
+    let options = prom.pending_rows_batcher_options();
+    let valid_options = options.is_some();
+    let prometheus_enabled = (prom.enable || external_http_consumers.prometheus)
+        && prom.with_metric_engine
+        && valid_options;
+    let otlp_enabled = opts.otlp.enable_metrics_batching
+        && prom.with_metric_engine
+        && batch_mode.is_synchronous()
+        && valid_options;
+    let http_batch_consumer_enabled =
+        prometheus_enabled || ((opts.otlp.enable || external_http_consumers.otlp) && otlp_enabled);
+
+    ResolvedMetricBatching {
+        options,
+        batch_mode,
+        with_metric_engine: prom.with_metric_engine,
+        prometheus_enabled,
+        otlp_enabled,
+        http_batch_consumer_enabled,
+    }
 }
 
 impl<T> Services<T>
@@ -69,7 +144,68 @@ where
     T: Into<FrontendOptions> + Configurable + Clone,
 {
     pub fn new(opts: T, instance: Arc<Instance>, plugins: Plugins) -> Self {
+        Self::new_with_external_metric_http_consumers(
+            opts,
+            ExternalMetricHttpConsumers::default(),
+            instance,
+            plugins,
+        )
+    }
+
+    /// Creates services that share metric batching with externally owned HTTP routes.
+    pub fn new_with_external_metric_http_consumers(
+        opts: T,
+        external_http_consumers: ExternalMetricHttpConsumers,
+        instance: Arc<Instance>,
+        plugins: Plugins,
+    ) -> Self {
+        let batch_mode = if pending_rows_batch_sync_enabled() {
+            PendingRowsBatchMode::Synchronous
+        } else {
+            PendingRowsBatchMode::Asynchronous
+        };
+        let metric_batching =
+            resolve_metric_batching(&opts.clone().into(), external_http_consumers, batch_mode);
+        Self::new_with_metric_batching(opts, instance, plugins, metric_batching)
+    }
+
+    #[cfg(test)]
+    fn new_with_synchronous_metric_batching(
+        opts: T,
+        instance: Arc<Instance>,
+        plugins: Plugins,
+    ) -> Self {
+        let metric_batching = resolve_metric_batching(
+            &opts.clone().into(),
+            ExternalMetricHttpConsumers::default(),
+            PendingRowsBatchMode::Synchronous,
+        );
+        Self::new_with_metric_batching(opts, instance, plugins, metric_batching)
+    }
+
+    fn new_with_metric_batching(
+        opts: T,
+        instance: Arc<Instance>,
+        plugins: Plugins,
+        metric_batching: ResolvedMetricBatching,
+    ) -> Self {
         let feopts = opts.clone().into();
+        let pending_rows_batcher = metric_batching
+            .options
+            .as_ref()
+            .filter(|_| metric_batching.batcher_enabled())
+            .map(|options| {
+                PendingRowsBatcher::new(
+                    instance.partition_manager().clone(),
+                    instance.node_manager().clone(),
+                    instance.catalog_manager().clone(),
+                    instance.table_flownode_set_cache().clone(),
+                    metric_batching.with_metric_engine,
+                    instance.clone(),
+                    options.clone(),
+                    metric_batching.batch_mode,
+                )
+            });
         // Create server request memory limiter for all server protocols
         let server_memory_limiter = ServerMemoryLimiter::new(
             feopts.max_in_flight_write_bytes.as_bytes(),
@@ -84,6 +220,10 @@ where
             plugins,
             flight_handler: None,
             internal_flight_handler: None,
+            metric_batching,
+            pending_rows_batcher,
+            #[cfg(any(test, feature = "testing"))]
+            metric_batcher_wiring: Default::default(),
             server_memory_limiter,
         }
     }
@@ -105,9 +245,10 @@ where
         opts: &FrontendOptions,
         request_memory_limiter: ServerMemoryLimiter,
     ) -> HttpServerBuilder {
-        let mut builder = HttpServerBuilder::new(effective_http_options(opts))
-            .with_memory_limiter(request_memory_limiter)
-            .with_sql_handler(self.instance.clone());
+        let mut builder =
+            HttpServerBuilder::new(effective_http_options(&opts.http, &self.metric_batching))
+                .with_memory_limiter(request_memory_limiter)
+                .with_sql_handler(self.instance.clone());
 
         let validator = self.plugins.get::<LogValidatorRef>();
         let ingest_interceptor = self.plugins.get::<LogIngestInterceptorRef<ServerError>>();
@@ -128,24 +269,10 @@ where
         }
 
         if opts.prom_store.enable {
-            let pending_rows_batcher = if opts.prom_store.with_metric_engine {
-                PendingRowsBatcher::try_new(
-                    self.instance.partition_manager().clone(),
-                    self.instance.node_manager().clone(),
-                    self.instance.catalog_manager().clone(),
-                    self.instance.table_flownode_set_cache().clone(),
-                    opts.prom_store.with_metric_engine,
-                    self.instance.clone(),
-                    opts.prom_store.pending_rows_flush_interval,
-                    opts.prom_store.max_batch_rows,
-                    opts.prom_store.max_concurrent_flushes,
-                    opts.prom_store.worker_channel_capacity,
-                    opts.prom_store.max_inflight_requests,
-                    opts.prom_store.flow_notification_queue_capacity,
-                )
-            } else {
-                None
-            };
+            let metric_row_batcher =
+                self.metric_row_batcher(self.metric_batching.prometheus_enabled);
+            #[cfg(any(test, feature = "testing"))]
+            self.record_metric_batcher(MetricBatchConsumer::PrometheusHttp, &metric_row_batcher);
             builder = builder
                 .with_prom_handler(
                     self.instance.clone(),
@@ -154,16 +281,20 @@ where
                     opts.prom_store.prom_validation_mode,
                     opts.prom_store
                         .experimental_enable_prometheus_native_histogram,
-                    pending_rows_batcher,
+                    metric_row_batcher,
                 )
                 .with_prometheus_handler(self.instance.clone());
         }
 
         if opts.otlp.enable {
+            let metric_row_batcher = self.metric_row_batcher(self.metric_batching.otlp_enabled);
+            #[cfg(any(test, feature = "testing"))]
+            self.record_metric_batcher(MetricBatchConsumer::OtlpHttp, &metric_row_batcher);
             builder = builder.with_otlp_handler(
                 self.instance.clone(),
                 opts.prom_store.with_metric_engine,
                 opts.otlp.experimental_enable_exponential_histogram,
+                metric_row_batcher,
             );
         }
 
@@ -218,6 +349,50 @@ where
         }
     }
 
+    fn metric_row_batcher(&self, enabled: bool) -> Option<MetricRowBatcherRef> {
+        if !enabled {
+            return None;
+        }
+
+        self.pending_rows_batcher
+            .as_ref()
+            .map(|batcher| batcher.clone() as MetricRowBatcherRef)
+    }
+
+    /// Returns the shared batcher when Prometheus pending-row batching is enabled.
+    pub fn prometheus_metric_row_batcher(&self) -> Option<MetricRowBatcherRef> {
+        self.metric_row_batcher(self.metric_batching.prometheus_enabled)
+    }
+
+    /// Returns the shared batcher when OTLP metric batching is enabled.
+    pub fn otlp_metric_row_batcher(&self) -> Option<MetricRowBatcherRef> {
+        self.metric_row_batcher(self.metric_batching.otlp_enabled)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    fn record_metric_batcher(
+        &self,
+        consumer: MetricBatchConsumer,
+        batcher: &Option<MetricRowBatcherRef>,
+    ) {
+        self.metric_batcher_wiring
+            .lock()
+            .unwrap()
+            .push((consumer, batcher.clone()));
+    }
+
+    /// Reports whether the production HTTP assembly configured an OTLP metric batcher.
+    #[cfg(feature = "testing")]
+    pub fn otlp_http_metric_batcher_configured(&self) -> Option<bool> {
+        self.metric_batcher_wiring
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(consumer, _)| *consumer == MetricBatchConsumer::OtlpHttp)
+            .map(|(_, batcher)| batcher.is_some())
+    }
+
     fn build_grpc_server(
         &mut self,
         grpc: &GrpcOptions,
@@ -264,6 +439,17 @@ where
                 .unwrap_or(default_flight_handler)
         };
 
+        let metric_row_batcher = self.metric_row_batcher(self.metric_batching.otlp_enabled);
+        #[cfg(any(test, feature = "testing"))]
+        self.record_metric_batcher(
+            if external {
+                MetricBatchConsumer::ExternalOtelArrow
+            } else {
+                MetricBatchConsumer::InternalOtelArrow
+            },
+            &metric_row_batcher,
+        );
+
         let grpc_server = builder
             .name(name)
             .database_handler(greptime_request_handler.clone())
@@ -271,6 +457,8 @@ where
             .otel_arrow_handler(OtelArrowServiceHandler::new(
                 self.instance.clone(),
                 user_provider.clone(),
+                self.metric_batching.with_metric_engine,
+                metric_row_batcher,
             ))
             .flight_handler(flight_handler)
             .add_layer(axum::middleware::from_fn_with_state(
@@ -426,19 +614,22 @@ where
     }
 }
 
-fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
-    effective_http_options_with_sync(opts, pending_rows_batch_sync_enabled())
-}
-
-fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) -> HttpOptions {
-    let mut http = opts.http.clone();
-    let flush_interval = opts.prom_store.pending_rows_flush_interval;
+fn effective_http_options(
+    configured_http: &HttpOptions,
+    metric_batching: &ResolvedMetricBatching,
+) -> HttpOptions {
+    let mut http = configured_http.clone();
+    let flush_interval = metric_batching
+        .options
+        .as_ref()
+        .map(PendingRowsBatcherOptions::flush_interval)
+        .unwrap_or_default();
     let fallback_timeout = flush_interval.saturating_add(Duration::from_secs(1));
     // In asynchronous batch mode submissions return right after enqueue and
     // no request waits for a pending-row flush, so the timeout must not be
     // raised either.
-    if !opts.prom_store.pending_rows_batching_enabled()
-        || !batch_sync
+    if !metric_batching.batch_mode.is_synchronous()
+        || !metric_batching.http_batch_consumer_enabled
         || http.timeout.is_zero()
         || http.timeout > fallback_timeout
     {
@@ -506,6 +697,15 @@ mod tests {
         }
     }
 
+    fn resolved_http_options(
+        opts: &FrontendOptions,
+        batch_mode: PendingRowsBatchMode,
+    ) -> HttpOptions {
+        let metric_batching =
+            resolve_metric_batching(opts, ExternalMetricHttpConsumers::default(), batch_mode);
+        effective_http_options(&opts.http, &metric_batching)
+    }
+
     #[test]
     fn test_effective_http_timeout_for_pending_rows() {
         let cases = [
@@ -536,7 +736,7 @@ mod tests {
 
             assert_eq!(
                 Duration::from_millis(expected),
-                effective_http_options_with_sync(&opts, true).timeout,
+                resolved_http_options(&opts, PendingRowsBatchMode::Synchronous).timeout,
                 "{name}"
             );
         }
@@ -553,19 +753,18 @@ mod tests {
 
         assert_eq!(
             Duration::from_millis(1000),
-            effective_http_options_with_sync(&opts, false).timeout,
+            resolved_http_options(&opts, PendingRowsBatchMode::Asynchronous).timeout,
         );
         assert_eq!(
             Duration::from_millis(6000),
-            effective_http_options_with_sync(&opts, true).timeout,
+            resolved_http_options(&opts, PendingRowsBatchMode::Synchronous).timeout,
         );
     }
 
     #[test]
     fn test_effective_http_timeout_skips_fallback_when_batcher_disabled() {
-        // Mirrors the conditions under which `PendingRowsBatcher::try_new`
-        // returns `None`; in these cases no request can wait for a pending-row
-        // flush, so the timeout must not be raised.
+        // Invalid tuning cannot produce a resolved batcher, so no request can
+        // wait for a pending-row flush and the timeout must not be raised.
         type KnobMutator = fn(&mut FrontendOptions);
         let cases: [(&str, KnobMutator); 4] = [
             ("zero max_batch_rows", |opts| {
@@ -590,10 +789,360 @@ mod tests {
 
             assert_eq!(
                 Duration::from_millis(1000),
-                effective_http_options_with_sync(&opts, true).timeout,
+                resolved_http_options(&opts, PendingRowsBatchMode::Synchronous).timeout,
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn test_metric_batching_enablement_matrix() {
+        type OptionsMutator = fn(&mut FrontendOptions);
+        let cases: [(&str, OptionsMutator, bool, bool, bool, PendingRowsBatchMode); 8] = [
+            (
+                "prometheus only",
+                |_| {},
+                true,
+                false,
+                true,
+                PendingRowsBatchMode::Synchronous,
+            ),
+            (
+                "otlp only with HTTP route disabled",
+                |opts| {
+                    opts.prom_store.enable = false;
+                    opts.otlp.enable = false;
+                    opts.otlp.enable_metrics_batching = true;
+                },
+                false,
+                true,
+                true,
+                PendingRowsBatchMode::Synchronous,
+            ),
+            (
+                "both consumers",
+                |opts| opts.otlp.enable_metrics_batching = true,
+                true,
+                true,
+                true,
+                PendingRowsBatchMode::Synchronous,
+            ),
+            (
+                "both routes disabled",
+                |opts| {
+                    opts.prom_store.enable = false;
+                    opts.otlp.enable = false;
+                },
+                false,
+                false,
+                false,
+                PendingRowsBatchMode::Synchronous,
+            ),
+            (
+                "metric engine disabled",
+                |opts| {
+                    opts.prom_store.with_metric_engine = false;
+                    opts.otlp.enable_metrics_batching = true;
+                },
+                false,
+                false,
+                false,
+                PendingRowsBatchMode::Synchronous,
+            ),
+            (
+                "asynchronous mode preserves prometheus only",
+                |opts| opts.otlp.enable_metrics_batching = true,
+                true,
+                false,
+                true,
+                PendingRowsBatchMode::Asynchronous,
+            ),
+            (
+                "prometheus disabled does not disable otlp",
+                |opts| {
+                    opts.prom_store.enable = false;
+                    opts.otlp.enable_metrics_batching = true;
+                },
+                false,
+                true,
+                true,
+                PendingRowsBatchMode::Synchronous,
+            ),
+            (
+                "otlp batching disabled does not disable prometheus",
+                |opts| opts.otlp.enable_metrics_batching = false,
+                true,
+                false,
+                true,
+                PendingRowsBatchMode::Synchronous,
+            ),
+        ];
+
+        for (name, mutate, expected_prom, expected_otlp, expected_batcher, batch_mode) in cases {
+            let mut opts = FrontendOptions::default();
+            opts.prom_store.pending_rows_flush_interval = Duration::from_secs(5);
+            mutate(&mut opts);
+
+            let resolved =
+                resolve_metric_batching(&opts, ExternalMetricHttpConsumers::default(), batch_mode);
+            assert_eq!(expected_prom, resolved.prometheus_enabled, "{name}");
+            assert_eq!(expected_otlp, resolved.otlp_enabled, "{name}");
+            assert_eq!(batch_mode, resolved.batch_mode, "{name}");
+            assert_eq!(expected_batcher, resolved.batcher_enabled(), "{name}");
+            assert_eq!(
+                Duration::from_secs(5),
+                resolved.options.as_ref().unwrap().flush_interval(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_metric_batching_snapshot_remains_authoritative_after_source_options_change() {
+        let mut opts = FrontendOptions::default();
+        opts.http.timeout = Duration::from_secs(1);
+        opts.prom_store.pending_rows_flush_interval = Duration::from_secs(5);
+        let resolved = resolve_metric_batching(
+            &opts,
+            ExternalMetricHttpConsumers::default(),
+            PendingRowsBatchMode::Synchronous,
+        );
+
+        opts.prom_store.pending_rows_flush_interval = Duration::from_secs(30);
+        opts.prom_store.max_batch_rows = 0;
+
+        assert_eq!(
+            Duration::from_secs(6),
+            effective_http_options(&opts.http, &resolved).timeout
+        );
+        assert!(resolved.options.is_some());
+        assert!(resolved.batcher_enabled());
+    }
+
+    #[test]
+    fn test_external_http_consumers_cannot_override_runtime_batching_configuration() {
+        type OptionsMutator = fn(&mut FrontendOptions);
+        struct TestCase {
+            name: &'static str,
+            external_http_consumers: ExternalMetricHttpConsumers,
+            batch_mode: PendingRowsBatchMode,
+            mutate: OptionsMutator,
+            expected_prometheus: bool,
+            expected_otlp: bool,
+            expected_flush_interval: Option<Duration>,
+            expected_timeout: Duration,
+        }
+
+        let cases = [
+            TestCase {
+                name: "external Prometheus uses runtime tuning",
+                external_http_consumers: ExternalMetricHttpConsumers {
+                    prometheus: true,
+                    otlp: false,
+                },
+                batch_mode: PendingRowsBatchMode::Synchronous,
+                mutate: |_| {},
+                expected_prometheus: true,
+                expected_otlp: false,
+                expected_flush_interval: Some(Duration::from_secs(5)),
+                expected_timeout: Duration::from_secs(6),
+            },
+            TestCase {
+                name: "external OTLP uses runtime tuning and batching flag",
+                external_http_consumers: ExternalMetricHttpConsumers {
+                    prometheus: false,
+                    otlp: true,
+                },
+                batch_mode: PendingRowsBatchMode::Synchronous,
+                mutate: |opts| opts.otlp.enable_metrics_batching = true,
+                expected_prometheus: false,
+                expected_otlp: true,
+                expected_flush_interval: Some(Duration::from_secs(5)),
+                expected_timeout: Duration::from_secs(6),
+            },
+            TestCase {
+                name: "external OTLP cannot enable runtime-disabled batching",
+                external_http_consumers: ExternalMetricHttpConsumers {
+                    prometheus: false,
+                    otlp: true,
+                },
+                batch_mode: PendingRowsBatchMode::Synchronous,
+                mutate: |_| {},
+                expected_prometheus: false,
+                expected_otlp: false,
+                expected_flush_interval: Some(Duration::from_secs(5)),
+                expected_timeout: Duration::from_secs(1),
+            },
+            TestCase {
+                name: "external OTLP cannot replace invalid runtime tuning",
+                external_http_consumers: ExternalMetricHttpConsumers {
+                    prometheus: false,
+                    otlp: true,
+                },
+                batch_mode: PendingRowsBatchMode::Synchronous,
+                mutate: |opts| {
+                    opts.otlp.enable_metrics_batching = true;
+                    opts.prom_store.max_batch_rows = 0;
+                },
+                expected_prometheus: false,
+                expected_otlp: false,
+                expected_flush_interval: None,
+                expected_timeout: Duration::from_secs(1),
+            },
+            TestCase {
+                name: "external OTLP cannot override asynchronous runtime mode",
+                external_http_consumers: ExternalMetricHttpConsumers {
+                    prometheus: false,
+                    otlp: true,
+                },
+                batch_mode: PendingRowsBatchMode::Asynchronous,
+                mutate: |opts| opts.otlp.enable_metrics_batching = true,
+                expected_prometheus: false,
+                expected_otlp: false,
+                expected_flush_interval: Some(Duration::from_secs(5)),
+                expected_timeout: Duration::from_secs(1),
+            },
+        ];
+
+        for case in cases {
+            let mut opts = FrontendOptions::default();
+            opts.http.timeout = Duration::from_secs(1);
+            opts.prom_store.enable = false;
+            opts.prom_store.pending_rows_flush_interval = Duration::from_secs(5);
+            opts.otlp.enable = false;
+            (case.mutate)(&mut opts);
+
+            let resolved =
+                resolve_metric_batching(&opts, case.external_http_consumers, case.batch_mode);
+
+            assert_eq!(
+                case.expected_prometheus, resolved.prometheus_enabled,
+                "{}",
+                case.name
+            );
+            assert_eq!(case.expected_otlp, resolved.otlp_enabled, "{}", case.name);
+            assert_eq!(case.batch_mode, resolved.batch_mode, "{}", case.name);
+            assert_eq!(
+                case.expected_flush_interval,
+                resolved
+                    .options
+                    .as_ref()
+                    .map(|options| options.flush_interval()),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                case.expected_timeout,
+                effective_http_options(&opts.http, &resolved).timeout,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_metric_batching_invalid_options_disable_all_consumers() {
+        type KnobMutator = fn(&mut FrontendOptions);
+        let cases: [(&str, KnobMutator); 5] = [
+            ("zero flush interval", |opts| {
+                opts.prom_store.pending_rows_flush_interval = Duration::ZERO
+            }),
+            ("zero max batch rows", |opts| {
+                opts.prom_store.max_batch_rows = 0
+            }),
+            ("zero max concurrent flushes", |opts| {
+                opts.prom_store.max_concurrent_flushes = 0
+            }),
+            ("zero worker channel capacity", |opts| {
+                opts.prom_store.worker_channel_capacity = 0
+            }),
+            ("zero max inflight requests", |opts| {
+                opts.prom_store.max_inflight_requests = 0
+            }),
+        ];
+
+        for (name, disable_batcher) in cases {
+            let mut opts = FrontendOptions::default();
+            opts.prom_store.pending_rows_flush_interval = Duration::from_secs(5);
+            opts.otlp.enable_metrics_batching = true;
+            disable_batcher(&mut opts);
+
+            let resolved = resolve_metric_batching(
+                &opts,
+                ExternalMetricHttpConsumers::default(),
+                PendingRowsBatchMode::Synchronous,
+            );
+            assert!(!resolved.prometheus_enabled, "{name}");
+            assert!(!resolved.otlp_enabled, "{name}");
+            assert!(resolved.options.is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_effective_http_timeout_for_enabled_sync_consumers() {
+        let cases = [
+            ("prometheus", true, false, true, true, 6000),
+            ("otlp HTTP", false, true, true, true, 6000),
+            ("otlp Arrow only", false, true, false, true, 1000),
+            ("asynchronous prometheus", true, false, true, false, 1000),
+            (
+                "otlp fallback in asynchronous mode",
+                false,
+                true,
+                true,
+                false,
+                1000,
+            ),
+        ];
+
+        for (name, prom_enable, otlp_batching, otlp_http, batch_sync, expected) in cases {
+            let mut opts = FrontendOptions::default();
+            opts.http.timeout = Duration::from_millis(1000);
+            opts.prom_store.enable = prom_enable;
+            opts.prom_store.pending_rows_flush_interval = Duration::from_millis(5000);
+            opts.otlp.enable = otlp_http;
+            opts.otlp.enable_metrics_batching = otlp_batching;
+
+            assert_eq!(
+                Duration::from_millis(expected),
+                resolved_http_options(
+                    &opts,
+                    if batch_sync {
+                        PendingRowsBatchMode::Synchronous
+                    } else {
+                        PendingRowsBatchMode::Asynchronous
+                    },
+                )
+                .timeout,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_enterprise_otlp_consumer_extends_timeout_with_oss_route_disabled() {
+        let mut opts = FrontendOptions::default();
+        opts.http.timeout = Duration::from_secs(1);
+        opts.prom_store.enable = false;
+        opts.prom_store.pending_rows_flush_interval = Duration::from_secs(5);
+        opts.otlp.enable = false;
+        opts.otlp.enable_metrics_batching = true;
+        let resolved = resolve_metric_batching(
+            &opts,
+            ExternalMetricHttpConsumers {
+                prometheus: false,
+                otlp: true,
+            },
+            PendingRowsBatchMode::Synchronous,
+        );
+
+        assert_eq!(
+            Duration::from_secs(6),
+            effective_http_options(&opts.http, &resolved).timeout
+        );
+        assert!(!opts.otlp.enable);
+        assert!(resolved.otlp_enabled);
+        assert!(resolved.http_batch_consumer_enabled);
     }
 
     #[tokio::test]
@@ -740,5 +1289,60 @@ mod tests {
 
         // Assert
         assert!(health_check.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_services_wires_same_metric_batcher_to_all_enabled_consumers() {
+        let options = FrontendOptions {
+            grpc: GrpcOptions::default().with_bind_addr("127.0.0.1:0"),
+            internal_grpc: Some(GrpcOptions::default().with_bind_addr("127.0.0.1:0")),
+            prom_store: crate::service_config::PromStoreOptions {
+                pending_rows_flush_interval: Duration::from_secs(1),
+                ..Default::default()
+            },
+            otlp: crate::service_config::OtlpOptions {
+                enable_metrics_batching: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let meta_client = Arc::new(
+            MetaClientBuilder::new(0, Role::Frontend)
+                .enable_procedure()
+                .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client)
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let services =
+            Services::new_with_synchronous_metric_batching(options, instance, Default::default());
+        let wiring = services.metric_batcher_wiring.clone();
+
+        let _handlers = services.build().unwrap();
+
+        let wiring = wiring.lock().unwrap();
+        assert_eq!(4, wiring.len());
+        let consumers = [
+            MetricBatchConsumer::PrometheusHttp,
+            MetricBatchConsumer::OtlpHttp,
+            MetricBatchConsumer::ExternalOtelArrow,
+            MetricBatchConsumer::InternalOtelArrow,
+        ];
+        let first = wiring
+            .iter()
+            .find(|(consumer, _)| *consumer == consumers[0])
+            .and_then(|(_, batcher)| batcher.as_ref())
+            .unwrap();
+        for consumer in consumers {
+            let batcher = wiring
+                .iter()
+                .find(|(wired_consumer, _)| *wired_consumer == consumer)
+                .and_then(|(_, batcher)| batcher.as_ref())
+                .unwrap();
+            assert!(Arc::ptr_eq(first, batcher), "{consumer:?}");
+        }
     }
 }

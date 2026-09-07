@@ -22,7 +22,7 @@ use api::v1::meta::Peer;
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
-use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
+use api::v1::{ArrowIpc, ColumnDataType, ColumnSchema, RowInsertRequests, Rows, SemanticType};
 use arrow::array::Array;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
@@ -53,11 +53,13 @@ use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
     FLOW_NOTIFICATION_DROPPED, FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS,
-    FLUSH_TOTAL, PENDING_BATCHES, PENDING_ROWS, PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED,
-    PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS,
+    FLUSH_TOTAL, METRIC_CANCELLED_VALUE, METRIC_FAILURE_VALUE, METRIC_ROW_BATCH_SUBMISSIONS,
+    METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED, METRIC_SUCCESS_VALUE, PENDING_BATCHES,
+    PENDING_ROWS, PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED,
+    PENDING_WORKERS,
 };
 use crate::prom_row_builder::{
-    build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
+    build_metric_create_table_schema_from_proto, identify_missing_columns_from_proto,
     rows_to_aligned_record_batch,
 };
 
@@ -69,9 +71,8 @@ const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 /// before replying to the client (synchronous mode), controlled by the
 /// `PENDING_ROWS_BATCH_SYNC` environment variable and defaulting to `true`.
 ///
-/// Callers that reason about how long a remote write request may block (e.g.
-/// the frontend HTTP timeout fallback) must consult this instead of
-/// duplicating the env lookup.
+/// Startup code must read this once and propagate the resolved mode to batcher
+/// construction and callers that derive timeout behavior.
 pub fn pending_rows_batch_sync_enabled() -> bool {
     std::env::var(PENDING_ROWS_BATCH_SYNC_ENV)
         .ok()
@@ -79,9 +80,113 @@ pub fn pending_rows_batch_sync_enabled() -> bool {
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(true)
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingRowsBatchMode {
+    Synchronous,
+    Asynchronous,
+}
+
+impl PendingRowsBatchMode {
+    pub fn is_synchronous(self) -> bool {
+        matches!(self, Self::Synchronous)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingRowsBatcherTuning {
+    pub flush_interval: Duration,
+    pub max_batch_rows: usize,
+    pub max_concurrent_flushes: usize,
+    pub worker_channel_capacity: usize,
+    pub max_inflight_requests: usize,
+    pub flow_notification_queue_capacity: NonZeroUsize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingRowsBatcherOptions {
+    tuning: PendingRowsBatcherTuning,
+}
+
+impl PendingRowsBatcherOptions {
+    pub fn try_new(tuning: PendingRowsBatcherTuning) -> Option<Self> {
+        if tuning.flush_interval.is_zero()
+            || tuning.max_batch_rows == 0
+            || tuning.max_concurrent_flushes == 0
+            || tuning.worker_channel_capacity == 0
+            || tuning.max_inflight_requests == 0
+        {
+            return None;
+        }
+
+        Some(Self { tuning })
+    }
+
+    pub fn flush_interval(&self) -> Duration {
+        self.tuning.flush_interval
+    }
+}
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
 const MAX_CONCURRENT_FLOW_NOTIFICATIONS: usize = 8;
+
+/// Batches protocol-neutral metric rows for ingestion.
+#[async_trait]
+pub trait MetricRowBatcher: Send + Sync {
+    /// Submits row insert requests and returns the number of accepted rows.
+    async fn submit(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<u64>;
+}
+
+pub type MetricRowBatcherRef = Arc<dyn MetricRowBatcher>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricRowBatchProtocol {
+    Prometheus,
+    Otlp,
+}
+
+impl MetricRowBatchProtocol {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prometheus => "prometheus",
+            Self::Otlp => "otlp",
+        }
+    }
+}
+
+struct WaitFlushResultTimer {
+    started_at: Instant,
+    protocol: MetricRowBatchProtocol,
+    result_label: &'static str,
+}
+
+impl WaitFlushResultTimer {
+    fn start(protocol: MetricRowBatchProtocol) -> Self {
+        Self {
+            started_at: Instant::now(),
+            protocol,
+            result_label: METRIC_CANCELLED_VALUE,
+        }
+    }
+
+    fn finish_with_result(mut self, result_label: &'static str) {
+        self.result_label = result_label;
+    }
+}
+
+impl Drop for WaitFlushResultTimer {
+    fn drop(&mut self) {
+        METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
+            .with_label_values(&[self.protocol.as_str(), self.result_label])
+            .observe(self.started_at.elapsed().as_secs_f64());
+    }
+}
+
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
     /// Batch-create multiple logical tables that are missing.
@@ -97,7 +202,7 @@ pub trait PendingRowsSchemaAlterer: Send + Sync {
 
     /// Batch-alter multiple logical tables to add missing tag columns.
     /// Each entry is `(table_name, missing_column_names)`.
-    async fn add_missing_prom_tag_columns_batch(
+    async fn add_missing_metric_tag_columns_batch(
         &self,
         catalog: &str,
         schema: &str,
@@ -144,6 +249,10 @@ pub trait PhysicalFlushNodeRequester: Send + Sync {
         request: RegionRequest,
     ) -> Result<api::region::RegionResponse>;
 }
+
+type PhysicalFlushCatalogProviderRef = Arc<dyn PhysicalFlushCatalogProvider>;
+type PhysicalFlushPartitionProviderRef = Arc<dyn PhysicalFlushPartitionProvider>;
+type PhysicalFlushNodeRequesterRef = Arc<dyn PhysicalFlushNodeRequester>;
 
 #[derive(Clone)]
 struct CatalogManagerPhysicalFlushAdapter {
@@ -341,83 +450,195 @@ fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
     }
 }
 
-/// Prometheus remote write pending rows batcher.
+/// Returns whether all non-empty inserts in `requests` can use the scalar metric batcher.
+///
+/// Empty inserts are ignored to match [`PendingRowsBatcher::submit`] filtering, and a request
+/// without rows is not batchable. Valid schemas outside the scalar metric shape return `false`,
+/// while malformed scalar row widths or value variants return an error before callers perform DDL.
+pub fn is_scalar_metric_batchable(requests: &RowInsertRequests) -> Result<bool> {
+    let mut has_rows = false;
+    let mut batchable = true;
+
+    for request in &requests.inserts {
+        let Some(rows) = &request.rows else {
+            continue;
+        };
+        if rows.rows.is_empty() {
+            continue;
+        }
+        has_rows = true;
+        if !is_scalar_metric_schema(&rows.schema) {
+            batchable = false;
+            continue;
+        }
+        validate_row_values(&request.table_name, rows)?;
+    }
+
+    Ok(has_rows && batchable)
+}
+
+fn validate_row_values(table_name: &str, rows: &Rows) -> Result<()> {
+    let datatypes = rows
+        .schema
+        .iter()
+        .map(|column| parse_column_datatype(table_name, column))
+        .collect::<Result<Vec<_>>>()?;
+
+    for (row_index, row) in rows.rows.iter().enumerate() {
+        ensure!(
+            row.values.len() == rows.schema.len(),
+            error::InvalidParameterSnafu {
+                reason: format!(
+                    "Column count mismatch in table '{}' row {}, expected {}, got {}",
+                    table_name,
+                    row_index,
+                    rows.schema.len(),
+                    row.values.len()
+                )
+            }
+        );
+
+        for (column_index, (value, datatype)) in row.values.iter().zip(&datatypes).enumerate() {
+            let Some(value_datatype) = api::helper::proto_value_type(value) else {
+                continue;
+            };
+            ensure!(
+                value_datatype == *datatype,
+                error::InvalidParameterSnafu {
+                    reason: format!(
+                        "Value variant mismatch in table '{}' row {}, column '{}' (index {}), expected {:?}, got {:?}",
+                        table_name,
+                        row_index,
+                        rows.schema[column_index].column_name,
+                        column_index,
+                        datatype,
+                        value_datatype
+                    )
+                }
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_column_datatype(table_name: &str, column: &ColumnSchema) -> Result<ColumnDataType> {
+    ColumnDataType::try_from(column.datatype).map_err(|_| {
+        error::InvalidParameterSnafu {
+            reason: format!(
+                "Unknown datatype {} for column '{}' in table '{}'",
+                column.datatype, column.column_name, table_name
+            ),
+        }
+        .build()
+    })
+}
+
+fn is_scalar_metric_schema(schema: &[ColumnSchema]) -> bool {
+    let timestamp_count = schema
+        .iter()
+        .filter(|column| {
+            column.datatype == ColumnDataType::TimestampMillisecond as i32
+                && column.semantic_type == SemanticType::Timestamp as i32
+        })
+        .count();
+    let field_count = schema
+        .iter()
+        .filter(|column| {
+            column.datatype == ColumnDataType::Float64 as i32
+                && column.semantic_type == SemanticType::Field as i32
+        })
+        .count();
+
+    timestamp_count == 1
+        && field_count == 1
+        && schema.iter().all(|column| {
+            (column.datatype == ColumnDataType::TimestampMillisecond as i32
+                && column.semantic_type == SemanticType::Timestamp as i32)
+                || (column.datatype == ColumnDataType::Float64 as i32
+                    && column.semantic_type == SemanticType::Field as i32)
+                || (column.datatype == ColumnDataType::String as i32
+                    && column.semantic_type == SemanticType::Tag as i32)
+        })
+        && schema
+            .iter()
+            .all(|column| column.datatype_extension.is_none())
+}
+
+/// Metric pending rows batcher.
 pub struct PendingRowsBatcher {
     workers: Arc<DashMap<BatchKey, PendingWorker>>,
     flush_interval: Duration,
     max_batch_rows: usize,
-    partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    partition_provider: PhysicalFlushPartitionProviderRef,
+    node_requester: PhysicalFlushNodeRequesterRef,
     catalog_manager: CatalogManagerRef,
+    flush_catalog_provider: PhysicalFlushCatalogProviderRef,
     flow_notification_tx: mpsc::Sender<FlowNotification>,
     flush_semaphore: Arc<Semaphore>,
     inflight_semaphore: Arc<Semaphore>,
     worker_channel_capacity: usize,
-    prom_store_with_metric_engine: bool,
+    with_metric_engine: bool,
     schema_alterer: PendingRowsSchemaAltererRef,
-    pending_rows_batch_sync: bool,
+    batch_mode: PendingRowsBatchMode,
     shutdown: broadcast::Sender<()>,
 }
 
 impl PendingRowsBatcher {
     #[allow(clippy::too_many_arguments)]
-    pub fn try_new(
+    pub fn new(
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         catalog_manager: CatalogManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
-        prom_store_with_metric_engine: bool,
+        with_metric_engine: bool,
         schema_alterer: PendingRowsSchemaAltererRef,
-        flush_interval: Duration,
-        max_batch_rows: usize,
-        max_concurrent_flushes: usize,
-        worker_channel_capacity: usize,
-        max_inflight_requests: usize,
-        flow_notification_queue_capacity: NonZeroUsize,
-    ) -> Option<Arc<Self>> {
-        // Disable the batcher if flush is disabled or configuration is invalid.
-        // Zero values for these knobs either cause panics (e.g., zero-capacity channels)
-        // or deadlocks (e.g., semaphores with no permits).
-        if flush_interval.is_zero()
-            || max_batch_rows == 0
-            || max_concurrent_flushes == 0
-            || worker_channel_capacity == 0
-            || max_inflight_requests == 0
-        {
-            return None;
-        }
-
+        options: PendingRowsBatcherOptions,
+        batch_mode: PendingRowsBatchMode,
+    ) -> Arc<Self> {
         let (shutdown, _) = broadcast::channel(1);
-        let pending_rows_batch_sync = pending_rows_batch_sync_enabled();
         let workers = Arc::new(DashMap::new());
         PENDING_WORKERS.set(workers.len() as i64);
         let (flow_notification_tx, flow_notification_rx) =
-            mpsc::channel(flow_notification_queue_capacity.get());
+            mpsc::channel(options.tuning.flow_notification_queue_capacity.get());
         start_flow_notification_worker(
             flow_notification_rx,
             table_flownode_set_cache,
             node_manager.clone(),
         );
 
-        Some(Arc::new(Self {
+        Arc::new(Self {
             workers,
-            flush_interval,
-            max_batch_rows,
-            partition_manager,
-            node_manager,
+            flush_interval: options.tuning.flush_interval,
+            max_batch_rows: options.tuning.max_batch_rows,
+            partition_provider: Arc::new(PartitionManagerPhysicalFlushAdapter {
+                partition_manager,
+            }),
+            node_requester: Arc::new(NodeManagerPhysicalFlushAdapter { node_manager }),
+            flush_catalog_provider: Arc::new(CatalogManagerPhysicalFlushAdapter {
+                catalog_manager: catalog_manager.clone(),
+            }),
             catalog_manager,
             flow_notification_tx,
-            prom_store_with_metric_engine,
+            with_metric_engine,
             schema_alterer,
-            flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
-            inflight_semaphore: Arc::new(Semaphore::new(max_inflight_requests)),
-            worker_channel_capacity,
-            pending_rows_batch_sync,
+            flush_semaphore: Arc::new(Semaphore::new(options.tuning.max_concurrent_flushes)),
+            inflight_semaphore: Arc::new(Semaphore::new(options.tuning.max_inflight_requests)),
+            worker_channel_capacity: options.tuning.worker_channel_capacity,
+            batch_mode,
             shutdown,
-        }))
+        })
     }
 
-    pub async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
+    pub async fn submit(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<u64> {
+        METRIC_ROW_BATCH_SUBMISSIONS
+            .with_label_values(&[protocol.as_str()])
+            .inc();
         let (table_batches, total_rows) = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["submit_build_and_align"])
@@ -479,18 +700,23 @@ impl PendingRowsBatcher {
             }
         }
 
-        if self.pending_rows_batch_sync {
-            let result = {
+        if self.batch_mode.is_synchronous() {
+            let wait_timer = WaitFlushResultTimer::start(protocol);
+            let flush_result = {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                     .with_label_values(&["submit_wait_flush_result"])
                     .start_timer();
                 response_rx
                     .await
-                    .map_err(|_| error::BatcherChannelClosedSnafu.build())?
+                    .map_err(|_| error::BatcherChannelClosedSnafu.build())
+                    .and_then(|waiter_result| waiter_result.context(error::SubmitBatchSnafu))
             };
-            result
-                .context(error::SubmitBatchSnafu)
-                .map(|()| total_rows as u64)
+            wait_timer.finish_with_result(if flush_result.is_ok() {
+                METRIC_SUCCESS_VALUE
+            } else {
+                METRIC_FAILURE_VALUE
+            });
+            flush_result.map(|()| total_rows as u64)
         } else {
             Ok(total_rows as u64)
         }
@@ -633,7 +859,7 @@ impl PendingRowsBatcher {
                     let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                         .with_label_values(&["align_build_create_table_schema"])
                         .start_timer();
-                    build_prom_create_table_schema_from_proto(rows_schema)?
+                    build_metric_create_table_schema_from_proto(rows_schema)?
                 };
                 plan.tables_to_create
                     .push(((*table_name).to_string(), request_schema));
@@ -672,7 +898,7 @@ impl PendingRowsBatcher {
                     catalog,
                     schema,
                     &create_refs,
-                    self.prom_store_with_metric_engine,
+                    self.with_metric_engine,
                     ctx.clone(),
                 )
                 .await?;
@@ -771,7 +997,7 @@ impl PendingRowsBatcher {
                 .with_label_values(&["align_batch_add_missing_columns"])
                 .start_timer();
             self.schema_alterer
-                .add_missing_prom_tag_columns_batch(catalog, schema, &alter_refs, ctx.clone())
+                .add_missing_metric_tag_columns_batch(catalog, schema, &alter_refs, ctx.clone())
                 .await?;
         }
 
@@ -868,16 +1094,17 @@ impl PendingRowsBatcher {
             .flush_interval
             .checked_mul(WORKER_IDLE_TIMEOUT_MULTIPLIER)
             .unwrap_or(self.flush_interval);
+        let shutdown_rx = self.shutdown.subscribe();
 
         start_worker(
             key,
             worker.tx.clone(),
             self.workers.clone(),
             rx,
-            self.shutdown.clone(),
-            self.partition_manager.clone(),
-            self.node_manager.clone(),
-            self.catalog_manager.clone(),
+            shutdown_rx,
+            self.partition_provider.clone(),
+            self.node_requester.clone(),
+            self.flush_catalog_provider.clone(),
             self.flow_notification_tx.clone(),
             self.flush_interval,
             worker_idle_timeout,
@@ -886,6 +1113,18 @@ impl PendingRowsBatcher {
         );
 
         worker
+    }
+}
+
+#[async_trait]
+impl MetricRowBatcher for PendingRowsBatcher {
+    async fn submit(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<u64> {
+        PendingRowsBatcher::submit(self, requests, ctx, protocol).await
     }
 }
 
@@ -930,10 +1169,10 @@ fn start_worker(
     worker_tx: mpsc::Sender<WorkerCommand>,
     workers: Arc<DashMap<BatchKey, PendingWorker>>,
     mut rx: mpsc::Receiver<WorkerCommand>,
-    shutdown: broadcast::Sender<()>,
-    partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
-    catalog_manager: CatalogManagerRef,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    partition_provider: PhysicalFlushPartitionProviderRef,
+    node_requester: PhysicalFlushNodeRequesterRef,
+    catalog_provider: PhysicalFlushCatalogProviderRef,
     flow_notification_tx: mpsc::Sender<FlowNotification>,
     flush_interval: Duration,
     worker_idle_timeout: Duration,
@@ -944,13 +1183,13 @@ fn start_worker(
         let mut batch = None;
         let flush_timer = tokio::time::sleep(flush_interval);
         tokio::pin!(flush_timer);
-        let mut shutdown_rx = shutdown.subscribe();
         let idle_deadline = tokio::time::Instant::now() + worker_idle_timeout;
         let idle_timer = tokio::time::sleep_until(idle_deadline);
         tokio::pin!(idle_timer);
 
         loop {
             tokio::select! {
+                biased;
                 cmd = rx.recv() => {
                     match cmd {
                         Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
@@ -981,9 +1220,9 @@ fn start_worker(
                                 && let Some(flush) = drain_batch(&mut batch) {
                                     spawn_flush(
                                         flush,
-                                        partition_manager.clone(),
-                                        node_manager.clone(),
-                                        catalog_manager.clone(),
+                                        partition_provider.clone(),
+                                        node_requester.clone(),
+                                        catalog_provider.clone(),
                                         flow_notification_tx.clone(),
                                         flush_semaphore.clone(),
                                     ).await;
@@ -991,11 +1230,11 @@ fn start_worker(
                         }
                         None => {
                             if let Some(flush) = drain_batch(&mut batch) {
-                                flush_batch_with_managers(
+                                flush_batch(
                                     flush,
-                                    partition_manager.clone(),
-                                    node_manager.clone(),
-                                    catalog_manager.clone(),
+                                    partition_provider.as_ref(),
+                                    node_requester.as_ref(),
+                                    catalog_provider.as_ref(),
                                     flow_notification_tx.clone(),
                                 ).await;
                             }
@@ -1030,9 +1269,9 @@ fn start_worker(
                     if let Some(flush) = drain_batch(&mut batch) {
                         spawn_flush(
                             flush,
-                            partition_manager.clone(),
-                            node_manager.clone(),
-                            catalog_manager.clone(),
+                            partition_provider.clone(),
+                            node_requester.clone(),
+                            catalog_provider.clone(),
                             flow_notification_tx.clone(),
                             flush_semaphore.clone(),
                         ).await;
@@ -1040,11 +1279,11 @@ fn start_worker(
                 }
                 _ = shutdown_rx.recv() => {
                     if let Some(flush) = drain_batch(&mut batch) {
-                        flush_batch_with_managers(
+                        flush_batch(
                             flush,
-                            partition_manager.clone(),
-                            node_manager.clone(),
-                            catalog_manager.clone(),
+                            partition_provider.as_ref(),
+                            node_requester.as_ref(),
+                            catalog_provider.as_ref(),
                             flow_notification_tx.clone(),
                         ).await;
                     }
@@ -1103,9 +1342,9 @@ fn drain_batch(batch: &mut Option<PendingBatch>) -> Option<FlushBatch> {
 
 async fn spawn_flush(
     flush: FlushBatch,
-    partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
-    catalog_manager: CatalogManagerRef,
+    partition_provider: PhysicalFlushPartitionProviderRef,
+    node_requester: PhysicalFlushNodeRequesterRef,
+    catalog_provider: PhysicalFlushCatalogProviderRef,
     flow_notification_tx: mpsc::Sender<FlowNotification>,
     semaphore: Arc<Semaphore>,
 ) {
@@ -1113,11 +1352,11 @@ async fn spawn_flush(
         Ok(permit) => {
             tokio::spawn(async move {
                 let _permit = permit;
-                flush_batch_with_managers(
+                flush_batch(
                     flush,
-                    partition_manager,
-                    node_manager,
-                    catalog_manager,
+                    partition_provider.as_ref(),
+                    node_requester.as_ref(),
+                    catalog_provider.as_ref(),
                     flow_notification_tx,
                 )
                 .await;
@@ -1125,11 +1364,11 @@ async fn spawn_flush(
         }
         Err(err) => {
             warn!(err; "Flush semaphore closed, flushing inline");
-            flush_batch_with_managers(
+            flush_batch(
                 flush,
-                partition_manager,
-                node_manager,
-                catalog_manager,
+                partition_provider.as_ref(),
+                node_requester.as_ref(),
+                catalog_provider.as_ref(),
                 flow_notification_tx,
             )
             .await;
@@ -1315,28 +1554,6 @@ async fn flush_region_writes_concurrently(
         .into_iter()
         .sum();
     Ok(affected_rows)
-}
-
-async fn flush_batch_with_managers(
-    flush: FlushBatch,
-    partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
-    catalog_manager: CatalogManagerRef,
-    flow_notification_tx: mpsc::Sender<FlowNotification>,
-) {
-    let partition_provider = PartitionManagerPhysicalFlushAdapter { partition_manager };
-    let node_requester = NodeManagerPhysicalFlushAdapter {
-        node_manager: node_manager.clone(),
-    };
-    let catalog_provider = CatalogManagerPhysicalFlushAdapter { catalog_manager };
-    flush_batch(
-        flush,
-        &partition_provider,
-        &node_requester,
-        &catalog_provider,
-        flow_notification_tx,
-    )
-    .await;
 }
 
 async fn flush_batch(
@@ -1876,6 +2093,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use api::helper::ColumnDataTypeWrapper;
     use api::region::RegionResponse;
     use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
     use api::v1::meta::Peer;
@@ -1883,7 +2101,7 @@ mod tests {
     use api::v1::value::ValueData;
     use api::v1::{
         ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-        Value,
+        StructValue, Value,
     };
     use arrow::array::{BinaryArray, BooleanArray, StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
@@ -1907,6 +2125,7 @@ mod tests {
         BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
         PutResponse, RangeRequest, RangeResponse,
     };
+    use common_query::native_histogram::native_histogram_column_schema;
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use dashmap::DashMap;
@@ -1920,24 +2139,30 @@ mod tests {
     use snafu::ResultExt;
     use store_api::storage::RegionId;
     use table::metadata::TableId;
+    use table::test_util::EmptyTable;
     use table::test_util::table_info::test_table_info;
     use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot};
     use tokio::time::{advance, sleep};
 
     use super::{
-        BatchKey, Error, FlushBatch, FlushRegionWrite, FlushWaiter, PendingBatch,
-        PendingRowsBatcher, PendingWorker, PhysicalFlushCatalogProvider,
-        PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
-        PlannedRegionBatch, RecordBatchWithTsIdx, ResolvedRegionBatch, TableBatch, WorkerCommand,
-        columns_taxonomy, drain_batch, encode_region_write_requests, extract_timestamps,
-        flush_batch, flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
-        notify_flow_dirty_windows_after_flush, plan_region_batches, remove_worker_if_same_channel,
-        should_close_worker_on_idle_timeout, should_dispatch_concurrently,
-        start_flow_notification_worker, start_worker, strip_partition_columns_from_batch,
-        transform_logical_batches_to_physical, try_enqueue_flow_notification,
+        BatchKey, Error, FlushBatch, FlushRegionWrite, FlushWaiter, MetricRowBatchProtocol,
+        PendingBatch, PendingRowsBatchMode, PendingRowsBatcher, PendingRowsSchemaAlterer,
+        PendingWorker, PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester,
+        PhysicalFlushPartitionProvider, PhysicalTableMetadata, PlannedRegionBatch,
+        RecordBatchWithTsIdx, ResolvedRegionBatch, TableBatch, WorkerCommand, columns_taxonomy,
+        drain_batch, encode_region_write_requests, extract_timestamps, flush_batch,
+        flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
+        is_scalar_metric_batchable, notify_flow_dirty_windows_after_flush, plan_region_batches,
+        remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
+        should_dispatch_concurrently, start_flow_notification_worker, start_worker,
+        strip_partition_columns_from_batch, transform_logical_batches_to_physical,
+        try_enqueue_flow_notification,
     };
     use crate::error;
-    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
+    use crate::metrics::{
+        FLOW_NOTIFICATION_DROPPED, METRIC_FAILURE_VALUE, METRIC_ROW_BATCH_SUBMISSIONS,
+        METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED, METRIC_SUCCESS_VALUE,
+    };
     use crate::prom_row_builder::rows_to_aligned_record_batch;
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
@@ -1948,6 +2173,220 @@ mod tests {
             }],
             rows: (0..row_count).map(|_| Row { values: vec![] }).collect(),
         }
+    }
+
+    fn scalar_insert(table_name: &str) -> RowInsertRequest {
+        RowInsertRequest {
+            table_name: table_name.to_string(),
+            rows: Some(Rows {
+                schema: vec![
+                    ColumnSchema {
+                        column_name: "ts".to_string(),
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        semantic_type: SemanticType::Timestamp as i32,
+                        ..Default::default()
+                    },
+                    ColumnSchema {
+                        column_name: "value".to_string(),
+                        datatype: ColumnDataType::Float64 as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        ..Default::default()
+                    },
+                    ColumnSchema {
+                        column_name: "host".to_string(),
+                        datatype: ColumnDataType::String as i32,
+                        semantic_type: SemanticType::Tag as i32,
+                        ..Default::default()
+                    },
+                ],
+                rows: vec![Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(1.0)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue("host-1".to_string())),
+                        },
+                    ],
+                }],
+            }),
+        }
+    }
+
+    fn scalar_request() -> RowInsertRequests {
+        RowInsertRequests {
+            inserts: vec![scalar_insert("cpu")],
+        }
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_accepts_ordinary_table() {
+        assert!(is_scalar_metric_batchable(&scalar_request()).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_accepts_multiple_logical_tables() {
+        let requests = RowInsertRequests {
+            inserts: vec![scalar_insert("cpu"), scalar_insert("memory")],
+        };
+
+        assert!(is_scalar_metric_batchable(&requests).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_rejects_native_histogram() {
+        let mut requests = scalar_request();
+        let rows = requests.inserts[0].rows.as_mut().unwrap();
+        rows.schema[1] = native_histogram_column_schema().unwrap();
+        rows.rows[0].values[1].value_data = Some(ValueData::StructValue(StructValue::default()));
+
+        assert!(!is_scalar_metric_batchable(&requests).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_rejects_datatype_extension() {
+        let mut requests = scalar_request();
+        requests.inserts[0].rows.as_mut().unwrap().schema[1].datatype_extension =
+            Some(Default::default());
+
+        assert!(!is_scalar_metric_batchable(&requests).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_rejects_multiple_fields() {
+        let mut requests = scalar_request();
+        let rows = requests.inserts[0].rows.as_mut().unwrap();
+        rows.schema.push(ColumnSchema {
+            column_name: "another_value".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        });
+        rows.rows[0].values.push(Value {
+            value_data: Some(ValueData::F64Value(2.0)),
+        });
+
+        assert!(!is_scalar_metric_batchable(&requests).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_rejects_non_string_tag() {
+        let mut requests = scalar_request();
+        let rows = requests.inserts[0].rows.as_mut().unwrap();
+        rows.schema[2].datatype = ColumnDataType::Int64 as i32;
+        rows.rows[0].values[2].value_data = Some(ValueData::I64Value(1));
+
+        assert!(!is_scalar_metric_batchable(&requests).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_falls_back_for_vector_binary_value() {
+        let mut requests = scalar_request();
+        let rows = requests.inserts[0].rows.as_mut().unwrap();
+        let (datatype, datatype_extension) = ColumnDataTypeWrapper::vector_datatype(3).into_parts();
+        rows.schema[2].datatype = datatype as i32;
+        rows.schema[2].datatype_extension = datatype_extension;
+        rows.rows[0].values[2].value_data = Some(ValueData::BinaryValue(vec![0; 12]));
+
+        assert!(!is_scalar_metric_batchable(&requests).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_checks_malformed_scalar_after_unsupported_insert() {
+        let mut vector = scalar_insert("vector");
+        let vector_rows = vector.rows.as_mut().unwrap();
+        let (datatype, datatype_extension) = ColumnDataTypeWrapper::vector_datatype(3).into_parts();
+        vector_rows.schema[2].datatype = datatype as i32;
+        vector_rows.schema[2].datatype_extension = datatype_extension;
+        vector_rows.rows[0].values[2].value_data = Some(ValueData::BinaryValue(vec![0; 12]));
+
+        let mut malformed = scalar_insert("malformed");
+        malformed.rows.as_mut().unwrap().rows[0].values.pop();
+        let requests = RowInsertRequests {
+            inserts: vec![vector, malformed],
+        };
+
+        assert!(is_scalar_metric_batchable(&requests).is_err());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_rejects_non_millisecond_timestamp() {
+        let mut requests = scalar_request();
+        let rows = requests.inserts[0].rows.as_mut().unwrap();
+        rows.schema[0].datatype = ColumnDataType::TimestampNanosecond as i32;
+        rows.rows[0].values[0].value_data = Some(ValueData::TimestampNanosecondValue(1_000_000));
+
+        assert!(!is_scalar_metric_batchable(&requests).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_rejects_missing_timestamp_or_value() {
+        for missing_index in [0, 1] {
+            let mut requests = scalar_request();
+            let rows = requests.inserts[0].rows.as_mut().unwrap();
+            rows.schema.remove(missing_index);
+            rows.rows[0].values.remove(missing_index);
+
+            assert!(!is_scalar_metric_batchable(&requests).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_rejects_wrong_semantic_types() {
+        for (column_index, semantic_type) in [
+            (0, SemanticType::Tag),
+            (1, SemanticType::Tag),
+            (2, SemanticType::Field),
+        ] {
+            let mut requests = scalar_request();
+            requests.inserts[0].rows.as_mut().unwrap().schema[column_index].semantic_type =
+                semantic_type as i32;
+
+            assert!(!is_scalar_metric_batchable(&requests).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_errors_on_row_width_mismatch() {
+        let mut requests = scalar_request();
+        requests.inserts[0].rows.as_mut().unwrap().rows[0]
+            .values
+            .pop();
+
+        assert!(is_scalar_metric_batchable(&requests).is_err());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_errors_on_value_variant_mismatch() {
+        let mut requests = scalar_request();
+        requests.inserts[0].rows.as_mut().unwrap().rows[0].values[2].value_data =
+            Some(ValueData::BoolValue(true));
+
+        assert!(is_scalar_metric_batchable(&requests).is_err());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_accepts_null_cell() {
+        let mut requests = scalar_request();
+        requests.inserts[0].rows.as_mut().unwrap().rows[0].values[1].value_data = None;
+
+        assert!(is_scalar_metric_batchable(&requests).unwrap());
+    }
+
+    #[test]
+    fn test_scalar_metric_batchability_treats_empty_requests_as_not_batchable() {
+        assert!(!is_scalar_metric_batchable(&RowInsertRequests::default()).unwrap());
+
+        let requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "empty".to_string(),
+                rows: Some(Rows::default()),
+            }],
+        };
+        assert!(!is_scalar_metric_batchable(&requests).unwrap());
     }
 
     fn mock_tag_batch(tag_name: &str, tag_value: &str, ts: i64, val: f64) -> RecordBatch {
@@ -2344,6 +2783,26 @@ mod tests {
         }
     }
 
+    struct BlockingFlushNodeRequester {
+        write_started_tx: Mutex<Option<oneshot::Sender<()>>>,
+        write_release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl PhysicalFlushNodeRequester for BlockingFlushNodeRequester {
+        async fn handle(
+            &self,
+            _peer: &Peer,
+            _request: RegionRequest,
+        ) -> error::Result<RegionResponse> {
+            if let Some(write_started_tx) = self.write_started_tx.lock().unwrap().take() {
+                let _ = write_started_tx.send(());
+            }
+            self.write_release.notified().await;
+            Ok(RegionResponse::new(0))
+        }
+    }
+
     #[test]
     fn test_collect_non_empty_table_rows_filters_empty_payloads() {
         let requests = RowInsertRequests {
@@ -2402,6 +2861,328 @@ mod tests {
         assert_eq!(1, flush.table_batches.len());
         assert_eq!(ctx.get_db_string(), flush.db_string);
         assert_eq!(ctx.current_catalog(), flush.ctx.current_catalog());
+    }
+
+    #[tokio::test]
+    async fn test_immediate_final_owner_drop_drains_worker_once_and_notifies_all_waiters() {
+        let ctx = session::context::QueryContext::arc();
+        let (first_response_tx, first_response_rx) = oneshot::channel();
+        let (second_response_tx, second_response_rx) = oneshot::channel();
+        let semaphore = Arc::new(Semaphore::new(2));
+        let first_permit = semaphore.clone().try_acquire_owned().unwrap();
+        let second_permit = semaphore.clone().try_acquire_owned().unwrap();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let (flow_notification_tx, _flow_notification_rx) = mpsc::channel(1);
+        let (shutdown, _) = tokio::sync::broadcast::channel(1);
+        let batcher = Arc::new(PendingRowsBatcher {
+            workers: Arc::new(DashMap::new()),
+            flush_interval: Duration::from_secs(60),
+            max_batch_rows: 100,
+            partition_provider: Arc::new(MockFlushPartitionProvider {
+                partition_rule_calls: Arc::new(AtomicUsize::new(0)),
+                region_leader_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            node_requester: Arc::new(MockFlushNodeRequester {
+                writes: writes.clone(),
+                fail: false,
+            }),
+            catalog_manager: MemoryCatalogManager::with_default_setup(),
+            flush_catalog_provider: Arc::new(MockFlushCatalogProvider {
+                table: Some(mock_physical_table_metadata(1024)),
+            }),
+            flow_notification_tx,
+            flush_semaphore: Arc::new(Semaphore::new(1)),
+            inflight_semaphore: semaphore,
+            worker_channel_capacity: 2,
+            with_metric_engine: true,
+            schema_alterer: Arc::new(NoopSchemaAlterer),
+            batch_mode: PendingRowsBatchMode::Synchronous,
+            shutdown,
+        });
+        let worker = batcher.get_or_spawn_worker(BatchKey {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            physical_table: "phy".to_string(),
+        });
+        for (timestamp, response_tx, permit) in [
+            (1000, first_response_tx, first_permit),
+            (2000, second_response_tx, second_permit),
+        ] {
+            worker
+                .tx
+                .try_send(WorkerCommand::Submit {
+                    table_batches: vec![(
+                        "cpu".to_string(),
+                        42,
+                        mock_aligned_tag_batch("tag1", "host-1", timestamp, 1.0),
+                    )],
+                    total_rows: 1,
+                    ctx: ctx.clone(),
+                    response_tx,
+                    _permit: permit,
+                })
+                .unwrap();
+        }
+
+        let consumers = [
+            batcher.clone(),
+            batcher.clone(),
+            batcher.clone(),
+            batcher.clone(),
+        ];
+        drop(consumers);
+        assert_eq!(1, Arc::strong_count(&batcher));
+        assert_eq!(0, writes.load(Ordering::SeqCst));
+
+        drop(batcher);
+
+        let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(first_response_rx, second_response_rx)
+        })
+        .await
+        .unwrap();
+        assert!(first_result.unwrap().is_ok());
+        assert!(second_result.unwrap().is_ok());
+        assert_eq!(1, writes.load(Ordering::SeqCst));
+    }
+
+    struct NoopSchemaAlterer;
+
+    #[async_trait]
+    impl PendingRowsSchemaAlterer for NoopSchemaAlterer {
+        async fn create_tables_if_missing_batch(
+            &self,
+            _catalog: &str,
+            _schema: &str,
+            _tables: &[(&str, &[ColumnSchema])],
+            _with_metric_engine: bool,
+            _ctx: session::context::QueryContextRef,
+        ) -> error::Result<()> {
+            Ok(())
+        }
+
+        async fn add_missing_metric_tag_columns_batch(
+            &self,
+            _catalog: &str,
+            _schema: &str,
+            _tables: &[(&str, &[String])],
+            _ctx: session::context::QueryContextRef,
+        ) -> error::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn synchronous_submit_request() -> RowInsertRequests {
+        let mut requests = scalar_request();
+        requests.inserts[0].rows.as_mut().unwrap().schema[2].column_name = "tag1".to_string();
+        requests
+    }
+
+    fn test_synchronous_submit_batcher(
+        node_requester: Arc<dyn PhysicalFlushNodeRequester>,
+    ) -> Arc<PendingRowsBatcher> {
+        let schema = Arc::new(
+            DtSchema::try_new(vec![
+                DtColumnSchema::new(
+                    "ts",
+                    datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                DtColumnSchema::new(
+                    "value",
+                    datatypes::prelude::ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+                DtColumnSchema::new(
+                    "tag1",
+                    datatypes::prelude::ConcreteDataType::string_datatype(),
+                    true,
+                ),
+            ])
+            .unwrap(),
+        );
+        let table_info = test_table_info(42, "cpu", "public", "greptime", schema);
+        let catalog_manager =
+            MemoryCatalogManager::new_with_table(EmptyTable::from_table_info(&table_info));
+        let (flow_notification_tx, _flow_notification_rx) = mpsc::channel(1);
+        let (shutdown, _) = tokio::sync::broadcast::channel(1);
+
+        Arc::new(PendingRowsBatcher {
+            workers: Arc::new(DashMap::new()),
+            flush_interval: Duration::from_secs(60),
+            max_batch_rows: 1,
+            partition_provider: Arc::new(MockFlushPartitionProvider {
+                partition_rule_calls: Arc::new(AtomicUsize::new(0)),
+                region_leader_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            node_requester,
+            catalog_manager,
+            flush_catalog_provider: Arc::new(MockFlushCatalogProvider {
+                table: Some(mock_physical_table_metadata(1024)),
+            }),
+            flow_notification_tx,
+            flush_semaphore: Arc::new(Semaphore::new(1)),
+            inflight_semaphore: Arc::new(Semaphore::new(1)),
+            worker_channel_capacity: 1,
+            with_metric_engine: true,
+            schema_alterer: Arc::new(NoopSchemaAlterer),
+            batch_mode: PendingRowsBatchMode::Synchronous,
+            shutdown,
+        })
+    }
+
+    fn test_successful_synchronous_submit_batcher() -> (Arc<PendingRowsBatcher>, Arc<AtomicUsize>) {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let node_requester = Arc::new(MockFlushNodeRequester {
+            writes: writes.clone(),
+            fail: false,
+        });
+        (test_synchronous_submit_batcher(node_requester), writes)
+    }
+
+    fn test_failing_synchronous_submit_batcher() -> (Arc<PendingRowsBatcher>, Arc<AtomicUsize>) {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let node_requester = Arc::new(MockFlushNodeRequester {
+            writes: writes.clone(),
+            fail: true,
+        });
+        (test_synchronous_submit_batcher(node_requester), writes)
+    }
+
+    static METRIC_ASSERTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn test_synchronous_submit_records_failed_flush_by_protocol() {
+        let _guard = METRIC_ASSERTION_LOCK.lock().await;
+
+        for protocol in [
+            MetricRowBatchProtocol::Prometheus,
+            MetricRowBatchProtocol::Otlp,
+        ] {
+            let failed_wait = METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
+                .with_label_values(&[protocol.as_str(), METRIC_FAILURE_VALUE]);
+            let initial_failed_waits = failed_wait.get_sample_count();
+            let (batcher, writes) = test_failing_synchronous_submit_batcher();
+
+            assert!(
+                batcher
+                    .submit(
+                        synchronous_submit_request(),
+                        session::context::QueryContext::arc(),
+                        protocol,
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(1, writes.load(Ordering::SeqCst));
+            assert_eq!(initial_failed_waits + 1, failed_wait.get_sample_count());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_synchronous_submit_records_each_protocol_submission() {
+        let _guard = METRIC_ASSERTION_LOCK.lock().await;
+
+        for protocol in [
+            MetricRowBatchProtocol::Prometheus,
+            MetricRowBatchProtocol::Otlp,
+        ] {
+            let submissions = METRIC_ROW_BATCH_SUBMISSIONS.with_label_values(&[protocol.as_str()]);
+            let initial_submissions = submissions.get();
+            let (batcher, writes) = test_successful_synchronous_submit_batcher();
+
+            assert_eq!(
+                1,
+                batcher
+                    .submit(
+                        synchronous_submit_request(),
+                        session::context::QueryContext::arc(),
+                        protocol,
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(1, writes.load(Ordering::SeqCst));
+            assert_eq!(initial_submissions + 1, submissions.get());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_synchronous_submit_records_successful_wait_by_protocol() {
+        let _guard = METRIC_ASSERTION_LOCK.lock().await;
+
+        for protocol in [
+            MetricRowBatchProtocol::Prometheus,
+            MetricRowBatchProtocol::Otlp,
+        ] {
+            let successful_wait = METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
+                .with_label_values(&[protocol.as_str(), METRIC_SUCCESS_VALUE]);
+            let initial_successful_waits = successful_wait.get_sample_count();
+            let (batcher, writes) = test_successful_synchronous_submit_batcher();
+
+            assert_eq!(
+                1,
+                batcher
+                    .submit(
+                        synchronous_submit_request(),
+                        session::context::QueryContext::arc(),
+                        protocol,
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(1, writes.load(Ordering::SeqCst));
+            assert_eq!(
+                initial_successful_waits + 1,
+                successful_wait.get_sample_count()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_synchronous_submit_records_only_cancelled_wait() {
+        let _guard = METRIC_ASSERTION_LOCK.lock().await;
+        let protocol = MetricRowBatchProtocol::Otlp;
+        let cancelled_wait = METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
+            .with_label_values(&[protocol.as_str(), "cancelled"]);
+        let successful_wait = METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
+            .with_label_values(&[protocol.as_str(), METRIC_SUCCESS_VALUE]);
+        let failed_wait = METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED
+            .with_label_values(&[protocol.as_str(), METRIC_FAILURE_VALUE]);
+        let initial_cancelled_waits = cancelled_wait.get_sample_count();
+        let initial_successful_waits = successful_wait.get_sample_count();
+        let initial_failed_waits = failed_wait.get_sample_count();
+        let (write_started_tx, write_started_rx) = oneshot::channel();
+        let write_release = Arc::new(Notify::new());
+        let batcher = test_synchronous_submit_batcher(Arc::new(BlockingFlushNodeRequester {
+            write_started_tx: Mutex::new(Some(write_started_tx)),
+            write_release: write_release.clone(),
+        }));
+
+        let submit_task = tokio::spawn(async move {
+            batcher
+                .submit(
+                    synchronous_submit_request(),
+                    session::context::QueryContext::arc(),
+                    protocol,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), write_started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        submit_task.abort();
+        assert!(submit_task.await.unwrap_err().is_cancelled());
+
+        assert_eq!(
+            initial_cancelled_waits + 1,
+            cancelled_wait.get_sample_count()
+        );
+        assert_eq!(initial_successful_waits, successful_wait.get_sample_count());
+        assert_eq!(initial_failed_waits, failed_wait.get_sample_count());
+        write_release.notify_one();
     }
 
     #[test]

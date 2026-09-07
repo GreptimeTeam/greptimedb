@@ -20,6 +20,13 @@ const DEFAULT_TRACE_INGEST_CHUNK_SIZE: usize = 512;
 #[serde(default)]
 pub struct OtlpOptions {
     pub enable: bool,
+    /// Enables pending-row batching for eligible OTLP metrics over HTTP and OTel Arrow.
+    ///
+    /// Disabled by default. Batching requires Metric Engine, valid nonzero
+    /// `prom_store.pending_rows_*` tuning, and synchronous pending-row mode.
+    /// Requests fall back to the Inserter when these conditions are not met or
+    /// when the converted rows are not scalar metrics supported by the batcher.
+    pub enable_metrics_batching: bool,
     pub experimental_enable_exponential_histogram: bool,
     /// Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
     pub trace_ingest_chunk_size: usize,
@@ -34,6 +41,7 @@ impl Default for OtlpOptions {
     fn default() -> Self {
         Self {
             enable: true,
+            enable_metrics_batching: false,
             experimental_enable_exponential_histogram: false,
             trace_ingest_chunk_size: DEFAULT_TRACE_INGEST_CHUNK_SIZE,
             experimental_enable_resource_info: false,
@@ -49,12 +57,14 @@ mod tests {
     fn test_otlp_options() {
         let default = OtlpOptions::default();
         assert!(default.enable);
+        assert!(!default.enable_metrics_batching);
         assert!(!default.experimental_enable_exponential_histogram);
         assert_eq!(default.trace_ingest_chunk_size, 512);
         assert!(!default.experimental_enable_resource_info);
 
         let options: OtlpOptions = toml::from_str("enable = false").unwrap();
         assert!(!options.enable);
+        assert!(!options.enable_metrics_batching);
         assert!(!options.experimental_enable_exponential_histogram);
         assert_eq!(
             options.trace_ingest_chunk_size,
@@ -71,7 +81,12 @@ mod tests {
         assert!(options.experimental_enable_exponential_histogram);
 
         let serialized = toml::to_string(&options).unwrap();
+        assert!(serialized.contains("enable_metrics_batching = false"));
         assert!(serialized.contains("experimental_enable_exponential_histogram = true"));
         assert_eq!(toml::from_str::<OtlpOptions>(&serialized).unwrap(), options);
+
+        let options: OtlpOptions = toml::from_str("enable_metrics_batching = true").unwrap();
+        assert!(options.enable_metrics_batching);
+        assert!(options.enable);
     }
 }

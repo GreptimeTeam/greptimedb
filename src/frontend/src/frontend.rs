@@ -222,6 +222,7 @@ mod tests {
     fn test_toml() {
         let opts = FrontendOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
+        assert!(toml_string.contains("enable_metrics_batching = false"));
         assert!(toml_string.contains("experimental_enable_exponential_histogram = false"));
         let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
         assert_eq!(parsed.otlp, opts.otlp);

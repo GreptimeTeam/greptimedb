@@ -80,7 +80,8 @@ use table::table_name::TableName;
 use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
-    setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
+    setup_test_http_app_with_frontend_and_user_provider,
+    setup_test_otlp_metrics_app_with_frontend_batched, setup_test_prom_app_with_frontend,
     setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
 };
 use urlencoding::encode;
@@ -2731,7 +2732,6 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
         r#"[["{\"protocol\":\"prometheus\",\"reason\":\"auto_alter\"}"]]"#,
     )
     .await;
-
     guard.remove_all().await;
 }
 
@@ -6963,6 +6963,194 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
          ('malformed_delta_histogram_bucket', 'malformed_delta_histogram_sum', \
           'malformed_delta_histogram_count');",
         "[[0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+async fn send_otlp_metrics_json(client: &TestClient, content: &str) -> TestResponse {
+    let request: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    send_req(
+        client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-translation-strategy"),
+                HeaderValue::from_static("NoTranslation"),
+            ),
+        ],
+        "/v1/otlp/v1/metrics",
+        request.encode_to_vec(),
+        false,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_otlp_metrics_batching_flushes_multiple_small_requests() {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_otlp_metrics_app_with_frontend_batched(
+        StorageType::File,
+        "test_otlp_metrics_batching_flushes_multiple_small_requests",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+    let responses = tokio::join!(
+        send_otlp_metrics_json(
+            &client,
+            r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"task6_gauge","unit":"1","gauge":{"dataPoints":[{"timeUnixNano":"1000000","asDouble":1.25}]}}]}]}]}"#,
+        ),
+        send_otlp_metrics_json(
+            &client,
+            r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"task6_sum","unit":"requests","sum":{"dataPoints":[{"timeUnixNano":"2000000","asDouble":2.5}],"aggregationTemporality":1,"isMonotonic":true}}]}]}]}"#,
+        ),
+        send_otlp_metrics_json(
+            &client,
+            r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"task6_gauge","unit":"1","gauge":{"dataPoints":[{"timeUnixNano":"3000000","asDouble":3.75}]}}]}]}]}"#,
+        ),
+        send_otlp_metrics_json(
+            &client,
+            r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"task6_sum","unit":"requests","sum":{"dataPoints":[{"timeUnixNano":"4000000","asDouble":4.5}],"aggregationTemporality":1,"isMonotonic":true}}]}]}]}"#,
+        ),
+    );
+    for response in [responses.0, responses.1, responses.2, responses.3] {
+        assert_eq!(StatusCode::OK, response.status());
+        let response = ExportMetricsServiceResponse::decode(response.bytes().await).unwrap();
+        assert!(response.partial_success.is_none());
+    }
+
+    validate_data(
+        "otlp_batched_gauge_rows",
+        &client,
+        "select greptime_timestamp, greptime_value from task6_gauge order by greptime_timestamp;",
+        "[[1,1.25],[3,3.75]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_sum_rows",
+        &client,
+        "select greptime_timestamp, greptime_value from task6_sum order by greptime_timestamp;",
+        "[[2,2.5],[4,4.5]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_otlp_metrics_batching_preserves_fanout_semantic_options() {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_otlp_metrics_app_with_frontend_batched(
+        StorageType::File,
+        "test_otlp_metrics_batching_preserves_fanout_semantic_options",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+    let content = r#"
+{"resourceMetrics":[{"scopeMetrics":[{"metrics":[
+  {"name":"task6_histogram","unit":"ms","histogram":{"dataPoints":[{"attributes":[{"key":"route","value":{"stringValue":"read"}}],"timeUnixNano":"1000000","count":"3","sum":6.0,"bucketCounts":["1","2"],"explicitBounds":[1.0]}],"aggregationTemporality":2}},
+  {"name":"task6_summary","unit":"items","summary":{"dataPoints":[{"attributes":[{"key":"route","value":{"stringValue":"write"}}],"timeUnixNano":"2000000","count":"4","sum":10.0,"quantileValues":[{"quantile":0.5,"value":2.0},{"quantile":0.9,"value":4.0}]}]}}
+]}]}]}
+"#;
+
+    let response = send_otlp_metrics_json(&client, content).await;
+    assert_eq!(StatusCode::OK, response.status());
+    let response = ExportMetricsServiceResponse::decode(response.bytes().await).unwrap();
+    assert!(response.partial_success.is_none());
+
+    validate_data(
+        "otlp_batched_histogram_rows",
+        &client,
+        "select greptime_timestamp, route, le, greptime_value from task6_histogram_bucket order by le;",
+        "[[1,\"read\",\"1\",1.0],[1,\"read\",\"inf\",3.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_histogram_count",
+        &client,
+        "select greptime_timestamp, route, greptime_value from task6_histogram_count;",
+        "[[1,\"read\",3.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_histogram_sum",
+        &client,
+        "select greptime_timestamp, route, greptime_value from task6_histogram_sum;",
+        "[[1,\"read\",6.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_summary_rows",
+        &client,
+        "select greptime_timestamp, route, quantile, greptime_value from task6_summary order by quantile;",
+        "[[2,\"write\",\"0.5\",2.0],[2,\"write\",\"0.9\",4.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_summary_count",
+        &client,
+        "select greptime_timestamp, route, greptime_value from task6_summary_count;",
+        "[[2,\"write\",4.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_summary_sum",
+        &client,
+        "select greptime_timestamp, route, greptime_value from task6_summary_sum;",
+        "[[2,\"write\",10.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_fanout_semantics",
+        &client,
+        "select table_name from information_schema.tables where table_schema = 'public' and (\
+         (table_name = 'task6_histogram_bucket' and create_options like '%greptime.semantic.metric.type=histogram%' and create_options like '%greptime.semantic.metric.unit=ms%' and create_options like '%greptime.semantic.metric.temporality=cumulative%' and create_options like '%greptime.semantic.metric.metadata_quality=declared%' and create_options like '%greptime.semantic.signal_type=metric%' and create_options like '%greptime.semantic.source=opentelemetry%') or \
+         (table_name in ('task6_histogram_count', 'task6_histogram_sum') and create_options like '%greptime.semantic.metric.type=counter%' and create_options like '%greptime.semantic.metric.unit=ms%' and create_options like '%greptime.semantic.metric.temporality=cumulative%' and create_options like '%greptime.semantic.metric.metadata_quality=declared%' and create_options like '%greptime.semantic.signal_type=metric%' and create_options like '%greptime.semantic.source=opentelemetry%') or \
+         (table_name = 'task6_summary' and create_options like '%greptime.semantic.metric.type=summary%' and create_options like '%greptime.semantic.metric.unit=items%' and create_options like '%greptime.semantic.metric.metadata_quality=declared%' and create_options like '%greptime.semantic.signal_type=metric%' and create_options like '%greptime.semantic.source=opentelemetry%' and create_options not like '%greptime.semantic.metric.temporality=%') or \
+         (table_name in ('task6_summary_count', 'task6_summary_sum') and create_options like '%greptime.semantic.metric.type=counter%' and create_options like '%greptime.semantic.metric.unit=items%' and create_options like '%greptime.semantic.metric.metadata_quality=declared%' and create_options like '%greptime.semantic.signal_type=metric%' and create_options like '%greptime.semantic.source=opentelemetry%' and create_options not like '%greptime.semantic.metric.temporality=%')) order by table_name;",
+        "[[\"task6_histogram_bucket\"],[\"task6_histogram_count\"],[\"task6_histogram_sum\"],[\"task6_summary\"],[\"task6_summary_count\"],[\"task6_summary_sum\"]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_otlp_metrics_batching_evolves_new_tag_schema() {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_otlp_metrics_app_with_frontend_batched(
+        StorageType::File,
+        "test_otlp_metrics_batching_evolves_new_tag_schema",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    for content in [
+        r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"task6_schema_gauge","gauge":{"dataPoints":[{"attributes":[{"key":"host","value":{"stringValue":"old"}}],"timeUnixNano":"1000000","asDouble":1.0}]}}]}]}]}"#,
+        r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"task6_schema_gauge","gauge":{"dataPoints":[{"attributes":[{"key":"host","value":{"stringValue":"new"}},{"key":"zone","value":{"stringValue":"west"}}],"timeUnixNano":"2000000","asDouble":2.0}]}}]}]}]}"#,
+    ] {
+        let response = send_otlp_metrics_json(&client, content).await;
+        assert_eq!(StatusCode::OK, response.status());
+        let response = ExportMetricsServiceResponse::decode(response.bytes().await).unwrap();
+        assert!(response.partial_success.is_none());
+    }
+
+    validate_data(
+        "otlp_batched_schema_evolution",
+        &client,
+        "select host, zone, greptime_value from task6_schema_gauge order by greptime_timestamp;",
+        "[[\"old\",null,1.0],[\"new\",\"west\",2.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_schema_evolution_tag_semantics",
+        &client,
+        "select column_name, semantic_type from information_schema.columns where table_name = 'task6_schema_gauge' and column_name in ('host', 'zone') order by column_name;",
+        r#"[["host","TAG"],["zone","TAG"]]"#,
     )
     .await;
 
