@@ -208,8 +208,12 @@ async fn test_logical_table_reconciliation_events() {
     assert_eventually_eq(
         &frontend,
         &format!(
-            "SELECT count(*) = 2 AND count(DISTINCT table_id) = 2 \
-                 AND count(DISTINCT physical_table_id) = 1 AS matches \
+            "SELECT count(*) AS event_count, \
+                 count(DISTINCT table_id) AS table_id_count, \
+                 count(DISTINCT physical_table_id) AS physical_table_id_count, \
+                 json_get_int(payload, 'version') AS version, \
+                 json_get_int(payload, 'logical_table_count') AS logical_table_count, \
+                 json_get_bool(payload, 'is_subprocedure') AS is_subprocedure \
              FROM {EVENTS_TABLE} \
              WHERE type = 'reconcile_logical_tables' \
              AND procedure_id = '{logical_procedure_id}' \
@@ -218,43 +222,52 @@ async fn test_logical_table_reconciliation_events() {
              AND table_name IN ('logical_cpu', 'logical_memory') \
              AND table_id IS NOT NULL AND physical_table_id IS NOT NULL \
              AND table_id != physical_table_id \
-             AND json_get_int(payload, 'version') = 1 \
-             AND json_get_int(payload, 'logical_table_count') = 2 \
-             AND json_get_bool(payload, 'is_subprocedure') = true"
+             GROUP BY json_get_int(payload, 'version'), \
+                 json_get_int(payload, 'logical_table_count'), \
+                 json_get_bool(payload, 'is_subprocedure')"
         ),
         "\
-+---------+
-| matches |
-+---------+
-| true    |
-+---------+",
++-------------+----------------+-------------------------+---------+---------------------+-----------------+
+| event_count | table_id_count | physical_table_id_count | version | logical_table_count | is_subprocedure |
++-------------+----------------+-------------------------+---------+---------------------+-----------------+
+| 2           | 2              | 1                       | 1       | 2                   | true            |
++-------------+----------------+-------------------------+---------+---------------------+-----------------+",
     )
     .await;
 
     assert_eventually_eq(
         &frontend,
         &format!(
-            "SELECT count(*) = 2 AND count(DISTINCT table_id) = 2 \
-                 AND count(DISTINCT physical_table_id) = 1 AS matches \
+            "SELECT count(*) AS event_count, \
+                 count(DISTINCT table_id) AS table_id_count, \
+                 count(DISTINCT physical_table_id) AS physical_table_id_count, \
+                 json_get_int(payload, 'version') AS version, \
+                 json_get_bool(payload, 'complete') AS complete, \
+                 json_get_int(payload, 'processed_table_count') AS processed_count, \
+                 json_get_int(payload, 'metadata_consistent_table_count') AS consistent_count, \
+                 json_get_int(payload, 'metadata_inconsistent_table_count') AS inconsistent_count, \
+                 json_get_int(payload, 'create_table_count') AS create_count, \
+                 json_get_int(payload, 'update_table_info_count') AS update_count \
              FROM {EVENTS_TABLE} \
              WHERE type = 'reconcile_logical_tables' \
              AND procedure_id = '{logical_procedure_id}' \
              AND json_get_string(procedure_trigger, 'type') = 'Succeeded' \
              AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
              AND table_name IN ('logical_cpu', 'logical_memory') \
-             AND json_get_bool(payload, 'complete') = true \
-             AND json_get_int(payload, 'processed_table_count') = 2 \
-             AND json_get_int(payload, 'metadata_consistent_table_count') = 2 \
-             AND json_get_int(payload, 'metadata_inconsistent_table_count') = 0 \
-             AND json_get_int(payload, 'create_table_count') = 0 \
-             AND json_get_int(payload, 'update_table_info_count') = 0"
+             GROUP BY json_get_int(payload, 'version'), \
+                 json_get_bool(payload, 'complete'), \
+                 json_get_int(payload, 'processed_table_count'), \
+                 json_get_int(payload, 'metadata_consistent_table_count'), \
+                 json_get_int(payload, 'metadata_inconsistent_table_count'), \
+                 json_get_int(payload, 'create_table_count'), \
+                 json_get_int(payload, 'update_table_info_count')"
         ),
         "\
-+---------+
-| matches |
-+---------+
-| true    |
-+---------+",
++-------------+----------------+-------------------------+---------+----------+-----------------+------------------+--------------------+--------------+--------------+
+| event_count | table_id_count | physical_table_id_count | version | complete | processed_count | consistent_count | inconsistent_count | create_count | update_count |
++-------------+----------------+-------------------------+---------+----------+-----------------+------------------+--------------------+--------------+--------------+
+| 2           | 2              | 1                       | 1       | true     | 2               | 2                | 0                  | 0            | 0            |
++-------------+----------------+-------------------------+---------+----------+-----------------+------------------+--------------------+--------------+--------------+",
     )
     .await;
 }
