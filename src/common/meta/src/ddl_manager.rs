@@ -148,7 +148,7 @@ pub trait TriggerDdlManager: Send + Sync {
 #[cfg(feature = "enterprise")]
 pub type TriggerDdlManagerRef = Arc<dyn TriggerDdlManager>;
 
-/// This trait is responsible for handling enterprise CREATE FLOW tasks.
+/// This trait is responsible for handling custom/extension CREATE FLOW tasks.
 #[cfg(feature = "enterprise")]
 #[async_trait::async_trait]
 pub trait CreateFlowHandler: Send + Sync {
@@ -1959,7 +1959,7 @@ mod tests {
 
     #[cfg(feature = "enterprise")]
     #[tokio::test]
-    async fn test_reserved_sequence_range_is_rejected_before_enterprise_handler() {
+    async fn test_reserved_sequence_range_is_rejected_before_custom_handler() {
         let handler = Arc::new(RecordingCreateFlowHandler::default());
         let ddl_manager =
             build_soft_drop_test_ddl_manager().with_create_flow_handler(handler.clone());
@@ -1987,7 +1987,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_flow_handler_dispatches_without_procedure() {
         let response = SubmitDdlTaskResponse {
-            key: b"enterprise".to_vec(),
+            key: b"custom-handler".to_vec(),
             ..Default::default()
         };
         let handler = Arc::new(RecordingCreateFlowHandler {
@@ -2018,7 +2018,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(actual.key, b"enterprise");
+        assert_eq!(actual.key, b"custom-handler");
         assert_eq!(handler.tasks.lock().unwrap().len(), 1);
         assert_eq!(
             handler.contexts.lock().unwrap().as_slice(),

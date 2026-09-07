@@ -785,7 +785,7 @@ pub enum FlowType {
 
 pub const FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY: &str =
     "experimental_enable_incremental_read";
-/// Reserved internal value for Enterprise flows requiring exact sequence ranges.
+/// Reserved internal value for flows requiring exact sequence ranges.
 pub const FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE: &str =
     "__greptime_internal_exact_sequence_range";
 
