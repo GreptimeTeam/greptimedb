@@ -251,7 +251,10 @@ mod test {
                 ..Default::default()
             }],
         };
-        let outcome = instance.metrics(malformed, None, ctx.clone()).await.unwrap();
+        let outcome = instance
+            .metrics(malformed, None, ctx.clone())
+            .await
+            .unwrap();
         assert_eq!(0, outcome.accepted_data_points);
         assert_eq!(1, outcome.rejected_data_points);
         assert!(
