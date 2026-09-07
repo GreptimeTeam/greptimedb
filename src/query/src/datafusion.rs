@@ -813,10 +813,13 @@ mod tests {
     use api::v1::SemanticType;
     use arrow::array::{ArrayRef, UInt64Array};
     use arrow_schema::SortOptions;
+    use async_trait::async_trait;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_error::ext::BoxedError;
-    use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream, util};
+    use common_recordbatch::{
+        EmptyRecordBatchStream, RecordBatch, SendableRecordBatchStream, util,
+    };
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
     use datafusion::physical_plan::joins::{HashJoinExec, JoinOn, PartitionMode};
@@ -834,12 +837,13 @@ mod tests {
         PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
     };
     use store_api::storage::{RegionId, ScanRequest};
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
     use table::table::scan::RegionScanExec;
 
     use super::*;
     use crate::options::QueryOptions;
-    use crate::parser::QueryLanguageParser;
+    use crate::parser::{QueryLanguageParser, QueryStatement};
     use crate::part_sort::PartSortExec;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
@@ -1420,5 +1424,391 @@ mod tests {
         assert_eq!(0, left_last_filter_len.load(Ordering::Relaxed));
         assert!(right_update_calls.load(Ordering::Relaxed) > 0);
         assert!(right_last_filter_len.load(Ordering::Relaxed) > 0);
+    }
+    #[derive(Default)]
+    struct RecordingMutationHandler {
+        inserts: std::sync::Mutex<Vec<table::requests::InsertRequest>>,
+    }
+
+    #[async_trait]
+    impl common_function::handlers::TableMutationHandler for RecordingMutationHandler {
+        async fn insert(
+            &self,
+            request: table::requests::InsertRequest,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_query::Output> {
+            self.inserts.lock().unwrap().push(request);
+            Ok(common_query::Output::new_with_affected_rows(1))
+        }
+
+        async fn delete(
+            &self,
+            _request: table::requests::DeleteRequest,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            Ok(0)
+        }
+
+        async fn flush(
+            &self,
+            _request: table::requests::FlushTableRequest,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            Ok(0)
+        }
+
+        async fn compact(
+            &self,
+            _request: table::requests::CompactTableRequest,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            Ok(0)
+        }
+
+        async fn build_index(
+            &self,
+            _request: table::requests::BuildIndexTableRequest,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            Ok(0)
+        }
+
+        async fn flush_region(
+            &self,
+            _region_id: store_api::storage::RegionId,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            Ok(0)
+        }
+
+        async fn compact_region(
+            &self,
+            _region_id: store_api::storage::RegionId,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            Ok(0)
+        }
+
+        async fn discard_unflushed_data(
+            &self,
+            _region_id: store_api::storage::RegionId,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            Ok(0)
+        }
+
+        async fn discard_unflushed_data_by_table(
+            &self,
+            _table_name: table::table_name::TableName,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            Ok(0)
+        }
+    }
+
+    fn native_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new("dim", ConcreteDataType::date_datatype(), true),
+            ColumnSchema::new("amount", ConcreteDataType::decimal128_datatype(30, 2), true),
+            ColumnSchema::new(
+                "elapsed",
+                ConcreteDataType::duration_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "updated_at",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new("marker", ConcreteDataType::uint8_datatype(), true),
+            ColumnSchema::new("payload", ConcreteDataType::binary_datatype(), true),
+            ColumnSchema::new("epoch", ConcreteDataType::uint64_datatype(), true),
+        ]))
+    }
+
+    fn register_native_tables(catalog: &catalog::memory::MemoryCatalogManager) {
+        let schema = native_schema();
+        let meta = TableMetaBuilder::empty()
+            .schema(schema.clone())
+            .primary_key_indices(vec![])
+            .value_indices((0..schema.num_columns()).collect())
+            .next_column_id(8)
+            .build()
+            .unwrap();
+        let info = TableInfoBuilder::default()
+            .name("native_regression")
+            .table_id(9001)
+            .table_version(0)
+            .meta(meta)
+            .build()
+            .unwrap();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "native_regression".to_string(),
+                table_id: 9001,
+                table: table::test_util::EmptyTable::from_table_info(&info),
+            })
+            .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("dim", ConcreteDataType::date_datatype(), true),
+            ColumnSchema::new("amount", ConcreteDataType::decimal128_datatype(20, 2), true),
+            ColumnSchema::new(
+                "elapsed",
+                ConcreteDataType::duration_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let rows = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(datatypes::vectors::DateVector::from_slice([0, 2])) as VectorRef,
+                Arc::new(
+                    datatypes::vectors::Decimal128Vector::from_slice([10000, 20000])
+                        .with_precision_and_scale(20, 2)
+                        .unwrap(),
+                ) as VectorRef,
+                Arc::new(datatypes::vectors::DurationMillisecondVector::from_values(
+                    [10, 20],
+                )) as VectorRef,
+                Arc::new(datatypes::vectors::TimestampMillisecondVector::from_slice(
+                    [1, 2],
+                )) as VectorRef,
+            ],
+        )
+        .unwrap();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "native_aggregate".to_string(),
+                table_id: 9002,
+                table: table::test_util::MemTable::table("native_aggregate", rows),
+            })
+            .unwrap();
+    }
+
+    async fn run_sql(engine: &QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
+        let plan = engine
+            .planner()
+            .plan(&stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        match engine
+            .execute(plan, QueryContext::arc())
+            .await
+            .unwrap()
+            .data
+        {
+            OutputData::Stream(stream) => util::collect(stream).await.unwrap(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_native_executor_null_insert_and_aggregates() {
+        let catalog = catalog::memory::new_memory_catalog_manager().unwrap();
+        register_native_tables(&catalog);
+        let handler = Arc::new(RecordingMutationHandler::default());
+        let engine = QueryEngineFactory::new(
+            catalog,
+            None,
+            Some(handler.clone()),
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+
+        // The CASTs force Insert::can_extract_values false. This records the
+        // QueryEngine DML path selected by operator/src/statement/dml.rs.
+        let insert_sql = "INSERT INTO native_regression (dim, amount, elapsed, ts, updated_at, marker, payload, epoch) VALUES (NULL, NULL, NULL, CAST(-62135596799999 AS TIMESTAMP(3)), CAST(NULL AS TIMESTAMP(3)), CAST(1 AS UInt8), X'0102', CAST(1 AS UInt64))";
+        let stmt = QueryLanguageParser::parse_sql(insert_sql, &QueryContext::arc()).unwrap();
+        let QueryStatement::Sql(sql::statements::statement::Statement::Insert(insert)) = &stmt
+        else {
+            unreachable!()
+        };
+        assert!(!insert.can_extract_values());
+        let plan = engine
+            .planner()
+            .plan(&stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(
+            engine
+                .execute(plan, QueryContext::arc())
+                .await
+                .unwrap()
+                .data,
+            OutputData::AffectedRows(1)
+        ));
+
+        let request = handler.inserts.lock().unwrap().pop().unwrap();
+        for (name, data_type) in [
+            ("dim", ConcreteDataType::date_datatype()),
+            ("amount", ConcreteDataType::decimal128_datatype(30, 2)),
+            ("elapsed", ConcreteDataType::duration_millisecond_datatype()),
+            (
+                "updated_at",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ),
+        ] {
+            let vector = request.columns_values.get(name).unwrap();
+            assert_eq!(vector.len(), 1, "{name}");
+            assert_eq!(vector.data_type(), data_type, "{name}");
+            assert!(vector.is_null(0), "{name}");
+        }
+        assert!(!request.columns_values["ts"].is_null(0));
+        assert_eq!(
+            request.columns_values["marker"].data_type(),
+            ConcreteDataType::uint8_datatype()
+        );
+        assert_eq!(
+            request.columns_values["payload"].data_type(),
+            ConcreteDataType::binary_datatype()
+        );
+        assert_eq!(
+            request.columns_values["epoch"].data_type(),
+            ConcreteDataType::uint64_datatype()
+        );
+
+        let batches = run_sql(
+            &engine,
+            "SELECT MIN(dim), MAX(dim), SUM(amount), SUM(elapsed) FROM native_aggregate",
+        )
+        .await;
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(
+            batch.schema.column_schemas()[0].data_type,
+            ConcreteDataType::date_datatype()
+        );
+        assert_eq!(
+            batch.schema.column_schemas()[1].data_type,
+            ConcreteDataType::date_datatype()
+        );
+        assert_eq!(
+            batch.schema.column_schemas()[2].data_type,
+            ConcreteDataType::decimal128_datatype(30, 2)
+        );
+        assert_eq!(
+            batch.schema.column_schemas()[3].data_type,
+            ConcreteDataType::duration_millisecond_datatype()
+        );
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Date32Array>()
+                .unwrap()
+                .value(0),
+            0
+        );
+        assert_eq!(
+            batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<arrow::array::Date32Array>()
+                .unwrap()
+                .value(0),
+            2
+        );
+        assert_eq!(
+            batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<arrow::array::Decimal128Array>()
+                .unwrap()
+                .value(0),
+            30000
+        );
+        assert_eq!(
+            batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<arrow::array::DurationMillisecondArray>()
+                .unwrap()
+                .value(0),
+            30
+        );
+
+        let batches = run_sql(
+            &engine,
+            "SELECT aggregate.amount_sum + aggregate.amount_sum AS amount_add, \
+                    aggregate.elapsed_sum + aggregate.elapsed_sum AS elapsed_add, \
+                    CASE WHEN aggregate.min_dim < CAST('1970-01-02' AS DATE) THEN true ELSE false END AS min_before, \
+                    CASE WHEN aggregate.max_dim > CAST('1970-01-01' AS DATE) THEN true ELSE false END AS max_after \
+             FROM (SELECT MIN(dim) AS min_dim, MAX(dim) AS max_dim, SUM(amount) AS amount_sum, SUM(elapsed) AS elapsed_sum \
+                   FROM native_aggregate) AS aggregate",
+        )
+        .await;
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(
+            batch.schema.column_schemas()[0].data_type,
+            ConcreteDataType::decimal128_datatype(31, 2)
+        );
+        assert_eq!(
+            batch.schema.column_schemas()[1].data_type,
+            ConcreteDataType::duration_millisecond_datatype()
+        );
+        assert_eq!(
+            batch.schema.column_schemas()[2].data_type,
+            ConcreteDataType::boolean_datatype()
+        );
+        assert_eq!(
+            batch.schema.column_schemas()[3].data_type,
+            ConcreteDataType::boolean_datatype()
+        );
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Decimal128Array>()
+                .unwrap()
+                .value(0),
+            60000
+        );
+        assert_eq!(
+            batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<arrow::array::DurationMillisecondArray>()
+                .unwrap()
+                .value(0),
+            60
+        );
+        assert!(
+            batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .unwrap()
+                .value(0)
+        );
+        assert!(
+            batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .unwrap()
+                .value(0)
+        );
     }
 }
