@@ -77,6 +77,7 @@ mod test {
         let error = instance
             .metrics(
                 build_sum_request("fixed.delta", AggregationTemporality::Delta, &[(60, 10)]),
+                None,
                 ctx.clone(),
             )
             .await
@@ -144,7 +145,7 @@ mod test {
                 ),
                 build_sum_request(metric, AggregationTemporality::Cumulative, &[(180, 30)]),
             ] {
-                let result = instance.metrics(request, ctx.clone()).await;
+                let result = instance.metrics(request, None, ctx.clone()).await;
                 assert!(result.is_ok(), "{metric}: {result:?}");
             }
 
@@ -203,7 +204,7 @@ mod test {
                 unreachable!()
             };
             sum.data_points[0].flags = DataPointFlags::NoRecordedValueMask as u32;
-            assert!(instance.metrics(stale, ctx.clone()).await.is_ok());
+            assert!(instance.metrics(stale, None, ctx.clone()).await.is_ok());
 
             for (matcher, expected_rows) in [
                 ("otlp_aggregation_temporality=\"delta\"", 0),
@@ -250,7 +251,7 @@ mod test {
                 ..Default::default()
             }],
         };
-        let outcome = instance.metrics(malformed, ctx.clone()).await.unwrap();
+        let outcome = instance.metrics(malformed, None, ctx.clone()).await.unwrap();
         assert_eq!(0, outcome.accepted_data_points);
         assert_eq!(1, outcome.rejected_data_points);
         assert!(
@@ -311,6 +312,7 @@ mod test {
             let outcome = instance
                 .metrics(
                     build_histogram_request("raw.delta.histogram", points),
+                    None,
                     ctx.clone(),
                 )
                 .await
