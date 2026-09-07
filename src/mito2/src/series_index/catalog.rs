@@ -23,9 +23,11 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::{FileId, RegionId};
 
-use super::purger::IndexFilePurger;
-use super::version::{SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::error::{OpenDalSnafu, Result, SerdeJsonSnafu};
+use crate::series_index::purger::IndexFilePurger;
+use crate::series_index::version::{
+    SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl,
+};
 const SERIES_DIR: &str = "series";
 const RANGE_CATALOG: &str = "range-index.json";
 const SERIES_CATALOG: &str = "series-index.json";
@@ -66,14 +68,6 @@ pub(crate) fn series_catalog_path(region_id: RegionId) -> String {
     format!("{}/{SERIES_CATALOG}", region_id.as_u64())
 }
 
-pub(crate) fn same_series_coverage(left: &SeriesIndexEntry, right: &SeriesIndexEntry) -> bool {
-    left.bucket_start == right.bucket_start
-        && left.bucket_end == right.bucket_end
-        && left.source_file_ids == right.source_file_ids
-        && left.min_file_sequence == right.min_file_sequence
-        && left.max_file_sequence == right.max_file_sequence
-}
-
 pub(crate) fn series_metadata(entry: &SeriesIndexEntry) -> Result<Vec<KeyValue>> {
     Ok(vec![KeyValue::new(
         SERIES_METADATA_KEY.to_string(),
@@ -81,23 +75,23 @@ pub(crate) fn series_metadata(entry: &SeriesIndexEntry) -> Result<Vec<KeyValue>>
     )])
 }
 
-pub(crate) async fn load_catalog<T>(store: &ObjectStore, path: &str) -> T
+pub(crate) async fn load_catalog<T>(store: &ObjectStore, path: &str) -> Option<T>
 where
-    T: Default + DeserializeOwned,
+    T: DeserializeOwned,
 {
     let bytes = match store.read(path).await {
         Ok(bytes) => bytes.to_bytes(),
-        Err(error) if error.kind() == ErrorKind::NotFound => return T::default(),
+        Err(error) if error.kind() == ErrorKind::NotFound => return None,
         Err(error) => {
             warn!(error; "Failed to load series-index catalog, path: {path}");
-            return T::default();
+            return None;
         }
     };
     match serde_json::from_slice(&bytes) {
-        Ok(catalog) => catalog,
+        Ok(catalog) => Some(catalog),
         Err(error) => {
             warn!(error; "Invalid series-index catalog, path: {path}, phase: load");
-            T::default()
+            None
         }
     }
 }
@@ -120,8 +114,12 @@ pub(crate) async fn load_version_control(
     region_id: RegionId,
     purger: &IndexFilePurger,
 ) -> SeriesIndexVersionControl {
-    let range = load_catalog::<RangeIndexCatalog>(store, &range_catalog_path(region_id)).await;
-    let series = load_catalog::<SeriesIndexCatalog>(store, &series_catalog_path(region_id)).await;
+    let range = load_catalog::<RangeIndexCatalog>(store, &range_catalog_path(region_id))
+        .await
+        .unwrap_or_default();
+    let series = load_catalog::<SeriesIndexCatalog>(store, &series_catalog_path(region_id))
+        .await
+        .unwrap_or_default();
     // TODO: Handle catalog entries whose index files are missing from storage.
     let version = SeriesIndexVersion {
         range_indexes: range.indexes.into_iter().collect(),
@@ -145,11 +143,16 @@ pub(crate) async fn load_version_control(
 mod tests {
     use std::sync::Arc;
 
+    use common_time::Timestamp;
+    use object_store::ObjectStore;
     use object_store::layers::mock::{self, MockLayerBuilder};
     use object_store::services::Memory;
+    use store_api::storage::{FileId, RegionId};
 
-    use super::super::purger::series_index_channel;
-    use super::*;
+    use crate::series_index::catalog::{
+        RangeIndexCatalog, SeriesIndexCatalog, SeriesIndexEntry, load_catalog, range_catalog_path,
+        series_catalog_path, series_metadata, store_catalog,
+    };
     struct FailingCatalogReader;
 
     impl mock::Read for FailingCatalogReader {
@@ -162,71 +165,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_catalog_defaults_on_missing_invalid_or_unreadable_catalog() {
+    async fn test_load_catalog_returns_none_on_error() {
         let store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let region_id = RegionId::new(1, 1);
-        let (purger, _receiver) = series_index_channel(store.clone());
-        let control = load_version_control(&store, region_id, &purger).await;
-        assert!(control.current().range_indexes.is_empty());
-        assert!(control.current().series_indexes.is_empty());
-        let file_id = store_api::storage::FileId::random();
-        store
-            .write(
-                &range_catalog_path(region_id),
-                serde_json::to_vec(&RangeIndexCatalog {
-                    indexes: vec![file_id],
-                })
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        store
-            .write(&series_catalog_path(region_id), "invalid")
-            .await
-            .unwrap();
-        let control = load_version_control(&store, region_id, &purger).await;
-        assert!(control.current().range_indexes.contains(&file_id));
-        assert!(control.current().series_indexes.is_empty());
+        let path = series_catalog_path(RegionId::new(1, 1));
+        // Missing catalog.
+        assert!(
+            load_catalog::<SeriesIndexCatalog>(&store, &path)
+                .await
+                .is_none()
+        );
+        store.write(&path, "invalid").await.unwrap();
+        assert!(
+            load_catalog::<SeriesIndexCatalog>(&store, &path)
+                .await
+                .is_none()
+        );
         let layer = MockLayerBuilder::default()
             .reader_factory(Arc::new(|_, _, _| Box::new(FailingCatalogReader)))
             .build()
             .unwrap();
-        let control = load_version_control(&store.layer(layer), region_id, &purger).await;
-        assert!(control.current().range_indexes.is_empty());
-        assert!(control.current().series_indexes.is_empty());
+        let store = store.layer(layer);
+        assert!(
+            load_catalog::<SeriesIndexCatalog>(&store, &path)
+                .await
+                .is_none()
+        );
     }
 
-    #[tokio::test]
-    async fn test_catalog_roundtrip_preserves_coverage() {
-        let store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let region_id = RegionId::new(1, 1);
-        let entry = SeriesIndexEntry {
-            index_uuid: FileId::random(),
-            bucket_start: Timestamp::new_second(0),
-            bucket_end: Timestamp::new_second(100),
-            source_file_ids: vec![FileId::random()],
-            min_file_sequence: 1,
-            max_file_sequence: 2,
-        };
-        store_catalog(
-            &store,
-            &series_catalog_path(region_id),
-            &SeriesIndexCatalog {
-                indexes: vec![entry.clone()],
-            },
-        )
-        .await
-        .unwrap();
-        let (purger, _receiver) = series_index_channel(store.clone());
-        let restored = load_version_control(&store, region_id, &purger)
-            .await
-            .current();
-        assert_eq!(&entry, restored.series_indexes[&entry.index_uuid].entry());
-        let metadata = series_metadata(&entry).unwrap();
-        let decoded: SeriesIndexEntry =
-            serde_json::from_str(metadata[0].value.as_ref().unwrap()).unwrap();
-        assert_eq!(entry, decoded);
-    }
     #[tokio::test]
     async fn test_region_open_restores_catalog_once() {
         use store_api::codec::PrimaryKeyEncoding;
@@ -279,6 +244,10 @@ mod tests {
             min_file_sequence: 1,
             max_file_sequence: 2,
         };
+        let metadata = series_metadata(&entry).unwrap();
+        let decoded: SeriesIndexEntry =
+            serde_json::from_str(metadata[0].value.as_ref().unwrap()).unwrap();
+        assert_eq!(entry, decoded);
         store_catalog(
             &store,
             &range_catalog_path(region_id),
@@ -317,14 +286,9 @@ mod tests {
         assert!(Arc::ptr_eq(&current, &region.series_index_version()));
         // Only a subsequent opening reloads the catalog and applies its empty fallback.
         reopen_region(&engine, region_id, table_dir, false, options).await;
-        assert!(
-            engine
-                .get_region(region_id)
-                .unwrap()
-                .series_index_version()
-                .series_indexes
-                .is_empty()
-        );
+        let current = engine.get_region(region_id).unwrap().series_index_version();
+        assert!(current.series_indexes.is_empty());
+        assert!(current.range_indexes.contains(&entry.source_file_ids[0]));
         engine.stop().await.unwrap();
     }
 }

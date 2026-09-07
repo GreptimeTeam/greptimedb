@@ -21,8 +21,8 @@ use std::sync::{Arc, RwLock};
 
 use store_api::storage::{FileId, RegionId};
 
-use super::catalog::SeriesIndexEntry;
-use super::purger::{IndexFilePurger, PurgeRequest};
+use crate::series_index::catalog::SeriesIndexEntry;
+use crate::series_index::purger::{IndexFilePurger, PurgeRequest};
 use crate::sst::file::RegionFileId;
 
 /// A reference-counted series-index file with deferred deletion semantics.

@@ -80,7 +80,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::series_index::{
-    IndexFilePurger, SeriesIndexTaskState, run_index_purge_task, series_index_channel,
+    IndexFilePurger, SeriesIndexTask, SeriesIndexTaskState, series_index_channel,
 };
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -604,12 +604,9 @@ impl<S: LogStore> WorkerStarter<S> {
             .map(|(store, state)| {
                 let (purger, purge_receiver) = series_index_channel(store.clone());
                 series_index_purger = Some(purger.clone());
-                common_runtime::spawn_global(run_index_purge_task(
-                    self.id,
-                    store,
-                    state,
-                    purge_receiver,
-                ))
+                common_runtime::spawn_global(
+                    SeriesIndexTask::new(self.id, store, state, purge_receiver).run(),
+                )
             });
         let now = self.time_provider.current_time_millis();
         let id_string = self.id.to_string();

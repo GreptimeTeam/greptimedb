@@ -20,26 +20,26 @@ mod catalog;
 #[allow(dead_code)]
 mod purger;
 mod searcher;
+mod task;
 #[allow(dead_code)]
 mod version;
 mod writer;
 
-pub(crate) use catalog::load_version_control;
 use futures::stream::BoxStream;
-pub(crate) use purger::{
-    IndexFilePurger, SeriesIndexTaskState, run_index_purge_task, series_index_channel,
-};
 pub use searcher::SeriesIndexSearcher;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
     DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
 };
-pub(crate) use version::{SeriesIndexVersion, SeriesIndexVersionControl};
 pub use writer::{
     SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,
 };
 
 use crate::error::Result;
+pub(crate) use crate::series_index::catalog::load_version_control;
+pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
+pub(crate) use crate::series_index::task::{SeriesIndexTask, SeriesIndexTaskState};
+pub(crate) use crate::series_index::version::{SeriesIndexVersion, SeriesIndexVersionControl};
 
 pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";
 pub(crate) const MAX_TS_COLUMN: &str = "__series_max_ts";

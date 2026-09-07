@@ -15,16 +15,13 @@
 //! Deferred deletion of aggregate series-index files.
 
 use std::fmt::{self, Debug, Formatter};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
-use common_telemetry::{info, warn};
+use common_telemetry::warn;
 use object_store::{ErrorKind, ObjectStore};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
-use super::catalog::series_index_path;
 use crate::metrics::SERIES_INDEX_FILE_OPERATION_TOTAL;
+use crate::series_index::catalog::series_index_path;
 use crate::sst::file::RegionFileId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,72 +97,4 @@ pub(crate) fn series_index_channel(
 ) -> (IndexFilePurger, mpsc::UnboundedReceiver<PurgeRequest>) {
     let (sender, receiver) = mpsc::unbounded_channel();
     (IndexFilePurger { store, sender }, receiver)
-}
-
-/// Shared lifecycle state for a worker's series-index task.
-#[derive(Debug)]
-pub(crate) struct SeriesIndexTaskState {
-    running: AtomicBool,
-    notify: Notify,
-}
-
-impl SeriesIndexTaskState {
-    pub(crate) fn new() -> Self {
-        Self {
-            running: AtomicBool::new(true),
-            notify: Notify::new(),
-        }
-    }
-
-    pub(crate) fn is_running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn stop(&self) {
-        self.running.store(false, Ordering::Release);
-        // notify_one() retains a permit if the task has not started waiting yet.
-        self.notify.notify_one();
-    }
-
-    pub(crate) async fn notified(&self) {
-        self.notify.notified().await;
-    }
-}
-
-/// Consumes deferred series-file deletions and retries failures until the worker stops.
-pub(crate) async fn run_index_purge_task(
-    worker_id: u32,
-    store: ObjectStore,
-    state: Arc<SeriesIndexTaskState>,
-    mut purge_receiver: mpsc::UnboundedReceiver<PurgeRequest>,
-) {
-    info!("Start series-index purge task, worker: {worker_id}");
-    let mut retry_purges = Vec::new();
-    while state.is_running() {
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(5 * 60)) => {}
-            _ = state.notified() => {}
-            Some(request) = purge_receiver.recv() => {
-                if !purge_file(&store, request).await {
-                    retry_purges.push(request);
-                }
-                continue;
-            }
-        }
-        if !state.is_running() {
-            break;
-        }
-        for request in std::mem::take(&mut retry_purges) {
-            if !purge_file(&store, request).await {
-                retry_purges.push(request);
-            }
-        }
-    }
-    while let Ok(request) = purge_receiver.try_recv() {
-        retry_purges.push(request);
-    }
-    for request in retry_purges {
-        let _ = purge_file(&store, request).await;
-    }
-    info!("Stop series-index purge task, worker: {worker_id}");
 }
