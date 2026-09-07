@@ -844,7 +844,13 @@ impl BatchingTask {
             let decision = {
                 let mut state = self.state.write().unwrap();
                 let reason = Self::query_failure_reason(err, coverage);
-                Self::apply_query_failure_to_state(&mut state, elapsed, coverage, reason)
+                Self::apply_query_failure_to_state(
+                    &mut state,
+                    elapsed,
+                    coverage,
+                    reason,
+                    attempt.is_some(),
+                )
             };
             if let Some(decision) = decision {
                 Self::record_checkpoint_decision(flow_id, decision);
@@ -877,7 +883,7 @@ impl BatchingTask {
             let mut state = self.state.write().unwrap();
             let snapshot = state.checkpoint_snapshot();
             let repair_required = snapshot.full_repair_required;
-            let decision = Self::apply_query_result_to_state_with_repair(
+            let decision = Self::apply_query_result_to_state(
                 &mut state,
                 &res,
                 elapsed,

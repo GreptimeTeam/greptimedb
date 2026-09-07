@@ -58,6 +58,7 @@ impl BatchingTask {
         elapsed: Duration,
         coverage: &QueryCoverage,
         reason: FlowQueryFallbackReason,
+        persistence_backed: bool,
     ) -> Option<FlowCheckpointDecision> {
         state.after_query_exec(elapsed, false);
         let checkpoint_mode = state.checkpoint_mode();
@@ -79,6 +80,9 @@ impl BatchingTask {
 
         if checkpoint_mode == CheckpointMode::Incremental {
             state.mark_full_snapshot();
+            if persistence_backed && matches!(coverage, QueryCoverage::IncrementalDelta) {
+                state.request_full_repair();
+            }
         }
         Some(FlowCheckpointDecision::FallbackToFullSnapshot {
             previous_mode: checkpoint_mode,
@@ -87,21 +91,11 @@ impl BatchingTask {
     }
 
     /// Apply checkpoint transitions for a successfully executed query using its
-    /// terminal watermark proof and declared coverage.
-    pub(super) fn apply_query_result_to_state(
-        state: &mut TaskState,
-        res: &OutputWithMetrics,
-        elapsed: Duration,
-        coverage: &QueryCoverage,
-    ) -> FlowCheckpointDecision {
-        Self::apply_query_result_to_state_with_repair(state, res, elapsed, coverage, false)
-    }
-
-    /// Apply checkpoint transitions while retaining whether this attempt
+    /// terminal watermark proof and declared coverage, while retaining whether this attempt
     /// started with a persisted full-repair request. That fact is deliberately
     /// captured by the caller before execution; a repair request raised later
     /// must not turn an ordinary full snapshot into a completed repair.
-    pub(super) fn apply_query_result_to_state_with_repair(
+    pub(super) fn apply_query_result_to_state(
         state: &mut TaskState,
         res: &OutputWithMetrics,
         elapsed: Duration,
