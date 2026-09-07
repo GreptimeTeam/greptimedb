@@ -30,8 +30,9 @@ use subtle::ConstantTimeEq;
 
 use crate::common::{
     DEFAULT_PBKDF2_SHA256_SALT_LEN, Identity, MAX_PBKDF2_SHA256_ITERATIONS,
-    MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN, PG_SCRAM_SHA256_KEY_LEN, Password,
-    PgScramSha256Verifier, auth_mysql_with_hash_stage_2,
+    MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN, Password, PgScramSha256Verifier,
+    auth_mysql_with_hash_stage_2, parse_mysql_native_password_verifier,
+    parse_pg_scram_sha256_password_verifier,
 };
 use crate::error::{
     IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedAuthMethodSnafu,
@@ -39,6 +40,14 @@ use crate::error::{
 };
 use crate::user_info::{DefaultUserInfo, PermissionMode};
 use crate::{UserInfoRef, auth_mysql};
+
+/// Reserved SQL-protocol username selecting bearer-token authentication.
+///
+/// User providers must not define this as a password-authenticated user.
+/// SQL servers carry the token through their clear-password exchange; this
+/// selector does not itself require TLS, so transport policy remains a server
+/// deployment choice.
+pub const BEARER_TOKEN_USER: &str = "*";
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -66,8 +75,8 @@ pub trait UserProvider: Send + Sync {
         Ok(user_info)
     }
 
-    /// Authenticates and authorizes an opaque bearer token (e.g. a JWT or an
-    /// OAuth2 access token).
+    /// Authenticates an opaque bearer token (e.g. a JWT or an OAuth2 access
+    /// token) and derives its user identity.
     ///
     /// Unlike [auth()](Self::auth), the caller has no `Identity`/`Password` —
     /// the provider validates the token and *derives* the identity from it.
@@ -77,27 +86,61 @@ pub trait UserProvider: Send + Sync {
     /// The default rejects token auth with
     /// [`Error::UnsupportedAuthMethod`], so password-only providers keep
     /// today's behavior. Providers that support token auth override this to
-    /// validate the token, resolve it to a user, and
-    /// [`authorize`](Self::authorize) the connection.
-    async fn auth_bearer_token(
-        &self,
-        _token: &str,
-        _catalog: &str,
-        _schema: &str,
-    ) -> Result<UserInfoRef> {
+    /// validate the token and resolve it to a user.
+    async fn authenticate_bearer_token(&self, _token: &str, _catalog: &str) -> Result<UserInfoRef> {
         UnsupportedAuthMethodSnafu {
             method: "bearer token",
         }
         .fail()
     }
 
-    async fn postgres_auth_info(&self, _id: Identity<'_>) -> Result<PgAuthInfo> {
+    /// Combination of [`authenticate_bearer_token`](Self::authenticate_bearer_token)
+    /// and [`authorize`](Self::authorize).
+    async fn auth_bearer_token(
+        &self,
+        token: &str,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<UserInfoRef> {
+        let user_info = self.authenticate_bearer_token(token, catalog).await?;
+        self.authorize(catalog, schema, &user_info).await?;
+        Ok(user_info)
+    }
+
+    fn mysql_auth_method(&self) -> MysqlAuthMethod {
+        if self.external() {
+            MysqlAuthMethod::ClearPassword
+        } else {
+            MysqlAuthMethod::NativePassword
+        }
+    }
+
+    async fn postgres_auth_info(&self, _id: Identity<'_>, _catalog: &str) -> Result<PgAuthInfo> {
         Ok(PgAuthInfo::Cleartext)
     }
 
     /// Returns whether this user provider implementation is backed by an external system.
     fn external(&self) -> bool {
         false
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MysqlAuthMethod {
+    NativePassword,
+    ClearPassword,
+}
+
+impl MysqlAuthMethod {
+    pub const NATIVE_PASSWORD_PLUGIN: &'static str = "mysql_native_password";
+    pub const CLEAR_PASSWORD_PLUGIN: &'static str = "mysql_clear_password";
+
+    /// Returns the MySQL authentication plugin name sent on the wire.
+    pub const fn plugin_name(self) -> &'static str {
+        match self {
+            Self::NativePassword => Self::NATIVE_PASSWORD_PLUGIN,
+            Self::ClearPassword => Self::CLEAR_PASSWORD_PLUGIN,
+        }
     }
 }
 
@@ -231,29 +274,13 @@ impl PasswordVerifier {
             });
         }
 
-        if let Some(verifier) = input.strip_prefix("mysql_native_password:") {
-            let hash_stage_2 = hex::decode(verifier).ok()?;
-            if hash_stage_2.len() != 20 {
-                return None;
-            }
-
+        if input.starts_with("mysql_native_password:") {
+            let hash_stage_2 = parse_mysql_native_password_verifier(input).ok()?;
             return Some(Self::MysqlNativePassword { hash_stage_2 });
         }
 
-        if let Some(verifier) = input.strip_prefix("pg_scram_sha256:") {
-            let mut parts = verifier.split(':');
-            let iterations = parts.next()?.parse::<u32>().ok()?;
-            let salt = hex::decode(parts.next()?).ok()?;
-            let stored_key = hex::decode(parts.next()?).ok()?;
-            let server_key = hex::decode(parts.next()?).ok()?;
-            if parts.next().is_some()
-                || stored_key.len() != PG_SCRAM_SHA256_KEY_LEN
-                || server_key.len() != PG_SCRAM_SHA256_KEY_LEN
-            {
-                return None;
-            }
-
-            return PgScramSha256Verifier::new(iterations, salt, stored_key, server_key)
+        if input.starts_with("pg_scram_sha256:") {
+            return parse_pg_scram_sha256_password_verifier(input)
                 .ok()
                 .map(Self::PgScramSha256);
         }
