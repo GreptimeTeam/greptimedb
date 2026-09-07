@@ -39,7 +39,7 @@ pub use permission::{
 };
 pub use user_info::UserInfo;
 pub use user_provider::static_user_provider::StaticUserProvider;
-pub use user_provider::{MysqlAuthMethod, PgAuthInfo, UserProvider};
+pub use user_provider::{BEARER_TOKEN_USER, MysqlAuthMethod, PgAuthInfo, UserProvider};
 
 /// pub type alias
 pub type UserInfoRef = std::sync::Arc<dyn UserInfo>;

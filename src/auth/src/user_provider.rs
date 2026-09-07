@@ -41,6 +41,14 @@ use crate::error::{
 use crate::user_info::{DefaultUserInfo, PermissionMode};
 use crate::{UserInfoRef, auth_mysql};
 
+/// Reserved SQL-protocol username selecting bearer-token authentication.
+///
+/// User providers must not define this as a password-authenticated user.
+/// SQL servers carry the token through their clear-password exchange; this
+/// selector does not itself require TLS, so transport policy remains a server
+/// deployment choice.
+pub const BEARER_TOKEN_USER: &str = "*";
+
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
     fn name(&self) -> &str;
@@ -67,8 +75,8 @@ pub trait UserProvider: Send + Sync {
         Ok(user_info)
     }
 
-    /// Authenticates and authorizes an opaque bearer token (e.g. a JWT or an
-    /// OAuth2 access token).
+    /// Authenticates an opaque bearer token (e.g. a JWT or an OAuth2 access
+    /// token) and derives its user identity.
     ///
     /// Unlike [auth()](Self::auth), the caller has no `Identity`/`Password` —
     /// the provider validates the token and *derives* the identity from it.
@@ -78,18 +86,25 @@ pub trait UserProvider: Send + Sync {
     /// The default rejects token auth with
     /// [`Error::UnsupportedAuthMethod`], so password-only providers keep
     /// today's behavior. Providers that support token auth override this to
-    /// validate the token, resolve it to a user, and
-    /// [`authorize`](Self::authorize) the connection.
-    async fn auth_bearer_token(
-        &self,
-        _token: &str,
-        _catalog: &str,
-        _schema: &str,
-    ) -> Result<UserInfoRef> {
+    /// validate the token and resolve it to a user.
+    async fn authenticate_bearer_token(&self, _token: &str, _catalog: &str) -> Result<UserInfoRef> {
         UnsupportedAuthMethodSnafu {
             method: "bearer token",
         }
         .fail()
+    }
+
+    /// Combination of [`authenticate_bearer_token`](Self::authenticate_bearer_token)
+    /// and [`authorize`](Self::authorize).
+    async fn auth_bearer_token(
+        &self,
+        token: &str,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<UserInfoRef> {
+        let user_info = self.authenticate_bearer_token(token, catalog).await?;
+        self.authorize(catalog, schema, &user_info).await?;
+        Ok(user_info)
     }
 
     fn mysql_auth_method(&self) -> MysqlAuthMethod {

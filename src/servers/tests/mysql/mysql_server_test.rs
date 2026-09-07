@@ -14,10 +14,12 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
+use auth::{BEARER_TOKEN_USER, Identity, Password, UserInfoRef, UserProvider};
 use chrono::{Datelike, NaiveDate};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::Output;
@@ -55,14 +57,60 @@ struct MysqlOpts<'a> {
     reject_no_database: bool,
 }
 
+#[derive(Default)]
+struct BearerProvider {
+    authentications: AtomicUsize,
+    authorizations: AtomicUsize,
+}
+
+#[async_trait]
+impl UserProvider for BearerProvider {
+    fn name(&self) -> &str {
+        "bearer-test"
+    }
+
+    async fn authenticate(
+        &self,
+        _: Identity<'_>,
+        _: Password<'_>,
+    ) -> auth::error::Result<UserInfoRef> {
+        unreachable!("the bearer sentinel must not use password authentication")
+    }
+
+    async fn authenticate_bearer_token(
+        &self,
+        token: &str,
+        catalog: &str,
+    ) -> auth::error::Result<UserInfoRef> {
+        assert_eq!("signed-token", token);
+        assert_eq!("greptime", catalog);
+        self.authentications.fetch_add(1, Ordering::Relaxed);
+        Ok(auth::userinfo_by_name(Some("alice".to_string())))
+    }
+
+    async fn authorize(
+        &self,
+        catalog: &str,
+        schema: &str,
+        user_info: &UserInfoRef,
+    ) -> auth::error::Result<()> {
+        assert_eq!("greptime", catalog);
+        assert_eq!(DEFAULT_SCHEMA_NAME, schema);
+        assert_eq!("alice", user_info.username());
+        self.authorizations.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
     let query_handler = create_testing_sql_query_handler(table);
-    create_mysql_server_with_query_handler(query_handler, opts)
+    create_mysql_server_with_query_handler(query_handler, opts, None)
 }
 
 fn create_mysql_server_with_query_handler(
     query_handler: ServerSqlQueryHandlerRef,
     opts: MysqlOpts<'_>,
+    user_provider: Option<auth::UserProviderRef>,
 ) -> Result<Box<dyn Server>> {
     let _ = install_default_crypto_provider();
     let io_runtime = RuntimeBuilder::default()
@@ -71,10 +119,13 @@ fn create_mysql_server_with_query_handler(
         .build()
         .unwrap();
 
-    let mut provider = MockUserProvider::default();
-    if let Some(auth_info) = opts.auth_info {
-        provider.set_authorization_info(auth_info);
-    }
+    let user_provider = user_provider.unwrap_or_else(|| {
+        let mut provider = MockUserProvider::default();
+        if let Some(auth_info) = opts.auth_info {
+            provider.set_authorization_info(auth_info);
+        }
+        Arc::new(provider)
+    });
 
     let tls_server_config = Arc::new(
         ReloadableTlsServerConfig::try_new(opts.tls.clone())
@@ -83,7 +134,7 @@ fn create_mysql_server_with_query_handler(
 
     Ok(MysqlServer::create_server(
         io_runtime,
-        Arc::new(MysqlSpawnRef::new(query_handler, Some(Arc::new(provider)))),
+        Arc::new(MysqlSpawnRef::new(query_handler, Some(user_provider))),
         Arc::new(MysqlSpawnConfig::new(
             opts.tls.should_force_tls(),
             tls_server_config,
@@ -328,6 +379,41 @@ async fn test_server_require_secure_client_secure_with_pkcs8_priv_key() -> Resul
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_bearer_token_auth_over_clear_password() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    let provider = Arc::new(BearerProvider::default());
+    let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let mut server = create_mysql_server_with_query_handler(
+        query_handler,
+        MysqlOpts::default(),
+        Some(provider.clone()),
+    )?;
+    server.start("127.0.0.1:0".parse().unwrap()).await?;
+    let port = server.bind_addr().unwrap().port();
+
+    let client_opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname("127.0.0.1")
+        .tcp_port(port)
+        .prefer_socket(false)
+        .user(Some(BEARER_TOKEN_USER.to_string()))
+        .pass(Some("signed-token".to_string()))
+        .db_name(Some(DEFAULT_SCHEMA_NAME.to_string()))
+        .enable_cleartext_plugin(true);
+    let mut connection = Conn::new(client_opts).await.unwrap();
+    let value: u32 = connection
+        .query_first("SELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(0, value);
+    assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
+    assert_eq!(1, provider.authorizations.load(Ordering::Relaxed));
+
+    server.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_required_secure_client_plain() -> Result<()> {
     let server_tls = TlsOption {
@@ -525,7 +611,7 @@ async fn test_mysql_text_protocol_max_timestamp_with_session_timezone_fails_clos
         inner: create_testing_sql_query_handler(table),
     });
     let mut mysql_server =
-        create_mysql_server_with_query_handler(query_handler, Default::default())?;
+        create_mysql_server_with_query_handler(query_handler, Default::default(), None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     mysql_server.start(listening).await.unwrap();
 

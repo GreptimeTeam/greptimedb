@@ -16,8 +16,8 @@ use std::fmt::Debug;
 use std::sync::Exclusive;
 
 use ::auth::{
-    Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef, UserProviderRef,
-    userinfo_by_name,
+    BEARER_TOKEN_USER, Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef,
+    UserProviderRef, userinfo_by_name,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -123,15 +123,21 @@ impl PgLoginVerifier {
             None => return Ok(None),
         };
 
-        match user_provider
-            .auth(
-                Identity::UserId(user_name, None),
-                Password::PlainText(password.to_string().into()),
-                catalog,
-                schema,
-            )
-            .await
-        {
+        let result = if user_name == BEARER_TOKEN_USER {
+            user_provider
+                .auth_bearer_token(password, catalog, schema)
+                .await
+        } else {
+            user_provider
+                .auth(
+                    Identity::UserId(user_name, None),
+                    Password::PlainText(password.to_string().into()),
+                    catalog,
+                    schema,
+                )
+                .await
+        };
+        match result {
             Err(e) => {
                 METRIC_AUTH_FAILURE
                     .with_label_values(&[e.status_code().as_ref()])
@@ -152,6 +158,9 @@ impl PgLoginVerifier {
             Some(name) => name,
             None => return Ok(PgAuthInfo::Cleartext),
         };
+        if user_name == BEARER_TOKEN_USER {
+            return Ok(PgAuthInfo::Cleartext);
+        }
         let catalog = match &login.catalog {
             Some(name) => name,
             None => return Ok(PgAuthInfo::Cleartext),
@@ -281,7 +290,6 @@ impl StartupHandler for PostgresServerHandlerInner {
                             return send_password_authentication_failed(client).await;
                         }
                     };
-
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);
                     match auth_info {
                         PgAuthInfo::ScramSha256 { .. } => {

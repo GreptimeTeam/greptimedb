@@ -9857,7 +9857,7 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.8.0"
-source = "git+https://github.com/GreptimeTeam/opensrv?rev=6c5a451544194b7bb60a8318d155d4f892b49f2c#6c5a451544194b7bb60a8318d155d4f892b49f2c"
+source = "git+https://github.com/GreptimeTeam/opensrv?rev=1f2ce54edc0324871bf43b2c63c16f9107ddfc15#1f2ce54edc0324871bf43b2c63c16f9107ddfc15"
 dependencies = [
  "async-trait",
  "byteorder",
