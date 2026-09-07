@@ -46,6 +46,7 @@ use servers::query_handler::{
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::requests::{
     OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PER_TABLE_INDEX_KEY,
     SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
@@ -55,6 +56,64 @@ use table::requests::{
 use self::trace_ingest::trace_conventions;
 use crate::instance::Instance;
 use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_RESOURCE_INFO_WRITE_ERRORS};
+
+impl Instance {
+    async fn metric_table_matches_physical_table(
+        &self,
+        table_name: &str,
+        physical_table: &str,
+        ctx: &QueryContextRef,
+    ) -> ServerResult<bool> {
+        let table = self
+            .catalog_manager()
+            .table(
+                ctx.current_catalog(),
+                &ctx.current_schema(),
+                table_name,
+                Some(ctx.as_ref()),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+        Ok(table.is_none_or(|table| {
+            metric_table_info_matches_physical_table(&table.table_info(), physical_table)
+        }))
+    }
+
+    async fn existing_metric_tables_match_physical_table(
+        &self,
+        requests: &api::v1::RowInsertRequests,
+        ctx: &QueryContextRef,
+    ) -> ServerResult<bool> {
+        let physical_table = ctx
+            .extension(PHYSICAL_TABLE_PARAM)
+            .unwrap_or(GREPTIME_PHYSICAL_TABLE);
+
+        for request in &requests.inserts {
+            if !self
+                .metric_table_matches_physical_table(&request.table_name, physical_table, ctx)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+}
+
+fn metric_table_info_matches_physical_table(
+    table_info: &table::metadata::TableInfo,
+    physical_table: &str,
+) -> bool {
+    table_info.meta.engine == METRIC_ENGINE_NAME
+        && table_info
+            .meta
+            .options
+            .extra_options
+            .get(LOGICAL_TABLE_METADATA_KEY)
+            .is_some_and(|table| table == physical_table)
+}
 
 fn trace_permission_targets(
     table_name: &str,
@@ -167,7 +226,11 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         let batching_candidate =
             !metric_ctx.is_legacy && metric_ctx.with_metric_engine && metric_row_batcher.is_some();
-        let batchable = batching_candidate && is_scalar_metric_batchable(&requests)?;
+        let batchable = batching_candidate
+            && is_scalar_metric_batchable(&requests)?
+            && self
+                .existing_metric_tables_match_physical_table(&requests, &ctx)
+                .await?;
         let write_cost =
             if let Some(metric_row_batcher) = metric_row_batcher.as_ref().filter(|_| batchable) {
                 metric_row_batcher

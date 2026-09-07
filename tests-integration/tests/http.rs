@@ -7043,6 +7043,61 @@ async fn test_otlp_metrics_batching_flushes_multiple_small_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_otlp_metrics_batching_respects_existing_logical_table_placement() {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_otlp_metrics_app_with_frontend_batched(
+        StorageType::File,
+        "test_otlp_metrics_batching_respects_existing_logical_table_placement",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    let response = send_otlp_metrics_json(
+        &client,
+        r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"default_seed","gauge":{"dataPoints":[{"timeUnixNano":"1000000","asDouble":1.0}]}}]}]}]}"#,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, response.status());
+
+    for sql in [
+        r#"CREATE TABLE otlp_custom_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ("physical_metric_table" = "")"#,
+        r#"CREATE TABLE placement_metric (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ("on_physical_table" = "otlp_custom_physical", "otlp_metric_compat" = "prom")"#,
+    ] {
+        let response = execute_sql(&client, sql).await;
+        assert_eq!(
+            StatusCode::OK,
+            response.status(),
+            "{}",
+            response.text().await
+        );
+    }
+
+    let response = send_otlp_metrics_json(
+        &client,
+        r#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"placement_metric","gauge":{"dataPoints":[{"timeUnixNano":"2000000","asDouble":2.0}]}}]}]}]}"#,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, response.status());
+
+    validate_data(
+        "otlp_batched_custom_physical_table",
+        &client,
+        "SELECT greptime_value FROM placement_metric",
+        "[[2.0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_batched_default_physical_table_baseline",
+        &client,
+        "SELECT greptime_value FROM default_seed",
+        "[[1.0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_otlp_metrics_batching_preserves_fanout_semantic_options() {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_otlp_metrics_app_with_frontend_batched(
