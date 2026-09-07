@@ -20,7 +20,7 @@ use std::sync::Arc;
 use common_time::{TimeToLive, Timestamp};
 use store_api::storage::{FileId, RegionId};
 
-use crate::sst::file::{FileHandle, FileMeta, Level, MAX_LEVEL};
+use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
 
 /// A version of all SSTs in a region.
@@ -152,6 +152,16 @@ impl SstVersion {
             .sum()
     }
 
+    /// Returns the time range covered by every file in this version, including
+    /// files referenced from other regions after a repartition.
+    pub(crate) fn time_range(&self) -> Option<FileTimeRange> {
+        self.levels
+            .iter()
+            .flat_map(|level_meta| level_meta.files.values())
+            .map(|file_handle| file_handle.time_range())
+            .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
+    }
+
     /// Returns the space occupied by SST data files owned by `region_id`.
     pub(crate) fn owned_sst_usage(&self, region_id: RegionId) -> u64 {
         self.levels
@@ -256,6 +266,74 @@ fn new_level_meta_vec() -> LevelMetaArray {
 mod tests {
     use super::*;
     use crate::test_util::new_noop_file_purger;
+
+    #[test]
+    fn time_range_spans_files_referenced_from_other_regions() {
+        let purger = new_noop_file_purger();
+        let owned = FileMeta {
+            file_id: FileId::random(),
+            region_id: RegionId::new(1, 1),
+            time_range: (
+                Timestamp::new_millisecond(200),
+                Timestamp::new_millisecond(300),
+            ),
+            ..Default::default()
+        };
+        let referenced = FileMeta {
+            file_id: FileId::random(),
+            region_id: RegionId::new(2, 1),
+            time_range: (
+                Timestamp::new_millisecond(50),
+                Timestamp::new_millisecond(100),
+            ),
+            ..Default::default()
+        };
+
+        let mut version = SstVersion::new();
+        version.add_files(purger, [owned, referenced].into_iter());
+
+        assert_eq!(
+            version.time_range(),
+            Some((
+                Timestamp::new_millisecond(50),
+                Timestamp::new_millisecond(300)
+            ))
+        );
+    }
+
+    #[test]
+    fn time_range_compares_across_units() {
+        let purger = new_noop_file_purger();
+        let seconds = FileMeta {
+            file_id: FileId::random(),
+            time_range: (Timestamp::new_second(1), Timestamp::new_second(2)),
+            ..Default::default()
+        };
+        let millis = FileMeta {
+            file_id: FileId::random(),
+            time_range: (
+                Timestamp::new_millisecond(500),
+                Timestamp::new_millisecond(2500),
+            ),
+            ..Default::default()
+        };
+
+        let mut version = SstVersion::new();
+        version.add_files(purger, [seconds, millis].into_iter());
+
+        assert_eq!(
+            version.time_range(),
+            Some((
+                Timestamp::new_millisecond(500),
+                Timestamp::new_millisecond(2500)
+            ))
+        );
+    }
+
+    #[test]
+    fn time_range_is_none_without_files() {
+        assert_eq!(SstVersion::new().time_range(), None);
+    }
 
     #[test]
     fn test_add_files() {
