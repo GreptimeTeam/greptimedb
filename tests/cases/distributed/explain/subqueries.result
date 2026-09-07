@@ -101,9 +101,9 @@ order by t.i desc;
 | physical_plan | SortPreservingMergeExec: [i@0 DESC]_|
 |_|_SortExec: expr=[i@0 DESC], preserve_partitioning=[true]_|
 |_|_CrossJoinExec_|
-|_|_CoalescePartitionsExec_|
 |_|_ProjectionExec: expr=[i@0 as i]_|
 |_|_MergeScanExec: REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -179,7 +179,9 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -212,7 +214,9 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHE
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[i@1 as i]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -363,7 +367,10 @@ EXPLAIN SELECT DISTINCT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[x@0 ASC NULLS LAST], preserve_partitioning=[true]_|
-|_|_AggregateExec: mode=SinglePartitioned, gby=[x@0 as x], aggr=[]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[x@0 as x], aggr=[]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[x@0 as x], aggr=[]_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -560,7 +567,9 @@ ORDER BY u1.a;
 | physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

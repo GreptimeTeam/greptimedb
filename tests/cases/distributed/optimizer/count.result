@@ -281,6 +281,7 @@ select count(1) from count_where_bug;
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[{count[count]:REDACTED} as __count_state(count_where_bug.ts)] REDACTED
@@ -316,6 +317,7 @@ select count(1) from count_where_bug where `tag` = 'b';
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
@@ -342,6 +344,7 @@ select count(1) from count_where_bug where `tag` = 'b';
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
@@ -378,6 +381,7 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
@@ -417,6 +421,7 @@ select count(1) from count_where_bug where num != 3;
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
