@@ -90,6 +90,7 @@ fn create_proto_alter_kind(
             })))
         }
         Kind::ModifyColumnTypes(x) => Ok(Some(alter_request::Kind::ModifyColumnTypes(x.clone()))),
+        Kind::SetJsonSettings(x) => Ok(Some(alter_request::Kind::SetJsonSettings(x.clone()))),
         Kind::DropColumns(x) => {
             let drop_columns = x
                 .drop_columns

@@ -663,6 +663,10 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns)?,
+            AlterKind::SetJsonSettings {
+                column_name,
+                target_metadata,
+            } => self.set_json_settings(column_name, target_metadata)?,
             AlterKind::SetIndexes { options } => self.set_indexes(options)?,
             AlterKind::UnsetIndexes { options } => self.unset_indexes(options)?,
             AlterKind::SetRegionOptions { options: _ } => {
@@ -828,6 +832,30 @@ impl RegionMetadataBuilder {
             }
         }
 
+        Ok(())
+    }
+
+    fn set_json_settings(
+        &mut self,
+        column_name: String,
+        target_metadata: datatypes::schema::Metadata,
+    ) -> Result<()> {
+        let Some(column_meta) = self
+            .column_metadatas
+            .iter_mut()
+            .find(|col| col.column_schema.name == column_name)
+        else {
+            return InvalidRegionRequestSnafu {
+                region_id: self.region_id,
+                err: format!("column {column_name} not found"),
+            }
+            .fail();
+        };
+
+        column_meta.column_schema = column_meta
+            .column_schema
+            .clone()
+            .with_metadata(target_metadata);
         Ok(())
     }
 

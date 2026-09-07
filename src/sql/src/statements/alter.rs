@@ -86,6 +86,11 @@ pub enum AlterTableOperation {
     ModifyColumnType {
         column_name: Ident,
         target_type: DataType,
+    },
+    /// `MODIFY <column_name> JSON2 [json2_options]`
+    SetJsonSettings {
+        column_name: Ident,
+        target_type: DataType,
         json2_options: Option<Json2Options>,
     },
     /// `SET <table attrs key> = <table attr value>`
@@ -255,6 +260,10 @@ impl Display for AlterTableOperation {
                 write!(f, r#"RENAME {new_table_name}"#)
             }
             AlterTableOperation::ModifyColumnType {
+                column_name,
+                target_type,
+            } => write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#),
+            AlterTableOperation::SetJsonSettings {
                 column_name,
                 target_type,
                 json2_options,

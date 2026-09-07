@@ -462,20 +462,23 @@ impl ParserContext<'_> {
                         .context(error::SyntaxSnafu)?;
                     self.parse_alter_table_drop_default(column_name)
                 } else {
-                    let (data_type, json2_options) =
-                        if let Some(json2) = parse_json2_type_and_options(&mut self.parser)? {
-                            json2
-                        } else {
-                            (
-                                self.parser.parse_data_type().context(error::SyntaxSnafu)?,
-                                None,
-                            )
-                        };
-                    Ok(AlterTableOperation::ModifyColumnType {
-                        column_name,
-                        target_type: data_type,
-                        json2_options,
-                    })
+                    if let Some((data_type, json2_options)) =
+                        parse_json2_type_and_options(&mut self.parser)?
+                    {
+                        Ok(AlterTableOperation::SetJsonSettings {
+                            column_name,
+                            target_type: data_type,
+                            json2_options,
+                        })
+                    } else {
+                        Ok(AlterTableOperation::ModifyColumnType {
+                            column_name,
+                            target_type: self
+                                .parser
+                                .parse_data_type()
+                                .context(error::SyntaxSnafu)?,
+                        })
+                    }
                 }
             }
             _ => self.expected(
@@ -1546,11 +1549,9 @@ ALTER TABLE metrics REPARTITION
                     AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
-                        json2_options,
                     } => {
                         assert_eq!("a", column_name.value);
                         assert_eq!(DataType::String(None), *target_type);
-                        assert!(json2_options.is_none());
                     }
                     _ => unreachable!(),
                 }
@@ -1576,7 +1577,7 @@ MODIFY COLUMN attrs JSON2 (
         let Statement::AlterTable(alter_table) = statements.remove(0) else {
             unreachable!()
         };
-        let AlterTableOperation::ModifyColumnType {
+        let AlterTableOperation::SetJsonSettings {
             column_name,
             target_type,
             json2_options: Some(options),
@@ -1612,7 +1613,7 @@ MODIFY COLUMN attrs JSON2 (
         let Statement::AlterTable(empty) = empty.remove(0) else {
             unreachable!()
         };
-        let AlterTableOperation::ModifyColumnType { json2_options, .. } = empty.alter_operation()
+        let AlterTableOperation::SetJsonSettings { json2_options, .. } = empty.alter_operation()
         else {
             unreachable!()
         };
@@ -1642,11 +1643,9 @@ MODIFY COLUMN attrs JSON2 (
                     AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
-                        json2_options,
                     } => {
                         assert_eq!("a", column_name.value);
                         assert_eq!(DataType::MediumText, *target_type);
-                        assert!(json2_options.is_none());
                     }
                     _ => unreachable!(),
                 }
@@ -1675,11 +1674,9 @@ MODIFY COLUMN attrs JSON2 (
                     AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
-                        json2_options,
                     } => {
                         assert_eq!("a", column_name.value);
                         assert!(matches!(target_type, DataType::Timestamp(Some(6), _)));
-                        assert!(json2_options.is_none());
                     }
                     _ => unreachable!(),
                 }
