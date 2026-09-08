@@ -547,11 +547,12 @@ mod tests {
             .unwrap();
         let ready_path = temp_dir.path().join("ready");
         let pid_path = temp_dir.path().join("pid");
-        let otelgen_path = temp_dir.path().join("otelgen");
+        let otelgen_path = temp_dir.path().join("bin").join("otelgen");
+        fs::create_dir_all(otelgen_path.parent().unwrap()).unwrap();
         fs::write(
             &otelgen_path,
             r#"#!/bin/sh
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1
 echo "$$" > pid
 : > ready
 exec sleep 5
