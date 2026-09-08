@@ -15,11 +15,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use object_store::config::ObjectStoreConfig;
 use serde_json::{Value, json};
 
 use self::read_bench::run_read_bench;
 use self::storage::{enforce_storage_thresholds, run_storage_inspection};
-use crate::query_regression_runner::model::DestinationConfig;
+use crate::query_regression_runner::model::{DestinationConfig, ReadBenchConfig};
 use crate::query_regression_runner::plan::normalized_remote_write;
 use crate::query_regression_runner::{
     FinalizeRemoteArgs, PrepareRemoteArgs, RenderRemoteConfigArgs, Result,
@@ -60,14 +61,15 @@ pub(super) async fn run_finalize_remote(args: FinalizeRemoteArgs) -> Result<()> 
                 args.candidate_destination.as_deref(),
             ),
         ] {
-            let (data_home, destination) = match (data_home, destination) {
-                (Some(data_home), None) => (data_home.to_path_buf(), None),
+            let (data_home, destination, destination_config) = match (data_home, destination) {
+                (Some(data_home), None) => (data_home.to_path_buf(), None, None),
                 (None, Some(path)) => {
                     let destination: DestinationConfig =
                         toml::from_str(&fs::read_to_string(path)?)?;
                     (
-                        PathBuf::from(destination.data_home),
+                        PathBuf::from(&destination.data_home),
                         Some(path.to_path_buf()),
+                        Some(destination),
                     )
                 }
                 (Some(_), Some(_)) => {
@@ -83,6 +85,11 @@ pub(super) async fn run_finalize_remote(args: FinalizeRemoteArgs) -> Result<()> 
                     .into());
                 }
             };
+            validate_read_bench_destination(
+                remote.read_bench.as_ref(),
+                destination_config.as_ref(),
+                name,
+            )?;
             let target = targets
                 .iter_mut()
                 .find(|target| target.get("name").and_then(Value::as_str) == Some(name))
@@ -160,6 +167,26 @@ pub(super) async fn run_finalize_remote(args: FinalizeRemoteArgs) -> Result<()> 
     Ok(())
 }
 
+fn validate_read_bench_destination(
+    read_bench: Option<&ReadBenchConfig>,
+    destination: Option<&DestinationConfig>,
+    name: &str,
+) -> Result<()> {
+    let Some(destination) = destination else {
+        return Ok(());
+    };
+    if read_bench.is_some_and(|config| config.enabled)
+        && !matches!(&destination.object_store, ObjectStoreConfig::File(_))
+    {
+        return Err(format!(
+            "{name}: read_bench requires a File destination, but --{name}-destination uses {}; disable read_bench to keep footer inspection enabled",
+            destination.object_store.provider_name(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn is_storage_threshold_entry(threshold: &Value) -> bool {
     let Some(name) = threshold.get("threshold").and_then(Value::as_str) else {
         return false;
@@ -180,4 +207,66 @@ fn is_storage_threshold_entry(threshold: &Value) -> bool {
                 | "require_encodings"
                 | "forbid_encodings"
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use object_store::config::S3Config;
+
+    use super::*;
+
+    fn read_bench(enabled: bool) -> ReadBenchConfig {
+        ReadBenchConfig {
+            enabled,
+            parquetbench: true,
+            scanbench: false,
+            iterations: 1,
+            projection: vec![],
+            parquet_reader: "default".to_string(),
+            scan_scanner: "default".to_string(),
+            parallelism: 1,
+            max_files: None,
+        }
+    }
+
+    fn destination(object_store: ObjectStoreConfig) -> DestinationConfig {
+        DestinationConfig {
+            data_home: "/tmp/data".to_string(),
+            object_store,
+        }
+    }
+
+    #[test]
+    fn read_bench_requires_file_destination() {
+        let enabled = read_bench(true);
+        assert!(
+            validate_read_bench_destination(
+                Some(&enabled),
+                Some(&destination(ObjectStoreConfig::default())),
+                "base",
+            )
+            .is_ok()
+        );
+
+        let error = validate_read_bench_destination(
+            Some(&enabled),
+            Some(&destination(ObjectStoreConfig::S3(S3Config::default()))),
+            "candidate",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "candidate: read_bench requires a File destination, but --candidate-destination uses S3; disable read_bench to keep footer inspection enabled",
+        );
+
+        let disabled = read_bench(false);
+        assert!(
+            validate_read_bench_destination(
+                Some(&disabled),
+                Some(&destination(ObjectStoreConfig::S3(S3Config::default()))),
+                "candidate",
+            )
+            .is_ok()
+        );
+    }
 }

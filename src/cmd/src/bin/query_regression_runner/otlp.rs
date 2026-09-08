@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
@@ -177,11 +177,13 @@ async fn run_otelgen_load(
     fs::create_dir_all(&log_dir)?;
     let stdout_path = log_dir.join("stdout.log");
     let stderr_path = log_dir.join("stderr.log");
-    let mut child = Command::new(otelgen_bin)
-        .args(&command[1..])
-        .stdout(Stdio::from(fs::File::create(&stdout_path)?))
-        .stderr(Stdio::from(fs::File::create(&stderr_path)?))
-        .spawn()?;
+    let mut child = ChildGuard::new(
+        Command::new(otelgen_bin)
+            .args(&command[1..])
+            .stdout(Stdio::from(fs::File::create(&stdout_path)?))
+            .stderr(Stdio::from(fs::File::create(&stderr_path)?))
+            .spawn()?,
+    );
     let started = Instant::now();
     if load.warmup_seconds > 0 {
         let _ = wait_for_child(&mut child, Duration::from_secs(load.warmup_seconds)).await?;
@@ -196,17 +198,13 @@ async fn run_otelgen_load(
             .max(60);
         if !wait_for_child(&mut child, Duration::from_secs(remaining)).await? {
             timed_out = true;
-            child.kill()?;
-            let _ = child.wait()?;
+            let _ = child.kill_and_wait()?;
         }
     }
     let final_snapshot = fetch_otlp_metrics(client, http_port, &clock).await?;
     let returncode = match child.try_wait()? {
         Some(status) => status.code(),
-        None => {
-            child.kill()?;
-            child.wait()?.code()
-        }
+        None => child.kill_and_wait()?.code(),
     };
     let elapsed_seconds = started.elapsed().as_secs_f64();
     Ok(json!({
@@ -221,7 +219,45 @@ async fn run_otelgen_load(
     }))
 }
 
-async fn wait_for_child(child: &mut std::process::Child, timeout: Duration) -> Result<bool> {
+struct ChildGuard {
+    child: Child,
+    reaped: bool,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.reaped = true;
+        }
+        Ok(status)
+    }
+
+    fn kill_and_wait(&mut self) -> std::io::Result<ExitStatus> {
+        self.child.kill()?;
+        let status = self.child.wait()?;
+        self.reaped = true;
+        Ok(status)
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if !self.reaped {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+async fn wait_for_child(child: &mut ChildGuard, timeout: Duration) -> Result<bool> {
     let deadline = Instant::now() + timeout;
     loop {
         if child.try_wait()?.is_some() {
@@ -483,6 +519,70 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metrics_failure_after_spawn_reaps_otelgen() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt;
+        use std::thread;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ready_path = temp_dir.path().join("ready");
+        let pid_path = temp_dir.path().join("pid");
+        let otelgen_path = temp_dir.path().join("otelgen");
+        fs::write(
+            &otelgen_path,
+            format!(
+                "#!/bin/sh\necho $$ > {}\ntouch {}\nwhile :; do :; done\n",
+                pid_path.display(),
+                ready_path.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&otelgen_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&otelgen_path, permissions).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            for status in ["200 OK", "500 Internal Server Error"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request);
+                if status == "500 Internal Server Error" {
+                    while !ready_path.exists() {
+                        thread::yield_now();
+                    }
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let client = Client::builder().build().unwrap();
+        let mut load = otlp_load_for_test();
+        load.warmup_seconds = 0;
+
+        assert!(
+            run_otelgen_load(&otelgen_path, port, temp_dir.path(), &load, &client)
+                .await
+                .is_err()
+        );
+        server.join().unwrap();
+        let pid = fs::read_to_string(pid_path).unwrap();
+        assert!(
+            !std::process::Command::new("sh")
+                .args(["-c", &format!("kill -0 {pid}")])
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 
     #[test]
