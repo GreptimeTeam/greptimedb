@@ -12,6 +12,8 @@ const MARKER = "<!-- pr-open-limit -->";
 const COMMENT_AUTHOR = "github-actions[bot]";
 // Repository permissions that mark someone as part of the team.
 const TEAM_PERMISSIONS = ["admin", "maintain", "write"];
+// Keep the comment readable for authors who are far over the limit.
+const MAX_LISTED_PRS = 10;
 
 function summary(text) {
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -43,8 +45,20 @@ async function isTeamMember(octokit, owner, repo, username) {
   }
 }
 
-function buildComment(author, total, limit, owner, repo) {
-  // Link to search results to avoid creating backlinks on individual PRs.
+function buildComment(author, total, limit, owner, repo, openPrs) {
+  const listed = openPrs.slice(0, MAX_LISTED_PRS).map((pr) => {
+    // Escape ASCII punctuation so titles stay literal Markdown link labels.
+    const title = pr.title
+      .replace(/\s+/g, " ")
+      .replace(/[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]/g, "\\$&");
+    // Redirect links avoid creating backlinks on the listed PRs.
+    return `- [PR ${pr.number}: ${title}](https://redirect.github.com/${owner}/${repo}/pull/${pr.number})`;
+  });
+  const hidden = openPrs.length - listed.length;
+  if (hidden > 0) {
+    listed.push(`- ...and ${hidden} more`);
+  }
+  const list = listed.length > 0 ? `${listed.join("\n")}\n\n` : "";
   const query = `is:pr is:open author:${author} draft:false`;
   const url = `https://github.com/${owner}/${repo}/pulls?q=${encodeURIComponent(query)}`;
 
@@ -55,7 +69,7 @@ function buildComment(author, total, limit, owner, repo) {
 Review is the scarcest resource here. Please land or close some of these before
 pushing this one forward.
 
-[View your open pull requests](${url})
+${list}[View your open pull requests](${url})
 
 This check is advisory for now and blocks nothing.`;
 }
@@ -132,7 +146,7 @@ async function upsertComment(octokit, params, body) {
   await upsertComment(
     octokit,
     { owner, repo, issue_number: prNumber },
-    buildComment(author, total, limit, owner, repo)
+    buildComment(author, total, limit, owner, repo, others)
   );
 })().catch((error) => {
   console.error(error);
