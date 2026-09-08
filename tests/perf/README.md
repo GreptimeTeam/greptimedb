@@ -86,15 +86,19 @@ sample values without changing label cardinality or the runner lifecycle:
 [scenario.remote_write.value]
 pattern = "quantized_signal" # linear, constant, modulo, unique, seeded_random,
                               # run_length, quantized_signal,
-                              # signal_with_sporadic_stalls, mixed_signal_repeated
+                              # signal_with_sporadic_stalls, mixed_signal_repeated,
+                              # bounded_mixed
 base = 0.0
 step = 0.125
-cardinality = 4096           # buckets for modulo/seeded_random/quantized_signal/run_length
-seed = 12345                 # deterministic seeded_random input
-run_length = 8               # adjacent samples per bucket for run_length/quantized_signal
+cardinality = 4096           # buckets for modulo/seeded_random/quantized_signal/run_length;
+                              # baseline buckets for bounded_mixed
+seed = 12345                 # deterministic seeded_random input and bounded_mixed series hash
+run_length = 8               # adjacent samples per bucket for run_length/quantized_signal;
+                              # interpolation interval for bounded_mixed
 stall_every = 100            # interval for signal_with_sporadic_stalls
 stall_length = 16            # held samples inside each stall interval
-mixed_every = 5              # every Nth sample becomes the repeated base value
+mixed_every = 5              # every Nth sample becomes the repeated base value;
+                              # one fractional bounded_mixed series per N series
 ```
 
 The default `linear` pattern preserves the helper's historical formula. Use
@@ -103,12 +107,29 @@ data shapes, `run_length` for run-heavy low-cardinality series, `quantized_signa
 for signal-like values collapsed into a finite bucket set, `signal_with_sporadic_stalls`
 for mostly continuous signals with periodic flat spots, and `mixed_signal_repeated`
 for signal-plus-periodic-default mixtures. `unique` or high-cardinality buckets
-still work for broad sample-value distributions. This is a generic sample-value
-control for query/ingestion cases; it does not inspect or assert storage
-encoding, Parquet footers, or storage policy choices. For chunked remote-write
-ingestion, the runner passes the sample offset and total sample count to the
-helper so non-linear value patterns use a stable global/per-series ordinal across
-chunks.
+still work for broad sample-value distributions.
+
+`bounded_mixed` is synthetic rather than an empirical workload. For series `s`,
+`h = splitmix64(s ^ seed)` selects a span from `[10, 1_000, 100_000, 10_000_000]`
+using its top two bits, multiplied by `1 + ((h >> 32) % 10)`. Its baseline is
+`(h % max(cardinality, 1)) * span / 10`. Ranges can overlap. At local sample
+`l = sample_offset + sample_idx`, it linearly interpolates hash-derived anchors
+in `[-span + 1, span - 1]`, changing anchors every `max(run_length, 1)` samples.
+It applies `base + step * signal`, then rounds to an integer. Every
+`max(mixed_every, 1)`-th series adds a hash-derived fraction from `1/1000` to
+`999/1000`. The 95/5 finite, nonintegral guarantee applies to the case's bounded
+parameters, not arbitrary huge or nonfinite base/step inputs. With `base = 0`
+and `step = 1`, output lies within `baseline ± span`, allowing one unit for
+rounding and the fractional addition. The explicit case uses 1,000 equal-length
+series and `mixed_every = 20`, giving exactly 95% integer-valued and 5%
+fractional Float64 samples. Its ranges and temporal shape are synthetic design
+parameters, not measured properties from the survey.
+
+This is a generic sample-value control for query/ingestion cases; it does not
+inspect or assert storage encoding, Parquet footers, or storage policy choices.
+For chunked remote-write ingestion, the runner passes the sample offset and total
+sample count to the helper so non-linear value patterns use a stable global/per-series
+ordinal across chunks.
 
 Case schema, value distribution defaults, storage defaults, and read-bench
 defaults are owned by Rust. The outer CI driver calls
@@ -373,8 +394,14 @@ uv run --no-project python .github/scripts/query-regression-run.py \
 
 `tests/perf/query_cases/sst_float_bss/case.toml` is an explicit-only case for
 comparing a default empty physical metric table with a candidate
-byte-stream-split (BSS) physical table. Current local-case findings are recorded
-in [`query_cases/sst_float_bss/RESULTS.md`](query_cases/sst_float_bss/RESULTS.md).
+byte-stream-split (BSS) physical table. It writes 1,000 series × 4,320 samples
+(4,320,000 rows) using synthetic `bounded_mixed` values: 95% integral series and
+5% nonintegral series, with bounded per-series fluctuation rather than globally
+unique values. This deliberately matches a 95/5 design; it is not an empirical
+claim about any production population. A separate survey sample found 94.79%
+integral values, but that observation does not make its values globally unique.
+Historical unique-value findings are preserved, but superseded pending a mixed
+workload rerun, in [`query_cases/sst_float_bss/RESULTS.md`](query_cases/sst_float_bss/RESULTS.md).
 Both targets must use the exact same release `greptime` binary; only the
 per-target table setup SQL differs. Run the existing driver from a checkout
 containing that binary, with absolute paths and fresh data directories for every

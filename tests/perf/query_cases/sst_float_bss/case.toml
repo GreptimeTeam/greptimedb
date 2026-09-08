@@ -3,7 +3,7 @@
 
 [case]
 name = "sst_float_bss"
-description = "Compare default and byte-stream-split floating-point SST bytes and warmed value-scanning query latency"
+description = "Compare default and byte-stream-split floating-point SST bytes and warmed value-scanning query latency with bounded 95/5 per-series DOUBLE values"
 
 [scenario]
 kind = "prom_remote_write_then_query"
@@ -12,7 +12,7 @@ kind = "prom_remote_write_then_query"
 database = "public"
 metric = "sst_float_bss"
 physical_table = "sst_float_bss_physical"
-series_count = 1024
+series_count = 1000
 samples_per_series = 4320
 sample_chunk_size = 1440
 flush_every_sample_chunks = 1
@@ -32,9 +32,15 @@ candidate_setup_sql = [
 ]
 
 [scenario.remote_write.value]
-pattern = "unique"
+# Synthetic, not empirical: 95% integral and 5% nonintegral series vary
+# smoothly within deterministic per-series ranges; series are not a global monotonic counter.
+pattern = "bounded_mixed"
 base = 0
 step = 1
+cardinality = 1000
+seed = 42
+mixed_every = 20
+run_length = 60
 
 [scenario.remote_write.prom_store]
 pending_rows_flush_interval = "1s"

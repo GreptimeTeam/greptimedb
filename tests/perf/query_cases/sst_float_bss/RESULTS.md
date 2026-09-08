@@ -1,4 +1,9 @@
-# SST float BSS: current-case results
+# SST float BSS: historical unique-integer results
+
+> Superseded workload: the current case now generates bounded, fluctuating
+> 95% integer-valued / 5% fractional series. The numbers below belong only to
+> the earlier global-unique-integer experiment, not the current case. Mixed
+> workload measurements are pending.
 
 ## Decision context
 

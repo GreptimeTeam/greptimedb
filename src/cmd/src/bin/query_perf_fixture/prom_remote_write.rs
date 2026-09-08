@@ -197,8 +197,35 @@ fn deterministic_prom_value(args: &PromRemoteWriteArgs, series_idx: u64, sample_
                 args.value_base + (series_idx % 97) as f64 + local as f64 * args.value_step
             }
         }
+        ValuePattern::BoundedMixed => bounded_mixed_value(args, series_idx, local),
     }
 }
+
+fn bounded_mixed_value(args: &PromRemoteWriteArgs, series_idx: u64, local: u64) -> f64 {
+    const SPANS: [i64; 4] = [10, 1_000, 100_000, 10_000_000];
+    let series = splitmix64(series_idx ^ args.value_seed);
+    let span = SPANS[(series >> 62) as usize] * (1 + ((series >> 32) % 10) as i64);
+    let baseline = (series % args.value_cardinality.max(1)) as f64 * span as f64 / 10.0;
+    let run_length = args.value_run_length.max(1);
+    let group = local / run_length;
+    let phase = local % run_length;
+    let anchor = bounded_mixed_anchor(series, group, span);
+    let next_anchor = bounded_mixed_anchor(series, group + 1, span);
+    let signal = baseline + anchor + (next_anchor - anchor) * phase as f64 / run_length as f64;
+    let value = (args.value_base + args.value_step * signal).round();
+    if series_idx % args.value_mixed_every.max(1) == args.value_mixed_every.max(1) - 1 {
+        let numerator = splitmix64(series ^ local) % 999 + 1;
+        value + numerator as f64 / 1_000.0
+    } else {
+        value
+    }
+}
+
+fn bounded_mixed_anchor(series: u64, group: u64, span: i64) -> f64 {
+    let limit = span - 1;
+    (splitmix64(series ^ group) % (2 * limit as u64 + 1)) as i64 as f64 - limit as f64
+}
+
 fn splitmix64(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9e3779b97f4a7c15);
     let mut mixed = value;
@@ -307,12 +334,124 @@ mod tests {
             for chunk_idx in 0..10 {
                 let mut chunk = args(ValuePattern::SeededRandom);
                 chunk.samples_per_series = 1_440;
-                chunk.value_sample_offset = chunk_idx * 1_440;
+                chunk.value_sample_offset = chunk_idx * 1_439;
                 chunk.value_total_samples_per_series = Some(14_400);
                 for sample_idx in 0..chunk.samples_per_series {
                     assert_eq!(
                         deterministic_prom_value(&chunk, series_idx, sample_idx),
                         expected[(chunk.value_sample_offset + sample_idx) as usize]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_mixed_has_bounded_95_5_per_series_values() {
+        let mut args = args(ValuePattern::BoundedMixed);
+        args.series_count = 1_000;
+        args.samples_per_series = 4_320;
+        args.value_cardinality = 1_000;
+        args.value_seed = 42;
+        args.value_run_length = 60;
+        args.value_mixed_every = 20;
+
+        let mut integral_series = 0;
+        let mut fractional_series = 0;
+        let mut spans = HashSet::new();
+        let mut ranges = HashSet::new();
+        for series_idx in 0..args.series_count {
+            let series = splitmix64(series_idx ^ args.value_seed);
+            let span = [10_i64, 1_000, 100_000, 10_000_000][(series >> 62) as usize]
+                * (1 + ((series >> 32) % 10) as i64);
+            let baseline = (series % args.value_cardinality.max(1)) as f64 * span as f64 / 10.0;
+            let values = (0..args.samples_per_series)
+                .map(|sample_idx| deterministic_prom_value(&args, series_idx, sample_idx))
+                .collect::<Vec<_>>();
+
+            assert!(values.iter().all(|value| value.is_finite()));
+            assert!(
+                values
+                    .iter()
+                    .all(|value| *value >= baseline - span as f64 - 1.0
+                        && *value <= baseline + span as f64 + 1.0)
+            );
+            assert!(
+                values.windows(2).any(|pair| pair[1] > pair[0]),
+                "series {series_idx} never rises"
+            );
+            assert!(
+                values.windows(2).any(|pair| pair[1] < pair[0]),
+                "series {series_idx} never falls"
+            );
+            ranges.insert((
+                values
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min)
+                    .to_bits(),
+                values
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max)
+                    .to_bits(),
+            ));
+            spans.insert(span);
+            if series_idx % args.value_mixed_every == args.value_mixed_every - 1 {
+                fractional_series += 1;
+                assert!(values.iter().all(|value| value.fract() != 0.0));
+            } else {
+                integral_series += 1;
+                assert!(values.iter().all(|value| value.fract() == 0.0));
+            }
+        }
+
+        assert_eq!((integral_series, fractional_series), (950, 50));
+        assert!(spans.len() > 4);
+        assert!(ranges.len() > 1);
+    }
+
+    #[test]
+    fn bounded_mixed_is_seeded_and_chunk_bit_identical() {
+        let mut monolithic = args(ValuePattern::BoundedMixed);
+        monolithic.samples_per_series = 14_400;
+        monolithic.value_total_samples_per_series = Some(14_400);
+        monolithic.value_cardinality = 1_000;
+        monolithic.value_seed = 42;
+        monolithic.value_run_length = 60;
+        monolithic.value_mixed_every = 20;
+
+        let original = (0..600)
+            .map(|sample_idx| deterministic_prom_value(&monolithic, 19, sample_idx))
+            .collect::<Vec<_>>();
+        monolithic.value_seed = 43;
+        assert_ne!(
+            original,
+            (0..600)
+                .map(|sample_idx| deterministic_prom_value(&monolithic, 19, sample_idx))
+                .collect::<Vec<_>>()
+        );
+
+        monolithic.value_seed = 42;
+        for series_idx in [0, 19] {
+            for chunk_idx in 0..10 {
+                let mut chunk = args(ValuePattern::BoundedMixed);
+                chunk.samples_per_series = 1_440;
+                chunk.value_sample_offset = chunk_idx * 1_439;
+                chunk.value_total_samples_per_series = Some(14_400);
+                chunk.value_cardinality = 1_000;
+                chunk.value_seed = 42;
+                chunk.value_run_length = 60;
+                chunk.value_mixed_every = 20;
+                for sample_idx in 0..chunk.samples_per_series {
+                    assert_eq!(
+                        deterministic_prom_value(&chunk, series_idx, sample_idx).to_bits(),
+                        deterministic_prom_value(
+                            &monolithic,
+                            series_idx,
+                            chunk.value_sample_offset + sample_idx
+                        )
+                        .to_bits()
                     );
                 }
             }

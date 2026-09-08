@@ -204,6 +204,7 @@ pub(super) enum ValuePattern {
     QuantizedSignal,
     SignalWithSporadicStalls,
     MixedSignalRepeated,
+    BoundedMixed,
 }
 
 impl std::fmt::Display for ValuePattern {
