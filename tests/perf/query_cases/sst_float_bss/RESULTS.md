@@ -29,7 +29,11 @@ The inspection covered `data/greptime/public` only. Each target had six selected
 SSTs, 4,423,680 rows, and 45 inspected `greptime_value` chunks. Footer checks
 found no BSS encoding in base and BSS in candidate; row-count, logical-schema,
 and SQL result checks passed. The expected and returned `sum(greptime_value)`
-was `9,784,470,159,360` for both targets.
+was `9,784,470,159,360` for both targets. This verifies counts and aggregate-query
+results, not an exhaustive row-by-row comparison. Base chunks used dictionary
+encoding; candidate chunks used BSS without dictionaries, so this is not a
+codec-only comparison with dictionary policy held constant. The bytes below
+exclude WAL, indexes, metadata, and internal-table storage.
 
 | Fresh run | Base SST bytes | Candidate SST bytes | Candidate change |
 | --- | ---: | ---: | ---: |
