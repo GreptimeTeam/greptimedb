@@ -23,6 +23,8 @@ use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
 use datatypes::arrow::array::{Float64Array, Int64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::compute::cast;
+use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use rstest::rstest;
@@ -1040,12 +1042,12 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
         let mut samples = batches
             .iter()
             .flat_map(|batch| {
-                let series = batch
-                    .column_by_name("series")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap();
+                let series = cast(
+                    batch.column_by_name("series").unwrap().as_ref(),
+                    &DataType::Utf8,
+                )
+                .unwrap();
+                let series = series.as_any().downcast_ref::<StringArray>().unwrap();
                 let values = batch
                     .column_by_name("value")
                     .unwrap()
