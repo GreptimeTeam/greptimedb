@@ -162,12 +162,15 @@ measures region scan cost, and query measurements still exercise the SQL/TQL
 frontend path. Treat all performance conclusions as release-only; debug builds
 are suitable only for command wiring and correctness checks.
 
-`prepare-remote` creates the configured database if needed. The outer driver writes a per-target
-frontend config enabling `[prom_store]` with metric engine storage and a non-zero
-`pending_rows_flush_interval`, and validates that the logical metric table reaches
-`series_count * samples_per_series` rows before trusting the query measurements.
-Use `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper
-to the outer driver.
+`prepare-remote` creates the configured database if needed. A remote-write case
+can provide `base_setup_sql` and `candidate_setup_sql` lists; each target runs its
+own complete statements in order after database creation and before ingestion.
+The outer driver writes a per-target frontend config enabling `[prom_store]` with
+metric engine storage and a non-zero `pending_rows_flush_interval`, and validates
+that the logical metric table reaches `series_count * samples_per_series` rows
+before trusting the query measurements. Use
+`--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper to
+the outer driver.
 
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
 time. For each chunk, `prepare-remote` invokes `query_perf_fixture prom-remote-write` with the
@@ -365,6 +368,57 @@ uv run --no-project python .github/scripts/query-regression-run.py \
   --runner /path/to/query_regression_runner \
   --work-dir /tmp/query-regression-work
 ```
+
+### Explicit SST float BSS comparison
+
+`tests/perf/query_cases/sst_float_bss/case.toml` is an explicit-only case for
+comparing a default empty physical metric table with a candidate
+byte-stream-split (BSS) physical table. Both targets must use the exact same
+release `greptime` binary; only the per-target table setup SQL differs. Run the
+existing driver from a checkout containing that binary, with absolute paths and
+fresh data directories for every run:
+
+```bash
+REPO="$(pwd -P)"
+RELEASE_GREPTIME="/absolute/path/to/release/greptime"
+FIXTURE_GENERATOR="/absolute/path/to/release/query_perf_fixture"
+RUNNER="/absolute/path/to/release/query_regression_runner"
+WORK_DIR="/absolute/path/to/fresh/sst-float-bss-run-1"
+cd "$REPO"
+uv run --no-project python "$REPO/.github/scripts/query-regression-run.py" \
+  --cases "$REPO/tests/perf/query_cases/sst_float_bss/case.toml" \
+  --base-src "$REPO" \
+  --candidate-src . \
+  --base-bin "$RELEASE_GREPTIME" \
+  --candidate-bin "$RELEASE_GREPTIME" \
+  --fixture-generator "$FIXTURE_GENERATOR" \
+  --runner "$RUNNER" \
+  --work-dir "$WORK_DIR" \
+  --summary-script "$REPO/.github/scripts/query-regression-summary.py"
+```
+
+Repeat the command three times with a different fresh absolute `WORK_DIR` each
+run. In each `query-regression-report.json`, compare base and candidate
+`targets[].storage_inspection.summary.summary.total_file_size`, and each query's
+`targets[].measurements[].latency_ms_median`. Storage percentage is
+`(candidate_total_file_size - base_total_file_size) / base_total_file_size * 100`;
+query latency percentage is
+`(candidate_latency_ms_median - base_latency_ms_median) / base_latency_ms_median * 100`.
+The configured three warmups occur after the initial query validation and before
+that query's 15 measured endpoint requests, so query latency is a warmed
+frontend/cache measurement. After the datanodes stop, the case also runs seven
+iterations of `parquetbench` for up to four inspected SST files and `scanbench`
+for their scan groups. Their per-run output and aggregate
+`parquetbench_median_average_ms` and `scanbench_median_average_ms` are under
+`targets[].read_bench`; they are quiescent local-file read/scan diagnostics, not
+warmed frontend-query latency measurements.
+
+The case's `-5.0` storage target and `25` query-latency guardrail are experimental
+acceptance targets, not observed-benefit claims; do not relax them if a run
+fails. Its three periodic flushes and shared high TWCS trigger avoid the normal
+four-file compaction trigger from confounding the layout. Check footer encodings
+(BSS on candidate and no BSS on base) and data equality from the artifacts rather
+than through a new harness framework.
 
 The Rust runner subcommands are also useful for focused diagnostics:
 

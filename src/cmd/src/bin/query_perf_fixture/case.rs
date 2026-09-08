@@ -105,6 +105,10 @@ pub(super) struct PromRemoteWritePlan {
     #[serde(default = "default_visibility_timeout_seconds")]
     pub(super) visibility_timeout_seconds: u64,
     #[serde(default)]
+    pub(super) base_setup_sql: Vec<String>,
+    #[serde(default)]
+    pub(super) candidate_setup_sql: Vec<String>,
+    #[serde(default)]
     pub(super) prom_store: PromStoreConfig,
     #[serde(default)]
     pub(super) value: ValueConfig,
@@ -434,6 +438,63 @@ pub(super) fn default_scan_scanner() -> String {
 }
 pub(super) fn default_parallelism() -> u64 {
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_write_setup_sql_defaults_to_empty() {
+        let case: CaseFile = toml::from_str(
+            r#"
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+metric = "metric"
+"#,
+        )
+        .unwrap();
+        let Scenario::PromRemoteWriteThenQuery(scenario) = case.scenario else {
+            panic!("expected prom_remote_write_then_query scenario");
+        };
+        assert!(scenario.remote_write.base_setup_sql.is_empty());
+        assert!(scenario.remote_write.candidate_setup_sql.is_empty());
+    }
+
+    #[test]
+    fn remote_write_setup_sql_roundtrips() {
+        let case: CaseFile = toml::from_str(
+            r#"
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+metric = "metric"
+base_setup_sql = ["CREATE TABLE base_table"]
+candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_table SET 'x'='y'"]
+"#,
+        )
+        .unwrap();
+
+        let roundtrip: CaseFile =
+            serde_json::from_str(&serde_json::to_string(&case).unwrap()).unwrap();
+        let Scenario::PromRemoteWriteThenQuery(scenario) = roundtrip.scenario else {
+            panic!("expected prom_remote_write_then_query scenario");
+        };
+        assert_eq!(
+            scenario.remote_write.base_setup_sql,
+            ["CREATE TABLE base_table"]
+        );
+        assert_eq!(
+            scenario.remote_write.candidate_setup_sql,
+            [
+                "CREATE TABLE candidate_table",
+                "ALTER TABLE candidate_table SET 'x'='y'"
+            ]
+        );
+    }
 }
 
 impl Scenario {
