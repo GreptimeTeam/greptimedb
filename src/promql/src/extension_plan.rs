@@ -28,8 +28,13 @@ mod union_distinct_on;
 pub use absent::{Absent, AbsentExec, AbsentStream};
 use common_query::native_histogram::{SUM_FIELD, native_histogram_value_type};
 use common_query::prometheus::is_prometheus_stale_nan;
-use datafusion::arrow::array::{Array, Float64Array, StructArray};
-use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
+use datafusion::arrow::array::{
+    Array, Float64Array, StructArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray,
+};
+use datafusion::arrow::datatypes::{
+    ArrowPrimitiveType, DataType, TimeUnit, TimestampMillisecondType,
+};
 use datafusion::common::DFSchemaRef;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datatypes::data_type::DataType as _;
@@ -46,6 +51,50 @@ pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
+
+/// Returns a timestamp value without reducing its Arrow storage precision.
+pub(crate) fn native_timestamp_values(array: &dyn Array) -> datafusion::error::Result<Vec<i64>> {
+    let value = match array.data_type() {
+        DataType::Timestamp(TimeUnit::Second, _) => array
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .map(|a| a.values().to_vec()),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => array
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .map(|a| a.values().to_vec()),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => array
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .map(|a| a.values().to_vec()),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => array
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .map(|a| a.values().to_vec()),
+        _ => None,
+    };
+    value.ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution("Time index column is not a timestamp".into())
+    })
+}
+
+pub(crate) fn timestamp_unit(data_type: &DataType) -> datafusion::error::Result<TimeUnit> {
+    match data_type {
+        DataType::Timestamp(unit, _) => Ok(*unit),
+        _ => Err(datafusion::error::DataFusionError::Execution(
+            "Time index column is not a timestamp".into(),
+        )),
+    }
+}
+
+pub(crate) fn native_per_nanosecond(unit: TimeUnit) -> i128 {
+    match unit {
+        TimeUnit::Second => 1_000_000_000,
+        TimeUnit::Millisecond => 1_000_000,
+        TimeUnit::Microsecond => 1_000,
+        TimeUnit::Nanosecond => 1,
+    }
+}
 
 const METRIC_NUM_SERIES: &str = "num_series";
 

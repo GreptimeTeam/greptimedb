@@ -33,8 +33,14 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion_expr::col;
-use datatypes::arrow::array::TimestampMillisecondArray;
-use datatypes::arrow::datatypes::{SchemaRef, TimestampMillisecondType};
+use datatypes::arrow::array::{
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
+use datatypes::arrow::datatypes::{
+    SchemaRef, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType,
+};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -44,7 +50,7 @@ use snafu::ResultExt;
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{
     METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, prometheus_stale_sample_column,
-    resolve_column_name, serialize_column_index,
+    resolve_column_name, serialize_column_index, timestamp_unit,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
@@ -393,27 +399,81 @@ pub struct SeriesNormalizeStream {
 
 impl SeriesNormalizeStream {
     pub fn normalize(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        let ts_column = input
-            .column(self.time_index)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .ok_or_else(|| {
-                DataFusionError::Execution(
-                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
-                )
-            })?;
-
+        let time_unit = timestamp_unit(input.column(self.time_index).data_type())?;
+        let offset = match time_unit {
+            TimeUnit::Second => (self.offset % 1_000 == 0).then_some(self.offset / 1_000),
+            TimeUnit::Millisecond => Some(self.offset),
+            TimeUnit::Microsecond => self.offset.checked_mul(1_000),
+            TimeUnit::Nanosecond => self.offset.checked_mul(1_000_000),
+        }
+        .ok_or_else(|| {
+            DataFusionError::Execution("SeriesNormalize: timestamp offset overflow".into())
+        })?;
         let bias_timestamp = |timestamp: i64| {
-            timestamp.checked_add(self.offset).ok_or_else(|| {
+            timestamp.checked_add(offset).ok_or_else(|| {
                 DataFusionError::Execution("SeriesNormalize: timestamp offset overflow".into())
             })
         };
 
-        // bias the timestamp column by offset
-        let ts_column_biased = if self.offset == 0 {
-            Arc::new(ts_column.clone()) as _
-        } else {
-            Arc::new(ts_column.try_unary::<_, TimestampMillisecondType, _>(&bias_timestamp)?)
+        // Bias timestamps in their native Arrow unit; histogram start timestamps
+        // intentionally remain millisecond payloads below.
+        let ts_column_biased: Arc<dyn Array> = match time_unit {
+            TimeUnit::Second => {
+                let column = input
+                    .column(self.time_index)
+                    .as_any()
+                    .downcast_ref::<TimestampSecondArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution("Time index column downcast failed".into())
+                    })?;
+                if offset == 0 {
+                    Arc::new(column.clone())
+                } else {
+                    Arc::new(column.try_unary::<_, TimestampSecondType, _>(&bias_timestamp)?)
+                }
+            }
+            TimeUnit::Millisecond => {
+                let column = input
+                    .column(self.time_index)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution("Time index column downcast failed".into())
+                    })?;
+                if offset == 0 {
+                    Arc::new(column.clone())
+                } else {
+                    Arc::new(column.try_unary::<_, TimestampMillisecondType, _>(&bias_timestamp)?)
+                }
+            }
+            TimeUnit::Microsecond => {
+                let column = input
+                    .column(self.time_index)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution("Time index column downcast failed".into())
+                    })?;
+                if offset == 0 {
+                    Arc::new(column.clone())
+                } else {
+                    Arc::new(column.try_unary::<_, TimestampMicrosecondType, _>(&bias_timestamp)?)
+                }
+            }
+            TimeUnit::Nanosecond => {
+                let column = input
+                    .column(self.time_index)
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution("Time index column downcast failed".into())
+                    })?;
+                if offset == 0 {
+                    Arc::new(column.clone())
+                } else {
+                    Arc::new(column.try_unary::<_, TimestampNanosecondType, _>(&bias_timestamp)?)
+                }
+            }
         };
         let mut columns = input.columns().to_vec();
         columns[self.time_index] = ts_column_biased;
@@ -444,7 +504,11 @@ impl SeriesNormalizeStream {
                         if timestamp == 0 {
                             Ok(0)
                         } else {
-                            bias_timestamp(timestamp)
+                            timestamp.checked_add(self.offset).ok_or_else(|| {
+                                DataFusionError::Execution(
+                                    "SeriesNormalize: histogram timestamp offset overflow".into(),
+                                )
+                            })
                         }
                     })?;
                 // Replace only the start timestamp child to preserve the histogram payload and
@@ -720,64 +784,95 @@ mod test {
         regular.start_timestamp = Some(500);
         let mut ordinary_nan = native_histogram(f64::NAN);
         ordinary_nan.start_timestamp = Some(0);
+        let mut unknown_start = native_histogram(7.0);
+        unknown_start.start_timestamp = None;
         let histograms = build_histogram_array(&[
             Some(regular),
             Some(native_histogram(f64::from_bits(PROMETHEUS_STALE_NAN_BITS))),
             Some(ordinary_nan),
+            Some(unknown_start),
             None,
         ]);
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                TIME_INDEX_COLUMN,
-                TimestampMillisecondType::DATA_TYPE,
-                false,
-            ),
-            Field::new("value", histograms.data_type().clone(), true),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![
-                    1_000, 2_000, 3_000, 4_000,
-                ])),
-                histograms,
-            ],
-        )
-        .unwrap();
-        let input = Arc::new(DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
-        )));
-        let exec = Arc::new(SeriesNormalizeExec {
-            offset: 1_000,
-            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
-            filter_stale_markers: true,
-            tag_columns: Vec::new(),
-            input,
-            metric: ExecutionPlanMetricsSet::new(),
-        });
-
-        let context = SessionContext::default();
-        let batches = datafusion::physical_plan::collect(exec, context.task_ctx())
-            .await
-            .unwrap();
-        let batch = batches.iter().find(|batch| batch.num_rows() == 3).unwrap();
-        let values = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::StructArray>()
-            .unwrap();
-
-        let timestamps = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
-        assert_eq!(timestamps.values(), &[2_000, 4_000, 5_000]);
-        let regular = read_histogram(values, 0).unwrap().unwrap();
-        assert_eq!((regular.sum, regular.start_timestamp), (42.0, Some(1_500)));
-        let ordinary_nan = read_histogram(values, 1).unwrap().unwrap();
-        assert!(ordinary_nan.sum.is_nan());
-        assert_eq!(ordinary_nan.start_timestamp, Some(0));
-        assert!(read_histogram(values, 2).unwrap().is_none());
+        for (unit, ticks_per_ms) in [
+            (TimeUnit::Millisecond, 1_i64),
+            (TimeUnit::Microsecond, 1_000),
+            (TimeUnit::Nanosecond, 1_000_000),
+        ] {
+            let timestamp_array = |values: Vec<i64>| -> Arc<dyn Array> {
+                match unit {
+                    TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(values)),
+                    TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(values)),
+                    TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(values)),
+                    TimeUnit::Second => unreachable!(),
+                }
+            };
+            for offset in [-1_i64, 1] {
+                let timestamps = timestamp_array(
+                    [1_000, 2_000, 3_000, 4_000, 5_000]
+                        .into_iter()
+                        .map(|timestamp| timestamp * ticks_per_ms)
+                        .collect(),
+                );
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new(TIME_INDEX_COLUMN, timestamps.data_type().clone(), false),
+                    Field::new("value", histograms.data_type().clone(), true),
+                ]));
+                let batch =
+                    RecordBatch::try_new(schema.clone(), vec![timestamps, histograms.clone()])
+                        .unwrap();
+                let input = Arc::new(DataSourceExec::new(Arc::new(
+                    MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+                )));
+                let exec = Arc::new(SeriesNormalizeExec {
+                    offset,
+                    time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+                    filter_stale_markers: true,
+                    tag_columns: Vec::new(),
+                    input,
+                    metric: ExecutionPlanMetricsSet::new(),
+                });
+                let context = SessionContext::default();
+                let batches = datafusion::physical_plan::collect(exec, context.task_ctx())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                    4,
+                    "unit={unit:?}, offset={offset}"
+                );
+                let batch = batches.iter().find(|batch| batch.num_rows() == 4).unwrap();
+                let expected_timestamps = timestamp_array(
+                    [1_000, 3_000, 4_000, 5_000]
+                        .into_iter()
+                        .map(|timestamp| (timestamp + offset) * ticks_per_ms)
+                        .collect(),
+                );
+                assert_eq!(
+                    batch.column(0).to_data(),
+                    expected_timestamps.to_data(),
+                    "unit={unit:?}, offset={offset}"
+                );
+                let values = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::StructArray>()
+                    .unwrap();
+                let regular = read_histogram(values, 0).unwrap().unwrap();
+                assert_eq!(
+                    (regular.sum, regular.start_timestamp),
+                    (42.0, Some(500 + offset)),
+                    "unit={unit:?}, offset={offset}"
+                );
+                let ordinary_nan = read_histogram(values, 1).unwrap().unwrap();
+                assert!(ordinary_nan.sum.is_nan());
+                assert_eq!(ordinary_nan.start_timestamp, Some(0));
+                let unknown_start = read_histogram(values, 2).unwrap().unwrap();
+                assert_eq!(
+                    (unknown_start.sum, unknown_start.start_timestamp),
+                    (7.0, None)
+                );
+                assert!(read_histogram(values, 3).unwrap().is_none());
+            }
+        }
     }
 }
