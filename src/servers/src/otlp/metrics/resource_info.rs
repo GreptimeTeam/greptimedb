@@ -108,7 +108,7 @@ impl ResourceInfoData {
             if is_projected_attr(&kv.key)
                 && let Some(value) = scalar_value_string(kv.value.as_ref())
             {
-                tags.push((kv.key.clone(), value));
+                tags.push((kv.key.clone(), value.into_owned()));
             }
         }
         if tags.is_empty() {

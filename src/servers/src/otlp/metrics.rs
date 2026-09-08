@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
+
 use ahash::HashSet;
 use api::greptime_proto::io::prometheus::write::v2::histogram::{
     Count as PromCount, ResetHint, ZeroCount as PromZeroCount,
@@ -357,11 +359,11 @@ fn from_metric_type(data: &metric::Data) -> MetricType {
 }
 
 /// Non-scalar values (bool, arrays, maps, bytes) are not representable as tags.
-fn scalar_value_string(value: Option<&AnyValue>) -> Option<String> {
+fn scalar_value_string(value: Option<&AnyValue>) -> Option<Cow<'_, str>> {
     match value.and_then(|v| v.value.as_ref())? {
-        any_value::Value::StringValue(s) => Some(s.clone()),
-        any_value::Value::IntValue(v) => Some(v.to_string()),
-        any_value::Value::DoubleValue(v) => Some(v.to_string()),
+        any_value::Value::StringValue(s) => Some(Cow::Borrowed(s)),
+        any_value::Value::IntValue(v) => Some(Cow::Owned(v.to_string())),
+        any_value::Value::DoubleValue(v) => Some(Cow::Owned(v.to_string())),
         _ => None,
     }
 }
@@ -390,9 +392,12 @@ pub(crate) fn service_identity(attrs: &[KeyValue]) -> ServiceIdentity {
     }
     let job = name.map(|name| match namespace {
         Some(ns) if !ns.is_empty() => format!("{ns}/{name}"),
-        _ => name,
+        _ => name.into_owned(),
     });
-    ServiceIdentity { job, instance }
+    ServiceIdentity {
+        job,
+        instance: instance.map(Cow::into_owned),
+    }
 }
 
 fn string_key_value(key: &str, value: String) -> KeyValue {
@@ -934,7 +939,7 @@ enum AttributeType {
 struct Attributes<'a> {
     attributes: &'a [KeyValue],
     kind: AttributeType,
-    tags: once_cell::unsync::OnceCell<Vec<(String, String)>>,
+    tags: once_cell::unsync::OnceCell<Vec<(String, Cow<'a, str>)>>,
 }
 
 impl<'a> Attributes<'a> {
@@ -983,7 +988,7 @@ impl<'a> Attributes<'a> {
         row_writer::write_tags(
             table,
             tags.iter()
-                .map(|(key, value)| (key.as_str(), value.clone())),
+                .map(|(key, value)| (key.as_str(), value.as_ref().to_owned())),
             row,
         )
     }
@@ -1868,6 +1873,7 @@ mod tests {
             .iter()
             .find(|kv| kv.key == key)
             .and_then(|kv| scalar_value_string(kv.value.as_ref()))
+            .map(Cow::into_owned)
     }
 
     fn gauge_request(
