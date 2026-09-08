@@ -645,7 +645,7 @@ fn encode_exponential_histogram(
     })?;
     let mut emitted = false;
     for (index, data_point) in histogram.data_points.iter().enumerate() {
-        let (value, timestamp_nanos) = match exponential_histogram_value(data_point) {
+        let (value, _) = match exponential_histogram_value(data_point) {
             Ok(value) => value,
             Err(reason) => {
                 reject_data_points(outcome, 1, || {
@@ -667,7 +667,7 @@ fn encode_exponential_histogram(
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
-            timestamp_nanos,
+            data_point.time_unix_nano,
             metric_ctx,
         )?;
         row_writer::write_by_schema(
@@ -967,29 +967,23 @@ fn write_attributes(
     Ok(())
 }
 
-fn write_timestamp(
-    table: &mut TableData,
-    row: &mut Vec<Value>,
-    time_nano: i64,
-    legacy_mode: bool,
-) -> Result<()> {
-    if legacy_mode {
-        row_writer::write_ts_to_nanos(
-            table,
-            greptime_timestamp(),
-            Some(time_nano),
-            Precision::Nanosecond,
-            row,
-        )
-    } else {
-        row_writer::write_ts_to_millis(
-            table,
-            greptime_timestamp(),
-            Some(time_nano / 1000000),
-            Precision::Millisecond,
-            row,
-        )
-    }
+fn write_timestamp(table: &mut TableData, row: &mut Vec<Value>, time_nano: u64) -> Result<()> {
+    let time_nano = i64::try_from(time_nano).map_err(|_| {
+        error::TimestampOverflowSnafu {
+            error: format!(
+                "timestamp {time_nano} overflow with precision {}",
+                Precision::Nanosecond
+            ),
+        }
+        .build()
+    })?;
+    row_writer::write_ts_to_nanos(
+        table,
+        greptime_timestamp(),
+        Some(time_nano),
+        Precision::Nanosecond,
+        row,
+    )
 }
 
 fn write_data_point_value(
@@ -1037,7 +1031,7 @@ fn write_tags_and_timestamp(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     data_point_attrs: Option<&Vec<KeyValue>>,
-    timestamp_nanos: i64,
+    timestamp_nanos: u64,
     metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
     if metric_ctx.is_legacy {
@@ -1075,7 +1069,7 @@ fn write_tags_and_timestamp(
         )?;
     }
 
-    write_timestamp(table, row, timestamp_nanos, metric_ctx.is_legacy)?;
+    write_timestamp(table, row, timestamp_nanos)?;
 
     Ok(())
 }
@@ -1106,7 +1100,7 @@ fn encode_gauge(
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
-            data_point.time_unix_nano as i64,
+            data_point.time_unix_nano,
             metric_ctx,
         )?;
 
@@ -1145,7 +1139,7 @@ fn encode_sum(
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
-            data_point.time_unix_nano as i64,
+            data_point.time_unix_nano,
             metric_ctx,
         )?;
         write_temporality_tag(table, &mut row, is_delta)?;
@@ -1257,7 +1251,7 @@ fn encode_histogram(
                 resource_attrs,
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
-                data_point.time_unix_nano as i64,
+                data_point.time_unix_nano,
                 metric_ctx,
             )?;
             write_temporality_tag(bucket_table, &mut bucket_row, is_delta)?;
@@ -1280,7 +1274,7 @@ fn encode_histogram(
                 resource_attrs,
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
-                data_point.time_unix_nano as i64,
+                data_point.time_unix_nano,
                 metric_ctx,
             )?;
             write_temporality_tag(sum_table, &mut sum_row, is_delta)?;
@@ -1305,7 +1299,7 @@ fn encode_histogram(
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
-            data_point.time_unix_nano as i64,
+            data_point.time_unix_nano,
             metric_ctx,
         )?;
         write_temporality_tag(count_table, &mut count_row, is_delta)?;
@@ -1402,7 +1396,7 @@ fn encode_summary(
                 resource_attrs,
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
-                data_point.time_unix_nano as i64,
+                data_point.time_unix_nano,
                 metric_ctx,
             )?;
 
@@ -1443,7 +1437,7 @@ fn encode_summary(
                         resource_attrs,
                         scope_attrs,
                         Some(data_point.attributes.as_ref()),
-                        data_point.time_unix_nano as i64,
+                        data_point.time_unix_nano,
                         metric_ctx,
                     )?;
                     row_writer::write_tag(quantile_table, "quantile", quantile.quantile, &mut row)?;
@@ -1469,7 +1463,7 @@ fn encode_summary(
                     resource_attrs,
                     scope_attrs,
                     Some(data_point.attributes.as_ref()),
-                    data_point.time_unix_nano as i64,
+                    data_point.time_unix_nano,
                     metric_ctx,
                 )?;
 
@@ -1496,7 +1490,7 @@ fn encode_summary(
                     resource_attrs,
                     scope_attrs,
                     Some(data_point.attributes.as_ref()),
-                    data_point.time_unix_nano as i64,
+                    data_point.time_unix_nano,
                     metric_ctx,
                 )?;
 
@@ -1743,6 +1737,88 @@ mod tests {
                 greptime_value()
             ]
         );
+    }
+
+    fn boundary_gauge_metric(time_unix_nano: u64) -> Metric {
+        Metric {
+            name: "boundary_gauge".to_string(),
+            data: Some(metric::Data::Gauge(Gauge {
+                data_points: vec![NumberDataPoint {
+                    time_unix_nano,
+                    value: Some(Value::AsInt(1)),
+                    ..Default::default()
+                }],
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_gauge_accepts_and_preserves_i64_max_timestamp() {
+        let ctx = OtlpMetricCtx {
+            metric_type: MetricType::Gauge,
+            ..Default::default()
+        };
+
+        let mut tables = MultiTableData::default();
+        let mut semantic_index = SemanticIndex::default();
+        let mut outcome = MetricsIngestOutcome::default();
+        encode_metrics(
+            &mut tables,
+            &boundary_gauge_metric(i64::MAX as u64),
+            None,
+            None,
+            &ctx,
+            &mut semantic_index,
+            &mut outcome,
+        )
+        .unwrap();
+        let (requests, rows) = tables.into_row_insert_requests();
+        assert_eq!(outcome.accepted_data_points, 1);
+        assert_eq!(rows, 1);
+        let rows = requests.inserts[0].rows.as_ref().unwrap();
+        let timestamp_index = rows
+            .schema
+            .iter()
+            .position(|column| column.column_name == greptime_timestamp())
+            .unwrap();
+        assert_eq!(
+            rows.rows[0].values[timestamp_index].value_data,
+            Some(ValueData::TimestampNanosecondValue(i64::MAX))
+        );
+    }
+
+    #[test]
+    fn test_gauge_rejects_timestamp_above_i64_max() {
+        let ctx = OtlpMetricCtx {
+            metric_type: MetricType::Gauge,
+            ..Default::default()
+        };
+        let mut tables = MultiTableData::default();
+        let mut semantic_index = SemanticIndex::default();
+        let mut outcome = MetricsIngestOutcome::default();
+        let error = encode_metrics(
+            &mut tables,
+            &boundary_gauge_metric(i64::MAX as u64 + 1),
+            None,
+            None,
+            &ctx,
+            &mut semantic_index,
+            &mut outcome,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert_eq!(outcome.accepted_data_points, 0);
+        assert_eq!(
+            tables
+                .get_or_default_table_data("boundary_gauge", 0, 0)
+                .num_rows(),
+            0
+        );
+        assert!(message.len() <= MAX_REJECTION_MESSAGE_BYTES, "{message}");
+        assert!(message.contains("Timestamp overflow"), "{message}");
+        assert!(message.contains("9223372036854775808"), "{message}");
+        assert!(message.contains("Precision::Nanosecond"), "{message}");
     }
 
     #[test]
@@ -2679,10 +2755,12 @@ mod tests {
 
     #[test]
     fn test_exponential_histogram_legacy_and_new_modes_share_struct() {
+        use api::v1::ColumnDataType;
         use common_query::prelude::greptime_native_histogram;
 
         let mut point = exponential_point();
         point.sum = Some(42.0);
+        point.time_unix_nano = 2_000_123;
         let request = metrics_request(vec![exponential_metric(
             "request.duration",
             vec![point],
@@ -2724,14 +2802,18 @@ mod tests {
             .unwrap()]
         .clone();
         assert_eq!(new_histogram, legacy_histogram);
+        let new_timestamp_index = new_rows
+            .schema
+            .iter()
+            .position(|column| column.column_name == greptime_timestamp())
+            .unwrap();
+        assert_eq!(
+            new_rows.schema[new_timestamp_index].datatype,
+            ColumnDataType::TimestampNanosecond as i32
+        );
         assert!(matches!(
-            new_rows.rows[0].values[new_rows
-                .schema
-                .iter()
-                .position(|column| column.column_name == greptime_timestamp())
-                .unwrap()]
-            .value_data,
-            Some(ValueData::TimestampMillisecondValue(2))
+            new_rows.rows[0].values[new_timestamp_index].value_data,
+            Some(ValueData::TimestampNanosecondValue(2_000_123))
         ));
         assert!(matches!(
             legacy_rows.rows[0].values[legacy_rows
@@ -2740,7 +2822,7 @@ mod tests {
                 .position(|column| column.column_name == greptime_timestamp())
                 .unwrap()]
             .value_data,
-            Some(ValueData::TimestampNanosecondValue(2_000_000))
+            Some(ValueData::TimestampNanosecondValue(2_000_123))
         ));
     }
 

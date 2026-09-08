@@ -538,8 +538,10 @@ fn is_scalar_metric_schema(schema: &[ColumnSchema]) -> bool {
     let timestamp_count = schema
         .iter()
         .filter(|column| {
-            column.datatype == ColumnDataType::TimestampMillisecond as i32
-                && column.semantic_type == SemanticType::Timestamp as i32
+            matches!(
+                ColumnDataType::try_from(column.datatype),
+                Ok(ColumnDataType::TimestampMillisecond | ColumnDataType::TimestampNanosecond)
+            ) && column.semantic_type == SemanticType::Timestamp as i32
         })
         .count();
     let field_count = schema
@@ -553,8 +555,10 @@ fn is_scalar_metric_schema(schema: &[ColumnSchema]) -> bool {
     timestamp_count == 1
         && field_count == 1
         && schema.iter().all(|column| {
-            (column.datatype == ColumnDataType::TimestampMillisecond as i32
-                && column.semantic_type == SemanticType::Timestamp as i32)
+            (matches!(
+                ColumnDataType::try_from(column.datatype),
+                Ok(ColumnDataType::TimestampMillisecond | ColumnDataType::TimestampNanosecond)
+            ) && column.semantic_type == SemanticType::Timestamp as i32)
                 || (column.datatype == ColumnDataType::Float64 as i32
                     && column.semantic_type == SemanticType::Field as i32)
                 || (column.datatype == ColumnDataType::String as i32
@@ -1448,7 +1452,7 @@ fn columns_taxonomy(
                     essential_column_indices.push(index);
                 }
             }
-            ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => {
+            ArrowDataType::Timestamp(TimeUnit::Millisecond | TimeUnit::Nanosecond, _) => {
                 ensure!(
                     timestamp_index.replace(index).is_none(),
                     error::InvalidPromRemoteRequestSnafu {
@@ -2103,7 +2107,9 @@ mod tests {
         ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
         StructValue, Value,
     };
-    use arrow::array::{BinaryArray, BooleanArray, StringArray, TimestampMillisecondArray};
+    use arrow::array::{
+        BinaryArray, BooleanArray, StringArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    };
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
@@ -2314,13 +2320,13 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_metric_batchability_rejects_non_millisecond_timestamp() {
+    fn test_scalar_metric_batchability_accepts_nanosecond_timestamp() {
         let mut requests = scalar_request();
         let rows = requests.inserts[0].rows.as_mut().unwrap();
         rows.schema[0].datatype = ColumnDataType::TimestampNanosecond as i32;
-        rows.rows[0].values[0].value_data = Some(ValueData::TimestampNanosecondValue(1_000_000));
+        rows.rows[0].values[0].value_data = Some(ValueData::TimestampNanosecondValue(2_000_123));
 
-        assert!(!is_scalar_metric_batchable(&requests).unwrap());
+        assert!(is_scalar_metric_batchable(&requests).unwrap());
     }
 
     #[test]
@@ -4241,6 +4247,51 @@ mod tests {
         assert_eq!("__primary_key", modified[0].schema().field(0).name());
         assert_eq!("greptime_timestamp", modified[0].schema().field(1).name());
         assert_eq!("greptime_value", modified[0].schema().field(2).name());
+    }
+
+    #[test]
+    fn test_transform_logical_batches_to_physical_preserves_nanosecond_timestamp() {
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new(
+                    "greptime_timestamp",
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+                    false,
+                ),
+                Field::new("greptime_value", ArrowDataType::Float64, true),
+                Field::new("tag1", ArrowDataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(TimestampNanosecondArray::from(vec![2_000_123])),
+                Arc::new(arrow::array::Float64Array::from(vec![1.0])),
+                Arc::new(StringArray::from(vec!["v1"])),
+            ],
+        )
+        .unwrap();
+        let table_batches = vec![TableBatch {
+            table_name: "t1".to_string(),
+            table_id: 1,
+            batches: vec![RecordBatchWithTsIdx::try_new(batch, 0).unwrap()],
+            row_count: 1,
+        }];
+
+        let modified = transform_logical_batches_to_physical(
+            &table_batches,
+            &HashMap::from([("tag1".to_string(), 1)]),
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            &ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+            modified[0].schema().field(1).data_type()
+        );
+        let timestamps = modified[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap();
+        assert_eq!(2_000_123, timestamps.value(0));
     }
 
     #[test]

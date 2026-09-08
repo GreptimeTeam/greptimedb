@@ -409,8 +409,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use api::v1::RowInsertRequests;
     use api::v1::meta::Role;
+    use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
     use async_trait::async_trait;
     use auth::{
         PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp,
@@ -505,6 +505,46 @@ mod tests {
             .try_build()
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_all_empty_metric_insert_is_noop_without_physical_table() {
+        let instance = test_instance().await;
+        let ctx = metric_query_ctx(true);
+        let physical_table = "empty_metric_physical";
+        let requests = RowInsertRequests {
+            inserts: vec![
+                RowInsertRequest {
+                    table_name: "missing_rows".to_string(),
+                    rows: None,
+                },
+                RowInsertRequest {
+                    table_name: "empty_rows".to_string(),
+                    rows: Some(Rows::default()),
+                },
+            ],
+        };
+
+        let output = instance
+            .handle_metric_row_inserts(requests, ctx.clone(), physical_table.to_string())
+            .await
+            .unwrap();
+
+        assert!(matches!(output.data, client::OutputData::AffectedRows(0)));
+        assert!(output.meta.plan.is_none());
+        assert!(
+            instance
+                .catalog_manager()
+                .table(
+                    DEFAULT_CATALOG_NAME,
+                    DEFAULT_SCHEMA_NAME,
+                    physical_table,
+                    Some(ctx.as_ref()),
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[derive(Default)]

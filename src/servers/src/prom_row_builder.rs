@@ -115,6 +115,18 @@ pub(crate) fn rows_to_aligned_record_batch(
                 target_ts_name
             ),
         })?;
+    let target_timestamp_unit = match target_schema.field(timestamp_index).data_type() {
+        ArrowDataType::Timestamp(unit, _) => unit,
+        actual => {
+            return error::UnexpectedResultSnafu {
+                reason: format!(
+                    "Resolved timestamp column '{}' has non-timestamp type {}",
+                    target_ts_name, actual
+                ),
+            }
+            .fail();
+        }
+    };
 
     // Map effective target column name → (source column index, source arrow type).
     // Handles prom renames: Timestamp → target ts name, Float64 → target field name.
@@ -131,11 +143,20 @@ pub(crate) fn rows_to_aligned_record_batch(
             }
             ArrowDataType::Timestamp(unit, _) => {
                 ensure!(
-                    unit == &TimeUnit::Millisecond,
+                    matches!(unit, TimeUnit::Millisecond | TimeUnit::Nanosecond),
                     error::InvalidPromRemoteRequestSnafu {
                         msg: format!(
-                            "Unexpected remote write batch timestamp unit, expect millisecond, got: {}",
-                            unit
+                            "Unsupported metric row timestamp unit, expected Millisecond or Nanosecond, actual {:?}",
+                            unit,
+                        )
+                    }
+                );
+                ensure!(
+                    unit == target_timestamp_unit,
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "Metric row timestamp unit mismatch, expected {:?}, actual {:?}",
+                            target_timestamp_unit, unit,
                         )
                     }
                 );
@@ -207,7 +228,13 @@ pub fn build_metric_create_table_schema_from_proto(
     rows_schema
         .iter()
         .map(|col| {
-            let semantic_type = if col.datatype == api::v1::ColumnDataType::TimestampMillisecond as i32 {
+            let semantic_type = if matches!(
+                api::v1::ColumnDataType::try_from(col.datatype),
+                Ok(
+                    api::v1::ColumnDataType::TimestampMillisecond
+                        | api::v1::ColumnDataType::TimestampNanosecond
+                )
+            ) {
                 SemanticType::Timestamp
             } else if col.datatype == api::v1::ColumnDataType::Float64 as i32 {
                 SemanticType::Field
@@ -305,7 +332,9 @@ fn build_arrow_array(
 mod tests {
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
-    use arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
+    use arrow::array::{
+        Array, Float64Array, StringArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    };
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
     use super::{
@@ -407,6 +436,100 @@ mod tests {
             .unwrap();
         assert_eq!(values.value(0), 42.0);
         assert_eq!(values.value(1), 99.0);
+    }
+
+    #[test]
+    fn test_rows_to_aligned_record_batch_nanosecond_preserves_value() {
+        let rows = Rows {
+            schema: vec![
+                ColumnSchema {
+                    column_name: "greptime_timestamp".to_string(),
+                    datatype: ColumnDataType::TimestampNanosecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "greptime_value".to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: vec![Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::TimestampNanosecondValue(2_000_123)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::F64Value(1.0)),
+                    },
+                ],
+            }],
+        };
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                false,
+            ),
+            Field::new("my_value", DataType::Float64, true),
+        ]);
+
+        let aligned_batch = rows_to_aligned_record_batch(&rows, &target).unwrap();
+        let (batch, timestamp_index) = aligned_batch.into_parts();
+        let timestamps = batch
+            .column(timestamp_index)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap();
+        assert_eq!(2_000_123, timestamps.value(0));
+    }
+
+    #[test]
+    fn test_rows_to_aligned_record_batch_nanosecond_rejects_millisecond_target() {
+        let rows = Rows {
+            schema: vec![
+                ColumnSchema {
+                    column_name: "greptime_timestamp".to_string(),
+                    datatype: ColumnDataType::TimestampNanosecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "greptime_value".to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: vec![Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::TimestampNanosecondValue(2_000_123)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::F64Value(1.0)),
+                    },
+                ],
+            }],
+        };
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("my_value", DataType::Float64, true),
+        ]);
+
+        let error = rows_to_aligned_record_batch(&rows, &target).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            matches!(error, crate::error::Error::InvalidPromRemoteRequest { .. }),
+            "{message}"
+        );
+        assert!(message.contains("expected Millisecond"), "{message}");
+        assert!(message.contains("actual Nanosecond"), "{message}");
     }
 
     #[test]
@@ -567,5 +690,30 @@ mod tests {
         assert_eq!("greptime_value", schema[2].column_name);
         assert_eq!(SemanticType::Field as i32, schema[2].semantic_type);
         assert_eq!(ColumnDataType::Float64 as i32, schema[2].datatype);
+    }
+
+    #[test]
+    fn test_build_metric_create_table_schema_preserves_nanosecond_timestamp_semantics() {
+        let rows_schema = vec![
+            ColumnSchema {
+                column_name: "greptime_timestamp".to_string(),
+                datatype: ColumnDataType::TimestampNanosecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "greptime_value".to_string(),
+                datatype: ColumnDataType::Float64 as i32,
+                semantic_type: SemanticType::Field as i32,
+                ..Default::default()
+            },
+        ];
+
+        let schema = build_metric_create_table_schema_from_proto(&rows_schema).unwrap();
+        assert_eq!(
+            ColumnDataType::TimestampNanosecond as i32,
+            schema[0].datatype
+        );
+        assert_eq!(SemanticType::Timestamp as i32, schema[0].semantic_type);
     }
 }
