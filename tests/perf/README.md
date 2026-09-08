@@ -244,8 +244,9 @@ improvement. The case passes when every `actual_pct` is at or below its
 the case at least three times on an otherwise idle machine and compare the
 median regressions rather than relying on one run.
 
-The CI runner image includes the pinned `otelgen` binary. Until this case is
-added to the default set, run it explicitly with `workflow_dispatch`:
+The default `aliyun-ecs` runner provisions a fresh ECS instance from the
+query-regression image, which includes the pinned `otelgen` binary. Until this
+case is added to the default set, run it explicitly with `workflow_dispatch`:
 
 ```bash
 gh workflow run query-regression.yml \
@@ -255,11 +256,8 @@ gh workflow run query-regression.yml \
   -f candidate_ref=<full-candidate-sha> \
   -f cargo_profile=nightly \
   -f http_timeout=300 \
-  -f runner=perf-regression-8-cores
+  -f runner=aliyun-ecs
 ```
-
-The selected ARC scale set must already be deployed with the runner-image
-digest built from the current query-regression Dockerfile.
 
 ## Generator contract
 

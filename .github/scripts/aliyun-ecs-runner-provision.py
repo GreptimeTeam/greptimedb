@@ -216,13 +216,15 @@ def github_api(token: str, method: str, path: str, body: dict | None = None) -> 
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+            payload = response.read()
+            return json.loads(payload.decode("utf-8")) if payload else {}
     except urllib.error.HTTPError as error:
         # GitHub's error body says exactly why (e.g. "Must have admin rights to
         # Repository" for a PAT without the required scope); surface it instead
-        # of a bare "HTTP Error 403".
+        # of a bare "HTTP Error 403". This must remain catchable by teardown so
+        # a runner deregistration failure does not prevent ECS cleanup.
         body = error.read().decode("utf-8", "replace")
-        raise SystemExit(
+        raise RuntimeError(
             f"GitHub API {method} {path} failed: HTTP {error.code}: {body}\n"
             "The token comes from the GH_PERSONAL_ACCESS_TOKEN secret; it needs "
             "'repo' scope (classic PAT) or 'Administration: write' on the "

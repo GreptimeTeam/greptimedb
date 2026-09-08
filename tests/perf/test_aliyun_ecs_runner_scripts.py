@@ -21,6 +21,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS_DIR = Path(__file__).parents[2] / ".github/scripts"
@@ -43,6 +44,25 @@ class ProvisionNamingTest(unittest.TestCase):
     def test_runner_name_and_label_derive_from_run_id(self) -> None:
         self.assertEqual(provision.runner_name_for_run("12345"), "qreg-ecs-12345")
         self.assertEqual(provision.runner_label_for_run("12345"), "query-regression-ecs-12345")
+
+
+class GithubApiTest(unittest.TestCase):
+    def test_empty_204_response_returns_empty_object(self) -> None:
+        response = mock.MagicMock()
+        response.status = 204
+        response.read.return_value = b""
+        response.__enter__.return_value = response
+        with mock.patch.object(provision.urllib.request, "urlopen", return_value=response):
+            self.assertEqual(provision.github_api("TOKEN", "DELETE", "/test"), {})
+
+    def test_populated_json_response_is_unchanged(self) -> None:
+        response = mock.MagicMock()
+        response.read.return_value = b'{"token":"TOKEN"}'
+        response.__enter__.return_value = response
+        with mock.patch.object(provision.urllib.request, "urlopen", return_value=response):
+            self.assertEqual(
+                provision.github_api("TOKEN", "POST", "/test", body={}), {"token": "TOKEN"}
+            )
 
 
 class ProvisionUserDataTest(unittest.TestCase):
@@ -88,6 +108,41 @@ class ProvisionUserDataTest(unittest.TestCase):
         self.assertIn("OOMPolicy=continue", script)
         self.assertNotIn("OOMScoreAdjust", script)
         self.assertLess(script.index("swapon"), script.index("systemctl restart --no-block ephemeral-github-runner.service"))
+
+
+class TeardownSweepTest(unittest.TestCase):
+    def test_sweep_deletes_all_instances_when_first_runner_lookup_fails(self) -> None:
+        client = mock.Mock()
+        instances = [
+            ("i-first", "qreg-ecs-first", "2026-08-17T01:00Z"),
+            ("i-second", "qreg-ecs-second", "2026-08-17T01:00Z"),
+        ]
+        with (
+            mock.patch.object(teardown, "list_managed_instances", return_value=instances),
+            mock.patch.object(
+                teardown,
+                "expired_instance_names",
+                return_value=[("i-first", "qreg-ecs-first"), ("i-second", "qreg-ecs-second")],
+            ),
+            mock.patch.object(teardown, "delete_instance", return_value=True) as delete_instance,
+            mock.patch.object(
+                teardown.provision,
+                "find_runner_by_name",
+                side_effect=[RuntimeError("GitHub unavailable"), None],
+            ),
+        ):
+            self.assertEqual(
+                teardown.sweep(client, "cn-test", "GreptimeTeam/greptimedb", "TOKEN", timedelta(hours=4)),
+                1,
+            )
+
+        self.assertEqual(
+            delete_instance.call_args_list,
+            [
+                mock.call(client, "i-first", "cn-test"),
+                mock.call(client, "i-second", "cn-test"),
+            ],
+        )
 
 
 class TeardownExpiryTest(unittest.TestCase):

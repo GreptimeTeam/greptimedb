@@ -90,8 +90,14 @@ tool contract. Build a new ECS image from it:
 ALIBABA_CLOUD_ACCESS_KEY_ID=... ALIBABA_CLOUD_ACCESS_KEY_SECRET=... \
 uv run .github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py \
   --region-id <region> --vswitch-id <vsw-...> --security-group-id <sg-...> \
-  --base-image-id <ubuntu-24.04-image-id>
+  --base-image-id <validated-base-image-id>
 ```
+
+The configured image has passed the workflow host checks for mold `2.40.4`
+and Python `3.14.4`. The builder installs those host tools from distribution
+packages; it does not pin or copy them from the container. A stock Ubuntu 24.04
+base does not supply these versions. Validate the chosen base and the resulting
+host against the workflow checks before replacing the configured image.
 
 The script boots a temporary builder instance, `docker build`s the runner
 image, materializes `/opt/rustup`, `/opt/cargo`, `/usr/local/bin` tools, and

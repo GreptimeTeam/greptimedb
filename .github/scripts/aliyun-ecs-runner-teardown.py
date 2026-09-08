@@ -144,11 +144,11 @@ def delete_instance(client, instance_id: str, region_id: str | None = None) -> b
 
 
 def deregister_runner(token: str, repo: str, runner_name: str) -> bool:
-    runner = provision.find_runner_by_name(token, repo, runner_name)
-    if runner is None:
-        print(f"Runner {runner_name} is not registered", flush=True)
-        return True
     try:
+        runner = provision.find_runner_by_name(token, repo, runner_name)
+        if runner is None:
+            print(f"Runner {runner_name} is not registered", flush=True)
+            return True
         provision.github_api(token, "DELETE", f"/repos/{repo}/actions/runners/{runner['id']}")
         print(f"Deregistered runner {runner_name} (id {runner['id']})", flush=True)
         return True
