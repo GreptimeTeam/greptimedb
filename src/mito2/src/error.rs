@@ -1306,6 +1306,17 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Estimated scan memory exhausted: requested {requested} bytes, reserved {reserved} bytes, budget {limit} bytes"
+    ))]
+    ScanMemoryExhausted {
+        requested: u64,
+        reserved: u64,
+        limit: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Duration out of range: {input:?}"))]
     DurationOutOfRange {
         input: std::time::Duration,
@@ -1614,7 +1625,9 @@ impl ErrorExt for Error {
 
             InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
 
-            TooManyFilesToRead { .. } | TooManyGcJobs { .. } => StatusCode::RateLimited,
+            TooManyFilesToRead { .. } | TooManyGcJobs { .. } | ScanMemoryExhausted { .. } => {
+                StatusCode::RateLimited
+            }
 
             PruneFile { source, .. } => source.status_code(),
 
@@ -1630,6 +1643,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            ScanMemoryExhausted {
+                requested, limit, ..
+            } if requested <= limit => RetryHint::Retryable,
             ReadParquet { .. }
             | WriteParquet { .. }
             | RejectWrite { .. }

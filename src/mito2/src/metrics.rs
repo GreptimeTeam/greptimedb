@@ -239,6 +239,18 @@ lazy_static! {
         "Number of rows returned in a scan task",
         exponential_buckets(100.0, 10.0, 7).unwrap(),
     ).unwrap();
+    pub static ref SCAN_ESTIMATED_MEMORY_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_scan_estimated_memory_bytes", "Reserved estimated SST scan memory"
+    ).unwrap();
+    pub static ref SCAN_ESTIMATED_MEMORY_LIMIT_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_scan_estimated_memory_limit_bytes", "Effective estimated SST scan memory budget"
+    ).unwrap();
+    pub static ref SCAN_ESTIMATED_MEMORY_REJECTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_scan_estimated_memory_rejected_total", "Rejected estimated SST scan reservations"
+    ).unwrap();
+    pub static ref SCAN_ESTIMATED_MEMORY_FALLBACK_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_scan_estimated_memory_fallback_total", "Scanners using legacy checks because estimates are unavailable"
+    ).unwrap();
     /// Gauge for scan memory usage in bytes.
     pub static ref SCAN_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
         "greptime_mito_scan_memory_usage_bytes",
