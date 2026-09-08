@@ -826,7 +826,7 @@ mod tests {
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
     use datafusion::prelude::{col, lit};
-    use datafusion_common::{JoinType, NullEquality};
+    use datafusion_common::{JoinType, NullEquality, ScalarValue};
     use datafusion_physical_expr::expressions::Column;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaRef};
@@ -1446,7 +1446,7 @@ mod tests {
             _request: table::requests::DeleteRequest,
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
-            Ok(0)
+            unimplemented!("unexpected delete")
         }
 
         async fn flush(
@@ -1454,7 +1454,7 @@ mod tests {
             _request: table::requests::FlushTableRequest,
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
-            Ok(0)
+            unimplemented!("unexpected flush")
         }
 
         async fn compact(
@@ -1462,7 +1462,7 @@ mod tests {
             _request: table::requests::CompactTableRequest,
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
-            Ok(0)
+            unimplemented!("unexpected compact")
         }
 
         async fn build_index(
@@ -1470,7 +1470,7 @@ mod tests {
             _request: table::requests::BuildIndexTableRequest,
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
-            Ok(0)
+            unimplemented!("unexpected build_index")
         }
 
         async fn flush_region(
@@ -1478,7 +1478,7 @@ mod tests {
             _region_id: store_api::storage::RegionId,
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
-            Ok(0)
+            unimplemented!("unexpected flush_region")
         }
 
         async fn compact_region(
@@ -1486,7 +1486,7 @@ mod tests {
             _region_id: store_api::storage::RegionId,
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
-            Ok(0)
+            unimplemented!("unexpected compact_region")
         }
 
         async fn discard_unflushed_data(
@@ -1494,7 +1494,7 @@ mod tests {
             _region_id: store_api::storage::RegionId,
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
-            Ok(0)
+            unimplemented!("unexpected discard_unflushed_data")
         }
 
         async fn discard_unflushed_data_by_table(
@@ -1502,7 +1502,7 @@ mod tests {
             _table_name: table::table_name::TableName,
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
-            Ok(0)
+            unimplemented!("unexpected discard_unflushed_data_by_table")
         }
     }
 
@@ -1675,18 +1675,17 @@ mod tests {
             assert!(vector.is_null(0), "{name}");
         }
         assert!(!request.columns_values["ts"].is_null(0));
-        assert_eq!(
-            request.columns_values["marker"].data_type(),
-            ConcreteDataType::uint8_datatype()
-        );
-        assert_eq!(
-            request.columns_values["payload"].data_type(),
-            ConcreteDataType::binary_datatype()
-        );
-        assert_eq!(
-            request.columns_values["epoch"].data_type(),
-            ConcreteDataType::uint64_datatype()
-        );
+        for (name, data_type) in [
+            ("marker", ConcreteDataType::uint8_datatype()),
+            ("payload", ConcreteDataType::binary_datatype()),
+            ("epoch", ConcreteDataType::uint64_datatype()),
+        ] {
+            assert_eq!(
+                request.columns_values[name].data_type(),
+                data_type,
+                "{name}"
+            );
+        }
 
         let batches = run_sql(
             &engine,
@@ -1695,58 +1694,33 @@ mod tests {
         .await;
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(
-            batch.schema.column_schemas()[0].data_type,
-            ConcreteDataType::date_datatype()
-        );
-        assert_eq!(
-            batch.schema.column_schemas()[1].data_type,
-            ConcreteDataType::date_datatype()
-        );
-        assert_eq!(
-            batch.schema.column_schemas()[2].data_type,
-            ConcreteDataType::decimal128_datatype(30, 2)
-        );
-        assert_eq!(
-            batch.schema.column_schemas()[3].data_type,
-            ConcreteDataType::duration_millisecond_datatype()
-        );
-        assert_eq!(
-            batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::Date32Array>()
-                .unwrap()
-                .value(0),
-            0
-        );
-        assert_eq!(
-            batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<arrow::array::Date32Array>()
-                .unwrap()
-                .value(0),
-            2
-        );
-        assert_eq!(
-            batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<arrow::array::Decimal128Array>()
-                .unwrap()
-                .value(0),
-            30000
-        );
-        assert_eq!(
-            batch
-                .column(3)
-                .as_any()
-                .downcast_ref::<arrow::array::DurationMillisecondArray>()
-                .unwrap()
-                .value(0),
-            30
-        );
+        for (index, (data_type, value)) in [
+            (
+                ConcreteDataType::date_datatype(),
+                ScalarValue::Date32(Some(0)),
+            ),
+            (
+                ConcreteDataType::date_datatype(),
+                ScalarValue::Date32(Some(2)),
+            ),
+            (
+                ConcreteDataType::decimal128_datatype(30, 2),
+                ScalarValue::Decimal128(Some(30000), 30, 2),
+            ),
+            (
+                ConcreteDataType::duration_millisecond_datatype(),
+                ScalarValue::DurationMillisecond(Some(30)),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(batch.schema.column_schemas()[index].data_type, data_type);
+            assert_eq!(
+                ScalarValue::try_from_array(batch.column(index).as_ref(), 0).unwrap(),
+                value
+            );
+        }
 
         let batches = run_sql(
             &engine,
@@ -1760,55 +1734,32 @@ mod tests {
         .await;
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(
-            batch.schema.column_schemas()[0].data_type,
-            ConcreteDataType::decimal128_datatype(31, 2)
-        );
-        assert_eq!(
-            batch.schema.column_schemas()[1].data_type,
-            ConcreteDataType::duration_millisecond_datatype()
-        );
-        assert_eq!(
-            batch.schema.column_schemas()[2].data_type,
-            ConcreteDataType::boolean_datatype()
-        );
-        assert_eq!(
-            batch.schema.column_schemas()[3].data_type,
-            ConcreteDataType::boolean_datatype()
-        );
-        assert_eq!(
-            batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::Decimal128Array>()
-                .unwrap()
-                .value(0),
-            60000
-        );
-        assert_eq!(
-            batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<arrow::array::DurationMillisecondArray>()
-                .unwrap()
-                .value(0),
-            60
-        );
-        assert!(
-            batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<arrow::array::BooleanArray>()
-                .unwrap()
-                .value(0)
-        );
-        assert!(
-            batch
-                .column(3)
-                .as_any()
-                .downcast_ref::<arrow::array::BooleanArray>()
-                .unwrap()
-                .value(0)
-        );
+        for (index, (data_type, value)) in [
+            (
+                ConcreteDataType::decimal128_datatype(31, 2),
+                ScalarValue::Decimal128(Some(60000), 31, 2),
+            ),
+            (
+                ConcreteDataType::duration_millisecond_datatype(),
+                ScalarValue::DurationMillisecond(Some(60)),
+            ),
+            (
+                ConcreteDataType::boolean_datatype(),
+                ScalarValue::Boolean(Some(true)),
+            ),
+            (
+                ConcreteDataType::boolean_datatype(),
+                ScalarValue::Boolean(Some(true)),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(batch.schema.column_schemas()[index].data_type, data_type);
+            assert_eq!(
+                ScalarValue::try_from_array(batch.column(index).as_ref(), 0).unwrap(),
+                value
+            );
+        }
     }
 }

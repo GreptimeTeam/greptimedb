@@ -1568,13 +1568,13 @@ impl BatchingTask {
             let detached = self.state.write().unwrap().dirty_time_windows.detach();
             let retention_filter = self.config.expire_after.and_then(|_| {
                 self.config.time_window_expr.as_ref().and_then(|expr| {
-                    expr.eval(low_bound)
-                        .ok()
-                        .and_then(|(lower, _)| lower)
+                    expire_time_window_bound
+                        .as_ref()
+                        .and_then(|(lower, _)| lower.as_ref())
                         .map(|lower| {
                             (
                                 expr.column_name.as_str(),
-                                lower,
+                                lower.clone(),
                                 "forced full snapshot retention",
                             )
                         })

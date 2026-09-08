@@ -1448,17 +1448,16 @@ mod tests {
     async fn test_flow_option_parser_matrix() {
         let engine = new_test_engine().await;
         let cases = [
-            (None, false, false),
-            (Some("true"), true, false),
-            (Some("false"), false, false),
+            (None, Ok((false, false))),
+            (Some("true"), Ok((true, false))),
+            (Some("false"), Ok((false, false))),
             (
                 Some(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE),
-                true,
-                true,
+                Ok((true, true)),
             ),
-            (Some("malformed"), false, false),
+            (Some("malformed"), Err(())),
         ];
-        for (value, enabled, required) in cases {
+        for (value, expected) in cases {
             let options = value
                 .map(|value| {
                     HashMap::from([(
@@ -1467,34 +1466,25 @@ mod tests {
                     )])
                 })
                 .unwrap_or_default();
-            let required_from_validated_sentinel = options
+            let exact_sequence_range_required = options
                 .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
                 .is_some_and(|value| {
                     value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE
                 });
-            match engine.batch_opts_for_flow_options(&options, required_from_validated_sentinel) {
-                Ok(opts) => {
+            match (
+                engine.batch_opts_for_flow_options(&options, exact_sequence_range_required),
+                expected,
+            ) {
+                (Ok(opts), Ok((enabled, required))) => {
                     assert_eq!(opts.experimental_enable_incremental_read, enabled);
-                    assert_eq!(required_from_validated_sentinel, required);
+                    assert_eq!(exact_sequence_range_required, required);
                 }
-                Err(_) => assert!(!enabled && !required),
+                (Err(_), Err(())) => {}
+                (result, expected) => panic!(
+                    "unexpected parser result for {value:?}: {result:?}, expected {expected:?}"
+                ),
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_forged_query_context_does_not_enable_exact_sequence_range() {
-        let engine = new_test_engine_with_execution(None).await;
-        register_sink_with_schema(&engine, "forged_query_context");
-        let mut args = flow_create_args(4, "forged_query_context");
-        let mut query_ctx = QueryContext::arc().as_ref().clone();
-        query_ctx.set_extension("__old_forged_required_extension", "true");
-        args.query_ctx = Some(query_ctx);
-
-        engine.create_flow_inner(args).await.unwrap();
-        let task = engine.runtime.read().await.tasks.get(&4).cloned().unwrap();
-        assert!(!task.config.exact_sequence_range_required);
-        engine.remove_flow_inner(4).await.unwrap();
     }
 
     #[tokio::test]

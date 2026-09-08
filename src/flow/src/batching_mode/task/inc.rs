@@ -21,7 +21,7 @@ use datafusion_expr::{DmlStatement, LogicalPlan};
 use query::QueryEngineRef;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
-    FLOW_SINK_TABLE_ID,
+    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_SINK_TABLE_ID,
 };
 use snafu::ResultExt;
 use store_api::mito_engine_options::PRESERVE_ROW_SEQUENCE;
@@ -36,9 +36,6 @@ use crate::batching_mode::utils::{
     rewrite_incremental_aggregate_with_sink_merge,
 };
 use crate::error::{ExternalSnafu, UnexpectedSnafu};
-
-// Kept local until the query-side extension enum exposes the exact scan mode.
-const FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE: &str = "sequence_range";
 
 impl BatchingTask {
     async fn sink_table_id(&self) -> Result<TableId, Error> {

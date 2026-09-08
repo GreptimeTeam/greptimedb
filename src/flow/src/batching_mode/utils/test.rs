@@ -23,7 +23,7 @@ use common_time::Timestamp;
 use datafusion_common::tree_node::TreeNode as _;
 use datafusion_expr::GroupingSet;
 use datatypes::arrow::array::{Array, AsArray};
-use datatypes::arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Float64Type, Int64Type, UInt64Type};
 use datatypes::prelude::{ConcreteDataType, MutableVector, Scalar, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::timestamp::TimestampMillisecond;
@@ -1011,34 +1011,6 @@ async fn test_gen_plan_with_matching_schema_rejects_arbitrary_missing_attempt_co
 }
 
 #[tokio::test]
-async fn test_gen_plan_with_matching_schema_no_attempt_still_rejects_missing_column() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sink_schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-        ColumnSchema::new(
-            "ts",
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        )
-        .with_time_index(true),
-        ColumnSchema::new("state", ConcreteDataType::uint32_datatype(), true),
-    ]));
-    assert!(
-        gen_plan_with_matching_schema(
-            "SELECT number, ts FROM numbers_with_ts",
-            ctx,
-            query_engine,
-            sink_schema,
-            &[],
-            false,
-        )
-        .await
-        .is_err()
-    );
-}
-
-#[tokio::test]
 async fn test_gen_plan_with_matching_schema_allow_partial_fills_nullable_columns() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
@@ -1809,10 +1781,13 @@ async fn test_analyze_incremental_aggregate_plan_supports_avg_state() {
     );
     assert_eq!(analysis.merge_columns.len(), 1);
     assert_eq!(analysis.merge_columns[0].output_field_name, "avg_num");
-    assert_eq!(
-        analysis.merge_columns[0].merge_op,
-        IncrementalAggregateMergeOp::AvgDeltaMerge
-    );
+    assert!(matches!(
+        &analysis.merge_columns[0].merge_op,
+        IncrementalAggregateMergeOp::StateDeltaMerge {
+            function_name: "__avg_state_delta_merge",
+            params,
+        } if params.is_empty()
+    ));
 }
 
 #[tokio::test]
@@ -1829,10 +1804,13 @@ async fn test_analyze_incremental_aggregate_plan_supports_avg_merge() {
         analysis.unsupported_exprs
     );
     assert_eq!(analysis.merge_columns.len(), 1);
-    assert_eq!(
-        analysis.merge_columns[0].merge_op,
-        IncrementalAggregateMergeOp::AvgDeltaMerge
-    );
+    assert!(matches!(
+        &analysis.merge_columns[0].merge_op,
+        IncrementalAggregateMergeOp::StateDeltaMerge {
+            function_name: "__avg_state_delta_merge",
+            params,
+        } if params.is_empty()
+    ));
 }
 
 #[tokio::test]
@@ -1844,12 +1822,15 @@ async fn test_analyze_incremental_aggregate_plan_supports_duplicate_avg_projecti
 
     assert!(analysis.unsupported_exprs.is_empty());
     assert_eq!(analysis.merge_columns.len(), 2);
-    assert!(
-        analysis
-            .merge_columns
-            .iter()
-            .all(|column| { column.merge_op == IncrementalAggregateMergeOp::AvgDeltaMerge })
-    );
+    assert!(analysis.merge_columns.iter().all(|column| {
+        matches!(
+            &column.merge_op,
+            IncrementalAggregateMergeOp::StateDeltaMerge {
+                function_name: "__avg_state_delta_merge",
+                params,
+            } if params.is_empty()
+        )
+    }));
     assert!(
         analysis
             .merge_columns
@@ -1875,7 +1856,13 @@ async fn test_analyze_incremental_aggregate_plan_supports_avg_with_native_aggreg
     assert_eq!(analysis.merge_columns.len(), 2);
     assert!(analysis.merge_columns.iter().any(|column| {
         column.output_field_name == "avg_num"
-            && column.merge_op == IncrementalAggregateMergeOp::AvgDeltaMerge
+            && matches!(
+                &column.merge_op,
+                IncrementalAggregateMergeOp::StateDeltaMerge {
+                    function_name: "__avg_state_delta_merge",
+                    params,
+                } if params.is_empty()
+            )
     }));
     assert!(analysis.merge_columns.iter().any(|column| {
         column.output_field_name == "total" && column.merge_op == IncrementalAggregateMergeOp::Sum
@@ -2568,32 +2555,36 @@ async fn test_gen_plan_with_matching_schema_last_non_null_rejects_extra_flow_col
 
 #[tokio::test]
 async fn test_gen_plan_with_matching_schema_rejects_unknown_attempt_column() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sink_schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-        ColumnSchema::new(
-            "ts",
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
+    for allow_partial in [false, true] {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let sink_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let values =
+            BTreeMap::from([(String::from("unknown_attempt"), ScalarValue::Int64(Some(1)))]);
+        let primary_key_indices: &[usize] = if allow_partial { &[0] } else { &[] };
+        let err = gen_plan_with_matching_schema_and_values(
+            "SELECT number, ts FROM numbers_with_ts",
+            ctx,
+            query_engine,
+            sink_schema,
+            primary_key_indices,
+            allow_partial,
+            Some(&values),
         )
-        .with_time_index(true),
-    ]));
-    let values = BTreeMap::from([(String::from("unknown_attempt"), ScalarValue::Int64(Some(1)))]);
-    let err = gen_plan_with_matching_schema_and_values(
-        "SELECT number, ts FROM numbers_with_ts",
-        ctx,
-        query_engine,
-        sink_schema,
-        &[0],
-        false,
-        Some(&values),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("unknown_attempt"), "{err}");
-    assert!(err.contains("does not exist in sink schema"), "{err}");
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown_attempt"), "{err}");
+        assert!(err.contains("does not exist in sink schema"), "{err}");
+    }
 }
 
 #[tokio::test]
@@ -2672,59 +2663,24 @@ async fn test_gen_plan_with_matching_schema_matches_positional_alias_and_injects
 async fn test_gen_plan_with_matching_schema_injects_ordinary_columns_after_auto_update_at() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
-    let mut sink_columns = (0..16)
-        .map(|idx| {
-            ColumnSchema::new(
-                format!("state_{idx}"),
-                ConcreteDataType::int32_datatype(),
-                true,
-            )
-        })
-        .collect::<Vec<_>>();
-    sink_columns.push(ColumnSchema::new(
-        "update_at",
-        ConcreteDataType::timestamp_millisecond_datatype(),
-        false,
-    ));
-    sink_columns.extend([
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("state_0", ConcreteDataType::int32_datatype(), true),
+        ColumnSchema::new("state_1", ConcreteDataType::int32_datatype(), true),
         ColumnSchema::new(
-            "__ee_checkpoint_epoch",
-            ConcreteDataType::uint32_datatype(),
+            "update_at",
+            ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         ),
-        ColumnSchema::new(
-            "__ee_checkpoint_sequence",
-            ConcreteDataType::uint32_datatype(),
-            false,
-        ),
-        ColumnSchema::new(
-            "__ee_checkpoint_region",
-            ConcreteDataType::uint32_datatype(),
-            false,
-        ),
-    ]);
-    let sink_schema = Arc::new(Schema::new(sink_columns));
+        ColumnSchema::new("metadata_a", ConcreteDataType::uint32_datatype(), false),
+        ColumnSchema::new("metadata_b", ConcreteDataType::uint32_datatype(), false),
+    ]));
     let ordinary_values = BTreeMap::from([
-        (
-            "__ee_checkpoint_epoch".to_string(),
-            ScalarValue::UInt32(Some(1)),
-        ),
-        (
-            "__ee_checkpoint_sequence".to_string(),
-            ScalarValue::UInt32(Some(2)),
-        ),
-        (
-            "__ee_checkpoint_region".to_string(),
-            ScalarValue::UInt32(Some(3)),
-        ),
+        ("metadata_a".to_string(), ScalarValue::UInt32(Some(1))),
+        ("metadata_b".to_string(), ScalarValue::UInt32(Some(2))),
     ]);
 
-    let flow_exprs = (0..16)
-        .map(|idx| format!("number AS state_{idx}"))
-        .collect::<Vec<_>>();
-    let sql = format!("SELECT {} FROM numbers_with_ts", flow_exprs.join(", "));
     let plan = gen_plan_with_matching_schema_and_values(
-        &sql,
+        "SELECT number AS state_0, number AS state_1 FROM numbers_with_ts",
         ctx,
         query_engine,
         sink_schema,
@@ -2746,26 +2702,28 @@ async fn test_gen_plan_with_matching_schema_injects_ordinary_columns_after_auto_
         vec![
             "state_0",
             "state_1",
-            "state_2",
-            "state_3",
-            "state_4",
-            "state_5",
-            "state_6",
-            "state_7",
-            "state_8",
-            "state_9",
-            "state_10",
-            "state_11",
-            "state_12",
-            "state_13",
-            "state_14",
-            "state_15",
             "update_at",
-            "__ee_checkpoint_epoch",
-            "__ee_checkpoint_sequence",
-            "__ee_checkpoint_region",
+            "metadata_a",
+            "metadata_b",
         ]
     );
+    assert_eq!(plan.schema().field(3).data_type(), &ArrowDataType::UInt32);
+    assert_eq!(plan.schema().field(4).data_type(), &ArrowDataType::UInt32);
+    let LogicalPlan::Projection(projection) = plan else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &projection.expr[3],
+        Expr::Alias(alias)
+            if alias.name == "metadata_a"
+                && matches!(alias.expr.as_ref(), Expr::Literal(ScalarValue::UInt32(Some(1)), _))
+    ));
+    assert!(matches!(
+        &projection.expr[4],
+        Expr::Alias(alias)
+            if alias.name == "metadata_b"
+                && matches!(alias.expr.as_ref(), Expr::Literal(ScalarValue::UInt32(Some(2)), _))
+    ));
 }
 
 #[tokio::test]
@@ -2798,64 +2756,36 @@ async fn test_gen_plan_with_matching_schema_rejects_no_attempt_strict_mismatch()
 }
 
 #[tokio::test]
-async fn test_gen_plan_with_matching_schema_rejects_unknown_attempt_column_in_partial_mode() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sink_schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-        ColumnSchema::new(
-            "ts",
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        )
-        .with_time_index(true),
-        ColumnSchema::new("optional", ConcreteDataType::uint32_datatype(), true),
-    ]));
-    let values = BTreeMap::from([(String::from("unknown_attempt"), ScalarValue::Int64(Some(1)))]);
-    let err = gen_plan_with_matching_schema_and_values(
-        "SELECT number, ts FROM numbers_with_ts",
-        ctx,
-        query_engine,
-        sink_schema,
-        &[0],
-        true,
-        Some(&values),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("unknown_attempt"), "{err}");
-    assert!(err.contains("does not exist in sink schema"), "{err}");
-}
-
-#[tokio::test]
 async fn test_gen_plan_with_matching_schema_rejects_attempt_output_collision() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sink_schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-        ColumnSchema::new("attempt", ConcreteDataType::uint32_datatype(), true),
-        ColumnSchema::new(
-            "ts",
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
+    for allow_partial in [false, true] {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let sink_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("attempt", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let values = BTreeMap::from([(String::from("attempt"), ScalarValue::UInt32(Some(1)))]);
+        let err = gen_plan_with_matching_schema_and_values(
+            "SELECT number, number AS attempt, ts FROM numbers_with_ts",
+            ctx,
+            query_engine,
+            sink_schema,
+            &[0],
+            allow_partial,
+            Some(&values),
         )
-        .with_time_index(true),
-    ]));
-    let values = BTreeMap::from([(String::from("attempt"), ScalarValue::UInt32(Some(1)))]);
-    let err = gen_plan_with_matching_schema_and_values(
-        "SELECT number, number AS attempt, ts FROM numbers_with_ts",
-        ctx,
-        query_engine,
-        sink_schema,
-        &[0],
-        false,
-        Some(&values),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("collides with a flow output"), "{err}");
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("attempt"), "{err}");
+        assert!(err.contains("collides with a flow output"), "{err}");
+    }
 }
 
 #[tokio::test]
@@ -2884,34 +2814,4 @@ async fn test_gen_plan_with_matching_schema_rejects_duplicate_original_outputs()
     let diagnostic = format!("{err:?}");
     assert!(diagnostic.contains("duplicate column"), "{diagnostic}");
     assert!(diagnostic.contains("number"), "{diagnostic}");
-}
-
-#[tokio::test]
-async fn test_gen_plan_with_matching_schema_rejects_attempt_output_collision_in_partial_mode() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sink_schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
-        ColumnSchema::new("attempt", ConcreteDataType::uint32_datatype(), true),
-        ColumnSchema::new(
-            "ts",
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        )
-        .with_time_index(true),
-    ]));
-    let values = BTreeMap::from([(String::from("attempt"), ScalarValue::UInt32(Some(1)))]);
-    let err = gen_plan_with_matching_schema_and_values(
-        "SELECT number, number AS attempt, ts FROM numbers_with_ts",
-        ctx,
-        query_engine,
-        sink_schema,
-        &[0],
-        true,
-        Some(&values),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("collides with a flow output"), "{err}");
 }

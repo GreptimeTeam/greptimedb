@@ -98,7 +98,6 @@ pub enum IncrementalAggregateMergeOp {
     BitAnd,
     BitOr,
     BitXor,
-    AvgDeltaMerge,
     StateDeltaMerge {
         function_name: &'static str,
         params: Vec<Expr>,
@@ -225,8 +224,6 @@ struct OutputProjectionInfo {
     has_top_level_projection: bool,
     /// Aggregate expression name and projected output field, in projection order.
     aggregate_outputs: Vec<(String, String)>,
-    /// Original single-instance resolver mapping, retained for compatibility.
-    output_aliases: HashMap<String, String>,
     literal_columns: HashSet<String>,
     output_field_names: Vec<String>,
 }
@@ -260,7 +257,6 @@ fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
         ..Default::default()
     };
 
-    let mut output_aliases = HashMap::new();
     if let LogicalPlan::Projection(projection) = plan {
         for expr in &projection.expr {
             match expr {
@@ -271,9 +267,6 @@ fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
                     // other output wrappers.
                     let alias_name = alias.name.clone();
                     if let Expr::Column(column) = alias.expr.as_ref() {
-                        output_aliases
-                            .entry(column.name.clone())
-                            .or_insert_with(|| alias_name.clone());
                         projection_info
                             .aggregate_outputs
                             .push((column.name.clone(), alias_name));
@@ -281,9 +274,6 @@ fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
                         && inner_alias.name.eq_ignore_ascii_case("count(*)")
                         && let Expr::Column(column) = inner_alias.expr.as_ref()
                     {
-                        output_aliases
-                            .entry(column.name.clone())
-                            .or_insert_with(|| alias_name.clone());
                         projection_info
                             .aggregate_outputs
                             .push((column.name.clone(), alias_name));
@@ -316,7 +306,6 @@ fn collect_output_projection_info(plan: &LogicalPlan) -> OutputProjectionInfo {
             .insert(AUTO_CREATED_PLACEHOLDER_TS_COL.to_string());
     }
 
-    projection_info.output_aliases = output_aliases;
     projection_info
 }
 
@@ -374,7 +363,7 @@ fn merge_op_for_aggregate_expr(
         "bit_xor" => Ok(IncrementalAggregateMergeOp::BitXor),
         // Preserve state-family parameters; value coercion is handled by the aggregate.
         "avg_state" if aggr_func.params.args.len() == 1 => {
-            Ok(IncrementalAggregateMergeOp::AvgDeltaMerge)
+            state_delta_merge("__avg_state_delta_merge", vec![])
         }
         "hll" if aggr_func.params.args.len() == 1 => state_delta_merge("__hll_delta_merge", vec![]),
         "stddev_pop_state" if aggr_func.params.args.len() == 1 => {
@@ -400,7 +389,7 @@ fn merge_op_for_aggregate_expr(
             if aggr_func.params.args.len() == 1
                 && is_type(&aggr_func.params.args[0], ArrowDataType::Binary) =>
         {
-            Ok(IncrementalAggregateMergeOp::AvgDeltaMerge)
+            state_delta_merge("__avg_state_delta_merge", vec![])
         }
         _ => Err(aggr_expr.to_string()),
     }
@@ -419,19 +408,12 @@ fn resolve_aggregate_output_fields(
     // one aggregate input field for identical expressions.
     let raw_name = aggr_expr.qualified_name().1;
     if projection_info.has_top_level_projection {
-        let outputs = projection_info
+        projection_info
             .aggregate_outputs
             .iter()
             .filter(|(input_name, _)| input_name == &raw_name)
             .cloned()
-            .collect::<Vec<_>>();
-        if outputs.len() > 1 {
-            outputs
-        } else if let Some(alias) = projection_info.output_aliases.get(&raw_name) {
-            vec![(raw_name, alias.clone())]
-        } else {
-            outputs
-        }
+            .collect()
     } else if output_field_name_set.contains(&raw_name) {
         vec![(raw_name.clone(), raw_name)]
     } else {
@@ -692,8 +674,7 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
     let state_merge = analysis.merge_columns.iter().any(|column| {
         matches!(
             &column.merge_op,
-            IncrementalAggregateMergeOp::AvgDeltaMerge
-                | IncrementalAggregateMergeOp::StateDeltaMerge { .. }
+            IncrementalAggregateMergeOp::StateDeltaMerge { .. }
         )
     });
     let mut selected_columns = analysis.group_key_names.clone();
@@ -840,8 +821,7 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
         } else if let Some(merge_col) = merge_columns.get(output_field_name) {
             if matches!(
                 &merge_col.merge_op,
-                IncrementalAggregateMergeOp::AvgDeltaMerge
-                    | IncrementalAggregateMergeOp::StateDeltaMerge { .. }
+                IncrementalAggregateMergeOp::StateDeltaMerge { .. }
             ) {
                 state_aggr_exprs.push(build_state_delta_merge_expr(engine, merge_col)?);
             } else {
@@ -903,7 +883,6 @@ fn build_state_delta_merge_expr(
     merge_col: &IncrementalAggregateMergeColumn,
 ) -> Result<Expr, Error> {
     let (function_name, params) = match &merge_col.merge_op {
-        IncrementalAggregateMergeOp::AvgDeltaMerge => ("__avg_state_delta_merge", vec![]),
         IncrementalAggregateMergeOp::StateDeltaMerge {
             function_name,
             params,
@@ -1000,8 +979,7 @@ fn build_left_join_merge_expr(
             .with_context(|_| DatafusionSnafu {
                 context: "Failed to build BIT_XOR merge expression".to_string(),
             })?,
-        IncrementalAggregateMergeOp::AvgDeltaMerge
-        | IncrementalAggregateMergeOp::StateDeltaMerge { .. } => {
+        IncrementalAggregateMergeOp::StateDeltaMerge { .. } => {
             return InvalidQuerySnafu {
                 reason: "state aggregate must be built with its delta UDAF".to_string(),
             }
