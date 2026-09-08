@@ -773,10 +773,10 @@ impl Ord for RowCursor {
 /// All iterators must be sorted by primary key, time index, sequence desc.
 ///
 /// Input batches must be in the flat format: the last four columns are time
-/// index, `__primary_key`, `__sequence` and `__op_type`. Row comparison
-/// decodes these internal columns and returns an error on batches that don't
-/// match the flat format; the name-based gate in [BatchBuilder] only makes
-/// output assembly degrade gracefully on generic schemas, not sorting.
+/// index, `__primary_key`, `__sequence` and `__op_type`. Ordering uses only
+/// (primary key, time index, sequence desc); `__op_type` is required for
+/// downstream flat dedup, but is not part of the ordering key.
+/// The name-based gate in [BatchBuilder] only makes output assembly degrade gracefully on generic schemas, not sorting.
 pub struct FlatMergeIterator {
     /// The merge algorithm to maintain heaps.
     algo: MergeAlgo<IterNode>,
