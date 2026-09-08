@@ -36,6 +36,7 @@ use futures::{Stream, TryStreamExt};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::SequenceNumber;
 use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
+use winner_tree::WinnerTree;
 
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
@@ -434,199 +435,6 @@ impl BatchBuilder {
     }
 }
 
-/// Sentinel for an empty slot in a [TournamentTree].
-const EMPTY_SLOT: usize = usize::MAX;
-
-/// A tournament tree over a fixed set of slots.
-///
-/// Each node occupies one slot; a slot is empty while its node is not in the
-/// tree (i.e. it is in the cold heap or reached EOF). An empty slot always
-/// loses a match. The number of leaves is padded to a power of two; leaves
-/// beyond the capacity never participate, so the tree works for arbitrary
-/// capacities.
-///
-/// Invariant: every internal tree node caches the champion (hottest slot, per
-/// `Ord`) of its subtree, so the root always holds the hottest occupied slot
-/// and updating a leaf only requires recomputing the ~log2(capacity) internal
-/// nodes on its path to the root. We cache champions ("winner tree") so that
-/// each internal node is a pure function of its children — insertion, removal
-/// and mutation share one replay path — and the runner-up is directly
-/// available from the sibling champions on the winner's path, which the
-/// hot/cold transition check needs after mutating the winner in place.
-struct TournamentTree<T> {
-    /// Slot storage, one slot per node. `None` means the slot is empty.
-    nodes: Vec<Option<T>>,
-    /// Tree of champions: `tree[i]` is the slot index of the champion of the
-    /// subtree rooted at `i` (or [EMPTY_SLOT]). Leaves for slot `s` live at
-    /// index `leaves + s`; the root is index 1.
-    tree: Vec<usize>,
-    /// Number of occupied slots.
-    len: usize,
-    /// Number of leaves, padded to a power of two.
-    leaves: usize,
-    /// Cached `(winner slot, second-best slot)`, with [EMPTY_SLOT] standing
-    /// for no second-best. Invalidated by [TournamentTree::replay], the single
-    /// choke point of every structural change (push, pop, winner replay).
-    ///
-    /// While the tree is structurally unchanged and the winner keeps its slot
-    /// the cache stays valid: only the winner's node may be mutated in place
-    /// and the second-best slot is never the winner's slot, so the cached
-    /// slot's node is untouched.
-    second_best_cache: Option<(usize, usize)>,
-}
-
-impl<T: Ord> TournamentTree<T> {
-    fn with_capacity(capacity: usize) -> Self {
-        let leaves = capacity.next_power_of_two().max(1);
-        let mut nodes = Vec::new();
-        nodes.resize_with(capacity, || None);
-        Self {
-            nodes,
-            tree: vec![EMPTY_SLOT; leaves * 2],
-            len: 0,
-            leaves,
-            second_best_cache: None,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Returns the winner (greatest element among occupied slots).
-    fn peek(&self) -> Option<&T> {
-        self.winner_slot()
-            .and_then(|slot| self.nodes[slot].as_ref())
-    }
-
-    /// Returns the winner mutably. Call [TournamentTree::replay_winner] after
-    /// mutating it, or remove it with `pop()` if it reached EOF or moved cold.
-    fn winner_mut(&mut self) -> Option<&mut T> {
-        let slot = self.winner_slot()?;
-        self.nodes[slot].as_mut()
-    }
-
-    /// Returns the second greatest element among occupied slots.
-    ///
-    /// The runner-up is the champion of one of the sibling subtrees on the
-    /// winner's path to the root.
-    #[cfg(test)]
-    fn second_best(&mut self) -> Option<&T> {
-        let slot = self.second_best_slot()?;
-        Some(self.nodes[slot].as_ref().unwrap())
-    }
-
-    /// Returns the winner and the second greatest element among occupied slots.
-    fn winner_and_second_best(&mut self) -> (Option<&T>, Option<&T>) {
-        let second = self.second_best_slot();
-        let winner = self.winner_slot();
-        (
-            winner.map(|slot| self.nodes[slot].as_ref().unwrap()),
-            second.map(|slot| self.nodes[slot].as_ref().unwrap()),
-        )
-    }
-
-    /// Inserts `value` into a free slot and replays its path to the root.
-    ///
-    /// Scans for a free slot instead of keeping a free list to keep the tree
-    /// cheap to construct. This is O(capacity), but pushes only happen on
-    /// batch transitions, never per row.
-    ///
-    /// # Panics
-    /// Panics if the tree is full.
-    fn push(&mut self, value: T) {
-        let slot = self
-            .nodes
-            .iter()
-            .position(Option::is_none)
-            .expect("tournament tree is full");
-        self.nodes[slot] = Some(value);
-        self.tree[self.leaves + slot] = slot;
-        self.len += 1;
-        self.replay(slot);
-    }
-
-    /// Removes and returns the winner, leaving its slot empty.
-    fn pop(&mut self) -> Option<T> {
-        let slot = self.winner_slot()?;
-        let value = self.nodes[slot].take();
-        debug_assert!(value.is_some());
-        self.tree[self.leaves + slot] = EMPTY_SLOT;
-        self.len -= 1;
-        self.replay(slot);
-        value
-    }
-
-    /// Replays the winner's path after its value was mutated in place.
-    fn replay_winner(&mut self) {
-        if let Some(slot) = self.winner_slot() {
-            self.replay(slot);
-        }
-    }
-
-    /// Returns the slot of the champion at the root, if any slot is occupied.
-    fn winner_slot(&self) -> Option<usize> {
-        (self.tree[1] != EMPTY_SLOT).then_some(self.tree[1])
-    }
-
-    /// Returns the slot of the second greatest element among occupied slots.
-    fn second_best_slot(&mut self) -> Option<usize> {
-        let winner = self.winner_slot()?;
-        if let Some((cached_winner, cached)) = self.second_best_cache
-            && cached_winner == winner
-        {
-            return (cached != EMPTY_SLOT).then_some(cached);
-        }
-        let second = self.compute_second_best_slot(winner).unwrap_or(EMPTY_SLOT);
-        self.second_best_cache = Some((winner, second));
-        (second != EMPTY_SLOT).then_some(second)
-    }
-
-    /// Scans the champions of the sibling subtrees on `winner`'s path to the
-    /// root for the hottest one.
-    fn compute_second_best_slot(&self, winner: usize) -> Option<usize> {
-        let mut node = self.leaves + winner;
-        let mut best = EMPTY_SLOT;
-        while node > 1 {
-            let challenger = self.tree[node ^ 1];
-            if self.wins(challenger, best) {
-                best = challenger;
-            }
-            node /= 2;
-        }
-        (best != EMPTY_SLOT).then_some(best)
-    }
-
-    /// Returns true if slot `a` wins its match against slot `b`, i.e. `a` is
-    /// the greater element. An occupied slot always beats an empty slot
-    /// ([EMPTY_SLOT] or a slot whose node was removed).
-    fn wins(&self, a: usize, b: usize) -> bool {
-        match (self.nodes.get(a), self.nodes.get(b)) {
-            (Some(Some(x)), Some(Some(y))) => x >= y,
-            (Some(Some(_)), _) => true,
-            _ => false,
-        }
-    }
-
-    /// Recomputes the internal nodes on the path from `slot`'s leaf to the
-    /// root (~log2(capacity) comparisons).
-    fn replay(&mut self, slot: usize) {
-        debug_assert!(slot < self.nodes.len());
-        self.second_best_cache = None;
-        let mut node = (self.leaves + slot) / 2;
-        while node > 0 {
-            let left = self.tree[node * 2];
-            let right = self.tree[node * 2 + 1];
-            self.tree[node] = if self.wins(left, right) { left } else { right };
-            node /= 2;
-        }
-    }
-}
-
 /// A comparable node of the heap.
 trait NodeCmp: Eq + Ord {
     /// Returns whether the node still has batch to read.
@@ -647,7 +455,7 @@ struct MergeAlgo<T: Ord> {
     ///
     /// Node in this tree **MUST** not be empty. A `merge window` is the (primary key, timestamp)
     /// range of the **winner node** in the `hot` tree.
-    hot: TournamentTree<T>,
+    hot: WinnerTree<T>,
     /// Holds nodes whose key range of current batch **isn't** overlapped with the merge window.
     ///
     /// Nodes in this heap **MUST** not be empty.
@@ -661,7 +469,7 @@ impl<T: NodeCmp> MergeAlgo<T> {
     fn new(mut nodes: Vec<T>) -> Self {
         // Skips EOF nodes.
         nodes.retain(|node| !node.is_eof());
-        let hot = TournamentTree::with_capacity(nodes.len());
+        let hot = WinnerTree::with_capacity(nodes.len());
         let cold = BinaryHeap::from(nodes);
 
         let mut algo = MergeAlgo { hot, cold };
@@ -1709,7 +1517,7 @@ mod tests {
         assert_eq!(vec![0, 3, 2, 1], drained);
     }
 
-    fn drain_tournament_tree<T: Ord>(tree: &mut TournamentTree<T>) -> Vec<T> {
+    fn drain_winner_tree<T: Ord>(tree: &mut WinnerTree<T>) -> Vec<T> {
         let mut values = Vec::with_capacity(tree.len());
         while let Some(value) = tree.pop() {
             values.push(value);
@@ -1718,8 +1526,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tournament_tree_empty() {
-        let mut tree = TournamentTree::<i32>::with_capacity(0);
+    fn test_winner_tree_empty() {
+        let mut tree = WinnerTree::<i32>::with_capacity(0);
 
         assert!(tree.is_empty());
         assert_eq!(0, tree.len());
@@ -1731,8 +1539,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tournament_tree_single_element() {
-        let mut tree = TournamentTree::with_capacity(1);
+    fn test_winner_tree_single_element() {
+        let mut tree = WinnerTree::with_capacity(1);
         tree.push(7);
 
         assert!(!tree.is_empty());
@@ -1744,35 +1552,32 @@ mod tests {
     }
 
     #[test]
-    fn test_tournament_tree_drains_in_descending_order() {
-        let mut tree = TournamentTree::with_capacity(8);
+    fn test_winner_tree_drains_in_descending_order() {
+        let mut tree = WinnerTree::with_capacity(8);
         for value in [3, 1, 4, 1, 5, 9, 2, 6] {
             tree.push(value);
         }
 
         assert_eq!(Some(&9), tree.peek());
         assert_eq!(Some(&6), tree.second_best());
-        assert_eq!(
-            vec![9, 6, 5, 4, 3, 2, 1, 1],
-            drain_tournament_tree(&mut tree)
-        );
+        assert_eq!(vec![9, 6, 5, 4, 3, 2, 1, 1], drain_winner_tree(&mut tree));
     }
 
     #[test]
-    fn test_tournament_tree_non_power_of_two_capacity() {
-        let mut tree = TournamentTree::with_capacity(5);
+    fn test_winner_tree_non_power_of_two_capacity() {
+        let mut tree = WinnerTree::with_capacity(5);
         for value in [40, 10, 50, 20, 30] {
             tree.push(value);
         }
 
         assert_eq!(Some(&50), tree.peek());
         assert_eq!(Some(&40), tree.second_best());
-        assert_eq!(vec![50, 40, 30, 20, 10], drain_tournament_tree(&mut tree));
+        assert_eq!(vec![50, 40, 30, 20, 10], drain_winner_tree(&mut tree));
     }
 
     #[test]
-    fn test_tournament_tree_replays_winner_after_mutation() {
-        let mut tree = TournamentTree::with_capacity(4);
+    fn test_winner_tree_replays_winner_after_mutation() {
+        let mut tree = WinnerTree::with_capacity(4);
         for value in [7, 3, 9, 5] {
             tree.push(value);
         }
@@ -1782,12 +1587,12 @@ mod tests {
 
         assert_eq!(Some(&7), tree.peek());
         assert_eq!(Some(&5), tree.second_best());
-        assert_eq!(vec![7, 5, 3, 1], drain_tournament_tree(&mut tree));
+        assert_eq!(vec![7, 5, 3, 1], drain_winner_tree(&mut tree));
     }
 
     #[test]
-    fn test_tournament_tree_mutated_winner_can_stay_winner() {
-        let mut tree = TournamentTree::with_capacity(3);
+    fn test_winner_tree_mutated_winner_can_stay_winner() {
+        let mut tree = WinnerTree::with_capacity(3);
         for value in [1, 2, 9] {
             tree.push(value);
         }
@@ -1796,12 +1601,12 @@ mod tests {
         tree.replay_winner();
 
         assert_eq!(Some(&8), tree.peek());
-        assert_eq!(vec![8, 2, 1], drain_tournament_tree(&mut tree));
+        assert_eq!(vec![8, 2, 1], drain_winner_tree(&mut tree));
     }
 
     #[test]
-    fn test_tournament_tree_remove_and_reinsert() {
-        let mut tree = TournamentTree::with_capacity(3);
+    fn test_winner_tree_remove_and_reinsert() {
+        let mut tree = WinnerTree::with_capacity(3);
         for value in [5, 9, 7] {
             tree.push(value);
         }
@@ -1810,20 +1615,20 @@ mod tests {
         assert_eq!(Some(9), tree.pop());
         tree.push(8);
         assert_eq!(Some(&8), tree.peek());
-        assert_eq!(vec![8, 7, 5], drain_tournament_tree(&mut tree));
+        assert_eq!(vec![8, 7, 5], drain_winner_tree(&mut tree));
 
         // Refill after the tree was drained to empty.
         tree.push(4);
         tree.push(6);
         assert_eq!(Some(&6), tree.peek());
-        assert_eq!(vec![6, 4], drain_tournament_tree(&mut tree));
+        assert_eq!(vec![6, 4], drain_winner_tree(&mut tree));
     }
 
-    /// Drives a TournamentTree and a std BinaryHeap oracle with the same seeded op
+    /// Drives a WinnerTree and a std BinaryHeap oracle with the same seeded op
     /// sequence (push / pop winner / mutate winner + replay) and compares
     /// observable behavior after every op. The number of live elements never
     /// exceeds `capacity`, mirroring how MergeAlgo uses the tree.
-    fn assert_tournament_tree_matches_oracle(
+    fn assert_winner_tree_matches_oracle(
         seed: u64,
         value_range: u32,
         capacity: usize,
@@ -1833,7 +1638,7 @@ mod tests {
         use rand::{Rng, SeedableRng};
 
         let mut rng = StdRng::seed_from_u64(seed);
-        let mut tree = TournamentTree::<u32>::with_capacity(capacity);
+        let mut tree = WinnerTree::<u32>::with_capacity(capacity);
         let mut oracle = BinaryHeap::<u32>::new();
         let mut next_value = 0_u32;
 
@@ -1875,27 +1680,27 @@ mod tests {
         while let Some(value) = oracle.pop() {
             oracle_values.push(value);
         }
-        assert_eq!(oracle_values, drain_tournament_tree(&mut tree));
+        assert_eq!(oracle_values, drain_winner_tree(&mut tree));
     }
 
     #[test]
-    fn test_tournament_tree_matches_binary_heap_oracle() {
+    fn test_winner_tree_matches_binary_heap_oracle() {
         for seed in [0x5eed, 0xdead_beef, 42] {
-            assert_tournament_tree_matches_oracle(seed, 1000, 13, 2000);
+            assert_winner_tree_matches_oracle(seed, 1000, 13, 2000);
         }
     }
 
     #[test]
-    fn test_tournament_tree_matches_oracle_with_duplicate_heavy_values() {
+    fn test_winner_tree_matches_oracle_with_duplicate_heavy_values() {
         // A tiny value range makes duplicates dominate, which exercises the
         // tie-breaking branches of the tree matches.
-        assert_tournament_tree_matches_oracle(0xc0ffee, 3, 8, 2000);
+        assert_winner_tree_matches_oracle(0xc0ffee, 3, 8, 2000);
     }
 
     #[test]
-    fn test_tournament_tree_matches_oracle_with_tiny_capacities() {
+    fn test_winner_tree_matches_oracle_with_tiny_capacities() {
         for capacity in 1..=3 {
-            assert_tournament_tree_matches_oracle(0xbeef, 100, capacity, 500);
+            assert_winner_tree_matches_oracle(0xbeef, 100, capacity, 500);
         }
     }
 
