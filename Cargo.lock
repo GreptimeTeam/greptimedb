@@ -8705,6 +8705,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "winner_tree",
  "zstd",
 ]
 
@@ -17128,6 +17129,12 @@ name = "windows_x86_64_msvc"
 version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
+
+[[package]]
+name = "winner_tree"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0639a3cbe35d6df7643f015e6fbde7664c7daf6d376b802b3c0fa05141b316e7"
 
 [[package]]
 name = "winnow"

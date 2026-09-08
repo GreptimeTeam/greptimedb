@@ -284,6 +284,92 @@ async fn test_write_query_region_with_format(flat_format: bool) {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
+/// Builds rows with `tag_num` string tags, one float field and a timestamp
+/// in second resolution, like [build_rows] but for various tag counts.
+fn build_rows_with_tags(tag_num: usize, rows: &[(usize, i64)]) -> Vec<api::v1::Row> {
+    rows.iter()
+        .map(|&(value, ts)| {
+            let mut values: Vec<ValueData> = (0..tag_num)
+                .map(|_| ValueData::StringValue(value.to_string()))
+                .collect();
+            values.push(ValueData::F64Value(value as f64));
+            values.push(ValueData::TimestampMillisecondValue(ts * 1000));
+            row(values)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_flat_merge_with_various_schemas() {
+    // Tables without tags: all rows share an empty primary key.
+    let expected_no_tag = "\
++---------+---------------------+
+| field_0 | ts                  |
++---------+---------------------+
+| 0.0     | 1970-01-01T00:00:00 |
+| 1.0     | 1970-01-01T00:00:01 |
+| 2.0     | 1970-01-01T00:00:02 |
+| 3.0     | 1970-01-01T00:00:03 |
++---------+---------------------+";
+    flat_merge_schema_check(0, "flat-merge-no-tag", expected_no_tag).await;
+
+    // Tables with multiple string tags: tag columns are dictionary-encoded
+    // in the flat input schema of the merge reader.
+    let expected_multi_tag = "\
++-------+-------+---------+---------------------+
+| tag_0 | tag_1 | field_0 | ts                  |
++-------+-------+---------+---------------------+
+| 0     | 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3     | 3.0     | 1970-01-01T00:00:03 |
++-------+-------+---------+---------------------+";
+    flat_merge_schema_check(2, "flat-merge-multi-tag", expected_multi_tag).await;
+}
+
+/// Writes and flushes rows, then writes interleaved rows so a scan must merge
+/// the SST with the memtable through the flat merge reader, and checks the
+/// merged output.
+async fn flat_merge_schema_check(tag_num: usize, prefix: &str, expected: &str) {
+    let mut env = TestEnv::with_prefix(prefix).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().tag_num(tag_num).build();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Writes rows with even timestamps and flushes them to an SST.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_with_tags(tag_num, &[(0, 0), (2, 2)]),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, None).await;
+
+    // Writes rows with odd timestamps; they stay in the memtable and
+    // interleave with the SST rows when merged.
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_with_tags(tag_num, &[(1, 1), (3, 3)]),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
 #[tokio::test]
 async fn test_different_order() {
     test_different_order_with_format(false).await;
