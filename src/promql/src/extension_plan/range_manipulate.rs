@@ -46,7 +46,7 @@ use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, native_per_nanosecond, native_timestamp_values,
+    METRIC_NUM_SERIES, Millisecond, nanoseconds_per_native_tick, native_timestamp_values,
     resolve_column_name, serialize_column_index, timestamp_unit,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
@@ -714,7 +714,7 @@ impl RangeManipulateStream {
         input: &RecordBatch,
     ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
         let ts_column = input.column(self.time_index);
-        let scale = native_per_nanosecond(self.time_unit);
+        let scale = nanoseconds_per_native_tick(self.time_unit);
         let timestamps = native_timestamp_values(ts_column.as_ref())?;
         let timestamp = |index| (timestamps[index] as i128) * scale;
         let len = timestamps.len();
