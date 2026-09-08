@@ -21,7 +21,7 @@ use std::task::{Context, Poll};
 use common_telemetry::{debug, warn};
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::{Field, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -46,7 +46,8 @@ use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+    METRIC_NUM_SERIES, Millisecond, native_per_nanosecond, native_timestamp_values,
+    resolve_column_name, serialize_column_index, timestamp_unit,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
@@ -142,9 +143,21 @@ impl RangeManipulate {
             ));
         };
         let ts_col_field = &columns[ts_col_index];
+        let output_time_field = Arc::new(
+            ts_col_field
+                .as_ref()
+                .clone()
+                .with_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
+        );
+        new_columns[ts_col_index] = (
+            input_schema.qualified_field(ts_col_index).0.cloned(),
+            output_time_field.clone(),
+        );
         let timestamp_range_field = Field::new(
             Self::build_timestamp_range_name(time_index),
-            RangeArray::convert_field(ts_col_field).data_type().clone(),
+            RangeArray::convert_field(output_time_field.as_ref())
+                .data_type()
+                .clone(),
             ts_col_field.is_nullable(),
         );
         new_columns.push((None, Arc::new(timestamp_range_field)));
@@ -515,6 +528,7 @@ impl ExecutionPlan for RangeManipulateExec {
                     .0
             })
             .collect();
+        let time_unit = timestamp_unit(schema.field(time_index).data_type())?;
         let aligned_ts_array =
             RangeManipulateStream::build_aligned_ts_array(self.start, self.end, self.interval);
         Ok(Box::pin(RangeManipulateStream {
@@ -523,6 +537,7 @@ impl ExecutionPlan for RangeManipulateExec {
             interval: self.interval,
             range: self.range,
             time_index,
+            time_unit,
             field_columns,
             aligned_ts_array,
             output_schema: self.output_schema.clone(),
@@ -584,6 +599,7 @@ pub struct RangeManipulateStream {
     interval: Millisecond,
     range: Millisecond,
     time_index: usize,
+    time_unit: TimeUnit,
     field_columns: Vec<usize>,
     aligned_ts_array: ArrayRef,
 
@@ -656,10 +672,13 @@ impl RangeManipulateStream {
         }
 
         // push timestamp range column
-        let ts_range_column =
-            RangeArray::from_ranges(input.column(self.time_index).clone(), ranges.clone())
-                .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
-                .into_dict();
+        let timestamp_values = compute::cast(
+            input.column(self.time_index),
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+        )?;
+        let ts_range_column = RangeArray::from_ranges(timestamp_values, ranges.clone())
+            .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
+            .into_dict();
         new_columns.push(Arc::new(ts_range_column));
 
         // truncate other columns
@@ -694,52 +713,58 @@ impl RangeManipulateStream {
         &self,
         input: &RecordBatch,
     ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
-        let ts_column = input
-            .column(self.time_index)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .ok_or_else(|| {
-                DataFusionError::Execution(
-                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
-                )
-            })?;
-
-        let len = ts_column.len();
+        let ts_column = input.column(self.time_index);
+        let scale = native_per_nanosecond(self.time_unit);
+        let timestamps = native_timestamp_values(ts_column.as_ref())?;
+        let timestamp = |index| (timestamps[index] as i128) * scale;
+        let len = timestamps.len();
         if len == 0 {
             return Ok((vec![], (self.start, self.end)));
         }
 
-        // shorten the range to calculate
-        let first_ts = ts_column.value(0);
-        // Preserve the query's alignment pattern when optimizing start time
-        let remainder = (first_ts - self.start).rem_euclid(self.interval);
-        let first_ts_aligned = if remainder == 0 {
-            first_ts
-        } else {
-            first_ts + (self.interval - remainder)
-        };
-        let last_ts = ts_column.value(ts_column.len() - 1);
-        let last_ts_with_range = last_ts + self.range;
-        let remainder = (last_ts_with_range - self.start).rem_euclid(self.interval);
+        // Shorten the range using wide arithmetic so timestamps near the native
+        // type limits retain every query-aligned evaluation point.
+        let query_start = self.start as i128;
+        let query_end = self.end as i128;
+        let interval = self.interval as i128;
+        let first_ts = timestamp(0).div_euclid(1_000_000);
+        // Preserve the query's alignment pattern when optimizing start time.
+        let remainder = (first_ts - query_start).rem_euclid(interval);
+        let first_ts_aligned = first_ts + (interval - remainder).rem_euclid(interval);
+        let last_ts_with_range =
+            (timestamp(len - 1) + (self.range as i128) * 1_000_000).div_euclid(1_000_000);
+        let remainder = (last_ts_with_range - query_start).rem_euclid(interval);
         let last_ts_aligned = last_ts_with_range - remainder;
-        let start = self.start.max(first_ts_aligned);
-        let end = self.end.min(last_ts_aligned);
+        let start = query_start.max(first_ts_aligned);
+        let end = query_end.min(last_ts_aligned);
         if start > end {
-            return Ok((vec![], (start, end)));
+            let bounds = if start >= i64::MIN as i128
+                && start <= i64::MAX as i128
+                && end >= i64::MIN as i128
+                && end <= i64::MAX as i128
+            {
+                (start as i64, end as i64)
+            } else {
+                (self.start, self.end)
+            };
+            return Ok((vec![], bounds));
         }
-        let mut ranges = Vec::with_capacity(((self.end - self.start) / self.interval + 1) as usize);
+        // The intersection is within the declared i64 query bounds.
+        let start = start as i64;
+        let end = end as i64;
+        let mut ranges = Vec::new();
 
         // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
         let mut left = 0usize;
         let mut right = 0usize;
         for curr_ts in (start..=end).step_by(self.interval as _) {
-            let start_ts = curr_ts - self.range;
+            let start_ts = (curr_ts as i128) * 1_000_000 - (self.range as i128) * 1_000_000;
 
-            while left < len && ts_column.value(left) <= start_ts {
+            while left < len && timestamp(left) <= start_ts {
                 left += 1;
             }
             right = right.max(left);
-            while right < len && ts_column.value(right) <= curr_ts {
+            while right < len && timestamp(right) <= (curr_ts as i128) * 1_000_000 {
                 right += 1;
             }
 
@@ -756,7 +781,10 @@ impl RangeManipulateStream {
 
 #[cfg(test)]
 mod test {
-    use datafusion::arrow::array::{ArrayRef, DictionaryArray, Float64Array, StringArray};
+    use datafusion::arrow::array::{
+        ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMicrosecondArray,
+        TimestampNanosecondArray,
+    };
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
@@ -886,6 +914,130 @@ mod test {
             .unwrap();
 
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn native_timestamps_preserve_range_membership_and_ms_payload() {
+        for (unit, ticks_per_ms) in [
+            (TimeUnit::Microsecond, 1_000_i64),
+            (TimeUnit::Nanosecond, 1_000_000_i64),
+        ] {
+            let lower = 1_000 * ticks_per_ms;
+            let upper = 1_001 * ticks_per_ms;
+            // Exclude the lower boundary and future sample; retain both native
+            // samples in the same millisecond bucket and the exact upper sample.
+            let timestamps = vec![lower, lower + 1, lower + 2, upper, upper + 1];
+            let time: ArrayRef = match unit {
+                TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(timestamps)),
+                TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(timestamps)),
+                _ => unreachable!(),
+            };
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(TIME_INDEX_COLUMN, DataType::Timestamp(unit, None), false),
+                Field::new("value", DataType::Float64, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    time,
+                    Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0])),
+                ],
+            )
+            .unwrap();
+            let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            });
+            let plan = RangeManipulate::new(
+                1_001,
+                1_001,
+                1,
+                1,
+                TIME_INDEX_COLUMN.to_string(),
+                vec!["value".to_string()],
+                logical_input.clone(),
+            )
+            .unwrap();
+            let output_time = Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            );
+            let output_schema = Arc::new(Schema::new(vec![
+                output_time.clone(),
+                RangeArray::convert_field(&Field::new("value", DataType::Float64, true)),
+                Field::new(
+                    RangeManipulate::build_timestamp_range_name(TIME_INDEX_COLUMN),
+                    RangeArray::convert_field(&output_time).data_type().clone(),
+                    false,
+                ),
+            ]));
+            assert_eq!(plan.schema().as_arrow(), output_schema.as_ref());
+
+            let rebuilt = RangeManipulate::deserialize(&plan.serialize())
+                .unwrap()
+                .with_exprs_and_inputs(vec![], vec![logical_input])
+                .unwrap();
+            assert_eq!(rebuilt.schema(), plan.schema());
+            assert_eq!(rebuilt.input.schema().as_arrow(), schema.as_ref());
+
+            let input = Arc::new(DataSourceExec::new(Arc::new(
+                MemorySourceConfig::try_new(&[vec![batch]], schema.clone(), None).unwrap(),
+            )));
+            let exec = rebuilt.to_execution_plan(input);
+            assert_eq!(exec.schema(), output_schema);
+            assert_eq!(exec.children()[0].schema(), schema);
+
+            let batches =
+                datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+                    .await
+                    .unwrap();
+            assert_eq!(batches.len(), 1, "{unit:?}");
+            let output = &batches[0];
+            assert_eq!(output.schema(), output_schema);
+            assert_eq!(output.num_rows(), 1);
+            assert_eq!(
+                output
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .values()
+                    .as_ref(),
+                &[1_001]
+            );
+
+            // RangeArray packs offset/length into dictionary keys; Arrow dictionary
+            // equality treats those packed keys as indices and cannot compare them.
+            let values = RangeArray::try_new(
+                output
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int64Type>>()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+            assert_eq!(values.get_offset_length(0), Some((1, 3)));
+            assert_eq!(
+                values.get(0).unwrap().to_data(),
+                Float64Array::from(vec![20.0, 30.0, 40.0]).to_data()
+            );
+            let timestamps = RangeArray::try_new(
+                output
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int64Type>>()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+            assert_eq!(timestamps.get_offset_length(0), Some((1, 3)));
+            assert_eq!(
+                timestamps.get(0).unwrap().to_data(),
+                TimestampMillisecondArray::from(vec![1_000, 1_000, 1_001]).to_data()
+            );
+        }
     }
 
     #[tokio::test]
@@ -1047,6 +1199,7 @@ mod test {
             interval: 30000,      // 30s step
             range: 60000,         // 60s lookback
             time_index: 0,
+            time_unit: TimeUnit::Millisecond,
             field_columns: vec![],
             aligned_ts_array: Arc::new(TimestampMillisecondArray::from(vec![0i64; 0])),
             output_schema: schema.clone(),
@@ -1111,6 +1264,7 @@ mod test {
             interval,
             range,
             time_index: 0,
+            time_unit: TimeUnit::Millisecond,
             field_columns: vec![],
             aligned_ts_array: Arc::new(TimestampMillisecondArray::from(vec![0i64; 0])),
             output_schema: schema.clone(),
@@ -1225,6 +1379,15 @@ mod test {
                 calculate_range_for_test(query_start, query_end, interval, range, &timestamps);
             assert_eq!(bounds, expected_bounds, "{name}");
         }
+    }
+
+    #[test]
+    fn calculate_range_keeps_extreme_range_tail() {
+        let (ranges, bounds) =
+            calculate_range_for_test(i64::MAX - 1, i64::MAX, 1, i64::MAX, &[i64::MAX]);
+
+        assert_eq!(bounds, (i64::MAX, i64::MAX));
+        assert_eq!(ranges, vec![(0, 1)]);
     }
 
     #[test]

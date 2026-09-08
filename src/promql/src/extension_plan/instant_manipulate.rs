@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::cmp::Ordering;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -29,6 +28,7 @@ use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{
     EmptyRelation, Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore,
 };
+use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
@@ -46,8 +46,9 @@ use snafu::ResultExt;
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::series_divide::SeriesDivide;
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, prometheus_stale_sample_column,
-    resolve_column_name, serialize_column_index,
+    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, native_per_nanosecond,
+    native_timestamp_values, prometheus_stale_sample_column, resolve_column_name,
+    serialize_column_index, timestamp_unit,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
@@ -67,7 +68,7 @@ fn mixed_sample_fields(field: Option<&str>) -> [Option<&str>; 2] {
 /// This plan will try to align the input time series, for every timestamp between
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
 /// is missing at the given timestamp.
-#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct InstantManipulate {
     start: Millisecond,
     end: Millisecond,
@@ -79,7 +80,33 @@ pub struct InstantManipulate {
     /// Primary sample column used to derive the columns checked for staleness.
     field_column: Option<String>,
     input: LogicalPlan,
+    output_schema: DFSchemaRef,
     unfix: Option<UnfixIndices>,
+}
+
+impl PartialOrd for InstantManipulate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (
+            self.start,
+            self.end,
+            self.lookback_delta,
+            self.interval,
+            &self.time_index_column,
+            &self.tag_columns,
+            &self.field_column,
+            &self.input,
+        )
+            .partial_cmp(&(
+                other.start,
+                other.end,
+                other.lookback_delta,
+                other.interval,
+                &other.time_index_column,
+                &other.tag_columns,
+                &other.field_column,
+                &other.input,
+            ))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
@@ -98,7 +125,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
     }
 
     fn schema(&self) -> &DFSchemaRef {
-        self.input.schema()
+        &self.output_schema
     }
 
     fn expressions(&self) -> Vec<Expr> {
@@ -180,6 +207,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
                 end: self.end,
                 lookback_delta: self.lookback_delta,
                 interval: self.interval,
+                output_schema: Self::calculate_output_schema(&input, &time_index_column)?,
                 time_index_column,
                 tag_columns: Self::resolve_tag_columns(&input, &self.tag_columns),
                 field_column,
@@ -195,6 +223,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
                 time_index_column: self.time_index_column.clone(),
                 tag_columns: Self::resolve_tag_columns(&input, &self.tag_columns),
                 field_column: self.field_column.clone(),
+                output_schema: Self::calculate_output_schema(&input, &self.time_index_column)?,
                 input,
                 unfix: None,
             })
@@ -203,6 +232,38 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
 }
 
 impl InstantManipulate {
+    fn calculate_output_schema(
+        input: &LogicalPlan,
+        time_index_column: &str,
+    ) -> DataFusionResult<DFSchemaRef> {
+        let input_schema = input.schema();
+        let time_index = input_schema
+            .index_of_column_by_name(None, time_index_column)
+            .ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "InstantManipulate time index {time_index_column} not found"
+                ))
+            })?;
+        let mut fields = (0..input_schema.fields().len())
+            .map(|index| {
+                let (qualifier, field) = input_schema.qualified_field(index);
+                (qualifier.cloned(), field.clone())
+            })
+            .collect::<Vec<_>>();
+        let (qualifier, field) = input_schema.qualified_field(time_index);
+        fields[time_index] = (
+            qualifier.cloned(),
+            Arc::new(field.as_ref().clone().with_data_type(DataType::Timestamp(
+                datafusion::arrow::datatypes::TimeUnit::Millisecond,
+                None,
+            ))),
+        );
+        Ok(Arc::new(DFSchema::new_with_metadata(
+            fields,
+            input_schema.metadata().clone(),
+        )?))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         start: Millisecond,
@@ -219,6 +280,8 @@ impl InstantManipulate {
             end,
             lookback_delta,
             interval,
+            output_schema: Self::calculate_output_schema(&input, &time_index_column)
+                .unwrap_or_else(|_| input.schema().clone()),
             time_index_column,
             tag_columns,
             field_column,
@@ -269,6 +332,25 @@ impl InstantManipulate {
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let reuse_tsid_column = matches!(self.tag_columns.as_slice(), [tag] if tag == "__tsid");
 
+        let mut fields = exec_input.schema().fields().to_vec();
+        let time_index = exec_input
+            .schema()
+            .index_of(&self.time_index_column)
+            .expect("time index column not found");
+        fields[time_index] = Arc::new(fields[time_index].as_ref().clone().with_data_type(
+            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+        ));
+        let output_schema = Arc::new(datafusion::arrow::datatypes::Schema::new_with_metadata(
+            fields,
+            exec_input.schema().metadata().clone(),
+        ));
+        let input_properties = exec_input.properties();
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            input_properties.partitioning.clone(),
+            input_properties.emission_type,
+            input_properties.boundedness,
+        ));
         Arc::new(InstantManipulateExec {
             start: self.start,
             end: self.end,
@@ -278,6 +360,8 @@ impl InstantManipulate {
             field_column: self.field_column.clone(),
             reuse_tsid_column,
             input: exec_input,
+            output_schema,
+            properties,
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
@@ -306,9 +390,10 @@ impl InstantManipulate {
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
         let pb_instant_manipulate =
             pb::InstantManipulate::decode(bytes).context(DeserializeSnafu)?;
+        let empty_schema = Arc::new(DFSchema::empty());
         let placeholder_plan = LogicalPlan::EmptyRelation(EmptyRelation {
             produce_one_row: false,
-            schema: Arc::new(DFSchema::empty()),
+            schema: empty_schema.clone(),
         });
 
         let unfix = UnfixIndices {
@@ -324,6 +409,7 @@ impl InstantManipulate {
             time_index_column: String::new(),
             tag_columns: Vec::new(),
             field_column: None,
+            output_schema: empty_schema,
             input: placeholder_plan,
             unfix: Some(unfix),
         })
@@ -341,6 +427,8 @@ pub struct InstantManipulateExec {
     reuse_tsid_column: bool,
 
     input: Arc<dyn ExecutionPlan>,
+    output_schema: SchemaRef,
+    properties: Arc<PlanProperties>,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -350,11 +438,11 @@ impl ExecutionPlan for InstantManipulateExec {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.input.schema()
+        self.output_schema.clone()
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
-        self.input.properties()
+        &self.properties
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
@@ -375,6 +463,14 @@ impl ExecutionPlan for InstantManipulateExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
+        let input = children[0].clone();
+        let input_properties = input.properties();
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(self.output_schema.clone()),
+            input_properties.partitioning.clone(),
+            input_properties.emission_type,
+            input_properties.boundedness,
+        ));
         Ok(Arc::new(Self {
             start: self.start,
             end: self.end,
@@ -383,7 +479,9 @@ impl ExecutionPlan for InstantManipulateExec {
             time_index_column: self.time_index_column.clone(),
             field_column: self.field_column.clone(),
             reuse_tsid_column: self.reuse_tsid_column,
-            input: children[0].clone(),
+            input,
+            output_schema: self.output_schema.clone(),
+            properties,
             metric: self.metric.clone(),
         }))
     }
@@ -408,6 +506,7 @@ impl ExecutionPlan for InstantManipulateExec {
             .column_with_name(&self.time_index_column)
             .expect("time index column not found")
             .0;
+        let time_unit = timestamp_unit(schema.field(time_index).data_type())?;
         let field_indices = mixed_sample_fields(self.field_column.as_deref()).map(|field| {
             field.and_then(|field| schema.column_with_name(field).map(|(index, _)| index))
         });
@@ -421,10 +520,11 @@ impl ExecutionPlan for InstantManipulateExec {
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index,
+            time_unit,
             field_indices,
             tsid_index,
             reuse_tsid_column: self.reuse_tsid_column && tsid_index.is_some(),
-            schema,
+            schema: self.output_schema.clone(),
             input,
             metric: baseline_metric,
             num_series,
@@ -488,6 +588,7 @@ pub struct InstantManipulateStream {
     interval: Millisecond,
     // Column index of TIME INDEX column's position in schema
     time_index: usize,
+    time_unit: datafusion::arrow::datatypes::TimeUnit,
     field_indices: [Option<usize>; 2],
     tsid_index: Option<usize>,
     reuse_tsid_column: bool,
@@ -511,9 +612,6 @@ impl Stream for InstantManipulateStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let poll = match ready!(self.input.poll_next_unpin(cx)) {
             Some(Ok(batch)) => {
-                if batch.num_rows() == 0 {
-                    return Poll::Pending;
-                }
                 let timer = std::time::Instant::now();
                 self.num_series.add(1);
                 let result = Ok(batch).and_then(|batch| self.manipulate(batch));
@@ -538,22 +636,11 @@ impl InstantManipulateStream {
     /// lookback window `(eval_ts - lookback_delta, eval_ts]`; a sample at exactly
     /// `eval_ts - lookback_delta` is too old.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        let ts_column = input
-            .column(self.time_index)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .ok_or_else(|| {
-                DataFusionError::Execution(
-                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
-                )
-            })?;
-
-        // Early return for empty input
+        let ts_column = input.column(self.time_index);
         if ts_column.is_empty() {
-            return Ok(input);
+            return Ok(RecordBatch::new_empty(self.schema.clone()));
         }
-
-        // Field columns for staleness checks, classified once per batch.
+        let scale = native_per_nanosecond(self.time_unit);
         let stale_sample_columns = self.field_indices.map(|index| {
             index.and_then(|index| prometheus_stale_sample_column(input.column(index).as_ref()))
         });
@@ -563,101 +650,71 @@ impl InstantManipulateStream {
                 .flatten()
                 .any(|column| is_prometheus_stale_sample(*column, row))
         };
-
-        // Optimize iteration range based on actual data bounds
-        let first_ts = ts_column.value(0);
-        let last_ts = ts_column.value(ts_column.len() - 1);
-        // A sample at `t` is eligible for eval time `eval_ts` iff:
-        //   t > eval_ts - lookback_delta  <=>  eval_ts < t + lookback_delta.
-        // Therefore the last eval timestamp for which the last sample is still eligible is:
-        //   last_ts + lookback_delta - 1 (millisecond granularity).
-        let last_useful = if self.lookback_delta > 0 {
-            last_ts + self.lookback_delta - 1
+        let timestamps = native_timestamp_values(ts_column.as_ref())?;
+        let len = timestamps.len();
+        let to_nanoseconds = |timestamp: i64| (timestamp as i128) * scale;
+        let first_ns = to_nanoseconds(timestamps[0]);
+        let last_ns = to_nanoseconds(timestamps[len - 1]);
+        // An exact sample remains useful with zero lookback. Otherwise the lower
+        // boundary is exclusive, so subtract one nanosecond from its final window.
+        let last_useful = if self.lookback_delta == 0 {
+            last_ns
         } else {
-            last_ts
+            last_ns + (self.lookback_delta as i128) * 1_000_000 - 1
         };
-
-        let max_start = first_ts.max(self.start);
-        let min_end = last_useful.min(self.end);
-
-        let aligned_start = self.start + (max_start - self.start) / self.interval * self.interval;
-        let aligned_end = self.end - (self.end - min_end) / self.interval * self.interval;
-
+        let first_ms = (first_ns + 999_999).div_euclid(1_000_000);
+        let last_ms = last_useful.div_euclid(1_000_000);
+        let query_start = self.start as i128;
+        let query_end = self.end as i128;
+        let interval = self.interval as i128;
+        let max_start = first_ms.max(query_start);
+        let min_end = last_ms.min(query_end);
+        let (aligned_start, aligned_end) = if max_start > min_end {
+            (1, 0)
+        } else {
+            (
+                query_start + (max_start - query_start) / interval * interval,
+                query_end - (query_end - min_end) / interval * interval,
+            )
+        };
         let estimated_points = if aligned_end >= aligned_start {
-            ((aligned_end - aligned_start) / self.interval).saturating_add(1) as usize
+            (aligned_end - aligned_start) / interval + 1
         } else {
             0
         };
-        if estimated_points > MAX_INSTANT_MANIPULATE_OUTPUT_POINTS {
+        if estimated_points > MAX_INSTANT_MANIPULATE_OUTPUT_POINTS as i128 {
             return Err(DataFusionError::Execution(format!(
                 "InstantManipulate output points exceed limit: {estimated_points} > {MAX_INSTANT_MANIPULATE_OUTPUT_POINTS}"
             )));
         }
+        let estimated_points = estimated_points as usize;
+        let aligned_start = aligned_start as i64;
+        let aligned_end = aligned_end as i64;
         let mut take_indices = Vec::with_capacity(estimated_points);
-
-        let mut cursor = 0;
-
-        let aligned_ts_iter = (aligned_start..=aligned_end).step_by(self.interval as usize);
         let mut aligned_ts = Vec::with_capacity(estimated_points);
-
-        // calculate the offsets to take
-        'next: for expected_ts in aligned_ts_iter {
-            // first, search toward end to see if there is matched timestamp
-            while cursor < ts_column.len() {
-                let curr = ts_column.value(cursor);
-                match curr.cmp(&expected_ts) {
-                    Ordering::Equal => {
-                        if is_stale(cursor) {
-                            // Ignore the stale marker.
-                        } else {
-                            take_indices.push(cursor as u64);
-                            aligned_ts.push(expected_ts);
-                        }
-                        continue 'next;
-                    }
-                    Ordering::Greater => break,
-                    Ordering::Less => {}
+        let mut cursor = 0;
+        for expected_ms in (aligned_start..=aligned_end).step_by(self.interval as usize) {
+            let expected = (expected_ms as i128) * 1_000_000;
+            let mut exact_candidate = None;
+            while cursor < len && to_nanoseconds(timestamps[cursor]) <= expected {
+                if to_nanoseconds(timestamps[cursor]) == expected && exact_candidate.is_none() {
+                    exact_candidate = Some(cursor);
                 }
                 cursor += 1;
             }
-            if cursor == ts_column.len() {
-                cursor -= 1;
-                // short cut this loop
-                if ts_column.value(cursor) + self.lookback_delta <= expected_ts {
-                    break;
-                }
-            }
-
-            // then examine the value
-            let curr_ts = ts_column.value(cursor);
-            if curr_ts + self.lookback_delta <= expected_ts {
+            let Some(candidate) = exact_candidate.or_else(|| cursor.checked_sub(1)) else {
                 continue;
-            }
-            if curr_ts > expected_ts {
-                // exceeds current expected timestamp, examine the previous value
-                if let Some(prev_cursor) = cursor.checked_sub(1) {
-                    let prev_ts = ts_column.value(prev_cursor);
-                    if prev_ts + self.lookback_delta > expected_ts {
-                        // only use the point in the time range
-                        if is_stale(prev_cursor) {
-                            // Do not use a stale marker as the newest value.
-                            continue;
-                        }
-                        // use this point
-                        take_indices.push(prev_cursor as u64);
-                        aligned_ts.push(expected_ts);
-                    }
-                }
-            } else if is_stale(cursor) {
-                // Do not use a stale marker as the newest value.
-            } else {
-                // use this point
-                take_indices.push(cursor as u64);
-                aligned_ts.push(expected_ts);
+            };
+            let candidate_ts = to_nanoseconds(timestamps[candidate]);
+            let lower = expected - (self.lookback_delta as i128) * 1_000_000;
+            if (candidate_ts == expected || candidate_ts > lower)
+                && candidate_ts <= expected
+                && !is_stale(candidate)
+            {
+                take_indices.push(candidate as u64);
+                aligned_ts.push(expected_ms);
             }
         }
-
-        // take record batch and replace the time index column
         self.take_record_batch_optional(input, take_indices, aligned_ts)
     }
 
@@ -691,7 +748,7 @@ impl InstantManipulateStream {
             arrays.push(compute::take(array, indices_array, None)?);
         }
 
-        let result = RecordBatch::try_new(record_batch.schema(), arrays)
+        let result = RecordBatch::try_new(self.schema.clone(), arrays)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         Ok(result)
     }
@@ -713,9 +770,11 @@ fn reuse_constant_column(array: &Arc<dyn Array>, len: usize) -> DataFusionResult
 mod test {
     use common_query::native_histogram::build_histogram_array;
     use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
-    use datafusion::arrow::array::Float64Array;
+    use datafusion::arrow::array::{
+        Float64Array, TimestampMicrosecondArray, TimestampNanosecondArray,
+    };
     use datafusion::arrow::buffer::NullBuffer;
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
@@ -748,6 +807,8 @@ mod test {
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
+            output_schema: memory_exec.schema(),
+            properties: memory_exec.properties().clone(),
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -760,6 +821,136 @@ mod test {
             .to_string();
 
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn native_timestamps_select_exact_samples_and_keep_ms_output() {
+        for (unit, ticks_per_ms) in [
+            (TimeUnit::Microsecond, 1_000_i64),
+            (TimeUnit::Nanosecond, 1_000_000_i64),
+        ] {
+            let lower = 1_000 * ticks_per_ms;
+            let upper = 1_001 * ticks_per_ms;
+            let stale = f64::from_bits(PROMETHEUS_STALE_NAN_BITS);
+            for (name, timestamps, values, expected_timestamps, expected_values) in [
+                (
+                    "exact upper sample",
+                    vec![lower + 1, upper],
+                    vec![1.0, 2.0],
+                    vec![1_001],
+                    vec![2.0],
+                ),
+                (
+                    "exclusive lower boundary and future sample",
+                    vec![lower, upper + 1],
+                    vec![1.0, 2.0],
+                    vec![1_000],
+                    vec![1.0],
+                ),
+                (
+                    "one native tick above lower boundary",
+                    vec![lower + 1, upper + 1],
+                    vec![1.0, 2.0],
+                    vec![1_001],
+                    vec![1.0],
+                ),
+                (
+                    "future stale marker does not suppress",
+                    vec![lower + 1, upper + 1],
+                    vec![1.0, stale],
+                    vec![1_001],
+                    vec![1.0],
+                ),
+                (
+                    "latest in-window stale marker suppresses",
+                    vec![lower + 1, lower + 2, upper + 1],
+                    vec![1.0, stale, 3.0],
+                    vec![],
+                    vec![],
+                ),
+            ] {
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new(TIME_INDEX_COLUMN, DataType::Timestamp(unit, None), false),
+                    Field::new("value", DataType::Float64, true),
+                ]));
+                let time: Arc<dyn Array> = match unit {
+                    TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(timestamps)),
+                    TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(timestamps)),
+                    _ => unreachable!(),
+                };
+                let batch = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![time, Arc::new(Float64Array::from(values))],
+                )
+                .unwrap();
+                let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
+                    produce_one_row: false,
+                    schema: schema.clone().to_dfschema_ref().unwrap(),
+                });
+                let plan = InstantManipulate::new(
+                    1_000,
+                    1_001,
+                    1,
+                    1,
+                    TIME_INDEX_COLUMN.to_string(),
+                    Vec::new(),
+                    Some("value".to_string()),
+                    logical_input.clone(),
+                );
+                let output_schema = Arc::new(Schema::new(vec![
+                    Field::new(
+                        TIME_INDEX_COLUMN,
+                        DataType::Timestamp(TimeUnit::Millisecond, None),
+                        false,
+                    ),
+                    Field::new("value", DataType::Float64, true),
+                ]));
+                assert_eq!(plan.schema().as_arrow(), output_schema.as_ref());
+
+                let rebuilt = InstantManipulate::deserialize(&plan.serialize())
+                    .unwrap()
+                    .with_exprs_and_inputs(vec![], vec![logical_input])
+                    .unwrap();
+                assert_eq!(rebuilt.schema(), plan.schema());
+                assert_eq!(rebuilt.input.schema().as_arrow(), schema.as_ref());
+
+                let input = Arc::new(DataSourceExec::new(Arc::new(
+                    MemorySourceConfig::try_new(&[vec![batch]], schema.clone(), None).unwrap(),
+                )));
+                let exec = rebuilt.to_execution_plan(input);
+                assert_eq!(exec.schema(), output_schema);
+                assert_eq!(exec.children()[0].schema(), schema);
+
+                let batches =
+                    datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+                        .await
+                        .unwrap();
+                assert_eq!(batches.len(), 1, "{unit:?}: {name}");
+                let output = &batches[0];
+                assert_eq!(output.schema(), output_schema);
+                let timestamps = output
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                let values = output
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(
+                    timestamps.values().as_ref(),
+                    expected_timestamps.as_slice(),
+                    "{unit:?}: {name}"
+                );
+                assert_eq!(
+                    values.values().as_ref(),
+                    expected_values.as_slice(),
+                    "{unit:?}: {name}"
+                );
+                assert_eq!(values.null_count(), 0, "{unit:?}: {name}");
+            }
+        }
     }
 
     #[test]
@@ -929,6 +1120,8 @@ mod test {
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: true,
+            output_schema: input.schema(),
+            properties: input.properties().clone(),
             input,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -990,6 +1183,8 @@ mod test {
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: true,
+            output_schema: input.schema(),
+            properties: input.properties().clone(),
             input,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -1044,6 +1239,8 @@ mod test {
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
+            output_schema: input.schema(),
+            properties: input.properties().clone(),
             input,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -1331,6 +1528,159 @@ mod test {
         .await;
     }
 
+    #[test]
+    fn exact_ties_select_first_and_lookback_uses_latest() {
+        for (values, expected_timestamp) in [
+            (vec![42.0, f64::from_bits(PROMETHEUS_STALE_NAN_BITS)], 1_000),
+            (vec![f64::from_bits(PROMETHEUS_STALE_NAN_BITS), 42.0], 1_050),
+        ] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(
+                    TIME_INDEX_COLUMN,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("value", DataType::Float64, true),
+            ]));
+            let input = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_000])),
+                    Arc::new(Float64Array::from(values)),
+                ],
+            )
+            .unwrap();
+            let stream = InstantManipulateStream {
+                start: 1_000,
+                end: 1_050,
+                lookback_delta: 100,
+                interval: 50,
+                time_index: 0,
+                time_unit: TimeUnit::Millisecond,
+                field_indices: [Some(1), None],
+                tsid_index: None,
+                reuse_tsid_column: false,
+                schema: schema.clone(),
+                input: Box::pin(
+                    datafusion::physical_plan::memory::MemoryStream::try_new(vec![], schema, None)
+                        .unwrap(),
+                ),
+                metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+                num_series: Count::new(),
+            };
+
+            let output = stream.manipulate(input).unwrap();
+            let timestamps = output
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let values = output
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(timestamps.values(), &[expected_timestamp]);
+            assert_eq!(values.values(), &[42.0]);
+        }
+    }
+
+    #[test]
+    fn empty_batch_uses_declared_output_schema() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            DataType::Timestamp(TimeUnit::Second, None),
+            false,
+        )]));
+        let output_schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )]));
+        let input = RecordBatch::new_empty(input_schema.clone());
+        let stream = InstantManipulateStream {
+            start: 0,
+            end: 0,
+            lookback_delta: 0,
+            interval: 1,
+            time_index: 0,
+            time_unit: TimeUnit::Second,
+            field_indices: [None, None],
+            tsid_index: None,
+            reuse_tsid_column: false,
+            schema: output_schema.clone(),
+            input: Box::pin(
+                datafusion::physical_plan::memory::MemoryStream::try_new(
+                    vec![],
+                    input_schema,
+                    None,
+                )
+                .unwrap(),
+            ),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+
+        let output = stream.manipulate(input).unwrap();
+        assert_eq!(output.schema(), output_schema);
+        assert_eq!(
+            output.schema().field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
+    }
+
+    #[test]
+    fn extreme_alignment_retains_exact_sample() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let input = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![i64::MAX])),
+                Arc::new(Float64Array::from(vec![7.0])),
+            ],
+        )
+        .unwrap();
+        let stream = InstantManipulateStream {
+            start: i64::MIN + 1,
+            end: i64::MAX,
+            lookback_delta: 0,
+            interval: i64::MAX,
+            time_index: 0,
+            time_unit: TimeUnit::Millisecond,
+            field_indices: [Some(1), None],
+            tsid_index: None,
+            reuse_tsid_column: false,
+            schema: schema.clone(),
+            input: Box::pin(
+                datafusion::physical_plan::memory::MemoryStream::try_new(vec![], schema, None)
+                    .unwrap(),
+            ),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+
+        let output = stream.manipulate(input).unwrap();
+        let timestamps = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values = output
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(timestamps.values(), &[i64::MAX]);
+        assert_eq!(values.values(), &[7.0]);
+    }
+
     #[tokio::test]
     async fn ordinary_nan_is_selected_for_exact_and_lookback() {
         let schema = Arc::new(Schema::new(vec![
@@ -1360,6 +1710,8 @@ mod test {
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
+            output_schema: input.schema(),
+            properties: input.properties().clone(),
             input,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -1439,6 +1791,8 @@ mod test {
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
+            output_schema: input.schema(),
+            properties: input.properties().clone(),
             input,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -1502,6 +1856,8 @@ mod test {
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
+            output_schema: input.schema(),
+            properties: input.properties().clone(),
             input,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -1549,6 +1905,8 @@ mod test {
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
+            output_schema: input.schema(),
+            properties: input.properties().clone(),
             input,
             metric: ExecutionPlanMetricsSet::new(),
         });

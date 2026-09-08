@@ -1974,8 +1974,32 @@ impl PromPlanner {
                     DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
                 })
                 .collect::<Vec<_>>();
-            project_exprs
-                .push(build_special_time_expr(&time_index_column).alias(&timestamp_value_column));
+            // `timestamp()` carries the sample timestamp as a value. Cast native
+            // input here because the helper consumes millisecond ticks.
+            let sample_time = col(&time_index_column);
+            let sample_time = if sample_time
+                .get_type(normalize.schema())
+                .context(DataFusionPlanningSnafu)?
+                == ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None)
+            {
+                sample_time
+            } else {
+                DfExpr::Cast(Cast {
+                    expr: Box::new(sample_time),
+                    data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                })
+            };
+            let sample_time = sample_time
+                .cast_to(&ArrowDataType::Int64, normalize.schema())
+                .context(DataFusionPlanningSnafu)?
+                .cast_to(&ArrowDataType::Float64, normalize.schema())
+                .context(DataFusionPlanningSnafu)?;
+            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(sample_time),
+                op: Operator::Divide,
+                right: Box::new(lit(1000.0)),
+            });
+            project_exprs.push(sample_time.alias(&timestamp_value_column));
             let normalize = LogicalPlanBuilder::from(normalize)
                 .project(project_exprs)
                 .context(DataFusionPlanningSnafu)?
@@ -2339,14 +2363,18 @@ impl PromPlanner {
             None => 0,
         };
         let mut scan_filters = Self::matchers_to_expr(label_matchers.clone(), table_schema)?;
-        if let Some(time_index_filter) = self.build_time_index_filter(offset_duration)? {
+        if let Some(time_index_filter) =
+            self.build_time_index_filter(offset_duration, table_schema)?
+        {
             scan_filters.push(time_index_filter);
         }
-        table_scan = LogicalPlanBuilder::from(table_scan)
-            .filter(conjunction(scan_filters).unwrap()) // Safety: `scan_filters` is not empty.
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
+        if let Some(filter) = conjunction(scan_filters) {
+            table_scan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         // make a projection plan if there is any `__field__` matcher
         if let Some(field_matchers) = &self.ctx.field_column_matcher {
@@ -2718,72 +2746,83 @@ impl PromPlanner {
         Ok(table_ref)
     }
 
-    fn build_time_index_filter(&self, offset_duration: i64) -> Result<Option<DfExpr>> {
+    fn build_time_index_filter(
+        &self,
+        offset_duration: i64,
+        schema: &DFSchemaRef,
+    ) -> Result<Option<DfExpr>> {
         let start = self.ctx.start;
         let end = self.ctx.end;
         if end < start {
             return InvalidTimeRangeSnafu { start, end }.fail();
         }
-        let lookback_delta = self.ctx.lookback_delta;
-        let range = self.ctx.range.unwrap_or_default();
-        let interval = self.ctx.interval;
         let time_index_expr = self.create_time_index_column_expr()?;
-        let num_points = (end - start) / interval;
-
-        // Prometheus semantics:
-        // - Instant selector lookback: (eval_ts - lookback_delta, eval_ts]
-        // - Range selector:           (eval_ts - range, eval_ts]
-        //
-        // So samples positioned exactly at the lower boundary must be excluded. We align the scan
-        // lower bound with Prometheus by shifting it forward by 1ms (millisecond granularity),
-        // while still using a `>=` filter.
-        let selector_window = if range == 0 { lookback_delta } else { range };
-        let lower_exclusive_adjustment = if selector_window > 0 { 1 } else { 0 };
-
-        // Scan a continuous time range
-        if (end - start) / interval > MAX_SCATTER_POINTS || interval <= INTERVAL_1H {
-            let single_time_range = time_index_expr
-                .clone()
-                .gt_eq(DfExpr::Literal(
-                    ScalarValue::TimestampMillisecond(
-                        Some(
-                            self.ctx.start - offset_duration - selector_window
-                                + lower_exclusive_adjustment,
-                        ),
-                        None,
-                    ),
-                    None,
-                ))
-                .and(time_index_expr.lt_eq(DfExpr::Literal(
-                    ScalarValue::TimestampMillisecond(Some(self.ctx.end - offset_duration), None),
-                    None,
-                )));
-            return Ok(Some(single_time_range));
-        }
-
-        // Otherwise scan scatter ranges separately
-        let mut filters = Vec::with_capacity(num_points as usize + 1);
-        for timestamp in (start..=end).step_by(interval as usize) {
-            filters.push(
+        let time_index_name = self.ctx.time_index_column.as_ref().unwrap();
+        let unit = schema
+            .index_of_column_by_name(None, time_index_name)
+            .and_then(|index| match schema.field(index).data_type() {
+                ArrowDataType::Timestamp(unit, _) => Some(*unit),
+                _ => None,
+            })
+            .unwrap_or(ArrowTimeUnit::Millisecond);
+        let scalar = |milliseconds: i64| -> Option<ScalarValue> {
+            let value = match unit {
+                ArrowTimeUnit::Second => milliseconds.div_euclid(1_000),
+                ArrowTimeUnit::Millisecond => milliseconds,
+                ArrowTimeUnit::Microsecond => milliseconds.checked_mul(1_000)?,
+                ArrowTimeUnit::Nanosecond => milliseconds.checked_mul(1_000_000)?,
+            };
+            Some(match unit {
+                ArrowTimeUnit::Second => ScalarValue::TimestampSecond(Some(value), None),
+                ArrowTimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), None),
+                ArrowTimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), None),
+                ArrowTimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), None),
+            })
+        };
+        let window = self.ctx.range.unwrap_or(self.ctx.lookback_delta);
+        let filter = |lower_ms: i64, upper_ms: i64| -> Option<DfExpr> {
+            let lower = DfExpr::Literal(scalar(lower_ms)?, None);
+            let lower_filter = if window == 0 {
+                time_index_expr.clone().gt_eq(lower)
+            } else if unit == ArrowTimeUnit::Millisecond
+                && let Some(inclusive_lower) = lower_ms.checked_add(1)
+            {
                 time_index_expr
                     .clone()
-                    .gt_eq(DfExpr::Literal(
-                        ScalarValue::TimestampMillisecond(
-                            Some(
-                                timestamp - offset_duration - selector_window
-                                    + lower_exclusive_adjustment,
-                            ),
-                            None,
-                        ),
-                        None,
-                    ))
-                    .and(time_index_expr.clone().lt_eq(DfExpr::Literal(
-                        ScalarValue::TimestampMillisecond(Some(timestamp - offset_duration), None),
-                        None,
-                    ))),
+                    .gt_eq(DfExpr::Literal(scalar(inclusive_lower)?, None))
+            } else {
+                time_index_expr.clone().gt(lower)
+            };
+            Some(
+                lower_filter.and(
+                    time_index_expr
+                        .clone()
+                        .lt_eq(DfExpr::Literal(scalar(upper_ms)?, None)),
+                ),
             )
+        };
+        let bounds = |timestamp: i64| {
+            timestamp
+                .checked_sub(offset_duration)
+                .and_then(|upper| upper.checked_sub(window).map(|lower| (lower, upper)))
+        };
+        let num_points = (end as i128 - start as i128) / self.ctx.interval as i128;
+        if num_points > MAX_SCATTER_POINTS as i128 || self.ctx.interval <= INTERVAL_1H {
+            return Ok(bounds(start)
+                .zip(bounds(end))
+                .and_then(|((lower, _), (_, upper))| filter(lower, upper)));
         }
-
+        let mut filters = Vec::new();
+        for timestamp in (start..=end).step_by(self.ctx.interval as usize) {
+            let Some((lower, upper)) = bounds(timestamp) else {
+                // An unrepresentable envelope must not discard samples.
+                return Ok(None);
+            };
+            let Some(filter) = filter(lower, upper) else {
+                return Ok(None);
+            };
+            filters.push(filter);
+        }
         Ok(filters.into_iter().reduce(DfExpr::or))
     }
 
@@ -2884,14 +2923,14 @@ impl PromPlanner {
             self.ctx.tag_columns.clone()
         };
 
-        let is_time_index_ms = scan_table
+        let is_time_index_second = scan_table
             .schema()
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {
                 table: maybe_phy_table_ref.to_quoted_string(),
             })?
             .data_type
-            == ConcreteDataType::timestamp_millisecond_datatype();
+            == ConcreteDataType::timestamp_second_datatype();
 
         let scan_projection = if table_id_filter.is_some() {
             let mut required_columns = HashSet::new();
@@ -2944,8 +2983,8 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        if !is_time_index_ms {
-            // cast to ms if time_index not in Millisecond precision
+        if is_time_index_second {
+            // Promote seconds so millisecond offsets remain exact; retain finer precision.
             let expr: Vec<_> = self
                 .create_field_column_exprs()?
                 .into_iter()
@@ -9051,7 +9090,17 @@ mod test {
 
         let manipulate = find_instant_manipulate(&plan).unwrap();
         let exec = manipulate.to_execution_plan(Arc::new(DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[], Arc::new(ArrowSchema::empty()), None).unwrap(),
+            MemorySourceConfig::try_new(
+                &[],
+                Arc::new(
+                    datafusion_expr::UserDefinedLogicalNodeCore::inputs(manipulate)[0]
+                        .schema()
+                        .as_arrow()
+                        .clone(),
+                ),
+                None,
+            )
+            .unwrap(),
         ))));
         assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
     }
@@ -12136,6 +12185,57 @@ mod test {
     }
 
     #[tokio::test]
+    async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")),
+            promql_annotations: None,
+        };
+        planner.ctx.time_index_column = Some("timestamp".to_string());
+        planner.ctx.start = 1_000;
+        planner.ctx.lookback_delta = 0;
+        let schema = Arc::new(
+            DFSchema::try_from(ArrowSchema::new(vec![Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                false,
+            )]))
+            .unwrap(),
+        );
+        for (end, interval, windows) in [
+            (1_000, 1_000, 1),
+            (2_000, 1_000, 1),
+            (7_201_000, 7_200_000, 2),
+        ] {
+            planner.ctx.end = end;
+            planner.ctx.interval = interval;
+            let filter = planner
+                .build_time_index_filter(0, &schema)
+                .unwrap()
+                .unwrap()
+                .to_string();
+            assert_eq!(filter.matches(">=").count(), windows, "{filter}");
+            assert!(
+                filter.contains("TimestampNanosecond(1000000000, None)"),
+                "{filter}"
+            );
+        }
+        planner.ctx.end = i64::MAX;
+        assert!(
+            planner
+                .build_time_index_filter(0, &schema)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn test_non_ms_precision() {
         let catalog_list = MemoryCatalogManager::with_default_setup();
         let columns = vec![
@@ -12205,12 +12305,7 @@ mod test {
         .unwrap();
         assert_eq!(
             plan.display_indent_schema().to_string(),
-            "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n  PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n    Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n      Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp >= TimestampMillisecond(-999, None) AND metrics.timestamp <= TimestampMillisecond(100000000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n        Projection: metrics.field, metrics.tag, CAST(metrics.timestamp AS Timestamp(ms)) AS timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n          TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
+            "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag:Utf8, timestamp:Timestamp(ms), field:Float64;N]\n  PromSeriesDivide: tags=[\"tag\"] [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n    Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n      Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp > TimestampNanosecond(-1000000000, None) AND metrics.timestamp <= TimestampNanosecond(100000000000000, None) [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n        TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
         );
         let plan = PromPlanner::stmt_to_plan(
             DfTableSourceProvider::new(
@@ -12235,15 +12330,7 @@ mod test {
         .unwrap();
         assert_eq!(
             plan.display_indent_schema().to_string(),
-            "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
-            \n  Projection: metrics.timestamp, prom_avg_over_time(timestamp_range, field) AS prom_avg_over_time(timestamp_range,field), metrics.tag [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
-            \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[5000], time index=[timestamp], values=[\"field\"] [field:Dictionary(Int64, Float64);N, tag:Utf8, timestamp:Timestamp(ms), timestamp_range:Dictionary(Int64, Timestamp(ms))]\
-            \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n        PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n          Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n            Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp >= TimestampMillisecond(-4999, None) AND metrics.timestamp <= TimestampMillisecond(100000000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n              Projection: metrics.field, metrics.tag, CAST(metrics.timestamp AS Timestamp(ms)) AS timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n                TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
+            "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\n  Projection: metrics.timestamp, prom_avg_over_time(timestamp_range, field) AS prom_avg_over_time(timestamp_range,field), metrics.tag [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[5000], time index=[timestamp], values=[\"field\"] [tag:Utf8, timestamp:Timestamp(ms), field:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n        PromSeriesDivide: tags=[\"tag\"] [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n          Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n            Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp > TimestampNanosecond(-5000000000, None) AND metrics.timestamp <= TimestampNanosecond(100000000000000, None) [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n              TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
         );
     }
 
