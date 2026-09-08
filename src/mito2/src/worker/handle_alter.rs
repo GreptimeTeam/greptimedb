@@ -431,9 +431,18 @@ fn set_twcs_options(
     match key {
         mito_engine_options::TWCS_TRIGGER_FILE_NUM
         | mito_engine_options::TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM => {
-            let files = parse_usize_with_default(key, value, default_option.trigger_file_num)?;
-            log_option_update(region_id, key, options.trigger_file_num, files);
-            options.trigger_file_num = files;
+            let files = parse_usize_with_default(
+                key,
+                value,
+                default_option.active_window_trigger_file_num,
+            )?;
+            log_option_update(
+                region_id,
+                key,
+                options.active_window_trigger_file_num,
+                files,
+            );
+            options.active_window_trigger_file_num = files;
         }
         mito_engine_options::TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER => {
             let files = parse_usize_with_default(
@@ -640,7 +649,7 @@ mod tests {
             region_id,
         )
         .unwrap();
-        assert_eq!(8, options.trigger_file_num);
+        assert_eq!(8, options.active_window_trigger_file_num);
         assert_eq!(16, options.active_window_l1_merge_trigger);
         assert_eq!(3, options.inactive_window_trigger_file_num);
         assert_eq!(12, options.inactive_window_l1_merge_trigger);

@@ -279,7 +279,7 @@ async fn test_find_compaction_options_db_level_prefers_canonical_trigger_alias()
         .unwrap();
 
     let crate::region::options::CompactionOptions::Twcs(twcs) = opts;
-    assert_eq!(twcs.trigger_file_num, 9);
+    assert_eq!(twcs.active_window_trigger_file_num, 9);
 }
 
 #[tokio::test]

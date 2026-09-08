@@ -388,7 +388,7 @@ pub struct TwcsOptions {
     /// Minimum file num in the active time window to trigger a compaction.
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "active_window.trigger_file_num", alias = "trigger_file_num")]
-    pub trigger_file_num: usize,
+    pub active_window_trigger_file_num: usize,
     /// Minimum L1 file num in the active window to allow a safety compaction.
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "active_window.l1_merge_trigger")]
@@ -433,7 +433,7 @@ impl TwcsOptions {
 impl Default for TwcsOptions {
     fn default() -> Self {
         Self {
-            trigger_file_num: 4,
+            active_window_trigger_file_num: 4,
             active_window_l1_merge_trigger: 16,
             inactive_window_trigger_file_num: 2,
             inactive_window_l1_merge_trigger: 8,
@@ -741,7 +741,7 @@ mod tests {
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                trigger_file_num: 8,
+                active_window_trigger_file_num: 8,
                 active_window_l1_merge_trigger: 16,
                 inactive_window_trigger_file_num: 2,
                 inactive_window_l1_merge_trigger: 12,
@@ -764,7 +764,7 @@ mod tests {
         ]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let CompactionOptions::Twcs(twcs) = &options.compaction;
-        assert_eq!(1, twcs.trigger_file_num);
+        assert_eq!(1, twcs.active_window_trigger_file_num);
 
         let map = make_map(&[
             ("compaction.twcs.inactive_window.trigger_file_num", "1"),
@@ -1071,7 +1071,7 @@ mod tests {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                trigger_file_num: 8,
+                active_window_trigger_file_num: 8,
                 active_window_l1_merge_trigger: 16,
                 inactive_window_trigger_file_num: 2,
                 inactive_window_l1_merge_trigger: 8,
@@ -1134,7 +1134,7 @@ mod tests {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                trigger_file_num: 8,
+                active_window_trigger_file_num: 8,
                 active_window_l1_merge_trigger: 8,
                 inactive_window_trigger_file_num: 2,
                 inactive_window_l1_merge_trigger: 8,
@@ -1211,7 +1211,7 @@ mod tests {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                trigger_file_num: 8,
+                active_window_trigger_file_num: 8,
                 active_window_l1_merge_trigger: 16,
                 inactive_window_trigger_file_num: 2,
                 inactive_window_l1_merge_trigger: 8,
