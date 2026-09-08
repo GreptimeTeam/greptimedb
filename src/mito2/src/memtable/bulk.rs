@@ -92,14 +92,30 @@ pub(crate) static ENCODE_ROW_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
 /// Default bytes threshold for encoding.
 const DEFAULT_ENCODE_BYTES_THRESHOLD: usize = 64 * 1024 * 1024;
 
-/// Bytes threshold for encoding parts. Configurable via `GREPTIME_BULK_ENCODE_BYTES_THRESHOLD`.
-/// When estimated bytes exceed this threshold, parts are encoded as EncodedBulkPart.
-static ENCODE_BYTES_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
-    env_usize(
-        "GREPTIME_BULK_ENCODE_BYTES_THRESHOLD",
-        DEFAULT_ENCODE_BYTES_THRESHOLD,
-    )
+/// Maximum bytes threshold for encoding when adapting to the write buffer size.
+const MAX_ENCODE_BYTES_THRESHOLD: usize = 512 * 1024 * 1024;
+
+/// Divisor to derive the encode bytes threshold from the global write buffer size.
+const ENCODE_BYTES_THRESHOLD_DIVISOR: usize = 32;
+
+/// Optional bytes threshold override from `GREPTIME_BULK_ENCODE_BYTES_THRESHOLD`.
+static ENCODE_BYTES_THRESHOLD_OVERRIDE: LazyLock<Option<usize>> = LazyLock::new(|| {
+    std::env::var("GREPTIME_BULK_ENCODE_BYTES_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
 });
+
+/// Computes the encode bytes threshold adapted to the global write buffer size:
+/// `max(64 MiB, min(global_write_buffer_size / 32, 512 MiB))`.
+fn adaptive_encode_bytes_threshold(global_write_buffer_bytes: usize) -> usize {
+    (global_write_buffer_bytes / ENCODE_BYTES_THRESHOLD_DIVISOR)
+        .clamp(DEFAULT_ENCODE_BYTES_THRESHOLD, MAX_ENCODE_BYTES_THRESHOLD)
+}
+
+/// Returns the default bytes threshold for encoding parts.
+fn default_encode_bytes_threshold() -> usize {
+    ENCODE_BYTES_THRESHOLD_OVERRIDE.unwrap_or(DEFAULT_ENCODE_BYTES_THRESHOLD)
+}
 
 /// Configuration for bulk memtable.
 #[serde_as]
@@ -125,7 +141,7 @@ impl Default for BulkMemtableConfig {
         Self {
             merge_threshold: *MERGE_THRESHOLD,
             encode_row_threshold: *ENCODE_ROW_THRESHOLD,
-            encode_bytes_threshold: *ENCODE_BYTES_THRESHOLD,
+            encode_bytes_threshold: default_encode_bytes_threshold(),
             max_merge_groups: *MAX_MERGE_GROUPS,
         }
         .sanitize()
@@ -133,6 +149,15 @@ impl Default for BulkMemtableConfig {
 }
 
 impl BulkMemtableConfig {
+    /// Returns the default config adapted to `global_write_buffer_bytes`.
+    pub(crate) fn default_for_write_buffer_size(global_write_buffer_bytes: usize) -> Self {
+        Self {
+            encode_bytes_threshold: ENCODE_BYTES_THRESHOLD_OVERRIDE
+                .unwrap_or_else(|| adaptive_encode_bytes_threshold(global_write_buffer_bytes)),
+            ..Default::default()
+        }
+    }
+
     fn sanitize(mut self) -> Self {
         if self.merge_threshold == 0 {
             self.merge_threshold = DEFAULT_MERGE_THRESHOLD;
@@ -1612,6 +1637,25 @@ mod tests {
 
         converter.append_key_values(&key_values)?;
         converter.convert()
+    }
+
+    #[test]
+    fn test_adaptive_encode_bytes_threshold() {
+        // Below the lower bound: clamped to the default 64 MiB.
+        assert_eq!(
+            DEFAULT_ENCODE_BYTES_THRESHOLD,
+            adaptive_encode_bytes_threshold(1024 * 1024 * 1024) // 1 GiB / 32 = 32 MiB
+        );
+        // In range: global_write_buffer_size / 32.
+        assert_eq!(
+            256 * 1024 * 1024,
+            adaptive_encode_bytes_threshold(8 * 1024 * 1024 * 1024) // 8 GiB / 32 = 256 MiB
+        );
+        // Above the upper bound: clamped to 512 MiB.
+        assert_eq!(
+            MAX_ENCODE_BYTES_THRESHOLD,
+            adaptive_encode_bytes_threshold(64 * 1024 * 1024 * 1024) // 64 GiB / 32 = 2 GiB
+        );
     }
 
     #[test]
