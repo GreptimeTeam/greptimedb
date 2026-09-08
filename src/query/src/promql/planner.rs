@@ -2923,14 +2923,16 @@ impl PromPlanner {
             self.ctx.tag_columns.clone()
         };
 
-        let is_time_index_second = scan_table
+        let time_index_data_type = scan_table
             .schema()
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {
                 table: maybe_phy_table_ref.to_quoted_string(),
             })?
             .data_type
-            == ConcreteDataType::timestamp_second_datatype();
+            .clone();
+        let is_time_index_second =
+            time_index_data_type == ConcreteDataType::timestamp_second_datatype();
 
         let scan_projection = if table_id_filter.is_some() {
             let mut required_columns = HashSet::new();
@@ -3019,8 +3021,12 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu)?;
-        } else if table_id_filter.is_some() {
-            // Drop the internal `__table_id` column after filtering.
+        } else if table_id_filter.is_some()
+            || time_index_data_type == ConcreteDataType::timestamp_microsecond_datatype()
+            || time_index_data_type == ConcreteDataType::timestamp_nanosecond_datatype()
+        {
+            // Drop the internal `__table_id` column after filtering and preserve PromQL's
+            // field/tag/timestamp column order for native microsecond/nanosecond timestamps.
             let project_exprs = self
                 .create_field_column_exprs()?
                 .into_iter()
@@ -12305,7 +12311,7 @@ mod test {
         .unwrap();
         assert_eq!(
             plan.display_indent_schema().to_string(),
-            "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag:Utf8, timestamp:Timestamp(ms), field:Float64;N]\n  PromSeriesDivide: tags=[\"tag\"] [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n    Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n      Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp > TimestampNanosecond(-1000000000, None) AND metrics.timestamp <= TimestampNanosecond(100000000000000, None) [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n        TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
+            "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\n  PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n    Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n      Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp > TimestampNanosecond(-1000000000, None) AND metrics.timestamp <= TimestampNanosecond(100000000000000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n        Projection: metrics.field, metrics.tag, metrics.timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n          TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
         );
         let plan = PromPlanner::stmt_to_plan(
             DfTableSourceProvider::new(
@@ -12330,7 +12336,7 @@ mod test {
         .unwrap();
         assert_eq!(
             plan.display_indent_schema().to_string(),
-            "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\n  Projection: metrics.timestamp, prom_avg_over_time(timestamp_range, field) AS prom_avg_over_time(timestamp_range,field), metrics.tag [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[5000], time index=[timestamp], values=[\"field\"] [tag:Utf8, timestamp:Timestamp(ms), field:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n        PromSeriesDivide: tags=[\"tag\"] [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n          Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n            Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp > TimestampNanosecond(-5000000000, None) AND metrics.timestamp <= TimestampNanosecond(100000000000000, None) [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]\n              TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
+            "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\n  Projection: metrics.timestamp, prom_avg_over_time(timestamp_range, field) AS prom_avg_over_time(timestamp_range,field), metrics.tag [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[5000], time index=[timestamp], values=[\"field\"] [field:Dictionary(Int64, Float64);N, tag:Utf8, timestamp:Timestamp(ms), timestamp_range:Dictionary(Int64, Timestamp(ms))]\n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n        PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n          Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n            Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp > TimestampNanosecond(-5000000000, None) AND metrics.timestamp <= TimestampNanosecond(100000000000000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n              Projection: metrics.field, metrics.tag, metrics.timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n                TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
         );
     }
 
