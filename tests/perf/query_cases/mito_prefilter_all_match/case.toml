@@ -1,0 +1,186 @@
+# Manual reproduction for the Mito prefilter all-match optimization.
+#
+# The count probes are deliberately not automatic assertions: inspect their
+# results manually. Each should return 262144, 16896, and 16896 respectively.
+
+[case]
+name = "mito_prefilter_all_match"
+description = "Manual Mito prefilter all-match reproduction with a selective control"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 9402
+
+[[scenario.tables]]
+database = "public"
+name = "mito_prefilter_all_match"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["tag_a", "tag_b"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "tag_a"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 1, prefix = "tag_a" }
+
+[[scenario.tables.columns]]
+name = "tag_b"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 1, prefix = "tag_b" }
+
+[[scenario.tables.columns]]
+name = "field_01"
+type = "UINT64"
+semantic = "field"
+
+[[scenario.tables.columns]]
+name = "field_02"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 2.0 }
+
+[[scenario.tables.columns]]
+name = "field_03"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 3.0 }
+
+[[scenario.tables.columns]]
+name = "field_04"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 4.0 }
+
+[[scenario.tables.columns]]
+name = "field_05"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 5.0 }
+
+[[scenario.tables.columns]]
+name = "field_06"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 6.0 }
+
+[[scenario.tables.columns]]
+name = "field_07"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 7.0 }
+
+[[scenario.tables.columns]]
+name = "field_08"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 8.0 }
+
+[[scenario.tables.columns]]
+name = "field_09"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 9.0 }
+
+[[scenario.tables.columns]]
+name = "field_10"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 10.0 }
+
+[[scenario.tables.columns]]
+name = "field_11"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 11.0 }
+
+[[scenario.tables.columns]]
+name = "field_12"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 12.0 }
+
+[[scenario.tables.columns]]
+name = "field_13"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 13.0 }
+
+[[scenario.tables.columns]]
+name = "field_14"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 14.0 }
+
+[[scenario.tables.columns]]
+name = "field_15"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 15.0 }
+
+[[scenario.tables.columns]]
+name = "field_16"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 16.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 1
+rows_per_sst = 262144
+row_group_size = 262144
+series_count = 1
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+[[scenario.queries]]
+name = "all_match_field_01"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT * FROM mito_prefilter_all_match WHERE field_01 >= 0"
+warmup = 2
+iterations = 10
+
+[[scenario.queries]]
+name = "all_match_field_01_and_field_02"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT * FROM mito_prefilter_all_match WHERE field_01 >= 0 AND field_02 > 1.98"
+warmup = 2
+iterations = 10
+
+[[scenario.queries]]
+name = "selective_control_field_02"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT * FROM mito_prefilter_all_match WHERE field_02 > 1.98"
+warmup = 2
+iterations = 10
+
+[[scenario.queries]]
+name = "count_all_match_field_01"
+kind = "sql"
+query = "SELECT count(*) FROM mito_prefilter_all_match WHERE field_01 >= 0"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "count_all_match_field_01_and_field_02"
+kind = "sql"
+query = "SELECT count(*) FROM mito_prefilter_all_match WHERE field_01 >= 0 AND field_02 > 1.98"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "count_selective_control_field_02"
+kind = "sql"
+query = "SELECT count(*) FROM mito_prefilter_all_match WHERE field_02 > 1.98"
+warmup = 0
+iterations = 1

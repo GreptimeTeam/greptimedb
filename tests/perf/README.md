@@ -366,6 +366,8 @@ uv run --no-project python .github/scripts/query-regression-run.py \
   --work-dir /tmp/query-regression-work
 ```
 
+For a focused manual reproduction of the Mito prefilter all-match optimization, use the existing lifecycle command above with `--cases tests/perf/query_cases/mito_prefilter_all_match/case.toml`. Its three count probes require explicit result inspection rather than automatic validation: expect `262144`, `16896`, and `16896` in query order. For a cold comparison, run with the page, range, and prefilter caches disabled.
+
 The Rust runner subcommands are also useful for focused diagnostics:
 
 ```bash
