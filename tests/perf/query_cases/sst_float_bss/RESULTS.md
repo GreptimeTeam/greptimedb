@@ -90,9 +90,14 @@ arbitrary base/candidate pair was selected. Across the three datasets this was
 | formal-3 | allcolumns | parquetbench | 72.522 | 34.300 | -52.70% |
 | formal-3 | allcolumns | scanbench | 137.906 | 89.151 | -35.35% |
 
-Warm results varied substantially, especially formal-2 all-column scanbench.
-They were run on a non-isolated local development host, with no CPU affinity and
-no cache drop, so they are not a direct historical comparison.
+Warm results varied substantially, especially formal-2 all-column scanbench:
+its eight round medians ranged from 120.158–422.669 ms (base) and
+85.224–243.650 ms (candidate); candidate was slower in rounds 7 and 8.
+These deltas are ratios of separately aggregated medians, not medians of paired
+percentage changes. Scanbench's projection is verified from commands/configs,
+not a printed schema. Target order alternated, but projection order stayed fixed.
+The runs used a non-isolated local development host, with no CPU affinity or
+cache drop. No specific cause of the variability was established.
 
 ## Scope, comparison, and artifacts
 
