@@ -60,6 +60,8 @@ fn build_new_schema_value(
                         value.ttl = Some(*ttl);
                     }
                     SetDatabaseOption::Other(key, val) => {
+                        // Keep the legacy key so older versions can read it after a downgrade.
+                        // Persisting both aliases would deserialize as a duplicate field.
                         let persisted_key = if twcs_trigger_alias(key).is_some() {
                             value.extra_options.remove(TWCS_TRIGGER_FILE_NUM);
                             value
