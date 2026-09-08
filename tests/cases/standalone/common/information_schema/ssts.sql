@@ -72,4 +72,12 @@ SELECT * FROM information_schema.ssts_index_meta ORDER BY meta_json;
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
 SELECT * FROM information_schema.ssts_storage order by file_path;
 
+-- Regression: repeated physical optimization must preserve the global DISTINCT limit.
+SELECT COUNT(*) AS distinct_limited_rows
+FROM (
+  SELECT DISTINCT region_id
+  FROM information_schema.ssts_manifest
+  LIMIT 1
+);
+
 DROP TABLE sst_case;
