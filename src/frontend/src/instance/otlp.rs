@@ -40,13 +40,13 @@ use servers::otlp;
 use servers::otlp::trace::span::TraceSpanGroup;
 use servers::pending_rows_batcher::{
     MetricRowBatchProtocol, MetricRowBatcherRef, is_scalar_metric_batchable,
+    metric_table_matches_physical_table,
 };
 use servers::query_handler::{
     MetricsIngestOutcome, OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::requests::{
     OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PER_TABLE_INDEX_KEY,
     SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
@@ -76,7 +76,7 @@ impl Instance {
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
         Ok(table.is_none_or(|table| {
-            metric_table_info_matches_physical_table(&table.table_info(), physical_table)
+            metric_table_matches_physical_table(&table.table_info(), physical_table)
         }))
     }
 
@@ -100,19 +100,6 @@ impl Instance {
 
         Ok(true)
     }
-}
-
-fn metric_table_info_matches_physical_table(
-    table_info: &table::metadata::TableInfo,
-    physical_table: &str,
-) -> bool {
-    table_info.meta.engine == METRIC_ENGINE_NAME
-        && table_info
-            .meta
-            .options
-            .extra_options
-            .get(LOGICAL_TABLE_METADATA_KEY)
-            .is_some_and(|table| table == physical_table)
 }
 
 fn trace_permission_targets(

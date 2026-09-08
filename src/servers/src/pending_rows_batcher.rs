@@ -45,6 +45,7 @@ use partition::partition::PartitionRuleRef;
 use session::context::QueryContextRef;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{TableInfo, TableInfoRef};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
@@ -569,6 +570,34 @@ fn is_scalar_metric_schema(schema: &[ColumnSchema]) -> bool {
             .all(|column| column.datatype_extension.is_none())
 }
 
+/// Returns whether `table_info` describes a Metric Engine logical table on
+/// `physical_table`.
+pub fn metric_table_matches_physical_table(table_info: &TableInfo, physical_table: &str) -> bool {
+    table_info.meta.engine == METRIC_ENGINE_NAME
+        && table_info
+            .meta
+            .options
+            .extra_options
+            .get(LOGICAL_TABLE_METADATA_KEY)
+            .is_some_and(|table| table == physical_table)
+}
+
+fn ensure_logical_table_matches_physical_table(
+    table_info: &TableInfo,
+    physical_table: &str,
+) -> Result<()> {
+    ensure!(
+        metric_table_matches_physical_table(table_info, physical_table),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: format!(
+                "Metric table '{}' does not belong to physical table '{}'",
+                table_info.name, physical_table
+            ),
+        }
+    );
+    Ok(())
+}
+
 /// Metric pending rows batcher.
 pub struct PendingRowsBatcher {
     workers: Arc<DashMap<BatchKey, PendingWorker>>,
@@ -821,6 +850,9 @@ impl PendingRowsBatcher {
         ctx: &QueryContextRef,
         unique_tables: &[(&str, &[ColumnSchema])],
     ) -> Result<TableResolutionPlan> {
+        let physical_table = ctx
+            .extension(PHYSICAL_TABLE_KEY)
+            .unwrap_or(GREPTIME_PHYSICAL_TABLE);
         let mut plan = TableResolutionPlan {
             region_schemas: HashMap::with_capacity(unique_tables.len()),
             tables_to_create: Vec::new(),
@@ -843,6 +875,9 @@ impl PendingRowsBatcher {
 
             if let Some(table) = table {
                 let table_info = table.table_info();
+                if self.with_metric_engine {
+                    ensure_logical_table_matches_physical_table(&table_info, physical_table)?;
+                }
                 let table_id = table_info.ident.table_id;
                 let region_schema = table_info.meta.schema.arrow_schema().clone();
 
@@ -929,6 +964,12 @@ impl PendingRowsBatcher {
                 ),
             })?;
             let table_info = table.table_info();
+            if self.with_metric_engine {
+                let physical_table = ctx
+                    .extension(PHYSICAL_TABLE_KEY)
+                    .unwrap_or(GREPTIME_PHYSICAL_TABLE);
+                ensure_logical_table_matches_physical_table(&table_info, physical_table)?;
+            }
             let table_id = table_info.ident.table_id;
             let region_schema = table_info.meta.schema.arrow_schema().clone();
             plan.region_schemas
@@ -2132,6 +2173,7 @@ mod tests {
         PutResponse, RangeRequest, RangeResponse,
     };
     use common_query::native_histogram::native_histogram_column_schema;
+    use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use dashmap::DashMap;
@@ -2143,6 +2185,7 @@ mod tests {
     use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
     use smallvec::SmallVec;
     use snafu::ResultExt;
+    use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
     use store_api::storage::RegionId;
     use table::metadata::TableId;
     use table::test_util::EmptyTable;
@@ -2989,6 +3032,13 @@ mod tests {
     fn test_synchronous_submit_batcher(
         node_requester: Arc<dyn PhysicalFlushNodeRequester>,
     ) -> Arc<PendingRowsBatcher> {
+        test_synchronous_submit_batcher_with_physical_table(node_requester, GREPTIME_PHYSICAL_TABLE)
+    }
+
+    fn test_synchronous_submit_batcher_with_physical_table(
+        node_requester: Arc<dyn PhysicalFlushNodeRequester>,
+        physical_table: &str,
+    ) -> Arc<PendingRowsBatcher> {
         let schema = Arc::new(
             DtSchema::try_new(vec![
                 DtColumnSchema::new(
@@ -3010,7 +3060,12 @@ mod tests {
             ])
             .unwrap(),
         );
-        let table_info = test_table_info(42, "cpu", "public", "greptime", schema);
+        let mut table_info = test_table_info(42, "cpu", "public", "greptime", schema);
+        table_info.meta.engine = METRIC_ENGINE_NAME.to_string();
+        table_info.meta.options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            physical_table.to_string(),
+        );
         let catalog_manager =
             MemoryCatalogManager::new_with_table(EmptyTable::from_table_info(&table_info));
         let (flow_notification_tx, _flow_notification_rx) = mpsc::channel(1);
@@ -3056,6 +3111,35 @@ mod tests {
             fail: true,
         });
         (test_synchronous_submit_batcher(node_requester), writes)
+    }
+
+    #[tokio::test]
+    async fn test_submit_rejects_logical_table_on_different_physical_table() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let batcher = test_synchronous_submit_batcher_with_physical_table(
+            Arc::new(MockFlushNodeRequester {
+                writes: writes.clone(),
+                fail: false,
+            }),
+            "other_physical_table",
+        );
+
+        let error = batcher
+            .submit(
+                synchronous_submit_request(),
+                session::context::QueryContext::arc(),
+                MetricRowBatchProtocol::Otlp,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not belong to physical table 'greptime_physical_table'"),
+            "{error:?}"
+        );
+        assert_eq!(0, writes.load(Ordering::SeqCst));
     }
 
     static METRIC_ASSERTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
