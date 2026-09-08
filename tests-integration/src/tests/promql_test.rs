@@ -963,7 +963,7 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
             "CREATE TABLE {table} (\
                 series STRING, \
                 ts TIMESTAMP TIME INDEX, \
-                value DOUBLE, \
+                val DOUBLE, \
                 PRIMARY KEY (series)\
             ) WITH (sst_format = 'flat')"
         ),
@@ -986,7 +986,7 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
                 ..Default::default()
             },
             ColumnSchema {
-                column_name: "value".to_string(),
+                column_name: "val".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 semantic_type: SemanticType::Field as i32,
                 ..Default::default()
@@ -1049,7 +1049,7 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
                 .unwrap();
                 let series = series.as_any().downcast_ref::<StringArray>().unwrap();
                 let values = batch
-                    .column_by_name("value")
+                    .column_by_name("val")
                     .unwrap()
                     .as_any()
                     .downcast_ref::<Float64Array>()
@@ -1077,7 +1077,7 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
 
     let raw_output = ins
         .do_query(
-            &format!("SELECT series, value, ts FROM {table} WHERE ts = 2000"),
+            &format!("SELECT series, val, ts FROM {table} WHERE ts = 2000"),
             QueryContext::arc(),
         )
         .await
