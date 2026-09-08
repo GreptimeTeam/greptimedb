@@ -719,15 +719,38 @@ impl HttpServerBuilder {
         experimental_enable_exponential_histogram: bool,
         metric_row_batcher: Option<MetricRowBatcherRef>,
     ) -> Self {
+        let state = OtlpState {
+            with_metric_engine,
+            experimental_enable_exponential_histogram,
+            handler,
+            metric_row_batcher,
+        };
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                HttpServer::route_otlp(
-                    handler,
-                    with_metric_engine,
-                    experimental_enable_exponential_histogram,
-                    metric_row_batcher,
-                ),
+                HttpServer::route_otlp(state),
+            ),
+            ..self
+        }
+    }
+
+    pub fn with_otlp_metrics_handler(
+        self,
+        handler: OpenTelemetryProtocolHandlerRef,
+        with_metric_engine: bool,
+        experimental_enable_exponential_histogram: bool,
+        metric_row_batcher: Option<MetricRowBatcherRef>,
+    ) -> Self {
+        let state = OtlpState {
+            with_metric_engine,
+            experimental_enable_exponential_histogram,
+            handler,
+            metric_row_batcher,
+        };
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/otlp"),
+                HttpServer::route_otlp_metrics(state),
             ),
             ..self
         }
@@ -1390,12 +1413,7 @@ impl HttpServer {
             .with_state(opentsdb_handler)
     }
 
-    fn route_otlp<S>(
-        otlp_handler: OpenTelemetryProtocolHandlerRef,
-        with_metric_engine: bool,
-        experimental_enable_exponential_histogram: bool,
-        metric_row_batcher: Option<MetricRowBatcherRef>,
-    ) -> Router<S> {
+    fn route_otlp<S>(state: OtlpState) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
@@ -1404,12 +1422,17 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
-            .with_state(OtlpState {
-                with_metric_engine,
-                experimental_enable_exponential_histogram,
-                handler: otlp_handler,
-                metric_row_batcher,
-            })
+            .with_state(state)
+    }
+
+    fn route_otlp_metrics<S>(state: OtlpState) -> Router<S> {
+        Router::new()
+            .route("/v1/metrics", routing::post(otlp::metrics))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(state)
     }
 
     fn route_config<S>(state: GreptimeOptionsConfigState) -> Router<S> {
