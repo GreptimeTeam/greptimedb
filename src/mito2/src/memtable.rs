@@ -898,18 +898,47 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_uses_adaptive_config_for_implicit_bulk_builder() {
-        let config = MitoConfig {
+    fn test_providers_use_isolated_adaptive_configs_for_implicit_bulk_builders() {
+        let small_config = MitoConfig {
             global_write_buffer_size: ReadableSize::gb(8),
             ..Default::default()
         };
-        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let large_config = MitoConfig {
+            global_write_buffer_size: ReadableSize::gb(64),
+            ..Default::default()
+        };
+        let small_provider = MemtableBuilderProvider::new(None, Arc::new(small_config));
+        let large_provider = MemtableBuilderProvider::new(None, Arc::new(large_config));
         let options = RegionOptions::default();
 
-        let builder =
-            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
+        let small_builder = small_provider.bulk_memtable_builder(
+            options.need_dedup(),
+            options.merge_mode(),
+            &options,
+        );
+        let large_builder = large_provider.bulk_memtable_builder(
+            options.need_dedup(),
+            options.merge_mode(),
+            &options,
+        );
+        let another_small_builder = small_provider.bulk_memtable_builder(
+            options.need_dedup(),
+            options.merge_mode(),
+            &options,
+        );
 
-        assert_eq!(256 * 1024 * 1024, builder.config().encode_bytes_threshold);
+        assert_eq!(
+            256 * 1024 * 1024,
+            small_builder.config().encode_bytes_threshold
+        );
+        assert_eq!(
+            512 * 1024 * 1024,
+            large_builder.config().encode_bytes_threshold
+        );
+        assert_eq!(
+            256 * 1024 * 1024,
+            another_small_builder.config().encode_bytes_threshold
+        );
     }
 
     #[test]

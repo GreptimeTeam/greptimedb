@@ -112,6 +112,13 @@ fn adaptive_encode_bytes_threshold(global_write_buffer_bytes: usize) -> usize {
         .clamp(DEFAULT_ENCODE_BYTES_THRESHOLD, MAX_ENCODE_BYTES_THRESHOLD)
 }
 
+fn resolve_encode_bytes_threshold(
+    global_write_buffer_bytes: usize,
+    override_value: Option<usize>,
+) -> usize {
+    override_value.unwrap_or_else(|| adaptive_encode_bytes_threshold(global_write_buffer_bytes))
+}
+
 /// Returns the default bytes threshold for encoding parts.
 fn default_encode_bytes_threshold() -> usize {
     ENCODE_BYTES_THRESHOLD_OVERRIDE.unwrap_or(DEFAULT_ENCODE_BYTES_THRESHOLD)
@@ -152,8 +159,10 @@ impl BulkMemtableConfig {
     /// Returns the default config adapted to `global_write_buffer_bytes`.
     pub(crate) fn default_for_write_buffer_size(global_write_buffer_bytes: usize) -> Self {
         Self {
-            encode_bytes_threshold: ENCODE_BYTES_THRESHOLD_OVERRIDE
-                .unwrap_or_else(|| adaptive_encode_bytes_threshold(global_write_buffer_bytes)),
+            encode_bytes_threshold: resolve_encode_bytes_threshold(
+                global_write_buffer_bytes,
+                *ENCODE_BYTES_THRESHOLD_OVERRIDE,
+            ),
             ..Default::default()
         }
     }
@@ -1655,6 +1664,14 @@ mod tests {
         assert_eq!(
             MAX_ENCODE_BYTES_THRESHOLD,
             adaptive_encode_bytes_threshold(64 * 1024 * 1024 * 1024) // 64 GiB / 32 = 2 GiB
+        );
+    }
+
+    #[test]
+    fn test_resolve_encode_bytes_threshold_prefers_override() {
+        assert_eq!(
+            13,
+            resolve_encode_bytes_threshold(8 * 1024 * 1024 * 1024, Some(13))
         );
     }
 

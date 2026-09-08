@@ -32,7 +32,9 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
-use store_api::mito_engine_options::{COMPACTION_OVERRIDE, MAX_ROW_GROUP_ROW_COUNT_LIMIT};
+use store_api::mito_engine_options::{
+    COMPACTION_OVERRIDE, MAX_ROW_GROUP_ROW_COUNT_LIMIT, MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD,
+};
 use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
 
@@ -45,7 +47,6 @@ const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
 const MEMTABLE_BULK_PREFIX: &str = "memtable.bulk.";
-const MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD: &str = "memtable.bulk.encode_bytes_threshold";
 
 /// Legacy memtable type identifier accepted for backward compatibility.
 /// The partition tree memtable has been removed; parsing this value falls
