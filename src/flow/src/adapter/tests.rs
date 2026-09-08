@@ -328,7 +328,7 @@ fn stateless_captured_slot_rejects_inactive_or_detached_slot() {
         active: std::sync::atomic::AtomicBool::new(false),
     };
 
-    assert!(super::validate_captured_slot(&slot, None, false, 1, 42).is_err());
+    assert!(super::validate_captured_slot(&slot, None, 1, 42).is_err());
 }
 
 #[test]
@@ -338,6 +338,428 @@ fn stateless_captured_slot_rejects_source_mismatch() {
         active: std::sync::atomic::AtomicBool::new(true),
     };
 
-    assert!(super::validate_captured_slot(&slot, Some(2), true, 1, 42).is_err());
-    assert!(super::validate_captured_slot(&slot, Some(1), false, 1, 42).is_err());
+    assert!(super::validate_captured_slot(&slot, Some(2), 1, 42).is_err());
+}
+
+#[derive(Default)]
+struct RecordingSink {
+    inserts: std::sync::Mutex<Vec<api::v1::RowInsertRequest>>,
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError for RecordingSink {
+    async fn do_query(
+        &self,
+        request: api::v1::greptime_request::Request,
+        _: session::context::QueryContextRef,
+    ) -> std::result::Result<common_query::Output, BoxedError> {
+        let api::v1::greptime_request::Request::RowInserts(request) = request else {
+            panic!("unexpected frontend request");
+        };
+        if request
+            .inserts
+            .iter()
+            .any(|insert| insert.table_name == "failed_sink")
+        {
+            return Err(BoxedError::new(
+                InvalidQuerySnafu {
+                    reason: "injected sink failure",
+                }
+                .build(),
+            ));
+        }
+        let count = request
+            .inserts
+            .iter()
+            .map(|insert| insert.rows.as_ref().unwrap().rows.len())
+            .sum();
+        self.inserts.lock().unwrap().extend(request.inserts);
+        Ok(common_query::Output::new_with_affected_rows(count))
+    }
+}
+
+struct StreamingHarness {
+    engine: StreamingEngine,
+    metadata: TableMetadataManagerRef,
+    catalog: Arc<catalog::memory::MemoryCatalogManager>,
+    sink: Arc<RecordingSink>,
+}
+
+impl StreamingHarness {
+    async fn new() -> Self {
+        let metadata = Arc::new(common_meta::key::TableMetadataManager::new(Arc::new(
+            common_meta::kv_backend::memory::MemoryKvBackend::new(),
+        )));
+        metadata.init().await.unwrap();
+        let catalog = catalog::memory::new_memory_catalog_manager().unwrap();
+        let query = query::QueryEngineFactory::new(
+            catalog.clone(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let sink = Arc::new(RecordingSink::default());
+        let handler: Arc<
+            dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+        > = sink.clone();
+        let frontend =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        Self {
+            engine: StreamingEngine::new(None, query, metadata.clone(), Arc::new(frontend)),
+            metadata,
+            catalog,
+            sink,
+        }
+    }
+
+    async fn table(&self, id: u32, name: &str) -> TableInfo {
+        let info = new_test_table_info_with_name(id, name, []);
+        self.metadata
+            .create_table_metadata(
+                info.clone(),
+                common_meta::key::table_route::TableRouteValue::physical(vec![]),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        self.register(&info);
+        info
+    }
+
+    fn register(&self, info: &TableInfo) {
+        self.catalog
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: info.catalog_name.clone(),
+                schema: info.schema_name.clone(),
+                table_name: info.name.clone(),
+                table_id: info.ident.table_id,
+                table: table::test_util::EmptyTable::from_table_info(info),
+            })
+            .unwrap();
+    }
+
+    async fn flow(&self, id: FlowId, source: u32, sink: &str, sql: &str) {
+        self.engine
+            .create_flow_inner(CreateFlowArgs {
+                flow_id: id,
+                source_table_ids: vec![source],
+                sink_table_name: ["greptime".into(), "public".into(), sink.into()],
+                create_if_not_exists: false,
+                or_replace: false,
+                expire_after: None,
+                eval_interval: None,
+                comment: None,
+                sql: sql.into(),
+                flow_options: Default::default(),
+                query_ctx: Some(session::context::QueryContext::arc().as_ref().clone()),
+                eval_schedule: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    fn take_numbers(&self) -> Vec<(String, Vec<i32>)> {
+        let inserts = std::mem::take(&mut *self.sink.inserts.lock().unwrap());
+        inserts
+            .into_iter()
+            .map(|insert| {
+                let mut values = insert
+                    .rows
+                    .unwrap()
+                    .rows
+                    .into_iter()
+                    .map(|row| {
+                        let Some(api::v1::value::ValueData::I32Value(value)) =
+                            row.values[0].value_data
+                        else {
+                            panic!("expected int32 output");
+                        };
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                values.sort_unstable();
+                (insert.table_name, values)
+            })
+            .collect()
+    }
+}
+
+fn mirror_request(table: u32, region: u32, values: &[i32]) -> api::v1::region::InsertRequest {
+    use api::v1::value::ValueData;
+    api::v1::region::InsertRequest {
+        region_id: RegionId::new(table, region).as_u64(),
+        rows: Some(api::v1::Rows {
+            schema: util::column_schemas_to_proto(
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ],
+                &["number".into()],
+            )
+            .unwrap(),
+            rows: values
+                .iter()
+                .map(|value| api::v1::Row {
+                    values: vec![
+                        api::v1::Value {
+                            value_data: Some(ValueData::I32Value(*value)),
+                        },
+                        api::v1::Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1)),
+                        },
+                    ],
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn stateless_failed_flow_and_table_do_not_starve_healthy_sinks() {
+    let h = StreamingHarness::new().await;
+    h.table(1, "source_a").await;
+    h.table(2, "source_b").await;
+    h.table(3, "failed_sink").await;
+    h.table(4, "healthy_a").await;
+    h.table(5, "healthy_b").await;
+    h.flow(1, 1, "failed_sink", "SELECT number, ts FROM source_a")
+        .await;
+    h.flow(2, 1, "healthy_a", "SELECT number, ts FROM source_a")
+        .await;
+    h.flow(3, 2, "healthy_b", "SELECT number, ts FROM source_b")
+        .await;
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[11]), mirror_request(2, 0, &[22])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        h.take_numbers(),
+        vec![
+            ("healthy_a".into(), vec![11]),
+            ("healthy_b".into(), vec![22])
+        ]
+    );
+
+    let mut malformed = mirror_request(1, 1, &[99]);
+    malformed.rows.as_mut().unwrap().schema.pop();
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![
+                    mirror_request(1, 0, &[33]),
+                    malformed,
+                    mirror_request(1, 2, &[44]),
+                    mirror_request(2, 0, &[55])
+                ],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_b".into(), vec![55])]);
+    h.engine.remove_flow_inner(1).await.unwrap();
+    h.engine
+        .handle_inserts_inner(api::v1::region::InsertRequests {
+            requests: vec![mirror_request(1, 0, &[66])],
+        })
+        .await
+        .unwrap();
+    assert_eq!(h.take_numbers(), vec![("healthy_a".into(), vec![66])]);
+}
+
+#[tokio::test]
+async fn stateless_distinct_groups_regions_without_retaining_previous_envelope() {
+    let h = StreamingHarness::new().await;
+    h.table(1, "source").await;
+    h.table(2, "sink").await;
+    h.flow(
+        1,
+        1,
+        "sink",
+        "SELECT DISTINCT number AS value, ts FROM source",
+    )
+    .await;
+    for _ in 0..2 {
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[1, 2]), mirror_request(1, 1, &[2, 3])],
+            })
+            .await
+            .unwrap();
+        assert_eq!(h.take_numbers(), vec![("sink".into(), vec![1, 2, 3])]);
+    }
+}
+
+#[tokio::test]
+async fn stateless_schema_bump_rebuilds_for_current_and_subsequent_writes() {
+    let h = StreamingHarness::new().await;
+    let mut source = h.table(1, "source").await;
+    h.table(2, "sink").await;
+    h.flow(1, 1, "sink", "SELECT number, ts FROM source").await;
+    let current = h
+        .metadata
+        .table_info_manager()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut columns = source.meta.schema.column_schemas().to_vec();
+    columns.push(ColumnSchema::new(
+        "extra",
+        ConcreteDataType::int32_datatype(),
+        true,
+    ));
+    source.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns)
+            .unwrap()
+            .version(124)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current, None, source.clone())
+        .await
+        .unwrap();
+    // The metadata is newer than the catalog provider: do not publish a plan
+    // carrying old column indices under the new version.
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[99])],
+            })
+            .await
+            .is_err()
+    );
+    assert!(h.take_numbers().is_empty());
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    let slot = h.engine.flow_ids_for_table(1).await.pop().unwrap().1;
+    assert_eq!(
+        slot.runtime
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .source_schema_version,
+        123
+    );
+    let (left_rows, types, version) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 0, &[5]))
+        .await
+        .unwrap();
+    let (right_rows, _, _) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 1, &[6]))
+        .await
+        .unwrap();
+    // Queue both readers behind a writer. Releasing it grants both readers,
+    // so neither rebuild can publish before both writes observe the old runtime.
+    let lease = slot.runtime.write().await;
+    let left = h
+        .engine
+        .execute_flow(1, slot.clone(), 1, left_rows, &types, version);
+    let right = h
+        .engine
+        .execute_flow(1, slot.clone(), 1, right_rows, &types, version);
+    tokio::pin!(left, right);
+    assert!(futures::poll!(&mut left).is_pending());
+    assert!(futures::poll!(&mut right).is_pending());
+    drop(lease);
+    let (left, right) = tokio::join!(left, right);
+    left.unwrap();
+    right.unwrap();
+    let mut inserted = h.take_numbers();
+    inserted.sort();
+    assert_eq!(
+        inserted,
+        vec![("sink".into(), vec![5]), ("sink".into(), vec![6])]
+    );
+    assert_eq!(
+        slot.runtime
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .source_schema_version,
+        124
+    );
+    for number in [7, 8] {
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[number])],
+            })
+            .await
+            .unwrap();
+        assert_eq!(h.take_numbers(), vec![("sink".into(), vec![number])]);
+    }
+}
+
+#[tokio::test]
+async fn stateless_rejects_wrong_provider_identity_and_detached_lifecycle() {
+    let h = StreamingHarness::new().await;
+    let source = h.table(1, "source").await;
+    h.table(2, "sink").await;
+    h.flow(1, 1, "sink", "SELECT number, ts FROM source").await;
+    let old_slot = h.engine.flow_ids_for_table(1).await.pop().unwrap().1;
+    let (rows, types, version) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 0, &[9]))
+        .await
+        .unwrap();
+    h.engine.remove_flow_inner(1).await.unwrap();
+    h.flow(1, 1, "sink", "SELECT number, ts FROM source").await;
+    assert!(
+        h.engine
+            .execute_flow(1, old_slot, 1, rows, &types, version)
+            .await
+            .is_err()
+    );
+    assert!(h.take_numbers().is_empty());
+
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    let mut wrong = source.clone();
+    wrong.ident.table_id = 99;
+    h.register(&wrong);
+    let args = h
+        .engine
+        .stateless_flows
+        .read()
+        .await
+        .get(&1)
+        .unwrap()
+        .runtime
+        .read()
+        .await
+        .as_ref()
+        .unwrap()
+        .create_args
+        .clone();
+    assert!(h.engine.build_stateless_flow(&args, false).await.is_err());
+    assert!(h.take_numbers().is_empty());
 }

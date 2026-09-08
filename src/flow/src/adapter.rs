@@ -440,7 +440,6 @@ struct StatelessFlowSlot {
 fn validate_captured_slot(
     slot: &StatelessFlowSlot,
     current_source_table_id: Option<table::metadata::TableId>,
-    runtime_matches: bool,
     expected_table_id: table::metadata::TableId,
     flow_id: FlowId,
 ) -> Result<(), Error> {
@@ -454,12 +453,6 @@ fn validate_captured_slot(
         current_source_table_id == expected_table_id,
         InvalidQuerySnafu {
             reason: format!("Flow {flow_id} source table changed while it was selected")
-        }
-    );
-    ensure!(
-        runtime_matches,
-        InvalidQuerySnafu {
-            reason: format!("Flow {flow_id} changed while it was prepared")
         }
     );
     Ok(())
@@ -568,38 +561,46 @@ impl StreamingEngine {
         batch_datatypes: &[ConcreteDataType],
         source_schema_version: u32,
     ) -> Result<usize, Error> {
-        // The slot is the request's source-selection lease.  Do not resolve flow_id through the
-        // registry again: removal/recreation may have installed a different slot in the meantime.
-        let guard = slot.runtime.clone().read_owned().await;
-        let selected = guard.as_ref().context(FlowNotFoundSnafu { id: flow_id })?;
-        validate_captured_slot(
-            &slot,
-            Some(selected.source_table_id),
-            true,
-            expected_table_id,
-            flow_id,
-        )?;
-        let selected = Arc::clone(selected);
-        drop(guard);
-
-        let flow = self
-            .flow_for_write(
-                flow_id,
-                slot.clone(),
-                expected_table_id,
-                selected,
-                source_schema_version,
-            )
-            .await?;
-        let guard = slot.runtime.clone().read_owned().await;
+        // Keep the captured lifecycle slot rather than resolving the ID again after a drop.
+        let mut guard = slot.runtime.clone().read_owned().await;
         let current = guard.as_ref().context(FlowNotFoundSnafu { id: flow_id })?;
         validate_captured_slot(
             &slot,
             Some(current.source_table_id),
-            Arc::ptr_eq(current, &flow),
             expected_table_id,
             flow_id,
         )?;
+        if current.source_schema_version != source_schema_version {
+            drop(guard);
+            // Serialize rebuilds with definition replacement using the existing publication
+            // lease. Another write may already have rebuilt this schema while we waited.
+            let mut published = slot.runtime.clone().write_owned().await;
+            let current = published
+                .as_ref()
+                .context(FlowNotFoundSnafu { id: flow_id })?;
+            validate_captured_slot(
+                &slot,
+                Some(current.source_table_id),
+                expected_table_id,
+                flow_id,
+            )?;
+            if current.source_schema_version != source_schema_version {
+                let replacement = self
+                    .build_stateless_flow(&current.create_args, false)
+                    .await?;
+                ensure!(
+                    replacement.source_table_id == expected_table_id
+                        && replacement.source_schema_version == source_schema_version,
+                    InvalidQuerySnafu {
+                        reason: format!("Source schema changed while rebuilding flow {flow_id}")
+                    }
+                );
+                *published = Some(Arc::new(replacement));
+            }
+            // Do not open a replacement/drop gap between preparation and sink execution.
+            guard = tokio::sync::OwnedRwLockWriteGuard::downgrade(published);
+        }
+        let flow = guard.as_ref().context(FlowNotFoundSnafu { id: flow_id })?;
         // This is the last check before planning.  In particular, a request normalized against
         // an old source schema is never allowed to reach a newly published plan.
         let latest = self
@@ -620,7 +621,7 @@ impl StreamingEngine {
             }
         );
         stateless::execute(
-            &flow,
+            flow,
             &rows,
             batch_datatypes,
             &self.query_engine,
@@ -628,84 +629,6 @@ impl StreamingEngine {
             latest,
         )
         .await
-    }
-
-    async fn flow_for_write(
-        &self,
-        flow_id: FlowId,
-        slot: Arc<StatelessFlowSlot>,
-        expected_table_id: table::metadata::TableId,
-        selected: Arc<StatelessFlow>,
-        source_schema_version: u32,
-    ) -> Result<Arc<StatelessFlow>, Error> {
-        validate_captured_slot(
-            &slot,
-            Some(selected.source_table_id),
-            true,
-            expected_table_id,
-            flow_id,
-        )?;
-        let current = selected;
-        if current.source_schema_version == source_schema_version {
-            return Ok(current);
-        }
-        let replacement = Arc::new(
-            self.build_stateless_flow(&current.create_args, false)
-                .await?,
-        );
-        ensure!(
-            replacement.source_table_id == current.source_table_id
-                && replacement.source_schema_version == source_schema_version,
-            InvalidQuerySnafu {
-                reason: format!(
-                    "Source schema changed while rebuilding flow {flow_id}: expected version {source_schema_version}, got {}",
-                    replacement.source_schema_version
-                )
-            }
-        );
-        let mut published = slot.runtime.write().await;
-        let latest = published
-            .as_ref()
-            .context(FlowNotFoundSnafu { id: flow_id })?;
-        validate_captured_slot(
-            &slot,
-            Some(latest.source_table_id),
-            Arc::ptr_eq(latest, &current),
-            expected_table_id,
-            flow_id,
-        )?;
-        if latest.source_schema_version == source_schema_version {
-            return Ok(Arc::clone(latest));
-        }
-        ensure!(
-            Arc::ptr_eq(latest, &current),
-            InvalidQuerySnafu {
-                reason: format!("Flow {flow_id} was replaced while its source schema was rebuilt")
-            }
-        );
-        // Metadata is fetched after acquiring the publication lease.  Thus a schema bump cannot
-        // slip between the final validation and publishing this runtime.
-        let latest_schema_version = self
-            .table_info_source
-            .get_table_info_value(&current.source_table_id)
-            .await?
-            .context(UnexpectedSnafu {
-                reason: "Source table metadata is missing",
-            })?
-            .table_info
-            .meta
-            .schema
-            .version();
-        ensure!(
-            latest_schema_version == source_schema_version,
-            InvalidQuerySnafu {
-                reason: format!(
-                    "Source schema changed while rebuilding flow {flow_id}: expected version {source_schema_version}, got {latest_schema_version}"
-                )
-            }
-        );
-        *published = Some(Arc::clone(&replacement));
-        Ok(replacement)
     }
 
     pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
@@ -832,9 +755,6 @@ impl StreamingEngine {
         let query_ctx = query_ctx.clone().map(Arc::new).context(UnexpectedSnafu {
             reason: "Query context is missing",
         })?;
-        let flow_plan =
-            sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), sql, true).await?;
-        stateless::validate_plan(&flow_plan)?;
         let source_table_id = source_table_ids[0];
         let source_table_name = self
             .table_info_source
@@ -847,9 +767,13 @@ impl StreamingEngine {
             .context(UnexpectedSnafu {
                 reason: "Source table metadata is missing",
             })?;
+        let flow_plan =
+            sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), sql, true).await?;
+        stateless::validate_plan(&flow_plan)?;
         let source_meta = source_table_info.table_info.meta;
         let source_schema = source_meta.schema;
         let source_primary_key_indices = source_meta.primary_key_indices;
+        stateless::validate_source_scan(&flow_plan, source_table_id, &source_schema)?;
         let (inferred_schema, lineage) = output_column_schemas(&flow_plan, &source_schema)?;
         let inferred_relation =
             relation_desc_from_output(&inferred_schema, &lineage, &source_primary_key_indices);
