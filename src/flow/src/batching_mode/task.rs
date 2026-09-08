@@ -1574,7 +1574,7 @@ impl BatchingTask {
                         .map(|lower| {
                             (
                                 expr.column_name.as_str(),
-                                lower.clone(),
+                                *lower,
                                 "forced full snapshot retention",
                             )
                         })
