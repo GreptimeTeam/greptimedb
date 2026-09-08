@@ -5967,21 +5967,29 @@ impl PromPlanner {
     ) -> Result<(LogicalPlan, LogicalPlan, bool)> {
         let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
         let left_has_marker = left_context.tag_columns.iter().any(|tag| tag == marker);
-        let (present, add_to_left) = if left_has_marker {
-            (&left, false)
-        } else {
-            (&right, true)
+        let (data_type, value_type, add_to_left) = {
+            let (present, add_to_left) = if left_has_marker {
+                (&left, false)
+            } else {
+                (&right, true)
+            };
+            let data_type = present
+                .schema()
+                .fields()
+                .iter()
+                .find(|field| field.name() == marker)
+                .map(|field| field.data_type().clone())
+                .with_context(|| ColumnNotFoundSnafu {
+                    col: marker.to_string(),
+                })?;
+            let value_type = Self::string_value_data_type(&data_type)
+                .cloned()
+                .with_context(|| UnexpectedPlanExprSnafu {
+                    desc: format!("temporality match label {marker} must be a string"),
+                })?;
+            (data_type, value_type, add_to_left)
         };
-        let data_type = present
-            .schema()
-            .fields()
-            .iter()
-            .find(|field| field.name() == marker)
-            .map(|field| field.data_type().clone())
-            .with_context(|| ColumnNotFoundSnafu {
-                col: marker.to_string(),
-            })?;
-        let null = Self::string_scalar_value(&data_type, None).with_context(|| {
+        let null = Self::string_scalar_value(&value_type, None).with_context(|| {
             UnexpectedPlanExprSnafu {
                 desc: format!("temporality match label {marker} must be a string"),
             }
@@ -6004,7 +6012,28 @@ impl PromPlanner {
                 .build()
                 .context(DataFusionPlanningSnafu)
         };
-
+        if data_type != value_type {
+            let present = if add_to_left { &mut right } else { &mut left };
+            let visible = present
+                .schema()
+                .iter()
+                .map(|(qualifier, field)| {
+                    let column =
+                        DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()));
+                    if field.name() == marker {
+                        DfExpr::Cast(Cast::new(Box::new(column), value_type.clone()))
+                            .alias_qualified(qualifier.cloned(), field.name().clone())
+                    } else {
+                        column
+                    }
+                })
+                .collect::<Vec<_>>();
+            *present = LogicalPlanBuilder::from(present.clone())
+                .project(visible)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
         if add_to_left {
             left = add_marker(left)?;
             left_context.tag_columns.push(marker.to_string());
@@ -6237,7 +6266,8 @@ impl PromPlanner {
             result
         };
 
-        // AND/UNLESS preserve the complete left operand schema and metadata.
+        // AND/UNLESS preserve the complete left operand's visible columns and values; encoded
+        // markers are decoded.
         self.ctx = output_context;
         Ok(result)
     }
