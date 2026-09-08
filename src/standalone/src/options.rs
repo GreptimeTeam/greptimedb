@@ -28,6 +28,7 @@ use frontend::service_config::{
     PromStoreOptions,
 };
 use mito2::config::MitoConfig;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -72,6 +73,8 @@ pub struct StandaloneOptions {
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    /// The pipeline options.
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -112,6 +115,7 @@ impl Default for StandaloneOptions {
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -158,6 +162,7 @@ impl StandaloneOptions {
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
             slow_query: cloned_opts.slow_query,
+            pipeline: cloned_opts.pipeline,
             event_recorder: cloned_opts.event_recorder,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
             ..Default::default()
@@ -196,10 +201,24 @@ impl StandaloneOptions {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use common_event_recorder::EventTypeFilter;
 
     use super::*;
+
+    #[test]
+    fn test_pipeline_cache_ttl_propagates_to_frontend_options() {
+        let default_options: StandaloneOptions = toml::from_str("").unwrap();
+        assert_eq!(default_options.pipeline.cache_ttl, Duration::from_secs(10));
+
+        let options: StandaloneOptions = toml::from_str("[pipeline]\ncache_ttl = \"30s\"").unwrap();
+        assert_eq!(options.pipeline.cache_ttl, Duration::from_secs(30));
+        assert_eq!(
+            options.frontend_options().pipeline.cache_ttl,
+            Duration::from_secs(30)
+        );
+    }
 
     #[test]
     fn test_event_recorder_event_types_preserve_filter_semantics() {

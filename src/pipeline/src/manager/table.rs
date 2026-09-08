@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{
@@ -76,13 +77,14 @@ impl PipelineTable {
         statement_executor: StatementExecutorRef,
         table: TableRef,
         query_engine: QueryEngineRef,
+        cache_ttl: Duration,
     ) -> Self {
         Self {
             inserter,
             statement_executor,
             table,
             query_engine,
-            cache: PipelineCache::new(),
+            cache: PipelineCache::new(cache_ttl),
         }
     }
 

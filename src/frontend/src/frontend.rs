@@ -22,6 +22,7 @@ use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -75,6 +76,8 @@ pub struct FrontendOptions {
     pub query: QueryOptions,
     pub slow_query: SlowQueryOptions,
     pub memory: MemoryOptions,
+    /// The pipeline options.
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -108,6 +111,7 @@ impl Default for FrontendOptions {
             query: QueryOptions::default(),
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -215,6 +219,22 @@ mod tests {
         let opts = FrontendOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
         let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+    }
+
+    #[test]
+    fn test_pipeline_cache_ttl_toml_roundtrip() {
+        let options: FrontendOptions = toml::from_str("[pipeline]\ncache_ttl = \"30s\"").unwrap();
+        assert_eq!(
+            options.pipeline.cache_ttl,
+            std::time::Duration::from_secs(30)
+        );
+
+        let serialized = toml::to_string(&options).unwrap();
+        let roundtrip: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            roundtrip.pipeline.cache_ttl,
+            std::time::Duration::from_secs(30)
+        );
     }
 
     #[test]

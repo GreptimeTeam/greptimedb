@@ -313,6 +313,7 @@ impl FrontendBuilder {
             statement_executor.clone(),
             self.catalog_manager.clone(),
             query_engine.clone(),
+            &self.options.pipeline,
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());

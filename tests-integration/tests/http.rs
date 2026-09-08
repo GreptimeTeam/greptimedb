@@ -2333,6 +2333,9 @@ allow_query_fallback = false
 [memory]
 enable_heap_profiling = true
 
+[pipeline]
+cache_ttl = "10s"
+
 [event_recorder]
 ttl = "2months 29days 2h 52m 48s"
 "#,

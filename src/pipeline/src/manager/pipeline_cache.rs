@@ -27,8 +27,6 @@ use crate::util::{generate_pipeline_cache_key, generate_pipeline_cache_key_suffi
 
 /// Pipeline table cache size.
 const PIPELINES_CACHE_SIZE: u64 = 10000;
-/// Pipeline table cache time to live.
-const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
 
 /// Pipeline cache is located on a separate file on purpose,
 /// to encapsulate inner cache. Only public methods are exposed.
@@ -54,16 +52,16 @@ pub struct PipelineContent {
 }
 
 impl PipelineCache {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(ttl: Duration) -> Self {
         Self {
             pipelines: Cache::builder()
                 .max_capacity(PIPELINES_CACHE_SIZE)
-                .time_to_live(PIPELINES_CACHE_TTL)
+                .time_to_live(ttl)
                 .name("pipelines")
                 .build(),
             original_pipelines: Cache::builder()
                 .max_capacity(PIPELINES_CACHE_SIZE)
-                .time_to_live(PIPELINES_CACHE_TTL)
+                .time_to_live(ttl)
                 .name("original_pipelines")
                 .build(),
             failover_cache: Cache::builder()
@@ -211,7 +209,7 @@ mod tests {
     async fn test_concurrent_misses_run_one_loader() {
         const CONCURRENCY: usize = 8;
 
-        let cache = Arc::new(PipelineCache::new());
+        let cache = Arc::new(PipelineCache::new(Duration::from_secs(60)));
         let loads = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(Barrier::new(CONCURRENCY));
 
@@ -241,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_drops_version_pinned_entry() {
-        let cache = PipelineCache::new();
+        let cache = PipelineCache::new(Duration::from_secs(60));
         let content = content_at(1);
         let version = Some(content.version);
 
@@ -265,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_drops_stale_latest_and_primes_failover() {
-        let cache = PipelineCache::new();
+        let cache = PipelineCache::new(Duration::from_secs(60));
         let v2 = content_at(2);
 
         cache
@@ -293,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_failover_serves_global_pipeline_to_unwarmed_schema() {
-        let cache = PipelineCache::new();
+        let cache = PipelineCache::new(Duration::from_secs(60));
         let content = content_at(1);
 
         cache.insert_failover_cache(content.clone(), true).await;
