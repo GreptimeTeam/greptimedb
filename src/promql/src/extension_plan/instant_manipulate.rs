@@ -46,7 +46,7 @@ use snafu::ResultExt;
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::series_divide::SeriesDivide;
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, native_per_nanosecond,
+    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, nanoseconds_per_native_tick,
     native_timestamp_values, prometheus_stale_sample_column, resolve_column_name,
     serialize_column_index, timestamp_unit,
 };
@@ -95,6 +95,7 @@ impl PartialOrd for InstantManipulate {
             &self.tag_columns,
             &self.field_column,
             &self.input,
+            &self.unfix,
         )
             .partial_cmp(&(
                 other.start,
@@ -105,6 +106,7 @@ impl PartialOrd for InstantManipulate {
                 &other.tag_columns,
                 &other.field_column,
                 &other.input,
+                &other.unfix,
             ))
     }
 }
@@ -640,7 +642,7 @@ impl InstantManipulateStream {
         if ts_column.is_empty() {
             return Ok(RecordBatch::new_empty(self.schema.clone()));
         }
-        let scale = native_per_nanosecond(self.time_unit);
+        let scale = nanoseconds_per_native_tick(self.time_unit);
         let stale_sample_columns = self.field_indices.map(|index| {
             index.and_then(|index| prometheus_stale_sample_column(input.column(index).as_ref()))
         });
@@ -951,6 +953,20 @@ mod test {
                 assert_eq!(values.null_count(), 0, "{unit:?}: {name}");
             }
         }
+    }
+
+    #[test]
+    fn deserialized_ordering_preserves_column_indices() {
+        let mut wire = pb::InstantManipulate::default();
+        let first = InstantManipulate::deserialize(&wire.encode_to_vec()).unwrap();
+        wire.time_index_idx = 1;
+        let second = InstantManipulate::deserialize(&wire.encode_to_vec()).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.partial_cmp(&second), Some(std::cmp::Ordering::Less));
+        wire.field_index_idx = 2;
+        let third = InstantManipulate::deserialize(&wire.encode_to_vec()).unwrap();
+        assert_ne!(second, third);
+        assert_eq!(second.partial_cmp(&third), Some(std::cmp::Ordering::Less));
     }
 
     #[test]

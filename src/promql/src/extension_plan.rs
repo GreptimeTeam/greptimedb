@@ -52,25 +52,25 @@ pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctO
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
-/// Returns a timestamp value without reducing its Arrow storage precision.
-pub(crate) fn native_timestamp_values(array: &dyn Array) -> datafusion::error::Result<Vec<i64>> {
+/// Borrows timestamp values without reducing their Arrow storage precision.
+pub(crate) fn native_timestamp_values(array: &dyn Array) -> datafusion::error::Result<&[i64]> {
     let value = match array.data_type() {
         DataType::Timestamp(TimeUnit::Second, _) => array
             .as_any()
             .downcast_ref::<TimestampSecondArray>()
-            .map(|a| a.values().to_vec()),
+            .map(|a| a.values().as_ref()),
         DataType::Timestamp(TimeUnit::Millisecond, _) => array
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .map(|a| a.values().to_vec()),
+            .map(|a| a.values().as_ref()),
         DataType::Timestamp(TimeUnit::Microsecond, _) => array
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
-            .map(|a| a.values().to_vec()),
+            .map(|a| a.values().as_ref()),
         DataType::Timestamp(TimeUnit::Nanosecond, _) => array
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
-            .map(|a| a.values().to_vec()),
+            .map(|a| a.values().as_ref()),
         _ => None,
     };
     value.ok_or_else(|| {
@@ -87,7 +87,7 @@ pub(crate) fn timestamp_unit(data_type: &DataType) -> datafusion::error::Result<
     }
 }
 
-pub(crate) fn native_per_nanosecond(unit: TimeUnit) -> i128 {
+pub(crate) fn nanoseconds_per_native_tick(unit: TimeUnit) -> i128 {
     match unit {
         TimeUnit::Second => 1_000_000_000,
         TimeUnit::Millisecond => 1_000_000,
