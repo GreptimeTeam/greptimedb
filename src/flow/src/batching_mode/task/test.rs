@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use catalog::{DeregisterTableRequest, RegisterTableRequest};
@@ -1611,11 +1612,28 @@ async fn test_fenced_repair_stale_fence_next_plan_is_scoped_base_repair() {
 
     {
         let mut state = task.state.write().unwrap();
+        let error = Err::<(), _>(BoxedError::new(
+            common_recordbatch::error::Error::PollStream {
+                error: datafusion::error::DataFusionError::Shared(Arc::new(
+                    datafusion::error::DataFusionError::External(Box::new(BoxedError::new(
+                        MockError::new(StatusCode::RequestOutdated),
+                    ))),
+                )),
+                location: snafu::Location::default(),
+            },
+        ))
+        .context(crate::error::ExternalSnafu)
+        .unwrap_err();
+        let reason = BatchingTask::query_failure_reason(
+            &error,
+            &QueryCoverage::FencedRepairChunk { high: high.clone() },
+        );
+        assert_eq!(reason, FlowQueryFallbackReason::SnapshotFenceExpired);
         let decision = BatchingTask::apply_query_failure_to_state(
             &mut state,
             std::time::Duration::from_millis(1),
             &QueryCoverage::FencedRepairChunk { high },
-            FlowQueryFallbackReason::SnapshotFenceExpired,
+            reason,
         );
         assert_eq!(
             decision,
@@ -1625,9 +1643,11 @@ async fn test_fenced_repair_stale_fence_next_plan_is_scoped_base_repair() {
             })
         );
         assert!(state.pending_fenced_repair().is_none());
+        assert_eq!(state.dirty_time_windows.len(), 1);
 
         // Simulate the outer execution failure restore for the in-flight chunk.
         state.restore_scoped_windows(&filter);
+        assert_eq!(state.dirty_time_windows.len(), 2);
     }
 
     let plan = task

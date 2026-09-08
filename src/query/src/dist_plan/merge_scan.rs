@@ -1426,6 +1426,7 @@ mod tests {
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
+    use datafusion::physical_plan::repartition::RepartitionExec;
     use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::Distribution;
@@ -1890,7 +1891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_scan_later_stream_error_preserves_status_code() {
+    async fn repartitioned_merge_scan_later_stream_error_preserves_status_code() {
         let region_id = RegionId::new(1024, 1);
         let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
             region_id,
@@ -1902,10 +1903,26 @@ mod tests {
                 )),
             ))],
         )]));
-        let exec =
-            merge_scan_exec_with_handler(vec![region_id], expected_int64_schema(), handler, 1);
+        let merge_scan = Arc::new(merge_scan_exec_with_handler(
+            vec![region_id],
+            expected_int64_schema(),
+            handler,
+            1,
+        ));
+        let repartition =
+            RepartitionExec::try_new(merge_scan, Partitioning::RoundRobinBatch(2)).unwrap();
+        assert_eq!(
+            repartition
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            2
+        );
+
         let mut stream = common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(
-            exec.to_stream(Arc::new(TaskContext::default()), 0).unwrap(),
+            repartition
+                .execute(0, Arc::new(TaskContext::default()))
+                .unwrap(),
         )
         .unwrap();
 
