@@ -51,6 +51,10 @@ enabled = true
 parquetbench = true
 scanbench = true
 iterations = 7
+projection = ["greptime_value"]
+parquet_reader = "direct"
+scan_scanner = "seq"
+parallelism = 1
 max_files = 4
 
 [[scenario.queries]]

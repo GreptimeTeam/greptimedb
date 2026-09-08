@@ -407,11 +407,23 @@ query latency percentage is
 The configured three warmups occur after the initial query validation and before
 that query's 15 measured endpoint requests, so query latency is a warmed
 frontend/cache measurement. After the datanodes stop, the case also runs seven
-iterations of `parquetbench` for up to four inspected SST files and `scanbench`
-for their scan groups. Their per-run output and aggregate
+iterations of value-only `parquetbench` for up to four inspected SST files and
+sequential `scanbench` over the corresponding regions, with parallelism one.
+Their per-run output and aggregate
 `parquetbench_median_average_ms` and `scanbench_median_average_ms` are under
 `targets[].read_bench`; they are quiescent local-file read/scan diagnostics, not
-warmed frontend-query latency measurements.
+warmed frontend-query latency measurements. Bench averages include iteration one;
+no OS cache is dropped, and the driver runs base before candidate.
+
+Historical [PR #8548](https://github.com/GreptimeTeam/greptimedb/pull/8548)
+reported storage savings alongside warm-read slowdowns. Its mixed counter/gauge
+study used value-only and all-column projections, discarded the first iteration,
+and alternated target order. This smaller integer-counter case is not an exact
+reproduction: do not compare its inclusive averages directly with that study's
+warm medians. For a matching reader comparison, reuse the recorded bench commands
+against the stopped data directories, run both projections with eight iterations,
+alternate target order, and compare medians of iterations 2–8 from raw output.
+Keep post-flush and post-compaction measurements separate.
 
 The case's `-5.0` storage target and `25` query-latency guardrail are experimental
 acceptance targets, not observed-benefit claims; do not relax them if a run
