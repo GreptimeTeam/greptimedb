@@ -12,8 +12,6 @@ const MARKER = "<!-- pr-open-limit -->";
 const COMMENT_AUTHOR = "github-actions[bot]";
 // Repository permissions that mark someone as part of the team.
 const TEAM_PERMISSIONS = ["admin", "maintain", "write"];
-// Keep the comment readable for authors who are far over the limit.
-const MAX_LISTED_PRS = 10;
 
 function summary(text) {
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -45,21 +43,19 @@ async function isTeamMember(octokit, owner, repo, username) {
   }
 }
 
-function buildComment(author, total, limit, openPrs) {
-  const listed = openPrs
-    .slice(0, MAX_LISTED_PRS)
-    .map((pr) => `- #${pr.number} ${pr.title}`);
-  const hidden = openPrs.length - listed.length;
-  const list = hidden > 0 ? `${listed.join("\n")}\n- ...and ${hidden} more` : listed.join("\n");
+function buildComment(author, total, limit, owner, repo) {
+  // Link to search results to avoid creating backlinks on individual PRs.
+  const query = `is:pr is:open author:${author} draft:false`;
+  const url = `https://github.com/${owner}/${repo}/pulls?q=${encodeURIComponent(query)}`;
 
   return `${MARKER}
 > [!WARNING]
-> @${author} has **${total}** open pull requests in this repository, over the limit of **${limit}**.
+> @${author} has **${total}** open non-draft pull requests in this repository, over the limit of **${limit}**.
 
 Review is the scarcest resource here. Please land or close some of these before
-pushing this one forward:
+pushing this one forward.
 
-${list}
+[View your open pull requests](${url})
 
 This check is advisory for now and blocks nothing.`;
 }
@@ -136,7 +132,7 @@ async function upsertComment(octokit, params, body) {
   await upsertComment(
     octokit,
     { owner, repo, issue_number: prNumber },
-    buildComment(author, total, limit, others)
+    buildComment(author, total, limit, owner, repo)
   );
 })().catch((error) => {
   console.error(error);
