@@ -403,6 +403,10 @@ integral values, but that observation does not make its values globally unique.
 Current mixed-data evidence, including SST inspection, exact-bit row verification,
 warmed endpoint SQL, and both warm-reader projections, is recorded in
 [`query_cases/sst_float_bss/RESULTS.md`](query_cases/sst_float_bss/RESULTS.md).
+Timing observations were collected while other builds saturated the shared host;
+they are not performance acceptance evidence. Before rerunning timings, ensure
+the host is idle (not merely this agent), record load throughout, and avoid
+concurrent builds. CPU affinity alone does not isolate memory or I/O contention.
 The historical unique-integer workload is preserved only in Git history and does
 not apply to this case.
 Both targets must use the exact same release `greptime` binary; only the

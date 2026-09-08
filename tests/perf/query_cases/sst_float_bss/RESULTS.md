@@ -5,6 +5,13 @@ for `sst_float_bss`. The detailed historical numbers remain in Git history; they
 apply only to that superseded workload and must not be used for the current mixed
 case.
 
+> **Timing measurements are confounded.** After these runs, the user reported
+> that other agents' builds saturated all 20 logical CPUs during measurement.
+> No host-wide idle/load gate was enforced. The latency tables below are retained
+> as raw observations only: neither improvements nor threshold failures establish
+> BSS performance. SST byte counts and cross-target stored-row checks remain
+> valid for the inspected dataset. Stable-host timing verification is pending.
+
 ## Case and data shape
 
 - Generator/case revision: `149b49de5f3`.
@@ -76,10 +83,9 @@ was not changed for these runs.
 | mixed-3 | `sum_all_values` | 38.25 / 55.41 | 19.68 / 29.49 | -48.55% | pass |
 | mixed-3 | `hourly_sum_values` | 56.77 / 148.29 | 121.87 / 143.16 | +114.66% | **fail** |
 
-The two failures mean this evidence does **not** establish performance acceptance
-or a safe degradation. These are noisy measurements on a local development host;
-there was no CPU isolation or cache flush, and no cause of the variation has been
-proved.
+The two recorded threshold failures remain in the artifacts, but the saturated
+shared host prevents attributing them to BSS. Passing entries likewise do not
+establish performance acceptance. No CPU isolation or cache flush was used.
 
 ## Stopped-directory warm readers
 
@@ -110,11 +116,12 @@ region columns). Projection order is fixed; target order alternates.
 
 All 672 commands / 5,376 raw iterations returned the expected rows; timing,
 projection configurations, parquet schemas and order metadata were checked.
-Run 1 all-column scanbench was **0.89% slower**. Its round medians ranged from
+Run 1 all-column scanbench differed by **+0.89%**, negligible relative to the
+observed variation, not evidence of a regression. Its round medians ranged from
 167.197–663.465 ms (base) and 133.339–557.352 ms (BSS). There is substantial
 variability; these measurements do not establish a stable gain on every read
-path. Runs used a non-isolated development host without CPU affinity or cache
-drops. The source of the variability was not established.
+path. The reported concurrent CPU saturation affects apparent improvements as
+well as slowdowns; no causal performance conclusion is drawn from these runs.
 
 ## Scope and recorded checks
 
