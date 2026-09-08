@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::error::Error as StdError;
 use std::time::Duration;
 
 use client::OutputWithMetrics;
@@ -30,6 +31,42 @@ use crate::metrics::{
 };
 use crate::{Error, FlowId};
 
+/// Liveness guard: when a fenced repair query fails with a wrapped error whose
+/// text indicates a stale snapshot fence (even when `StatusCode::RequestOutdated`
+/// was lost through client layers), classify it as `SnapshotFenceExpired` to
+/// break the retry loop and force a rebind of the fence high `H`.
+///
+/// Long-term the structured `StatusCode` / retry hint path should be preserved
+/// end-to-end; this text fallback is a narrow safety measure.
+fn matches_stale_snapshot_fence_text(err: &Error) -> bool {
+    let markers = [
+        "STALE_SNAPSHOT_FENCE",
+        "REBIND_SNAPSHOT_FENCE",
+        "snapshot upper bound stale",
+    ];
+    // Check the top-level error Display and Debug.
+    let debug_str = format!("{:?}", err);
+    let display_str = err.to_string();
+    for marker in &markers {
+        if debug_str.contains(marker) || display_str.contains(marker) {
+            return true;
+        }
+    }
+    // Walk the error source chain.
+    let mut source = err.source();
+    while let Some(s) = source {
+        let debug_str = format!("{:?}", s);
+        let display_str = s.to_string();
+        for marker in &markers {
+            if debug_str.contains(marker) || display_str.contains(marker) {
+                return true;
+            }
+        }
+        source = s.source();
+    }
+    false
+}
+
 impl BatchingTask {
     /// Classify execution errors into checkpoint fallback reasons. A stale
     /// snapshot fence is special only for fenced repair chunks.
@@ -43,6 +80,14 @@ impl BatchingTask {
             } else {
                 FlowQueryFallbackReason::StaleCursor
             }
+        } else if matches!(coverage, QueryCoverage::FencedRepairChunk { .. })
+            && matches_stale_snapshot_fence_text(err)
+        {
+            // Narrow text-based fallback for wrapped errors where the
+            // structured StatusCode::RequestOutdated was lost through
+            // frontend/client layers. Without this fenced repair will
+            // retry the same stale `given_seq` every refresh tick.
+            FlowQueryFallbackReason::SnapshotFenceExpired
         } else if matches!(coverage, QueryCoverage::IncrementalDelta) {
             FlowQueryFallbackReason::IncrementalQueryFailure
         } else {
@@ -87,10 +132,7 @@ impl BatchingTask {
     }
 
     /// Apply checkpoint transitions for a successfully executed query using its
-    /// terminal watermark proof and declared coverage, while retaining whether this attempt
-    /// started with a persisted full-repair request. That fact is deliberately
-    /// captured by the caller before execution; a repair request raised later
-    /// must not turn an ordinary full snapshot into a completed repair.
+    /// terminal watermark proof and declared coverage.
     pub(super) fn apply_query_result_to_state(
         state: &mut TaskState,
         res: &OutputWithMetrics,

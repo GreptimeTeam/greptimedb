@@ -20,14 +20,6 @@ use common_grpc::channel_manager::ClientTlsOption;
 use serde::{Deserialize, Serialize};
 use session::ReadPreference;
 
-/// Runtime-only mode used for incremental source scans.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum IncrementalMode {
-    #[default]
-    MemtableOnly,
-    SequenceRange,
-}
-
 pub(crate) mod batching_execution;
 pub(crate) mod checkpoint;
 pub(crate) mod engine;

@@ -473,15 +473,6 @@ impl BatchingTask {
             .await
     }
 
-    pub(crate) async fn validate_sink_table_schema_with_table(
-        &self,
-        engine: &QueryEngineRef,
-        table: TableRef,
-    ) -> Result<Arc<Schema>, Error> {
-        self.validate_sink_table_schema_with_table_and_values(engine, table, &BTreeMap::new())
-            .await
-    }
-
     async fn validate_sink_table_schema_with_table_and_values(
         &self,
         engine: &QueryEngineRef,

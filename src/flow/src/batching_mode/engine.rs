@@ -519,14 +519,6 @@ impl BatchingEngine {
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
     }
 
-    fn table_options_enable_merge_mode_last_non_null(
-        extra_options: &HashMap<String, String>,
-    ) -> bool {
-        extra_options
-            .get(store_api::mito_engine_options::MERGE_MODE_KEY)
-            .is_some_and(|value| value.eq_ignore_ascii_case("last_non_null"))
-    }
-
     /// SQL flows without a usable time-window expression can only run as an
     /// explicit full-query flow, so require `EVAL INTERVAL` at creation time.
     fn ensure_sql_flow_has_twe_or_eval_interval(

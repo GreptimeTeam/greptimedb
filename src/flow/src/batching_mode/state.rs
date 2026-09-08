@@ -112,10 +112,6 @@ impl TaskState {
         }
     }
 
-    pub(crate) fn last_query_duration(&self) -> Duration {
-        self.last_query_duration
-    }
-
     pub fn last_execution_time_millis(&self) -> Option<i64> {
         self.last_exec_time_millis
     }

@@ -115,8 +115,8 @@ impl FlowCheckpointDecision {
             }
             Self::AdvancedIncremental { .. } => checkpoint_mode_label(CheckpointMode::Incremental),
             Self::ContinuedFencedRepair { .. } => {
-                // Fenced repair and completion of a requested full repair are
-                // FullSnapshot sub-states, not third top-level modes.
+                // Fenced repair is a FullSnapshot sub-state, not a third
+                // top-level mode.
                 checkpoint_mode_label(CheckpointMode::FullSnapshot)
             }
             Self::FallbackToFullSnapshot { previous_mode, .. } => {
