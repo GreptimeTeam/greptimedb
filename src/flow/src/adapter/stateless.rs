@@ -25,7 +25,7 @@ use common_query::OutputData;
 use common_recordbatch::{RecordBatch, RecordBatches, map_dictionary_to_values_data_type};
 use common_time::Timestamp;
 use datafusion::catalog::MemTable;
-use datafusion::datasource::{TableProvider, provider_as_source};
+use datafusion::datasource::{TableProvider, provider_as_source, source_as_provider};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{Column, DFSchema, TableReference};
 use datafusion_expr::logical_plan::{Distinct, Projection};
@@ -36,6 +36,7 @@ use query::QueryEngine;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableId;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::TableName;
 use crate::adapter::util::column_schemas_to_proto;
@@ -289,9 +290,44 @@ pub(crate) fn validate_plan(plan: &LogicalPlan) -> Result<(), Error> {
     Ok(())
 }
 
+/// Ensures the retained scan was planned against the source metadata captured for this flow.
+pub(crate) fn validate_source_scan(
+    plan: &LogicalPlan,
+    source_table_id: TableId,
+    source_schema: &SchemaRef,
+) -> Result<(), Error> {
+    plan.apply(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            let provider = source_as_provider(&scan.source)?;
+            let provider = provider
+                .as_any()
+                .downcast_ref::<DfTableProviderAdapter>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Plan(
+                        "Streaming flow source scan does not use a table provider".into(),
+                    )
+                })?;
+            let table_info = provider.table().table_info();
+            if table_info.ident.table_id != source_table_id
+                || table_info.meta.schema.as_ref() != source_schema.as_ref()
+            {
+                return Err(datafusion::error::DataFusionError::Plan(format!(
+                    "Streaming flow source scan does not match source table {source_table_id} schema version {}",
+                    source_schema.version()
+                )));
+            }
+        }
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    })
+    .context(DatafusionSnafu {
+        context: "Failed to validate streaming flow source scan",
+    })?;
+    Ok(())
+}
+
 /// Rejects execution when the source metadata changed after the flow plan was retained.
-/// Replanning is intentionally not attempted: the flow must be recreated or recovered so its
-/// plan and source schema are captured together.
+/// The outer adapter replans a flow when it observes a new source schema version; this guard
+/// rejects a request if the version changes again before execution.
 fn validate_source_schema_version(
     retained_version: u32,
     current_version: u32,
