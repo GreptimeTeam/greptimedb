@@ -89,8 +89,10 @@ pub struct MitoConfig {
     // Background job configs:
     /// Max number of running background index build jobs (default: 1/8 of cpu cores).
     pub max_background_index_builds: usize,
+    // TODO: Document both series-index settings in the example configs and regenerate configuration
+    // docs before exposing the feature.
     /// Under development; do not enable. Root directory for loading series indexes, currently stored
-    /// on the local filesystem. Empty disables the feature.
+    /// on the local filesystem. Empty disables the feature. Relative paths resolve under `data_home`.
     pub experimental_series_index_root: String,
     /// Interval between series-index maintenance runs (default 5 min). Zero uses the default.
     #[serde(with = "humantime_serde")]

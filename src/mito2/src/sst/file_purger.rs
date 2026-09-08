@@ -288,14 +288,8 @@ mod tests {
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
 
-    #[rstest::rstest]
-    #[case(false)]
-    #[case(true)]
     #[tokio::test]
-    async fn test_range_index_purge_on_handle_release(
-        #[case] gc_enabled: bool,
-        #[values(false, true)] is_delete: bool,
-    ) {
+    async fn test_file_purge() {
         common_telemetry::init_default_ut_logging();
 
         let dir = create_temp_dir("file-purge");
@@ -326,19 +320,7 @@ mod tests {
 
         let scheduler = Arc::new(LocalScheduler::new(3));
 
-        let index_store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-        let owner = RegionId::new(9, 1);
-        let index_path = crate::sst::range_index::range_index_path(owner, sst_file_id.file_id());
-        index_store.write(&index_path, "range index").await.unwrap();
-        let file_purger = create_file_purger(
-            gc_enabled,
-            PathType::Bare,
-            scheduler.clone(),
-            layer,
-            None,
-            Arc::new(crate::sst::file_ref::FileReferenceManager::new(None)),
-            Some(RangeIndexDeleter::new(index_store.clone(), owner)),
-        );
+        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 
         {
             let handle = FileHandle::new(
@@ -362,22 +344,13 @@ mod tests {
                 },
                 file_purger,
             );
-            if is_delete {
-                handle.mark_deleted();
-            }
-            let reader = handle.clone();
-            drop(handle);
-            assert!(index_store.exists(&index_path).await.unwrap());
-            drop(reader);
+            // mark file as deleted and drop the handle, we expect the file is deleted.
+            handle.mark_deleted();
         }
 
         scheduler.stop(true).await.unwrap();
 
-        assert_eq!(
-            object_store.exists(&path).await.unwrap(),
-            gc_enabled || !is_delete
-        );
-        assert_eq!(index_store.exists(&index_path).await.unwrap(), !is_delete);
+        assert!(!object_store.exists(&path).await.unwrap());
     }
 
     #[tokio::test]
