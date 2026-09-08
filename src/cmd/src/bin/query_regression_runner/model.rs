@@ -57,7 +57,7 @@ pub(super) enum Scenario {
         queries: Vec<Query>,
     },
     #[serde(rename = "otlp_trace_load")]
-    OtlpTraceLoad { load: OtlpTraceLoad },
+    OtlpTraceLoad { load: OtlpLoad },
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,11 +136,6 @@ pub(super) struct RemoteValue {
     pub(super) stall_every: u64,
     pub(super) stall_length: u64,
     pub(super) mixed_every: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct OtlpTraceLoad {
-    pub(super) load: OtlpLoad,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -232,4 +227,62 @@ pub(super) struct Measurement {
     pub(super) latency_ms_median: Option<f64>,
     pub(super) latency_ms_p95: Option<f64>,
     pub(super) status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::Scenario;
+
+    #[test]
+    fn deserializes_otlp_trace_load_plan_shape() {
+        let plan = json!({
+            "scenario": {
+                "kind": "otlp_trace_load",
+                "load": {
+                    "database": "observability",
+                    "table": "opentelemetry_traces",
+                    "pipeline": "greptime_trace_v1",
+                    "duration_seconds": 120,
+                    "warmup_seconds": 60,
+                    "rate": 50_000,
+                    "workers": 4,
+                    "exporter_shards": 4,
+                    "workload": "microservices",
+                    "visibility_timeout_seconds": 120,
+                    "thresholds": {
+                        "max_candidate_throughput_regression_pct": 20.0,
+                        "max_candidate_mean_latency_regression_pct": 15.5,
+                        "max_failure_count": 3
+                    }
+                }
+            }
+        });
+
+        let scenario = serde_json::from_value(plan["scenario"].clone()).unwrap();
+        let Scenario::OtlpTraceLoad { load } = scenario else {
+            panic!("expected otlp_trace_load scenario");
+        };
+
+        assert_eq!("observability", load.database);
+        assert_eq!("opentelemetry_traces", load.table);
+        assert_eq!("greptime_trace_v1", load.pipeline);
+        assert_eq!(120, load.duration_seconds);
+        assert_eq!(60, load.warmup_seconds);
+        assert_eq!(50_000, load.rate);
+        assert_eq!(4, load.workers);
+        assert_eq!(4, load.exporter_shards);
+        assert_eq!("microservices", load.workload);
+        assert_eq!(120, load.visibility_timeout_seconds);
+        assert_eq!(
+            20.0,
+            load.thresholds.max_candidate_throughput_regression_pct
+        );
+        assert_eq!(
+            15.5,
+            load.thresholds.max_candidate_mean_latency_regression_pct
+        );
+        assert_eq!(3, load.thresholds.max_failure_count);
+    }
 }

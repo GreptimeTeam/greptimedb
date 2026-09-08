@@ -114,7 +114,7 @@ pub(super) fn normalized_otlp_load(
         .cloned()
         .ok_or("fixture plan has no scenario")?;
     match serde_json::from_value(scenario)? {
-        Scenario::OtlpTraceLoad { load } => Ok((case_path, load.load)),
+        Scenario::OtlpTraceLoad { load } => Ok((case_path, load)),
         Scenario::DirectReadableSst { .. } | Scenario::PromRemoteWriteThenQuery { .. } => {
             Err("OTLP command requires scenario kind otlp_trace_load".into())
         }
