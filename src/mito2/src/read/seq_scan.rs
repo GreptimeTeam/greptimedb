@@ -576,6 +576,13 @@ impl RegionScanner for SeqScan {
         self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 
+    fn reset_state(&mut self) {
+        self.stream_ctx.input.predicate.clear_dyn_filters();
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        self.pruner = Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers));
+        self.metrics_list = PartitionMetricsList::default();
+    }
+
     fn set_logical_region(&mut self, logical_region: bool) {
         self.properties.set_logical_region(logical_region);
     }

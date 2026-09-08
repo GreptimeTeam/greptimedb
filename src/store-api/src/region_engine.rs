@@ -496,6 +496,14 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Vec<bool>;
 
+    /// Resets execution state after streams from the previous execution have been dropped.
+    ///
+    /// Callers must not concurrently execute, reset, or install filters through scanner aliases.
+    /// Implementations retaining dynamic predicates must discard them and derived pruning state,
+    /// while preserving static predicates, the source snapshot, and prepared properties.
+    /// The default is a no-op and does not make inherently one-shot sources replayable.
+    fn reset_state(&mut self) {}
+
     /// Sets whether the scanner is reading a logical region.
     fn set_logical_region(&mut self, logical_region: bool);
 

@@ -108,6 +108,11 @@ impl Predicate {
         });
     }
 
+    /// Removes dynamic filters while preserving the static logical expressions.
+    pub fn clear_dyn_filters(&self) {
+        self.dyn_filters.store(Arc::new(vec![]));
+    }
+
     /// Returns the logical exprs.
     pub fn exprs(&self) -> &[Expr] {
         &self.exprs
@@ -838,6 +843,24 @@ mod tests {
         assert_eq!(expect, res);
     }
 
+    #[test]
+    fn test_clear_dyn_filters_preserves_static_predicates() {
+        use datafusion_physical_expr::expressions::lit as physical_lit;
+
+        let static_exprs = vec![col("a").eq(lit(1_i32))];
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(true)));
+        let predicate =
+            Predicate::with_dyn_filters(static_exprs.clone(), vec![dynamic_filter.clone()]);
+
+        predicate.clear_dyn_filters();
+        // An update from the old producer must not put its wrapper back into this execution.
+        dynamic_filter.update(physical_lit(false)).unwrap();
+
+        assert_eq!(predicate.exprs(), static_exprs);
+        assert!(predicate.dyn_filters().is_empty());
+        assert!(predicate.dyn_filter_phy_exprs().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn test_dynamic_pruning_keeps_null_row_group() {
         use datafusion_physical_expr::expressions::{
@@ -887,6 +910,48 @@ mod tests {
         assert_eq!(
             predicate.prune_with_stats(&stats, &arrow_schema),
             vec![true, false, true],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_dyn_filters_restores_static_row_group_pruning() {
+        use datafusion_physical_expr::expressions::{
+            Column as PhysicalColumn, lit as physical_lit,
+        };
+
+        let dir = create_temp_dir("dynamic_pruning_reset");
+        let (path, arrow_schema) = gen_test_parquet_file(&dir, 30).await;
+        let schema = Arc::new(datatypes::schema::Schema::try_from(arrow_schema.clone()).unwrap());
+        let builder =
+            ParquetRecordBatchStreamBuilder::new(tokio::fs::File::open(path).await.unwrap())
+                .await
+                .unwrap();
+        let stats = RowGroupPruningStatistics::new(builder.metadata().row_groups(), &schema);
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(PhysicalColumn::new("cnt", 1))],
+            physical_lit(true),
+        ));
+        let predicate = Predicate::with_dyn_filters(
+            vec![col("cnt").gt_eq(lit(10_i32))],
+            vec![dynamic_filter.clone()],
+        );
+
+        dynamic_filter
+            .update(
+                Predicate::to_physical_expr(&col("cnt").gt(lit(100_i32)), &arrow_schema).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            predicate.prune_with_stats(&stats, &arrow_schema),
+            vec![false; 3]
+        );
+
+        // Reset after the prior stream is dropped: no dynamic filter remains, while the
+        // static predicate still excludes only the first row group.
+        predicate.clear_dyn_filters();
+        assert_eq!(
+            predicate.prune_with_stats(&stats, &arrow_schema),
+            vec![false, true, true]
         );
     }
 

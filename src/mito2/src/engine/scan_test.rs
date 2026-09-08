@@ -27,9 +27,12 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, RecordBatches};
 use common_test_util::flight::encode_to_flight_data;
 use common_time::Timestamp;
+use datafusion::physical_plan::expressions::{
+    BinaryExpr, Column, DynamicFilterPhysicalExpr, lit as physical_lit,
+};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_common::ScalarValue;
-use datafusion_expr::{col, lit};
+use datafusion_expr::{Operator, col, lit};
 use datatypes::arrow::array::{
     ArrayRef, AsArray, Float64Array, StringArray, TimestampMillisecondArray,
 };
@@ -1043,6 +1046,22 @@ async fn test_series_scan_with_format(flat_format: bool) {
     expected_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
 
     assert_eq!(expected_rows, actual_rows);
+
+    scanner.reset_state();
+    assert_eq!("legacy", scanner.mode());
+    assert_eq!(
+        vec![1, 1, 1],
+        scanner
+            .properties()
+            .partitions
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        expected_rows,
+        collect_partition_rows_round_robin(&scanner, 3).await
+    );
 }
 
 #[tokio::test]
@@ -1226,6 +1245,51 @@ async fn test_two_phase_series_scan() {
     assert_eq!(Some(&0), series_to_partition.get("c"));
     assert_eq!(Some(&2), series_to_partition.get("b"));
     assert_eq!(Some(&2), series_to_partition.get("d"));
+
+    scanner.reset_state();
+    assert_eq!("two_phase", scanner.mode());
+    assert_eq!(
+        vec![1, 0, 0],
+        scanner
+            .properties()
+            .partitions
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>()
+    );
+    let replay_batches = try_join_all((0..3).map(|partition| {
+        let stream = scanner
+            .scan_partition(&context, &metrics_set, partition)
+            .unwrap();
+        async move { stream.try_collect::<Vec<_>>().await }
+    }))
+    .await
+    .unwrap();
+    let mut replay_rows = Vec::new();
+    for batches in replay_batches {
+        for batch in batches {
+            let tags = batch.column_by_name("tag_0").unwrap();
+            let fields = batch
+                .column_by_name("field_0")
+                .unwrap()
+                .as_primitive::<UInt64Type>();
+            let timestamps = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_primitive::<TimestampMillisecondType>();
+            for row in 0..batch.num_rows() {
+                replay_rows.push((
+                    datatypes::arrow_array::string_array_value_at_index(tags, row)
+                        .unwrap()
+                        .to_string(),
+                    fields.value(row),
+                    timestamps.value(row),
+                ));
+            }
+        }
+    }
+    replay_rows.sort();
+    assert_eq!(actual_rows, replay_rows);
 }
 
 /// Scans all partitions in round-robin fashion and returns rows sorted by (tag, ts).
@@ -3174,4 +3238,129 @@ async fn test_range_cache_key_separates_sequence_ranges() {
         second,
         "different (C, H] shared a range-cache entry"
     );
+}
+
+#[tokio::test]
+async fn test_reset_state_discards_dynamic_field_pruning() {
+    for (append_mode, expected_scanner_name) in [(false, "SeqScan"), (true, "UnorderedScan")] {
+        let mut env = TestEnv::with_prefix(if append_mode {
+            "test_reset_state_discards_dynamic_field_pruning_unordered"
+        } else {
+            "test_reset_state_discards_dynamic_field_pruning_seq"
+        })
+        .await;
+        let engine = env.create_engine(MitoConfig::default()).await;
+        let region_id = RegionId::new(1, u32::from(append_mode) + 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("append_mode", &append_mode.to_string())
+            // Keep a third row group unconsumed after the first execution so its
+            // file-range builder remains cached by the old pruner.
+            .insert_option("max_row_group_row_count", "2")
+            .build();
+        let column_schemas = test_util::rows_schema(&request);
+
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas,
+                rows: test_util::build_rows(0, 6),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    // The static physical-field predicate must survive reset.
+                    filters: vec![col("field_0").gt_eq(lit(1.0_f64))],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut scanner: Box<dyn RegionScanner> = match scanner {
+            Scanner::Seq(scanner) => {
+                assert_eq!(expected_scanner_name, "SeqScan");
+                assert_eq!(3, scanner.input().files[0].meta_ref().num_row_groups);
+                Box::new(scanner)
+            }
+            Scanner::Unordered(scanner) => {
+                assert_eq!(expected_scanner_name, "UnorderedScan");
+                assert_eq!(3, scanner.input().files[0].meta_ref().num_row_groups);
+                Box::new(scanner)
+            }
+            Scanner::Series(_) => panic!("scanner should not be a series scan"),
+        };
+        assert_eq!(expected_scanner_name, scanner.name());
+
+        let field = Arc::new(Column::new("field_0", 1));
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![field.clone()],
+            physical_lit(true),
+        ));
+        assert_eq!(
+            vec![true],
+            scanner.add_dyn_filter_to_predicate(vec![dynamic_filter.clone()])
+        );
+        dynamic_filter
+            .update(Arc::new(BinaryExpr::new(
+                field,
+                Operator::Gt,
+                physical_lit(2.0_f64),
+            )))
+            .unwrap();
+
+        // Dynamic pruning skips the first row group but does not filter individual
+        // rows in the second. Drop before consuming the third row group.
+        let mut stream = scanner
+            .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
+            .unwrap();
+        let first_batch = stream.try_next().await.unwrap().unwrap();
+        assert_eq!(
+            vec![2.0, 3.0],
+            scan_field_values(std::slice::from_ref(&first_batch))
+        );
+        drop(stream);
+
+        scanner.reset_state();
+        // This producer belongs to the old execution. Its later update must not
+        // affect the reset scanner or restore the old cached pruning decision.
+        dynamic_filter.update(physical_lit(false)).unwrap();
+
+        let mut values = Vec::new();
+        for partition in 0..scanner.properties().num_partitions() {
+            let stream = scanner
+                .scan_partition(
+                    &Default::default(),
+                    &ExecutionPlanMetricsSet::default(),
+                    partition,
+                )
+                .unwrap();
+            values.extend(scan_field_values(
+                &stream.try_collect::<Vec<_>>().await.unwrap(),
+            ));
+        }
+        values.sort_by(f64::total_cmp);
+        assert_eq!(vec![1.0, 2.0, 3.0, 4.0, 5.0], values);
+    }
+}
+
+fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let fields = batch
+                .column_by_name("field_0")
+                .unwrap()
+                .as_primitive::<Float64Type>();
+            (0..batch.num_rows()).map(move |row| fields.value(row))
+        })
+        .collect()
 }

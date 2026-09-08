@@ -587,6 +587,25 @@ impl RegionScanner for SeriesScan {
         self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 
+    fn reset_state(&mut self) {
+        self.stream_ctx.input.predicate.clear_dyn_filters();
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        self.pruner = match self.mode {
+            SeriesScanMode::Legacy => Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers)),
+            SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
+                self.stream_ctx.clone(),
+                num_workers,
+                PrunerOptions {
+                    retain_builders: true,
+                    enable_predicate_prefilter: false,
+                },
+            )),
+        };
+        self.legacy_receivers.lock().unwrap().clear();
+        self.candidate_receivers.lock().unwrap().clear();
+        self.metrics_list = Arc::new(PartitionMetricsList::default());
+    }
+
     fn set_logical_region(&mut self, logical_region: bool) {
         self.properties.set_logical_region(logical_region);
     }
