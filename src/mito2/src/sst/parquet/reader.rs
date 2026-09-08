@@ -2630,7 +2630,7 @@ mod tests {
             RecordBatch::try_new(
                 crate::sst::to_flat_sst_arrow_schema(
                     &metadata,
-                    &crate::sst::FlatSchemaOptions::default(),
+                    &crate::sst::FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
                 ),
                 vec![
                     Arc::new(UInt64Array::from(fields)) as ArrayRef,
