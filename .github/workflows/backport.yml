@@ -96,7 +96,7 @@ jobs:
               --head "${head_branch}" \
               --label "${target}" \
               --title "${PR_TITLE} [Backport ${release_branch}]" \
-              --body "Backport of #${PR_NUMBER} to ${release_branch}."
+              --body "Backport of #${PR_NUMBER} to ${release_branch}.
 
           ---
           Original PR: #${PR_NUMBER}
