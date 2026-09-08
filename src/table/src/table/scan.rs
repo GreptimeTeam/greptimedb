@@ -519,10 +519,10 @@ impl ExecutionPlan for RegionScanExec {
             .map(|f| f.filter)
             .collect::<Vec<_>>();
 
-        // Keep live wrappers for exact filtering, while also giving the scanner their expressions
-        // for statistics pruning. Exact acceptance is independent of scanner pruning support.
-        // Avoid registering an already accepted wrapper when pushdown is revisited.
+        // `supported` holds the final per-parent `PushedDown` answers. Dynamic filters are accepted
+        // because this scan filters decoded rows; scanner support only determines statistics pruning.
         let mut scanner_filters = Vec::with_capacity(parent_filters.len());
+        // Maps compact scanner callback positions back to their original parent-filter positions.
         let mut scanner_filter_indices = Vec::with_capacity(parent_filters.len());
         let mut supported = vec![false; parent_filters.len()];
         {
@@ -548,8 +548,7 @@ impl ExecutionPlan for RegionScanExec {
             }
         }
 
-        // Do not hold the exact-filter lock while calling into the scanner. Scanner
-        // implementations may do arbitrary work while installing pruning predicates.
+        // Release the exact-filter lock before calling into the scanner.
         let scanner_supported = self.add_dyn_filters_to_predicate(scanner_filters);
         for (index, is_supported) in scanner_filter_indices.into_iter().zip(scanner_supported) {
             if parent_filters[index]
@@ -561,8 +560,7 @@ impl ExecutionPlan for RegionScanExec {
             }
         }
 
-        // DataFusion requires an updated node after this mutation; the scan consumes dynamic
-        // filters itself.
+        // DataFusion requires an updated node after installing the filters.
         let new_self = Arc::new(self.clone());
 
         Ok(FilterPushdownPropagation {
@@ -611,10 +609,12 @@ impl Stream for StreamWithMetricWrapper {
                 }
                 match result {
                     Ok(record_batch) => {
-                        // we don't record elapsed time here
-                        // since it's calling storage api involving I/O ops
                         let record_batch = if let Some(predicate) = &this.dyn_filter {
-                            match batch_filter(record_batch.df_record_batch(), predicate) {
+                            let result = {
+                                let _timer = this.metric.dynamic_filter_timer();
+                                batch_filter(record_batch.df_record_batch(), predicate)
+                            };
+                            match result {
                                 Ok(batch) => RecordBatch::from_df_record_batch(
                                     record_batch.schema.clone(),
                                     batch,
@@ -810,6 +810,11 @@ mod test {
         assert_eq!(values.values(), &[3, 4]);
         let metrics = plan.metrics().unwrap();
         assert_eq!(metrics.output_rows(), Some(2));
+        let filter_cost = metrics.iter().find_map(|metric| match metric.value() {
+            MetricValue::Time { name, time } if name == "dynamic_filter_cost" => Some(time.value()),
+            _ => None,
+        });
+        assert!(filter_cost.is_some_and(|cost| cost > 0));
         let output_bytes = metrics.iter().find_map(|metric| match metric.value() {
             MetricValue::OutputBytes(count) => Some(count.value()),
             _ => None,
