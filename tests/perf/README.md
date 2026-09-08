@@ -400,8 +400,11 @@ byte-stream-split (BSS) physical table. It writes 1,000 series × 4,320 samples
 unique values. This deliberately matches a 95/5 design; it is not an empirical
 claim about any production population. A separate survey sample found 94.79%
 integral values, but that observation does not make its values globally unique.
-Historical unique-value findings are preserved, but superseded pending a mixed
-workload rerun, in [`query_cases/sst_float_bss/RESULTS.md`](query_cases/sst_float_bss/RESULTS.md).
+Current mixed-data evidence, including SST inspection, exact-bit row verification,
+warmed endpoint SQL, and both warm-reader projections, is recorded in
+[`query_cases/sst_float_bss/RESULTS.md`](query_cases/sst_float_bss/RESULTS.md).
+The historical unique-integer workload is preserved only in Git history and does
+not apply to this case.
 Both targets must use the exact same release `greptime` binary; only the
 per-target table setup SQL differs. Run the existing driver from a checkout
 containing that binary, with absolute paths and fresh data directories for every
@@ -440,8 +443,8 @@ frontend/cache measurement. The case restricts storage inspection to
 stop, it also runs seven iterations of value-only `parquetbench` for all
 inspected SST files and sequential `scanbench` over the corresponding regions,
 with parallelism one. The three explicit flushes yielded six SSTs in the observed
-run—three 1,105,920-row files and three 368,640-row files—because storage split
-each flush; this is an observation, not a guaranteed file layout. Their per-run
+mixed runs—three 1,105,920-row files and three 334,080-row files—because storage split each
+flush; this is an observation, not a guaranteed file layout. Their per-run
 output and aggregate `parquetbench_median_average_ms` and
 `scanbench_median_average_ms` are under
 `targets[].read_bench`; they are quiescent local-file read/scan diagnostics, not
@@ -449,14 +452,15 @@ warmed frontend-query latency measurements. Bench averages include iteration one
 no OS cache is dropped, and the driver runs base before candidate.
 
 Historical [PR #8548](https://github.com/GreptimeTeam/greptimedb/pull/8548)
-reported storage savings alongside warm-read slowdowns. Its mixed counter/gauge
-study used value-only and all-column projections, discarded the first iteration,
-and alternated target order. This smaller integer-counter case is not an exact
-reproduction: do not compare its inclusive averages directly with that study's
-warm medians. For a matching reader comparison, reuse the recorded bench commands
-against the stopped data directories, run both projections with eight iterations,
-alternate target order, and compare medians of iterations 2–8 from raw output.
-Keep post-flush and post-compaction measurements separate.
+reported storage savings alongside warm-read slowdowns for a different mixed
+counter/gauge study. It used value-only and all-column projections, discarded the
+first iteration, and alternated target order. This case reuses that reader
+measurement approach, not its dataset or results. For the supplementary warm
+comparison, reuse recorded commands against stopped data directories with eight
+iterations, discard iteration one, and alternate target order for eight rounds.
+For parquetbench, sum all per-file warm medians before taking the outer median;
+for scanbench, take the outer median of whole-region warm medians. Keep
+post-flush and post-compaction measurements separate.
 
 The case's `-5.0` storage target and `25` query-latency guardrail are experimental
 acceptance targets, not observed-benefit claims; do not relax them if a run

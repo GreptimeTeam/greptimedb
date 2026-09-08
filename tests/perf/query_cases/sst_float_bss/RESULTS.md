@@ -1,144 +1,138 @@
-# SST float BSS: historical unique-integer results
+# SST float BSS: mixed-data post-flush evidence
 
-> Superseded workload: the current case now generates bounded, fluctuating
-> 95% integer-valued / 5% fractional series. The numbers below belong only to
-> the earlier global-unique-integer experiment, not the current case. Mixed
-> workload measurements are pending.
+This report replaces the earlier unique-integer experiment as the primary evidence
+for `sst_float_bss`. The detailed historical numbers remain in Git history; they
+apply only to that superseded workload and must not be used for the current mixed
+case.
 
-## Decision context
+## Case and data shape
 
-This evidence supports a **minimal opt-in configuration, default off**. It shows a
-large storage reduction for this controlled case, a SQL trade-off, and faster
-stopped-directory warm readers; it does not establish a universal float benefit.
+- Generator/case revision: `149b49de5f3`.
+- Base and candidate used the same release `greptime` binary. The only physical
+  table difference was `experimental_sst_float_field_encoding`: `default` versus
+  `byte_stream_split`; base used dictionary encoding and candidate used BSS
+  without dictionaries. This is not a dictionary-policy-held-constant comparison.
+- Each of three fresh post-flush runs wrote 1,000 series × 4,320 samples at
+  60-second intervals: 4,320,000 rows per target. Three explicit flushes produced
+  six SSTs per target: three × 1,105,920 rows and three × 334,080 rows, with 45
+  `greptime_value` row groups total. This is observed layout, not a layout
+  guarantee.
+- `bounded_mixed` is a synthetic, uncalibrated design: a series hash selects its
+  baseline and span band, and 60-sample anchor interpolation produces bounded
+  fluctuation. It does not represent a measured production distribution.
+- Exactly 950 equal-length series are integer-only and 50 are fractional-only,
+  yielding 4,104,000 integer rows and 216,000 fractional rows per target. The
+  equal-length 1,000-series design deliberately makes both the series and row
+  shares 95%/5%.
+- The 95% design is not an empirical claim. A [local preview survey project](http://192.168.50.85:8765/view/prometheus-metrics-186-project-preliminary)
+  observed 94.79% integral **samples**; it does not establish a global rate,
+  global uniqueness, or a 95% series distribution.
 
-## Compared build and case
+## Initial SST inspection and value verification
 
-- Same release `greptime` binary for base and candidate: SHA-256
-  `2ce0ab1670cd4bdb0f60c87af3e1f494ee66c3c6ab83bce943a073638514eb2b`.
-- GreptimeDB `1.3.0-alpha.1`, source commit `dd4734d7b2ca4468f2c8a50e063fc9e7db53794b`.
-- BSS case/harness source: `54f26ea8153`.
-- The only DDL difference was `experimental_sst_float_field_encoding`:
-  `default` (base) versus `byte_stream_split` (candidate). Both used
-  `compaction.twcs.trigger_file_num = 100`.
-- Three fresh runs wrote 1,024 series × 4,320 samples at 60 s intervals:
-  4,423,680 rows per target. Values were unique monotonic integer-valued
-  `DOUBLE`s.
-- Each run used three 1,440-sample chunks and an explicit flush after each.
-  The observed layout was six SSTs: three × 1,105,920 rows and three ×
-  368,640 rows, compressed with ZSTD level 1. This is an observed post-flush
-  layout, not a promised layout.
+Inspection is limited to `data/greptime/public`; bytes exclude WAL, indexes,
+metadata, and internal/private-table storage. Each of the three runs had the
+same totals:
 
-## SST and correctness results
-
-The inspection covered `data/greptime/public` only. Each target had six selected
-SSTs, 4,423,680 rows, and 45 inspected `greptime_value` chunks. Footer checks
-found no BSS encoding in base and BSS in candidate; row-count, logical-schema,
-and SQL result checks passed. The expected and returned `sum(greptime_value)`
-was `9,784,470,159,360` for both targets. This verifies counts and aggregate-query
-results, not an exhaustive row-by-row comparison. Base chunks used dictionary
-encoding; candidate chunks used BSS without dictionaries, so this is not a
-codec-only comparison with dictionary policy held constant. The bytes below
-exclude WAL, indexes, metadata, and internal-table storage.
-
-| Fresh run | Base SST bytes | Candidate SST bytes | Candidate change |
+| Measure | Default | BSS | BSS change |
 | --- | ---: | ---: | ---: |
-| formal-1 | 13,830,799 | 612,899 | -95.5686% |
-| formal-2 | 13,830,799 | 612,884 | -95.5687% |
-| formal-3 | 13,830,799 | 612,884 | -95.5687% |
+| Selected SST bytes | 20,443,131 | 8,884,743 | -56.5392% |
+| `greptime_value` compressed bytes | 20,201,188 | 8,643,964 | -57.2106% |
+| SST files / rows / value row groups | 6 / 4,320,000 / 45 | 6 / 4,320,000 / 45 | — |
 
-The configured storage threshold was at least a 5% reduction (`-5%`); all three
-runs passed it.
+Footer inspection found `PLAIN`/`RLE`/`RLE_DICTIONARY` for the default value
+column and `RLE`/`BYTE_STREAM_SPLIT` for BSS (both ZSTD level 1). The configured
+storage threshold remains a 5% reduction; this repeated SST-size result passes
+that threshold. It is post-flush evidence only, not a compaction result or a
+general float-compression claim.
+
+For every base/candidate group in all three runs, rows were compared by the same
+primary key and timestamp and their Float64 bits were exact matches: 950
+integer-only and 50 fractional-only series, 4,104,000 and 216,000 rows
+respectively. The six canonical sorted-row SHA-256 results are identical:
+
+```
+48f87d7d01bc8a0ce9a9cdb3033f322e787784fcae61f1417ac25b05c4a40375
+```
+
+This verifies exact cross-target stored rows, not independent reconstruction of
+the generator output. All 1,000 series had both rises and falls, and every one
+of the 36 inspected SSTs contained both integer-valued and fractional values;
+these were not stored as two disjoint file sets.
 
 ## Warmed endpoint SQL
 
-Each query had three warmups followed by 15 measured endpoint requests. Values
-below are base/candidate median and p95 latency in milliseconds; delta is
-`(candidate median - base median) / base median × 100%`.
+Each query used three warmups followed by 15 measured endpoint requests. Values
+are median/p95 milliseconds; delta is `(BSS median - default median) / default
+median × 100%`. The guardrail remains a maximum 25% candidate median regression and
+was not changed for these runs.
 
-| Run | Query | Base median / p95 | Candidate median / p95 | Delta |
-| --- | --- | ---: | ---: | ---: |
-| formal-1 | `sum_all_values` | 7.23 / 8.36 | 6.55 / 7.52 | -9.4% |
-| formal-1 | `hourly_sum_values` | 23.11 / 28.71 | 28.76 / 34.74 | +24.4% |
-| formal-2 | `sum_all_values` | 6.77 / 7.70 | 7.61 / 8.76 | +12.4% |
-| formal-2 | `hourly_sum_values` | 25.48 / 33.30 | 29.26 / 30.61 | +14.8% |
-| formal-3 | `sum_all_values` | 8.97 / 10.38 | 9.12 / 9.68 | +1.6% |
-| formal-3 | `hourly_sum_values` | 33.44 / 43.80 | 36.89 / 44.14 | +10.3% |
+| Run | Query | Default median / p95 | BSS median / p95 | Delta | Guardrail |
+| --- | --- | ---: | ---: | ---: | --- |
+| mixed-1 | `sum_all_values` | 27.13 / 37.38 | 25.45 / 38.99 | -6.21% | pass |
+| mixed-1 | `hourly_sum_values` | 118.78 / 136.63 | 130.93 / 185.26 | +10.23% | pass |
+| mixed-2 | `sum_all_values` | 24.02 / 35.02 | 36.34 / 56.01 | +51.31% | **fail** |
+| mixed-2 | `hourly_sum_values` | 95.58 / 120.40 | 85.45 / 148.03 | -10.60% | pass |
+| mixed-3 | `sum_all_values` | 38.25 / 55.41 | 19.68 / 29.49 | -48.55% | pass |
+| mixed-3 | `hourly_sum_values` | 56.77 / 148.29 | 121.87 / 143.16 | +114.66% | **fail** |
 
-The SQL guardrail was a maximum 25% candidate median regression; all six checks
-passed. `hourly_sum_values` was slower in all three runs despite passing.
+The two failures mean this evidence does **not** establish performance acceptance
+or a safe degradation. These are noisy measurements on a local development host;
+there was no CPU isolation or cache flush, and no cause of the variation has been
+proved.
 
 ## Stopped-directory warm readers
 
-These are real `greptime datanode parquetbench` and sequential `scanbench`
-measurements against the complete landed SST sets, not endpoint SQL latency.
-For each of three formal datasets, the reader script used eight outer rounds,
-eight inner iterations per command, discarded iteration 1, computed the median
-of iterations 2–8, then summed the six per-file parquet medians before taking
-the median across outer rounds. Thus the parquet statistic is a **sum of
-per-SST warm medians**, not a whole-region latency. `scanbench` instead covered
-the whole region, taking the outer median of its eight warm medians.
+For each of the three datasets, eight outer rounds alternate base/candidate order.
+Each command runs eight iterations, discards the first, and takes the median of
+iterations 2–8. Parquetbench reads every SST: sum the six per-file medians, then
+take the median of the eight round totals. Scanbench scans the whole region and
+reports the outer median of its eight warm medians. These are distinct metrics,
+not interchangeable whole-query latencies. Deltas are ratios of separately
+aggregated medians. Value projection selects `greptime_value`; all-column
+parquetbench returns five physical columns, while scanbench uses `{}` (all
+region columns). Projection order is fixed; target order alternates.
 
-Both projections were measured: `value` reads only `greptime_value`;
-`allcolumns` selects all columns (five physical columns in direct parquetbench;
-all region columns in scanbench). The targets alternated order. No
-arbitrary base/candidate pair was selected. Across the three datasets this was
-672 commands × 8 iterations = 5,376 timed iterations.
-
-| Dataset | Projection | Reader | Base ms | Candidate ms | Delta |
+| Dataset | Projection | Reader | Base ms | BSS ms | Change |
 | --- | --- | --- | ---: | ---: | ---: |
-| formal-1 | value | parquetbench | 55.946 | 18.995 | -66.05% |
-| formal-1 | value | scanbench | 75.772 | 40.161 | -47.00% |
-| formal-1 | allcolumns | parquetbench | 65.515 | 28.804 | -56.03% |
-| formal-1 | allcolumns | scanbench | 120.528 | 85.226 | -29.29% |
-| formal-2 | value | parquetbench | 111.607 | 35.158 | -68.50% |
-| formal-2 | value | scanbench | 140.960 | 77.098 | -45.31% |
-| formal-2 | allcolumns | parquetbench | 120.564 | 72.044 | -40.24% |
-| formal-2 | allcolumns | scanbench | 226.479 | 224.709 | -0.78% |
-| formal-3 | value | parquetbench | 71.076 | 20.752 | -70.80% |
-| formal-3 | value | scanbench | 79.159 | 42.435 | -46.39% |
-| formal-3 | allcolumns | parquetbench | 72.522 | 34.300 | -52.70% |
-| formal-3 | allcolumns | scanbench | 137.906 | 89.151 | -35.35% |
+| mixed-1 | value | parquetbench | 95.957 | 68.442 | -28.67% |
+| mixed-1 | value | scanbench | 144.293 | 115.421 | -20.01% |
+| mixed-1 | allcolumns | parquetbench | 176.620 | 103.761 | -41.25% |
+| mixed-1 | allcolumns | scanbench | 200.881 | 202.660 | +0.89% |
+| mixed-2 | value | parquetbench | 112.151 | 74.275 | -33.77% |
+| mixed-2 | value | scanbench | 109.824 | 78.189 | -28.80% |
+| mixed-2 | allcolumns | parquetbench | 141.944 | 102.681 | -27.66% |
+| mixed-2 | allcolumns | scanbench | 211.414 | 163.261 | -22.78% |
+| mixed-3 | value | parquetbench | 121.827 | 67.565 | -44.54% |
+| mixed-3 | value | scanbench | 100.968 | 79.878 | -20.89% |
+| mixed-3 | allcolumns | parquetbench | 113.984 | 94.361 | -17.22% |
+| mixed-3 | allcolumns | scanbench | 193.101 | 164.175 | -14.98% |
 
-Warm results varied substantially, especially formal-2 all-column scanbench:
-its eight round medians ranged from 120.158–422.669 ms (base) and
-85.224–243.650 ms (candidate); candidate was slower in rounds 7 and 8.
-These deltas are ratios of separately aggregated medians, not medians of paired
-percentage changes. Scanbench's projection is verified from commands/configs,
-not a printed schema. Target order alternated, but projection order stayed fixed.
-The runs used a non-isolated local development host, with no CPU affinity or
-cache drop. No specific cause of the variability was established.
+All 672 commands / 5,376 raw iterations returned the expected rows; timing,
+projection configurations, parquet schemas and order metadata were checked.
+Run 1 all-column scanbench was **0.89% slower**. Its round medians ranged from
+167.197–663.465 ms (base) and 133.339–557.352 ms (BSS). There is substantial
+variability; these measurements do not establish a stable gain on every read
+path. Runs used a non-isolated development host without CPU affinity or cache
+drops. The source of the variability was not established.
 
-## Scope, comparison, and artifacts
+## Scope and recorded checks
 
-This is a post-flush test of monotonic integer-valued `DOUBLE`s. It is not a
-general float-compression result, and no compaction result was tested.
+This case compares default and BSS post-flush data only. It adds no benchmark
+framework and no public artifact upload. Historical unique-integer results and
+other mixed counter/gauge studies have different data and methods; they are
+context only and do not apply to this workload.
 
-[PR #8548](https://github.com/GreptimeTeam/greptimedb/pull/8548) used mixed
-counters and gauges and reported 25.66% storage savings with 11.36–41.34% warm
-slowdown. Its different dataset and methodology make these results neither a
-direct comparison nor a contradiction.
+Recorded checks for this change set: 37 targeted Rust tests, 20 Python tooling
+tests, and 15 plans passed. Full-workspace tests were not run.
 
-The local artifacts were not uploaded. They are rooted at
-`/mnt/nvme_rust/rust-targets/metric-bss-perf/experiments/`:
+Local artifacts are under
+`/mnt/nvme_rust/rust-targets/metric-bss-perf/experiments/mixed-{1,2,3}/`,
+including `value-verification.json`, `verification.txt`, and each run's
+`sst_float_bss/query-regression-report.json`.
 
-- `formal-{1,2,3}/sst_float_bss/query-regression-report.json` and
-  `prepare-remote.json`: SST, schema/data, endpoint-SQL, and read-bench data.
-- `warm-comparison.json`: the 12-row warm-reader table above.
-- `warm-formal-{1,2,3}/summary.json`: raw warm-reader summaries.
-- `environment.txt`: host and binary checksums.
-
-Reproduce with the existing commands in `tests/perf/README.md` and the external
-artifact scripts `tools/warm_readers.py` and `tools/verify.py`; this result adds
-no new benchmark framework.
-
-## Verification recorded for this case
-
-- Release build/check: passed.
-- Targeted `cargo nextest`: 35 tests passed.
-- Python tooling tests: 20 tests passed.
-- Plan validation: 15 plans passed.
-- Existing default smoke driver: recorded status 0; both targets returned 16 rows.
-- All three formal drivers: recorded status 0 and report `ok`; artifact verification passed.
-  The outer Python driver always exits 0, so its exit code alone is not validation.
-
-No full-workspace test suite or Clippy run is claimed here.
+Warm artifacts are in sibling `warm-mixed-{1,2,3}/` directories;
+`mixed-warm-comparison.json` contains the table and per-round ranges.
+`mixed-file-composition.json` records integer/fractional counts for each SST.
+The shared release `greptime` SHA-256 is
+`2ce0ab1670cd4bdb0f60c87af3e1f494ee66c3c6ab83bce943a073638514eb2b`.
