@@ -202,6 +202,7 @@ fn test_load_datanode_example_config() {
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
+                    experimental_scan_memory_budget: MemoryLimit::Percentage(25),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -441,6 +442,7 @@ fn test_load_standalone_example_config() {
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
+                    experimental_scan_memory_budget: MemoryLimit::Percentage(25),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
