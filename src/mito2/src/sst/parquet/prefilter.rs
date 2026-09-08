@@ -402,6 +402,7 @@ pub(crate) fn build_bulk_filter_plan(
 /// the prefilter pass. A caller can postpone simple timestamp filters to the normal
 /// precise-filter path when the scan time range covers the SST. When predicate
 /// prefiltering is disabled, all simple filters remain on the normal path instead.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_reader_filter_plan(
     predicate: Option<&Predicate>,
     expected_metadata: Option<&RegionMetadata>,
@@ -602,6 +603,7 @@ impl PrefilterContextBuilder {
     /// - The read format doesn't use flat layout
     /// - No prefilter columns are selected
     /// - Prefilter would read the full projection without any PK filter
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         read_format: &FlatReadFormat,
         codec: &Arc<dyn PrimaryKeyCodec>,
@@ -1096,14 +1098,14 @@ fn all_prefilter_entries(prefilter_ctx: &PrefilterContext) -> Vec<PrefilterEntry
             .filters
             .iter()
             .enumerate()
-            .filter_map(|(idx, _)| {
-                (!prefilter_ctx
+            .filter(|(idx, _)| {
+                !prefilter_ctx
                     .proven_simple_filters
-                    .get(idx)
+                    .get(*idx)
                     .copied()
-                    .unwrap_or(false))
-                .then(|| PrefilterEntry::without_cache(PrefilterEntryKind::Simple(idx)))
-            }),
+                    .unwrap_or(false)
+            })
+            .map(|(idx, _)| PrefilterEntry::without_cache(PrefilterEntryKind::Simple(idx))),
     );
     entries.extend(
         prefilter_ctx
@@ -2028,15 +2030,15 @@ mod tests {
 
     #[test]
     fn test_identity_row_selection_preserves_input() {
-        let sparse = Some(RowSelection::from(vec![
+        let sparse = RowSelection::from(vec![
             RowSelector::skip(2),
             RowSelector::select(3),
             RowSelector::skip(1),
-        ]));
-        assert_eq!(identity_row_selection(&sparse, 6), sparse.unwrap());
+        ]);
+        assert_eq!(identity_row_selection(&Some(sparse.clone()), 6), sparse);
 
-        let empty = Some(RowSelection::from(vec![]));
-        assert_eq!(identity_row_selection(&empty, 6), empty.unwrap());
+        let empty = RowSelection::from(vec![]);
+        assert_eq!(identity_row_selection(&Some(empty.clone()), 6), empty);
         assert_eq!(
             identity_row_selection(&None, 6),
             RowSelection::from(vec![RowSelector::select(6)])
