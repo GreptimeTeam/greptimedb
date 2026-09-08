@@ -469,16 +469,6 @@ impl BatchingTask {
             self.config.sink_table_name.clone(),
         )
         .await?;
-        self.validate_sink_table_schema_with_table_and_values(engine, table, values)
-            .await
-    }
-
-    async fn validate_sink_table_schema_with_table_and_values(
-        &self,
-        engine: &QueryEngineRef,
-        table: TableRef,
-        values: &BTreeMap<String, ScalarValue>,
-    ) -> Result<Arc<Schema>, Error> {
         let table_meta = &table.table_info().meta;
         let merge_mode_last_non_null =
             is_merge_mode_last_non_null(&table_meta.options.extra_options);
@@ -491,7 +481,7 @@ impl BatchingTask {
             table_meta.schema.clone(),
             &primary_key_indices,
             merge_mode_last_non_null,
-            Some(values),
+            values,
         )
         .await
         .map(|_| table_meta.schema.clone())
@@ -920,10 +910,8 @@ impl BatchingTask {
     /// Consume the live dirty signal for an unscoped query while keeping a copy
     /// that can be restored if planning or execution fails.
     fn drain_dirty_windows_signal(&self) -> (bool, DirtyTimeWindows) {
-        let mut state = self.state.write().unwrap();
-        let dirty_windows_to_restore = state.dirty_time_windows.clone();
+        let dirty_windows_to_restore = self.state.write().unwrap().dirty_time_windows.detach();
         let is_dirty = !dirty_windows_to_restore.is_empty();
-        state.dirty_time_windows.clean();
         (is_dirty, dirty_windows_to_restore)
     }
 
@@ -951,7 +939,7 @@ impl BatchingTask {
                 sink_table_schema,
                 primary_key_indices,
                 allow_partial,
-                Some(values),
+                values,
             )
             .await,
         )?;
@@ -1513,6 +1501,7 @@ impl BatchingTask {
 
     /// Generate the next plan and classify its coverage so checkpoint handling
     /// knows whether it is full-query, scoped repair, fenced repair, or delta.
+    #[cfg(test)]
     async fn gen_query_with_time_window(
         &self,
         engine: QueryEngineRef,

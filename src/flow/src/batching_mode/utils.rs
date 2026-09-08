@@ -790,8 +790,7 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
         .iter()
         .map(|c| (&c.output_field_name, c))
         .collect::<HashMap<_, _>>();
-    let mut projection_exprs = Vec::with_capacity(analysis.output_field_names.len());
-    let mut group_exprs = Vec::new();
+    let mut ordinary_exprs = Vec::with_capacity(analysis.output_field_names.len());
     let mut state_aggr_exprs = Vec::new();
     for output_field_name in &analysis.output_field_names {
         if group_key_names.contains(output_field_name)
@@ -799,8 +798,7 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
         {
             let expr =
                 qualified_col(delta_alias, output_field_name.clone()).alias(output_field_name);
-            projection_exprs.push(expr.clone());
-            group_exprs.push(expr);
+            ordinary_exprs.push(expr);
         } else if let Some(merge_col) = merge_columns.get(output_field_name) {
             if matches!(
                 &merge_col.merge_op,
@@ -809,8 +807,7 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
                 state_aggr_exprs.push(build_state_delta_merge_expr(engine, merge_col)?);
             } else {
                 let expr = build_left_join_merge_expr(delta_alias, sink_alias, merge_col)?;
-                projection_exprs.push(expr.clone());
-                group_exprs.push(expr);
+                ordinary_exprs.push(expr);
             }
         } else {
             return InvalidQuerySnafu {
@@ -824,7 +821,7 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
 
     if state_merge {
         let aggregated = LogicalPlanBuilder::from(joined)
-            .aggregate(group_exprs, state_aggr_exprs)
+            .aggregate(ordinary_exprs, state_aggr_exprs)
             .with_context(|_| DatafusionSnafu {
                 context: "Failed to aggregate state delta merge plan".to_string(),
             })?
@@ -849,7 +846,7 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
             })
     } else {
         LogicalPlanBuilder::from(joined)
-            .project(projection_exprs)
+            .project(ordinary_exprs)
             .with_context(|_| DatafusionSnafu {
                 context: "Failed to build projection merge plan for incremental sink merge"
                     .to_string(),
@@ -1073,6 +1070,7 @@ pub async fn sql_to_df_plan(
 
 /// Generate a plan that matches the schema of the sink table
 /// from given sql by alias and adding auto columns
+#[cfg(test)]
 pub(crate) async fn gen_plan_with_matching_schema(
     sql: &str,
     query_ctx: QueryContextRef,
@@ -1088,7 +1086,7 @@ pub(crate) async fn gen_plan_with_matching_schema(
         sink_table_schema,
         primary_key_indices,
         allow_partial,
-        None,
+        &BTreeMap::new(),
     )
     .await
 }
@@ -1100,7 +1098,7 @@ pub(crate) async fn gen_plan_with_matching_schema_and_values(
     sink_table_schema: SchemaRef,
     primary_key_indices: &[usize],
     allow_partial: bool,
-    ordinary_values: Option<&BTreeMap<String, ScalarValue>>,
+    ordinary_values: &BTreeMap<String, ScalarValue>,
 ) -> Result<LogicalPlan, Error> {
     let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), sql, false).await?;
 
@@ -1108,7 +1106,7 @@ pub(crate) async fn gen_plan_with_matching_schema_and_values(
         sink_table_schema,
         primary_key_indices.to_vec(),
         allow_partial,
-        ordinary_values.cloned().unwrap_or_default(),
+        ordinary_values.clone(),
     );
     let plan = plan
         .clone()

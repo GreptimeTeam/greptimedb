@@ -960,7 +960,7 @@ async fn test_gen_plan_with_matching_schema_injects_attempt_columns_in_sink_orde
         sink_schema,
         &[],
         false,
-        Some(&values),
+        &values,
     )
     .await
     .unwrap();
@@ -1002,7 +1002,7 @@ async fn test_gen_plan_with_matching_schema_rejects_arbitrary_missing_attempt_co
         sink_schema,
         &[],
         false,
-        Some(&BTreeMap::new()),
+        &BTreeMap::new(),
     )
     .await
     .unwrap_err()
@@ -2485,7 +2485,7 @@ async fn test_gen_plan_with_matching_schema_rejects_unknown_attempt_column() {
             sink_schema,
             primary_key_indices,
             allow_partial,
-            Some(&values),
+            &values,
         )
         .await
         .unwrap_err()
@@ -2520,7 +2520,7 @@ async fn test_gen_plan_with_matching_schema_rejects_wrong_attempt_column_type() 
         sink_schema,
         &[0],
         false,
-        Some(&values),
+        &values,
     )
     .await
     .unwrap_err()
@@ -2554,7 +2554,7 @@ async fn test_gen_plan_with_matching_schema_matches_positional_alias_and_injects
         sink_schema,
         &[0],
         false,
-        Some(&values),
+        &values,
     )
     .await
     .unwrap();
@@ -2594,7 +2594,7 @@ async fn test_gen_plan_with_matching_schema_injects_ordinary_columns_after_auto_
         sink_schema,
         &[],
         false,
-        Some(&ordinary_values),
+        &ordinary_values,
     )
     .await
     .unwrap();
@@ -2686,7 +2686,7 @@ async fn test_gen_plan_with_matching_schema_rejects_attempt_output_collision() {
             sink_schema,
             &[0],
             allow_partial,
-            Some(&values),
+            &values,
         )
         .await
         .unwrap_err()
