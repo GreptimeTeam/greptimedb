@@ -761,13 +761,16 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let mut services = Services::new_with_http_routes(
-            opts.clone(),
-            ExternalMetricHttpConsumers::default(),
-            otlp_http_routes,
-            instance,
-            Default::default(),
-        );
+        let mut services = match otlp_http_routes {
+            OtlpHttpRoutes::Configured => Services::new(opts.clone(), instance, Default::default()),
+            OtlpHttpRoutes::MetricsOnly => Services::new_with_http_routes(
+                opts.clone(),
+                ExternalMetricHttpConsumers::default(),
+                OtlpHttpRoutes::MetricsOnly,
+                instance,
+                Default::default(),
+            ),
+        };
         let wiring = services.metric_batcher_wiring.clone();
         let request_memory_limiter = services.server_memory_limiter.clone();
         let (http_server, _) = services
@@ -802,8 +805,8 @@ mod tests {
             "/v1/otlp/v1/traces",
             "/v1/otlp/v1/logs",
         ] {
-            assert_ne!(
-                StatusCode::NOT_FOUND,
+            assert_eq!(
+                StatusCode::BAD_REQUEST,
                 route_status(&app, path).await,
                 "{path}"
             );
@@ -838,22 +841,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_only_exposes_metrics_but_not_traces_or_logs() {
-        let mut opts = FrontendOptions::default();
-        opts.otlp.enable = false;
-        let (app, _) = services_http_app(opts, OtlpHttpRoutes::MetricsOnly).await;
+        for otlp_enabled in [false, true] {
+            let mut opts = FrontendOptions::default();
+            opts.otlp.enable = otlp_enabled;
+            let (app, _) = services_http_app(opts, OtlpHttpRoutes::MetricsOnly).await;
 
-        assert_ne!(
-            StatusCode::NOT_FOUND,
-            route_status(&app, "/v1/otlp/v1/metrics").await
-        );
-        assert_eq!(
-            StatusCode::NOT_FOUND,
-            route_status(&app, "/v1/otlp/v1/traces").await
-        );
-        assert_eq!(
-            StatusCode::NOT_FOUND,
-            route_status(&app, "/v1/otlp/v1/logs").await
-        );
+            assert_eq!(
+                StatusCode::BAD_REQUEST,
+                route_status(&app, "/v1/otlp/v1/metrics").await,
+                "otlp_enabled={otlp_enabled}"
+            );
+            assert_eq!(
+                StatusCode::NOT_FOUND,
+                route_status(&app, "/v1/otlp/v1/traces").await,
+                "otlp_enabled={otlp_enabled}"
+            );
+            assert_eq!(
+                StatusCode::NOT_FOUND,
+                route_status(&app, "/v1/otlp/v1/logs").await,
+                "otlp_enabled={otlp_enabled}"
+            );
+        }
     }
 
     #[test]
