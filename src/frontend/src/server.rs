@@ -695,11 +695,15 @@ mod tests {
     use arrow_flight::{FlightData, PutResult, Ticket};
     use async_trait::async_trait;
     use auth::{UserProviderRef, static_user_provider_from_option};
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
     use client::{Client, Database};
     use meta_client::client::MetaClientBuilder;
     use servers::grpc::GRPC_SERVER;
     use servers::grpc::flight::{FlightCraft, FlightCraftRef, TonicStream};
     use tonic::{Code, Request, Response, Status, Streaming};
+    use tower::ServiceExt;
 
     use super::*;
     use crate::instance::builder::FrontendBuilder;
@@ -740,6 +744,116 @@ mod tests {
             batch_mode,
         );
         effective_http_options(&opts.http, &metric_batching)
+    }
+
+    async fn services_http_app(
+        opts: FrontendOptions,
+        otlp_http_routes: OtlpHttpRoutes,
+    ) -> (Router, MetricBatcherWiring) {
+        let meta_client = Arc::new(
+            MetaClientBuilder::new(0, Role::Frontend)
+                .enable_procedure()
+                .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&opts, meta_client)
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let mut services = Services::new_with_http_routes(
+            opts.clone(),
+            ExternalMetricHttpConsumers::default(),
+            otlp_http_routes,
+            instance,
+            Default::default(),
+        );
+        let wiring = services.metric_batcher_wiring.clone();
+        let request_memory_limiter = services.server_memory_limiter.clone();
+        let (http_server, _) = services
+            .build_http_server(&opts, opts.to_toml().unwrap(), request_memory_limiter)
+            .unwrap();
+        let app = http_server.build(http_server.make_app()).unwrap();
+
+        (app, wiring)
+    }
+
+    async fn route_status(app: &Router, path: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                HttpRequest::post(path)
+                    .header(axum::http::header::CONTENT_TYPE, "application/x-protobuf")
+                    .body(Body::from(vec![0xff]))
+                    .expect("valid OTLP route request"),
+            )
+            .await
+            .expect("OTLP route response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn test_configured_enabled_exposes_all_otlp_http_routes() {
+        let mut opts = FrontendOptions::default();
+        opts.otlp.enable = true;
+        let (app, _) = services_http_app(opts, OtlpHttpRoutes::Configured).await;
+
+        for path in [
+            "/v1/otlp/v1/metrics",
+            "/v1/otlp/v1/traces",
+            "/v1/otlp/v1/logs",
+        ] {
+            assert_ne!(
+                StatusCode::NOT_FOUND,
+                route_status(&app, path).await,
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_configured_disabled_exposes_no_otlp_http_routes_or_consumer() {
+        let mut opts = FrontendOptions::default();
+        opts.otlp.enable = false;
+        let (app, wiring) = services_http_app(opts, OtlpHttpRoutes::Configured).await;
+
+        for path in [
+            "/v1/otlp/v1/metrics",
+            "/v1/otlp/v1/traces",
+            "/v1/otlp/v1/logs",
+        ] {
+            assert_eq!(
+                StatusCode::NOT_FOUND,
+                route_status(&app, path).await,
+                "{path}"
+            );
+        }
+        assert!(
+            wiring
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(consumer, _)| *consumer != MetricBatchConsumer::OtlpHttp)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_metrics_only_exposes_metrics_but_not_traces_or_logs() {
+        let mut opts = FrontendOptions::default();
+        opts.otlp.enable = false;
+        let (app, _) = services_http_app(opts, OtlpHttpRoutes::MetricsOnly).await;
+
+        assert_ne!(
+            StatusCode::NOT_FOUND,
+            route_status(&app, "/v1/otlp/v1/metrics").await
+        );
+        assert_eq!(
+            StatusCode::NOT_FOUND,
+            route_status(&app, "/v1/otlp/v1/traces").await
+        );
+        assert_eq!(
+            StatusCode::NOT_FOUND,
+            route_status(&app, "/v1/otlp/v1/logs").await
+        );
     }
 
     #[test]
