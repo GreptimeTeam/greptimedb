@@ -258,6 +258,55 @@ fn parse_terminal_metrics(metrics_json: &str) -> Result<RecordBatchMetrics> {
     })
 }
 
+fn spawn_affected_rows_trailing_metrics_task<S>(
+    terminal_metrics: &OutputMetrics,
+    mut reader: FlightMessageReader<S>,
+) where
+    S: Stream<Item = Result<FlightMessage>> + Send + Unpin + 'static,
+{
+    let metrics_ref = Arc::downgrade(&terminal_metrics.inner);
+    let remote_addr = reader.remote_addr().to_string();
+    let task = common_runtime::spawn_global(async move {
+        let result =
+            tokio::time::timeout(FLIGHT_TRAILING_METRICS_TIMEOUT, reader.read_next()).await;
+        let Some(inner) = metrics_ref.upgrade() else {
+            return;
+        };
+        let metrics = OutputMetrics { inner };
+        match result {
+            Ok(Ok(Some(FlightMessage::Metrics(s)))) => match parse_terminal_metrics(&s) {
+                Ok(metrics_json) => metrics.update(Some(metrics_json)),
+                Err(error) => {
+                    metrics.set_completion_error(error.to_string());
+                    warn!(
+                        "Failed to decode trailing Flight metrics from {}: {}",
+                        remote_addr, error
+                    );
+                }
+            },
+            Ok(Ok(None)) => {}
+            Ok(Ok(Some(other))) => {
+                let error = format!("Unexpected trailing Flight message: {other:?}");
+                metrics.set_completion_error(error.clone());
+                warn!("{} from {}", error, remote_addr);
+            }
+            Ok(Err(error)) => {
+                let error = flight_stream_error(&remote_addr, error);
+                metrics.set_completion_error(error.to_string());
+                warn!("{}", error);
+            }
+            Err(_) => {
+                let error = "Timed out waiting for trailing Flight metrics";
+                metrics.set_completion_error(error);
+                warn!("{} from {}", error, remote_addr);
+            }
+        }
+        metrics.mark_ready();
+        metrics.take_compatibility_task();
+    });
+    terminal_metrics.set_compatibility_task(task.abort_handle());
+}
+
 struct StreamWithMetrics {
     stream: common_recordbatch::SendableRecordBatchStream,
     metrics: OutputMetrics,
@@ -352,50 +401,7 @@ where
                 terminal_metrics.update(Some(parse_terminal_metrics(&metrics)?));
                 terminal_metrics.mark_ready();
             } else {
-                let metrics_ref = Arc::downgrade(&terminal_metrics.inner);
-                let remote_addr = reader.remote_addr().to_string();
-                let task = common_runtime::spawn_global(async move {
-                    let result =
-                        tokio::time::timeout(FLIGHT_TRAILING_METRICS_TIMEOUT, reader.read_next())
-                            .await;
-                    let Some(inner) = metrics_ref.upgrade() else {
-                        return;
-                    };
-                    let metrics = OutputMetrics { inner };
-                    match result {
-                        Ok(Ok(Some(FlightMessage::Metrics(s)))) => {
-                            match parse_terminal_metrics(&s) {
-                                Ok(metrics_json) => metrics.update(Some(metrics_json)),
-                                Err(error) => {
-                                    metrics.set_completion_error(error.to_string());
-                                    warn!(
-                                        "Failed to decode trailing Flight metrics from {}: {}",
-                                        remote_addr, error
-                                    );
-                                }
-                            }
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Ok(Some(other))) => {
-                            let error = format!("Unexpected trailing Flight message: {other:?}");
-                            metrics.set_completion_error(error.clone());
-                            warn!("{} from {}", error, remote_addr);
-                        }
-                        Ok(Err(error)) => {
-                            let error = flight_stream_error(&remote_addr, error);
-                            metrics.set_completion_error(error.to_string());
-                            warn!("{}", error);
-                        }
-                        Err(_) => {
-                            let error = "Timed out waiting for trailing Flight metrics";
-                            metrics.set_completion_error(error);
-                            warn!("{} from {}", error, remote_addr);
-                        }
-                    }
-                    metrics.mark_ready();
-                    metrics.take_compatibility_task();
-                });
-                terminal_metrics.set_compatibility_task(task.abort_handle());
+                spawn_affected_rows_trailing_metrics_task(&terminal_metrics, reader);
             }
             Ok(OutputWithMetrics {
                 output: Output::new_with_affected_rows(rows),
