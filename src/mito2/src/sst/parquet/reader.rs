@@ -2557,9 +2557,11 @@ impl FlatRowGroupReader {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::collections::HashMap;
     use std::fmt::{Debug, Formatter};
     use std::sync::{Arc, LazyLock};
 
+    use api::v1::OpType;
     use common_error::ext::WhateverResult;
     use common_function::scalars::json::json_get::JsonGetWithType;
     use common_function::scalars::udf::create_udf;
@@ -2571,24 +2573,270 @@ mod tests {
         ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
         col, lit,
     };
-    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
-    use datatypes::arrow::datatypes::{Fields, Schema};
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, StructArray,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::{Fields, Schema, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
     use parquet::arrow::ArrowWriter;
+    use parquet::arrow::arrow_reader::RowSelector;
     use parquet::file::properties::WriterProperties;
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;
     use table::predicate::Predicate;
 
     use super::*;
+    use crate::cache::CacheManager;
     use crate::sst::parquet::metadata::MetadataLoader;
+    use crate::sst::parquet::prefilter::{build_reader_filter_plan, execute_prefilter};
     use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
+    use crate::sst::parquet::row_group::ParquetFetchMetrics;
     use crate::test_util::sst_util::{sst_file_handle, sst_region_metadata};
+
+    async fn prefilter_test_builder(
+        object_store: ObjectStore,
+        predicate: Predicate,
+        cache_strategy: CacheStrategy,
+    ) -> (RowGroupReaderBuilder, Arc<RegionMetadata>) {
+        let metadata = Arc::new(
+            crate::test_util::sst_util::sst_region_metadata_with_encoding(
+                PrimaryKeyEncoding::Sparse,
+            ),
+        );
+        let batch = |start: i64, end: i64| {
+            let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
+            let mut fields = Vec::new();
+            let mut timestamps = Vec::new();
+            for value in start..end {
+                let tag = if value == 4 { "b" } else { "a" };
+                primary_key
+                    .append(crate::test_util::sst_util::new_sparse_primary_key(
+                        &[tag, "x"],
+                        &metadata,
+                        1,
+                        100,
+                    ))
+                    .unwrap();
+                fields.push(value as u64);
+                timestamps.push(value);
+            }
+            RecordBatch::try_new(
+                crate::sst::to_flat_sst_arrow_schema(
+                    &metadata,
+                    &crate::sst::FlatSchemaOptions::default(),
+                ),
+                vec![
+                    Arc::new(UInt64Array::from(fields)) as ArrayRef,
+                    Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
+                    Arc::new(primary_key.finish()) as ArrayRef,
+                    Arc::new(UInt64Array::from_value(1, (end - start) as usize)) as ArrayRef,
+                    Arc::new(UInt8Array::from_value(
+                        OpType::Put as u8,
+                        (end - start) as usize,
+                    )) as ArrayRef,
+                ],
+            )
+            .unwrap()
+        };
+        let first_batch = batch(0, 3);
+        let second_batch = batch(3, 6);
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, first_batch.schema(), None).unwrap();
+        writer.write(&first_batch).unwrap();
+        writer.flush().unwrap();
+        writer.write(&second_batch).unwrap();
+        writer.close().unwrap();
+
+        let file_handle = sst_file_handle(0, 6);
+        let file_path = file_handle.file_path("prefilter_test", PathType::Bare);
+        let file_size = bytes.len() as u64;
+        object_store.write(&file_path, bytes).await.unwrap();
+
+        let mut cache_metrics = MetadataCacheMetrics::default();
+        let parquet_meta = Arc::new(
+            MetadataLoader::new(object_store.clone(), &file_path, file_size)
+                .load(&mut cache_metrics)
+                .await
+                .unwrap(),
+        );
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(
+                metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
+            None,
+            &file_path,
+            false,
+        )
+        .unwrap();
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let filter_plan = build_reader_filter_plan(
+            Some(&predicate),
+            None,
+            PreFilterMode::All,
+            true,
+            false,
+            &read_format,
+            &codec,
+            &parquet_meta,
+        );
+        assert!(filter_plan.prefilter_builder.is_some());
+
+        let output_schema = read_format.arrow_schema().clone();
+        let parquet_schema = parquet_meta.file_metadata().schema_descr();
+        let projection = build_projection_plan(read_format.parquet_read_columns(), parquet_schema);
+        let arrow_metadata =
+            ArrowReaderMetadata::try_new(parquet_meta.clone(), ArrowReaderOptions::new()).unwrap();
+        (
+            RowGroupReaderBuilder {
+                file_handle: file_handle.clone(),
+                file_path,
+                parquet_meta,
+                parquet_metadata_size: 0,
+                arrow_metadata,
+                output_schema,
+                json2_rewrite_targets: HashMap::new(),
+                object_store,
+                projection,
+                has_nested_projection: false,
+                cache_strategy,
+                prefilter_builder: filter_plan.prefilter_builder,
+                batch_size: DEFAULT_READ_BATCH_SIZE,
+            },
+            metadata,
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_execute_prefilter_proven_filters_preserve_selection_without_fetching() {
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+        let predicate = Predicate::new(vec![col("field_0").gt_eq(lit(0_u64))]);
+        let (reader_builder, _) =
+            prefilter_test_builder(object_store, predicate, CacheStrategy::Disabled).await;
+        let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
+
+        for original_selection in [
+            None,
+            Some(RowSelection::from(vec![
+                RowSelector::skip(1),
+                RowSelector::select(1),
+                RowSelector::skip(1),
+            ])),
+            Some(RowSelection::from(vec![])),
+        ] {
+            let mut prefilter_ctx = prefilter_builder.build(0);
+            let fetch_metrics = ParquetFetchMetrics::default();
+            let result = execute_prefilter(
+                &mut prefilter_ctx,
+                &reader_builder,
+                &RowGroupBuildContext {
+                    row_group_idx: 0,
+                    row_selection: original_selection.clone(),
+                    fetch_metrics: Some(&fetch_metrics),
+                },
+            )
+            .await
+            .unwrap();
+
+            let expected = original_selection.unwrap_or_else(|| {
+                RowSelection::from(vec![RowSelector::select(
+                    reader_builder.parquet_meta.row_group(0).num_rows() as usize,
+                )])
+            });
+            assert_eq!(result.refined_selection, expected);
+            assert_eq!(result.filtered_rows, 0);
+            let metrics = fetch_metrics.data.lock().unwrap();
+            assert_eq!(metrics.pages_to_fetch_store, 0);
+            assert_eq!(metrics.pages_to_fetch_mem, 0);
+            assert_eq!(metrics.pages_to_fetch_write_cache, 0);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_execute_prefilter_mixed_filters_use_nonzero_row_group_and_cache() {
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+        let predicate = Predicate::new(vec![
+            col("field_0").gt_eq(lit(3_u64)),
+            col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(6), None))),
+            col("field_0").in_list(vec![lit(3_u64), lit(4_u64)], false),
+            col("tag_0").eq(lit("a")),
+        ]);
+        let cache = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder()
+                .prefilter_result_cache_size(1024)
+                .build(),
+        ));
+        let (reader_builder, _) =
+            prefilter_test_builder(object_store, predicate, cache.clone()).await;
+        let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
+
+        for pass in 0..2 {
+            let mut prefilter_ctx = prefilter_builder.build(1);
+            let fetch_metrics = ParquetFetchMetrics::default();
+            let fetch_metrics_ref = (pass == 1).then_some(&fetch_metrics);
+            let result = execute_prefilter(
+                &mut prefilter_ctx,
+                &reader_builder,
+                &RowGroupBuildContext {
+                    row_group_idx: 1,
+                    row_selection: Some(RowSelection::from(vec![
+                        RowSelector::select(2),
+                        RowSelector::skip(1),
+                    ])),
+                    fetch_metrics: fetch_metrics_ref,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.filtered_rows, 1);
+            assert_eq!(
+                result.refined_selection,
+                RowSelection::from(vec![RowSelector::select(1), RowSelector::skip(2),])
+            );
+            if pass == 1 {
+                assert_eq!(fetch_metrics.data.lock().unwrap().pages_to_fetch_store, 0);
+            }
+        }
+
+        let disabled = prefilter_test_builder(
+            ObjectStore::new(Memory::default()).unwrap(),
+            Predicate::new(vec![
+                col("field_0").gt_eq(lit(3_u64)),
+                col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(6), None))),
+                col("field_0").in_list(vec![lit(3_u64), lit(4_u64)], false),
+                col("tag_0").eq(lit("a")),
+            ]),
+            CacheStrategy::Disabled,
+        )
+        .await;
+        let mut prefilter_ctx = disabled.0.prefilter_builder.as_ref().unwrap().build(1);
+        let result = execute_prefilter(
+            &mut prefilter_ctx,
+            &disabled.0,
+            &RowGroupBuildContext {
+                row_group_idx: 1,
+                row_selection: None,
+                fetch_metrics: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.filtered_rows, 2);
+        assert_eq!(
+            result.refined_selection,
+            RowSelection::from(vec![RowSelector::select(1), RowSelector::skip(2)])
+        );
+    }
 
     #[test]
     fn test_skip_prefilter_for_json_get() -> WhateverResult<()> {

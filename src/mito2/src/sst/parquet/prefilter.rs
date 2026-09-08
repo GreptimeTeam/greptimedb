@@ -1929,14 +1929,30 @@ mod tests {
             Value::UInt64(i64::MAX as u64 + 3)
         );
 
-        let filter = SimpleFilterEvaluator::try_new(&col("x").not_eq(lit(5_i64))).unwrap();
-        assert!(!simple_filter_is_true_by_values(
-            &filter,
-            &Value::Int64(5),
-            Some(Value::Int64(1)),
-            Some(Value::Int64(9)),
-            Some(Value::UInt64(0)),
-        ));
+        // Boundary cases must remain unproven: the min/max interval still
+        // admits a row that violates the predicate.
+        for (expr, min, max) in [
+            (col("x").lt(lit(5_i64)), 1, 5),
+            (col("x").gt(lit(5_i64)), 5, 9),
+            (col("x").lt_eq(lit(5_i64)), 1, 6),
+            (col("x").gt_eq(lit(5_i64)), 4, 9),
+            (col("x").eq(lit(5_i64)), 5, 6),
+            (col("x").not_eq(lit(5_i64)), 5, 9),
+            (col("x").not_eq(lit(5_i64)), 1, 5),
+            (col("x").not_eq(lit(5_i64)), 1, 9),
+        ] {
+            let filter = SimpleFilterEvaluator::try_new(&expr).unwrap();
+            assert!(
+                !simple_filter_is_true_by_values(
+                    &filter,
+                    &Value::Int64(5),
+                    Some(Value::Int64(min)),
+                    Some(Value::Int64(max)),
+                    Some(Value::UInt64(0)),
+                ),
+                "{expr:?} must not be proven by stats {min}..={max}",
+            );
+        }
     }
 
     #[test]
@@ -2143,6 +2159,7 @@ mod tests {
             true,
             &full_read_format,
             &codec,
+            &stats_metadata(&[vec![1]], None),
         );
         assert!(postponed_time_plan.prefilter_builder.is_some());
         assert_eq!(
@@ -2160,6 +2177,7 @@ mod tests {
             true,
             &full_read_format,
             &codec,
+            &stats_metadata(&[vec![1]], None),
         );
         assert!(postponed_time_only_plan.prefilter_builder.is_none());
         assert_eq!(
