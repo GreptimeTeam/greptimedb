@@ -69,6 +69,7 @@ use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::ReadColumns;
+use crate::read::scan_memory::{self, ScanMemoryBudget, ScanMemoryGuard};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
@@ -245,6 +246,7 @@ pub(crate) struct ScanRegion {
     max_concurrent_scan_files: usize,
     /// Memory pool shared by internal scan operators across all queries.
     scan_memory_pool: Arc<dyn MemoryPool>,
+    scan_memory_budget: Option<ScanMemoryBudget>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
     /// Whether to ignore inverted index.
@@ -281,6 +283,7 @@ impl ScanRegion {
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+            scan_memory_budget: None,
             experimental_series_scan_v2: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
@@ -308,6 +311,11 @@ impl ScanRegion {
         max_concurrent_scan_files: usize,
     ) -> Self {
         self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    pub(crate) fn with_scan_memory_budget(mut self, budget: Option<ScanMemoryBudget>) -> Self {
+        self.scan_memory_budget = budget;
         self
     }
 
@@ -569,6 +577,7 @@ impl ScanRegion {
             .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_scan_memory_pool(self.scan_memory_pool)
+            .with_scan_memory_budget(self.scan_memory_budget)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(self.filter_deleted)
@@ -957,6 +966,8 @@ pub struct ScanInput {
     pub(crate) max_concurrent_scan_files: usize,
     /// Memory pool shared by internal scan operators across all queries.
     pub(crate) scan_memory_pool: Arc<dyn MemoryPool>,
+    /// Present only when every selected SST has an estimate and no extension sources exist.
+    scan_memory_budget: Option<ScanMemoryBudget>,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
@@ -1039,6 +1050,7 @@ impl ScanInput {
                 ignore_file_not_found: false,
                 max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
                 scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+                scan_memory_budget: None,
                 inverted_index_appliers: [None, None],
                 bloom_filter_index_appliers: [None, None],
                 fulltext_index_appliers: [None, None],
@@ -1107,6 +1119,17 @@ impl ScanInputBuilder {
     /// Builds a finalized [ScanInput] and computes its scan analysis.
     #[must_use]
     pub(crate) fn build(mut self) -> ScanInput {
+        let use_budget = !self.input.compaction
+            && self
+                .input
+                .files
+                .iter()
+                .all(|file| file.meta_ref().max_row_group_uncompressed_size > 0);
+        #[cfg(feature = "enterprise")]
+        let use_budget = use_budget && self.input.extension_ranges.is_empty();
+        if !use_budget && self.input.scan_memory_budget.take().is_some() && !self.input.compaction {
+            crate::metrics::SCAN_ESTIMATED_MEMORY_FALLBACK_TOTAL.inc();
+        }
         let input = &self.input;
         let eligible = !input.compaction
             && !input.files.is_empty()
@@ -1260,6 +1283,11 @@ impl ScanInputBuilder {
         max_concurrent_scan_files: usize,
     ) -> Self {
         self.input.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    pub(crate) fn with_scan_memory_budget(mut self, budget: Option<ScanMemoryBudget>) -> Self {
+        self.input.scan_memory_budget = budget;
         self
     }
 
@@ -1422,6 +1450,27 @@ impl ScanInputBuilder {
 }
 
 impl ScanInput {
+    pub(crate) fn uses_scan_memory_budget(&self) -> bool {
+        self.scan_memory_budget.is_some()
+    }
+
+    pub(crate) fn reserve_scan_memory(
+        &self,
+        index: RowGroupIndex,
+    ) -> Result<Option<ScanMemoryGuard>> {
+        self.scan_memory_budget
+            .as_ref()
+            .map(|budget| {
+                scan_memory::reserve(
+                    budget,
+                    self.file_from_index(index)
+                        .meta_ref()
+                        .max_row_group_uncompressed_size,
+                )
+            })
+            .transpose()
+    }
+
     /// Builds memtable ranges to scan by `index`.
     pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
         let memtable = &self.memtables[index.index];
@@ -1669,12 +1718,19 @@ impl ScanInput {
                     // the channel with the permit held.
                     let maybe_batch = {
                         // Safety: We never close the semaphore.
-                        let _permit = semaphore.acquire().await.unwrap();
-                        input.next().await
+                        tokio::select! {
+                            _ = sender.closed() => break,
+                            batch = async {
+                                let _permit = semaphore.acquire().await.unwrap();
+                                input.next().await
+                            } => batch,
+                        }
                     };
                     match maybe_batch {
                         Some(Ok(batch)) => {
-                            let _ = sender.send(Ok(batch)).await;
+                            if sender.send(Ok(batch)).await.is_err() {
+                                break;
+                            }
                         }
                         Some(Err(e)) => {
                             let _ = sender.send(Err(e)).await;
@@ -2298,6 +2354,78 @@ mod tests {
     use crate::sst::file::FileMeta;
     use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
+
+    #[tokio::test]
+    async fn test_scan_memory_budget_fallback_and_cancellation() {
+        use common_base::memory_limit::MemoryLimit;
+        use common_base::readable_size::ReadableSize;
+
+        use crate::read::scan_memory::{hold_reservation, new_scan_memory_budget};
+
+        let budget = new_scan_memory_budget(MemoryLimit::Size(ReadableSize::kb(3)), 0).unwrap();
+        let make_file = |size| {
+            FileHandle::new(
+                FileMeta {
+                    max_row_group_uncompressed_size: size,
+                    ..Default::default()
+                },
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+            )
+        };
+        let metadata = metadata_with_time_index_unit(TimeUnit::Millisecond);
+        let input = new_scan_input(metadata.clone(), vec![])
+            .await
+            .with_files(vec![make_file(2048), make_file(0)])
+            .with_scan_memory_budget(Some(budget.clone()))
+            .with_max_concurrent_scan_files(1)
+            .build();
+        let scanner = SeqScan::new(input);
+        assert!(matches!(
+            scanner.check_scan_limit(),
+            Err(crate::error::Error::TooManyFilesToRead { .. })
+        ));
+
+        let input = new_scan_input(metadata, vec![])
+            .await
+            .with_files(vec![make_file(2048)])
+            .with_scan_memory_budget(Some(budget.clone()))
+            .build();
+        let index = RowGroupIndex {
+            index: 0,
+            row_group_index: -1,
+        };
+        // Independent readers share quota, even for the same file (as in two-phase series scans).
+        for permits in [0, 1] {
+            let guard = input.reserve_scan_memory(index).unwrap();
+            assert!(input.reserve_scan_memory(index).is_err());
+            let stream = Box::pin(hold_reservation(futures::stream::pending(), guard));
+            let (sender, receiver) = mpsc::channel(1);
+            input.spawn_flat_scan_task(stream, Arc::new(Semaphore::new(permits)), sender);
+            // Cancellation must release quota both while waiting for a permit and during a read.
+            drop(receiver);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while budget.used_bytes() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let guard = input.reserve_scan_memory(index).unwrap();
+        let mut failed = Box::pin(hold_reservation(
+            futures::stream::once(async {
+                crate::error::UnexpectedSnafu {
+                    reason: "injected reader failure",
+                }
+                .fail::<()>()
+            }),
+            guard,
+        ));
+        assert!(failed.next().await.unwrap().is_err());
+        // A failed stream can remain in the query plan without retaining the reservation.
+        assert_eq!(0, budget.used_bytes());
+        assert!(input.reserve_scan_memory(index).is_ok());
+    }
 
     async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInputBuilder {
         let env = SchedulerEnv::new().await;

@@ -160,7 +160,8 @@ pub struct MitoConfig {
     // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
-    /// Maximum number of SST files to scan concurrently (default 384).
+    /// Maximum number of SST files to scan concurrently when estimated memory
+    /// protection is unavailable or disabled (default 384).
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
@@ -168,6 +169,10 @@ pub struct MitoConfig {
     /// Setting it to 0 or "unlimited" disables the limit.
     /// Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
+    /// Estimated SST decoding budget shared across queries (default: 25% of system memory).
+    /// Supports absolute sizes or percentages. Exhaustion fails immediately.
+    /// Zero or "unlimited" restores file-count checks, as does missing SST size metadata.
+    pub experimental_scan_memory_budget: MemoryLimit,
     /// Behavior when scan memory tracking cannot acquire memory from the budget.
     /// `wait` means `wait(10s)`, not unlimited waiting.
     /// Defaults to [`OnExhaustedPolicy::Fail`], which intentionally differs from
@@ -244,6 +249,7 @@ impl Default for MitoConfig {
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
             scan_memory_limit: MemoryLimit::default(),
+            experimental_scan_memory_budget: MemoryLimit::Percentage(25),
             scan_memory_on_exhausted: OnExhaustedPolicy::Fail,
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),

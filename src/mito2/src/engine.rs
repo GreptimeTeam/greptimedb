@@ -148,6 +148,7 @@ use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
     SCAN_REQUESTS_REJECTED_TOTAL,
 };
+use crate::read::scan_memory::{ScanMemoryBudget, new_scan_memory_budget};
 use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
@@ -238,6 +239,8 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
+        let scan_memory_budget =
+            new_scan_memory_budget(config.experimental_scan_memory_budget, total_memory);
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
                 .on_update(|usage| {
@@ -257,6 +260,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             wal_raw_entry_reader,
             scan_memory_tracker,
             scan_memory_pool,
+            scan_memory_budget,
             region_hook,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
@@ -744,6 +748,8 @@ struct EngineInner {
     scan_memory_tracker: QueryMemoryTracker,
     /// Memory pool shared by internal scan operators across all queries.
     scan_memory_pool: Arc<dyn MemoryPool>,
+    /// Estimated SST reader memory shared across queries.
+    scan_memory_budget: Option<ScanMemoryBudget>,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
     /// to fire [`RegionHook::on_region_gc`].
     region_hook: Option<RegionHookRef>,
@@ -1148,6 +1154,7 @@ impl EngineInner {
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_scan_memory_pool(self.scan_memory_pool.clone())
+        .with_scan_memory_budget(self.scan_memory_budget.clone())
         .with_experimental_series_scan_v2(self.config.experimental_series_scan_v2)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
@@ -1605,6 +1612,8 @@ impl MitoEngine {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
+        let scan_memory_budget =
+            new_scan_memory_budget(config.experimental_scan_memory_budget, total_memory);
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
                 .on_update(|usage| {
@@ -1635,6 +1644,7 @@ impl MitoEngine {
                 wal_raw_entry_reader,
                 scan_memory_tracker,
                 scan_memory_pool,
+                scan_memory_budget,
                 region_hook: None,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
