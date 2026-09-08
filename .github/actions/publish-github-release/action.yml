@@ -28,8 +28,9 @@ runs:
       shell: bash
       run: |
         if [[ "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "prerelease=false" >> $GITHUB_ENV
-          echo "makeLatest=true" >> $GITHUB_ENV
+          # Promote to Latest manually after validating the release artifacts.
+          echo "prerelease=true" >> $GITHUB_ENV
+          echo "makeLatest=false" >> $GITHUB_ENV
           echo "generateReleaseNotes=false" >> $GITHUB_ENV
           echo "omitBody=true" >> $GITHUB_ENV
         else
