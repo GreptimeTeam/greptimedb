@@ -14,6 +14,11 @@ name = "query_perf_fixture"
 path = "src/bin/query_perf_fixture.rs"
 required-features = ["dev-tools"]
 
+[[bin]]
+name = "query_regression_runner"
+path = "src/bin/query_regression_runner.rs"
+required-features = ["dev-tools"]
+
 [features]
 default = [
     "servers/pprof",
@@ -68,6 +73,7 @@ common-wal.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-physical-plan.workspace = true
+datafusion_object_store.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
 either = "1.15"
@@ -87,6 +93,7 @@ mito-codec.workspace = true
 mito2.workspace = true
 moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
+object_store_opendal.workspace = true
 parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true
 prometheus.workspace = true

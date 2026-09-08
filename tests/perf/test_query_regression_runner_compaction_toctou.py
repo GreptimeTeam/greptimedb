@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Regression coverage for quiescing remote-write storage before read benches."""
+"""Regression coverage for the outer remote-write lifecycle."""
 
-import argparse
 import importlib.util
 import json
 import sys
@@ -25,151 +24,90 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-RUNNER_PATH = Path(__file__).with_name("query_regression_runner.py")
-SPEC = importlib.util.spec_from_file_location("query_regression_runner_under_test", RUNNER_PATH)
+RUNNER_PATH = Path(__file__).resolve().parents[2] / ".github/scripts/query-regression-run.py"
+SPEC = importlib.util.spec_from_file_location("query_regression_outer_under_test", RUNNER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
 
 
-class ReportOutputTest(unittest.TestCase):
-    def test_final_report_output_defaults_to_stdout_or_writes_to_file(self) -> None:
-        report = {"status": "ok"}
-        expected = json.dumps(report, indent=2, sort_keys=True)
+class RemoteWriteLifecycleTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.args = type("Args", (), {"http_timeout": "1"})()
+        self.ports = list(range(10000, 10016))
 
-        with patch("builtins.print") as print_mock:
-            runner.output_report(report, None)
-        print_mock.assert_called_once_with(expected)
+    def test_measure_report_is_finalized_after_datanodes_stop(self) -> None:
+        events: list[str] = []
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "nested" / "report.json"
-            with patch("builtins.print") as print_mock:
-                runner.output_report(report, output)
-            print_mock.assert_not_called()
-            self.assertEqual(output.read_text(), expected + "\n")
+        def run(command, **_kwargs):
+            phase = command[1]
+            events.append(phase)
+            if phase == "measure":
+                output = Path(command[command.index("--output") + 1])
+                output.write_text(json.dumps({"targets": [], "thresholds": [], "status": "ok"}))
+            return type("Result", (), {"returncode": 0})()
 
+        def start(target, component, _procs):
+            events.append(f"start:{target.name}:{component}")
 
-class RemoteWriteCompactionToctouTest(unittest.TestCase):
-    def test_quiesces_each_target_before_storage_inspection_and_read_bench(self) -> None:
-        lifecycle: dict[str, list[str]] = {"base": [], "candidate": []}
-        clusters = []
+        def stop(target, component, _procs):
+            events.append(f"stop:{target.name}:{component}")
 
-        class RecordingCluster:
-            def __init__(self, target):
-                self.target = target
-                self.active = set()
-                self.stop_all_calls = 0
-                clusters.append(self)
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(runner, "allocate_ports", return_value=self.ports),
+            patch.object(runner, "start_component", side_effect=start),
+            patch.object(runner, "stop_component", side_effect=stop),
+            patch.object(runner.subprocess, "run", side_effect=run),
+        ):
+            self.assertEqual(
+                runner.run_remote_case(
+                    self.args, Path("case.toml"), Path(tmpdir), Path("base"), Path("candidate"), Path("fixture"), Path("runner")
+                ),
+                0,
+            )
+            self.assertTrue((Path(tmpdir) / "query-regression-report.json").exists())
 
-            def start_all(self, _config_path):
-                self.active.update(("metasrv", "datanode", "frontend"))
+        measure = events.index("measure")
+        finalize = events.index("finalize-remote")
+        self.assertLess(measure, events.index("stop:base:datanode"))
+        self.assertLess(events.index("stop:base:datanode"), finalize)
+        self.assertLess(events.index("stop:candidate:datanode"), finalize)
+        self.assertIn("stop:base:frontend", events[finalize + 1:])
+        self.assertIn("stop:candidate:metasrv", events[finalize + 1:])
 
-            def stop_component(self, name):
-                if name in self.active:
-                    lifecycle[self.target.name].append(f'cluster.stop_component("{name}")')
-                    self.active.remove(name)
+    def test_phase_exception_still_cleans_up_without_processes_or_network(self) -> None:
+        events: list[str] = []
 
-            def stop_all(self):
-                self.stop_all_calls += 1
-                for name in ("frontend", "datanode", "metasrv"):
-                    self.stop_component(name)
+        def run(command, **_kwargs):
+            phase = command[1]
+            events.append(phase)
+            if phase == "prepare-remote":
+                raise RuntimeError("prepare exploded")
+            return type("Result", (), {"returncode": 0})()
 
-            def component_report(self):
-                return {}
+        def start(target, component, _procs):
+            events.append(f"start:{target.name}:{component}")
 
-        def run_queries(target, _case, _tables, _http_timeout):
-            lifecycle[target.name].append("query measurement completes")
-            return {"validation": [], "validation_errors": [], "measurements": [], "status": "ok"}
+        def stop(target, component, _procs):
+            events.append(f"stop:{target.name}:{component}")
 
-        def inspect_storage(_helper, target, _storage, *, dry_run):
-            self.assertFalse(dry_run)
-            lifecycle[target.name].append("storage inspection")
-            return {"status": "ok", "summary": {"summary": {}}}
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(runner, "allocate_ports", return_value=self.ports),
+            patch.object(runner, "start_component", side_effect=start),
+            patch.object(runner, "stop_component", side_effect=stop),
+            patch.object(runner.subprocess, "run", side_effect=run),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "prepare exploded"):
+                runner.run_remote_case(
+                    self.args, Path("case.toml"), Path(tmpdir), Path("base"), Path("candidate"), Path("fixture"), Path("runner")
+                )
 
-        def read_bench(_binary, target, _read_bench, _inspection, *, dry_run):
-            self.assertFalse(dry_run)
-            lifecycle[target.name].append("read bench")
-            return {"status": "ok"}
-
-        remote_write = {
-            "database": "public",
-            "metric": "cpu_usage",
-            "physical_table": "cpu_usage_physical",
-            "series_count": 1,
-            "samples_per_series": 1,
-            "visibility_timeout_seconds": 1,
-            "storage": {
-                "inspect": True,
-                "min_files": None,
-                "min_files_with_column": None,
-                "max_total_file_size_bytes": None,
-                "max_column_compressed_size_bytes": None,
-                "max_column_uncompressed_size_bytes": None,
-                "require_encodings": [],
-                "forbid_encodings": [],
-            },
-            "read_bench": {"enabled": True},
-            "prom_store": {
-                "pending_rows_flush_interval": "1s",
-                "max_batch_rows": 1,
-                "max_concurrent_flushes": 1,
-                "worker_channel_capacity": 1,
-                "max_inflight_requests": 1,
-            },
-        }
-        case = {
-            "scenario": {
-                "kind": "prom_remote_write_then_query",
-                "remote_write": remote_write,
-                "queries": [],
-            }
-        }
-        args = argparse.Namespace(
-            fixture_only=False,
-            fixture_generator=Path("/bin/true"),
-            remote_write_generator=None,
-            storage_inspector=None,
-            candidate_bin=Path("/bin/true"),
-            dry_run=False,
-            http_timeout=1.0,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            targets = [
-                runner.make_target("base", Path("/bin/true"), root, list(range(10000, 10008))),
-                runner.make_target("candidate", Path("/bin/true"), root, list(range(10008, 10016))),
-            ]
-            report = {"targets": [], "thresholds": []}
-            with (
-                patch.object(runner, "DistributedCluster", RecordingCluster),
-                patch.object(runner, "run_remote_write_ingestion", return_value=({"status": "ok"}, [{"ok": True}])),
-                patch.object(runner, "http_post_sql", return_value={"ok": True}),
-                patch.object(runner, "poll_expected_count", return_value={"ok": True, "row_count_ok": True}),
-                patch.object(runner, "run_queries", side_effect=run_queries),
-                patch.object(runner, "run_storage_inspection", side_effect=inspect_storage),
-                patch.object(runner, "run_read_bench", side_effect=read_bench),
-            ):
-                runner.run_remote_write_scenario(args, case, root / "case.toml", targets, report)
-
-        for cluster in clusters:
-            self.assertEqual(cluster.stop_all_calls, 1)
-            self.assertEqual(cluster.active, set())
-            cluster.stop_all()
-            self.assertEqual(cluster.stop_all_calls, 2)
-            self.assertEqual(cluster.active, set())
-
-        expected = [
-            "query measurement completes",
-            'cluster.stop_component("datanode")',
-            "storage inspection",
-            "read bench",
-        ]
-        relevant = {name: [event for event in events if event in expected] for name, events in lifecycle.items()}
-        for target_name in ("base", "candidate"):
-            with self.subTest(target=target_name):
-                self.assertEqual(relevant[target_name], expected)
+        self.assertIn("prepare-remote", events)
+        self.assertIn("stop:base:metasrv", events)
+        self.assertIn("stop:candidate:frontend", events)
 
 
 if __name__ == "__main__":

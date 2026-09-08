@@ -71,6 +71,14 @@ jobs:
           version: "latest"
       - name: Run check-version script tests
         run: uv run --no-project python .github/scripts/check-version-test.py
+      - name: Run query-regression Python tooling tests
+        run: |
+          uv run --no-project --python 3.12 python tests/perf/test_query_regression_runner_compaction_toctou.py
+          uv run --no-project --python 3.12 python tests/perf/test_query_regression_runner_otlp_trace_load.py
+          uv run --no-project --python 3.12 python tests/perf/test_query_regression_summary_otlp.py
+          uv run --no-project --python 3.12 python tests/perf/test_query_regression_case_selection.py
+          uv run --no-project --python 3.12 python tests/perf/test_query_regression_nightly_refs.py
+          uv run --no-project --python 3.12 python tests/perf/test_aliyun_ecs_runner_scripts.py
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
