@@ -18,6 +18,7 @@ use std::fmt::{self, Debug, Formatter};
 
 use common_telemetry::{info, warn};
 use object_store::{ErrorKind, ObjectStore};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::metrics::SERIES_INDEX_FILE_OPERATION_TOTAL;
 use crate::series_index::catalog::series_index_path;
@@ -46,7 +47,7 @@ pub(crate) struct PurgeRequest {
 #[derive(Clone)]
 pub(crate) struct IndexFilePurger {
     store: ObjectStore,
-    sender: async_channel::Sender<PurgeRequest>,
+    sender: UnboundedSender<PurgeRequest>,
 }
 
 impl Debug for IndexFilePurger {
@@ -57,10 +58,10 @@ impl Debug for IndexFilePurger {
 
 impl IndexFilePurger {
     pub(crate) fn purge(&self, request: PurgeRequest) {
-        if let Err(error) = self.sender.try_send(request) {
+        if let Err(error) = self.sender.send(request) {
             let store = self.store.clone();
             common_runtime::spawn_global(async move {
-                purge_file(&store, error.into_inner()).await;
+                purge_file(&store, error.0).await;
             });
         }
     }
@@ -76,10 +77,10 @@ pub(crate) fn file_operation(index_type: IndexFileType, operation: &str, result:
 pub(crate) async fn run_index_purge_task(
     worker_id: u32,
     store: ObjectStore,
-    receiver: async_channel::Receiver<PurgeRequest>,
+    mut receiver: UnboundedReceiver<PurgeRequest>,
 ) {
     info!("Start series-index purge task, worker: {worker_id}");
-    while let Ok(request) = receiver.recv().await {
+    while let Some(request) = receiver.recv().await {
         purge_file(&store, request).await;
     }
     info!("Stop series-index purge task, worker: {worker_id}");
@@ -103,7 +104,7 @@ async fn purge_file(store: &ObjectStore, request: PurgeRequest) {
 
 pub(crate) fn series_index_channel(
     store: ObjectStore,
-) -> (IndexFilePurger, async_channel::Receiver<PurgeRequest>) {
-    let (sender, receiver) = async_channel::unbounded();
+) -> (IndexFilePurger, UnboundedReceiver<PurgeRequest>) {
+    let (sender, receiver) = unbounded_channel();
     (IndexFilePurger { store, sender }, receiver)
 }

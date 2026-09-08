@@ -21,6 +21,7 @@ use std::time::Duration;
 use common_telemetry::info;
 use object_store::ObjectStore;
 use tokio::sync::Notify;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -61,14 +62,11 @@ pub(crate) fn spawn_series_index_tasks(
     worker_id: u32,
     store: ObjectStore,
     state: Arc<SeriesIndexTaskState>,
-    purge_receiver: async_channel::Receiver<PurgeRequest>,
+    purge_receiver: UnboundedReceiver<PurgeRequest>,
     interval: Duration,
 ) -> JoinHandle<()> {
-    common_runtime::spawn_global(run_index_purge_task(
-        worker_id,
-        store,
-        purge_receiver.clone(),
-    ));
+    // Snapshots may retain senders after the worker stops; purge until all senders drop.
+    common_runtime::spawn_global(run_index_purge_task(worker_id, store, purge_receiver));
     common_runtime::spawn_global(async move {
         SeriesIndexTask {
             worker_id,
@@ -77,8 +75,6 @@ pub(crate) fn spawn_series_index_tasks(
         }
         .run()
         .await;
-        // Snapshots may retain senders after the worker stops.
-        purge_receiver.close();
     })
 }
 
@@ -113,29 +109,5 @@ impl SeriesIndexTask {
     /// Runs periodic maintenance independently of incoming deletion requests.
     async fn maintain(&mut self) {
         // TODO: Reconcile indexes and perform other periodic maintenance here.
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use object_store::ObjectStore;
-    use object_store::services::Memory;
-
-    use crate::series_index::purger::series_index_channel;
-    use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
-
-    #[tokio::test]
-    async fn test_stop_closes_purge_channel() {
-        let store = ObjectStore::new(Memory::default()).unwrap();
-        let (_purger, receiver) = series_index_channel(store.clone());
-        let state = Arc::new(SeriesIndexTaskState::new());
-        state.stop();
-        spawn_series_index_tasks(0, store, state, receiver.clone(), Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert!(receiver.is_closed());
     }
 }
