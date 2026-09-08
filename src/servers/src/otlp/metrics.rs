@@ -133,16 +133,16 @@ pub fn to_grpc_insert_requests(
     let mut outcome = MetricsIngestOutcome::default();
     let mut resource_info = ResourceInfoData::default();
 
-    for resource in &request.resource_metrics {
+    for resource in request.resource_metrics {
         if metric_ctx.resource_info
             && !metric_ctx.is_legacy
             && let Some(r) = resource.resource.as_ref()
         {
-            resource_info.observe(&r.attributes, resource, metric_ctx);
+            resource_info.observe(&r.attributes, &resource, metric_ctx);
         }
 
-        let resource_attrs = resource.resource.as_ref().map(|r| {
-            let mut attrs = r.attributes.clone();
+        let resource_attrs = resource.resource.map(|r| {
+            let mut attrs = r.attributes;
             process_resource_attrs(&mut attrs, metric_ctx);
             attrs
         });
@@ -151,14 +151,14 @@ pub fn to_grpc_insert_requests(
             resource_attrs.as_deref().unwrap_or_default(),
             AttributeType::Resource,
         );
-        for scope in &resource.scope_metrics {
-            let scope_attrs = process_scope_attrs(scope, metric_ctx);
+        for mut scope in resource.scope_metrics {
+            let scope_attrs = process_scope_attrs(&mut scope, metric_ctx);
             let scope_attrs = Attributes::new(
                 scope_attrs.as_deref().unwrap_or_default(),
                 AttributeType::Scope,
             );
 
-            for metric in &scope.metrics {
+            for metric in scope.metrics {
                 if metric.data.is_none() {
                     continue;
                 }
@@ -168,7 +168,7 @@ pub fn to_grpc_insert_requests(
 
                 encode_metrics(
                     &mut table_writer,
-                    metric,
+                    &metric,
                     &resource_attrs,
                     &scope_attrs,
                     metric_ctx,
@@ -430,9 +430,12 @@ fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx)
     }
 }
 
-fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Option<Vec<KeyValue>> {
+fn process_scope_attrs(
+    scope: &mut ScopeMetrics,
+    metric_ctx: &OtlpMetricCtx,
+) -> Option<Vec<KeyValue>> {
     if metric_ctx.is_legacy {
-        return scope.scope.as_ref().map(|s| s.attributes.clone());
+        return scope.scope.take().map(|s| s.attributes);
     };
 
     if !metric_ctx.promote_scope_attrs {
@@ -440,24 +443,26 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
     }
 
     // persist scope attrs with name, version and schema_url
-    scope.scope.as_ref().map(|s| {
-        let mut attrs = s.attributes.clone();
+    scope.scope.take().map(|s| {
+        let mut attrs = s.attributes;
         attrs.push(KeyValue {
             key: OTEL_SCOPE_NAME.to_string(),
             value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(s.name.clone())),
+                value: Some(any_value::Value::StringValue(s.name)),
             }),
         });
         attrs.push(KeyValue {
             key: OTEL_SCOPE_VERSION.to_string(),
             value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(s.version.clone())),
+                value: Some(any_value::Value::StringValue(s.version)),
             }),
         });
         attrs.push(KeyValue {
             key: OTEL_SCOPE_SCHEMA_URL.to_string(),
             value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(scope.schema_url.clone())),
+                value: Some(any_value::Value::StringValue(std::mem::take(
+                    &mut scope.schema_url,
+                ))),
             }),
         });
         attrs
