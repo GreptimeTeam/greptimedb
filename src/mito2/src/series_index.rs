@@ -14,7 +14,15 @@
 
 //! Series index writer and searcher.
 
+// These components are consumed by the upcoming query and maintenance integration.
+#[allow(dead_code)]
+mod catalog;
+#[allow(dead_code)]
+mod purger;
 mod searcher;
+mod task;
+#[allow(dead_code)]
+mod version;
 mod writer;
 
 use futures::stream::BoxStream;
@@ -28,6 +36,10 @@ pub use writer::{
 };
 
 use crate::error::Result;
+pub(crate) use crate::series_index::catalog::{delete_catalogs, load_version_control};
+pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
+pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
+pub(crate) use crate::series_index::version::{SeriesIndexVersion, SeriesIndexVersionControl};
 
 pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";
 pub(crate) const MAX_TS_COLUMN: &str = "__series_max_ts";
