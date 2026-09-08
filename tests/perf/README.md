@@ -373,10 +373,12 @@ uv run --no-project python .github/scripts/query-regression-run.py \
 
 `tests/perf/query_cases/sst_float_bss/case.toml` is an explicit-only case for
 comparing a default empty physical metric table with a candidate
-byte-stream-split (BSS) physical table. Both targets must use the exact same
-release `greptime` binary; only the per-target table setup SQL differs. Run the
-existing driver from a checkout containing that binary, with absolute paths and
-fresh data directories for every run:
+byte-stream-split (BSS) physical table. Current local-case findings are recorded
+in [`query_cases/sst_float_bss/RESULTS.md`](query_cases/sst_float_bss/RESULTS.md).
+Both targets must use the exact same release `greptime` binary; only the
+per-target table setup SQL differs. Run the existing driver from a checkout
+containing that binary, with absolute paths and fresh data directories for every
+run:
 
 ```bash
 REPO="$(pwd -P)"
