@@ -52,9 +52,17 @@ SELECT number FROM distinct_basic;
 -- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
 
+-- Recover the persisted streaming DISTINCT flow, then replan its first write
+-- against an extended source schema without recreating the flow.
+-- SQLNESS ARG restart=true
+SELECT 1;
+
+ALTER TABLE distinct_basic ADD COLUMN extra INT NULL;
+
 INSERT INTO
-    distinct_basic
+    distinct_basic (number, ts)
 VALUES
+    (23, "2021-07-01 00:00:01.600"),
     (23, "2021-07-01 00:00:01.600");
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
@@ -99,6 +107,15 @@ CREATE TABLE distinct_basic (
     PRIMARY KEY(number),
     TIME INDEX(ts)
 )WITH ('ttl' = '5s');
+
+-- Without a schedule, persisted DISTINCT must reach batching validation,
+-- not silently become request-local streaming.
+CREATE FLOW test_distinct_persisted_unscheduled
+SINK TO out_distinct_persisted_unscheduled AS
+SELECT DISTINCT number AS dis FROM distinct_basic;
+
+DROP FLOW IF EXISTS test_distinct_persisted_unscheduled;
+DROP TABLE IF EXISTS out_distinct_persisted_unscheduled;
 
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
 SELECT
