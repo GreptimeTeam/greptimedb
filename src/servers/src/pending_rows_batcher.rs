@@ -453,6 +453,8 @@ fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
 
 /// Returns whether all non-empty inserts in `requests` can use the scalar metric batcher.
 ///
+/// A scalar metric schema has exactly one millisecond or nanosecond timestamp column, exactly one
+/// `Float64` field column, and zero or more `String` tag columns, without datatype extensions.
 /// Empty inserts are ignored to match [`PendingRowsBatcher::submit`] filtering, and a request
 /// without rows is not batchable. Valid schemas outside the scalar metric shape return `false`,
 /// while malformed scalar row widths or value variants return an error before callers perform DDL.
