@@ -2798,13 +2798,13 @@ async fn test_validate_sink_table_schema_with_values_rejects_output_mismatch_wit
         query_engine,
         ..
     } = new_time_window_test_task_with_query(
-        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+        "SELECT number, number AS extra_output, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
     )
     .await;
     Arc::get_mut(&mut task.config)
         .expect("test task config should be uniquely owned")
         .sink_table_name[2] = sink_table.to_string();
-    register_number_only_sink(&query_engine, sink_table);
+    register_twe_sink_with_metadata(&query_engine, sink_table, 9105);
     task.state
         .write()
         .unwrap()
@@ -2815,10 +2815,24 @@ async fn test_validate_sink_table_schema_with_values_rejects_output_mismatch_wit
         "metadata".to_string(),
         datafusion_common::ScalarValue::Utf8(Some("typed".to_string())),
     )]);
+    let error = task
+        .validate_sink_table_schema_with_values(&query_engine, &values)
+        .await
+        .unwrap_err();
+    let Error::Datafusion {
+        raw: datafusion_common::DataFusionError::Plan(error),
+        ..
+    } = error
+    else {
+        panic!("expected output schema planning error, got: {error:?}");
+    };
     assert!(
-        task.validate_sink_table_schema_with_values(&query_engine, &values)
-            .await
-            .is_err()
+        error.contains("Flow output schema does not match sink table schema"),
+        "{error}"
+    );
+    assert!(
+        error.contains("extra flow columns not in sink: [\"extra_output\"]"),
+        "{error}"
     );
     let state = task.state.read().unwrap();
     assert_eq!(state.dirty_time_windows.len(), 1);

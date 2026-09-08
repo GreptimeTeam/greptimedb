@@ -1928,8 +1928,8 @@ async fn test_analyze_incremental_aggregate_plan_supports_mixed_state_families()
 #[tokio::test]
 async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_families() {
     let query_engine = create_test_query_engine();
-    let old_sql = "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN 1 ELSE 2 END AS grp FROM numbers_with_ts WHERE number <= 3 OR number = 6 GROUP BY grp";
-    let new_sql = "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN 1 WHEN number <= 8 THEN 2 ELSE 3 END AS grp FROM numbers_with_ts WHERE number >= 4 AND number != 6 GROUP BY grp";
+    let old_sql = "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN CAST(NULL AS BIGINT) ELSE 2 END AS grp FROM numbers_with_ts WHERE number <= 3 OR number = 6 GROUP BY grp";
+    let new_sql = "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN CAST(NULL AS BIGINT) WHEN number <= 8 THEN 2 ELSE 3 END AS grp FROM numbers_with_ts WHERE number >= 4 AND number != 6 GROUP BY grp";
     let old_plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), old_sql, false)
         .await
         .unwrap();
@@ -1952,12 +1952,12 @@ async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_familie
         .column_by_name("grp")
         .unwrap()
         .as_primitive::<Int64Type>();
-    assert_eq!(old_groups.null_count(), 0);
+    assert_eq!(old_groups.null_count(), 1);
     let mut old_group_values = (0..old_groups.len())
-        .map(|index| old_groups.value(index))
+        .map(|index| (!old_groups.is_null(index)).then(|| old_groups.value(index)))
         .collect::<Vec<_>>();
     old_group_values.sort_unstable();
-    assert_eq!(old_group_values, [1, 2]);
+    assert_eq!(old_group_values, [None, Some(2)]);
     let sink_table = MemTable::table("state_merge_sink", old_batch);
     let sink_table_name = [
         "greptime".to_string(),
@@ -2023,12 +2023,12 @@ async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_familie
         .column_by_name("grp")
         .unwrap()
         .as_primitive::<Int64Type>();
-    assert_eq!(merged_groups.null_count(), 0);
+    assert_eq!(merged_groups.null_count(), 1);
     let mut merged_group_values = (0..merged_groups.len())
-        .map(|index| merged_groups.value(index))
+        .map(|index| (!merged_groups.is_null(index)).then(|| merged_groups.value(index)))
         .collect::<Vec<_>>();
     merged_group_values.sort_unstable();
-    assert_eq!(merged_group_values, [1, 2, 3]);
+    assert_eq!(merged_group_values, [None, Some(2), Some(3)]);
     let merged_table = MemTable::table("merged_states", merged_batch);
     query_engine
         .engine_state()
@@ -2044,7 +2044,7 @@ async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_familie
             table: merged_table,
         })
         .unwrap();
-    let checks = "SELECT grp, sum(total) AS total, hll_count(hll_merge(hll_a)) AS hll_a, hll_count(hll_merge(hll_b)) AS hll_b, stddev_pop_calc(stddev_pop_merge(stddev_state)) AS stddev, uddsketch_calc(0.5, uddsketch_merge(128, 0.000001, percentile_a)) AS p50_a, uddsketch_calc(0.5, uddsketch_merge(256, 0.02, percentile_b)) AS p50_b FROM merged_states GROUP BY grp ORDER BY grp";
+    let checks = "SELECT grp, sum(total) AS total, hll_count(hll_merge(hll_a)) AS hll_a, hll_count(hll_merge(hll_b)) AS hll_b, stddev_pop_calc(stddev_pop_merge(stddev_state)) AS stddev, uddsketch_calc(0.5, uddsketch_merge(128, 0.000001, percentile_a)) AS p50_a, uddsketch_calc(0.5, uddsketch_merge(256, 0.02, percentile_b)) AS p50_b FROM merged_states GROUP BY grp ORDER BY grp NULLS FIRST";
     let checks_plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), checks, false)
         .await
         .unwrap();
@@ -2075,20 +2075,32 @@ async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_familie
     let stddev = checks.column(4).as_primitive::<Float64Type>();
     let p50_a = checks.column(5).as_primitive::<Float64Type>();
     let p50_b = checks.column(6).as_primitive::<Float64Type>();
-    assert_eq!(group.null_count(), 0);
+    assert_eq!(group.null_count(), 1);
     assert_eq!(total.null_count(), 0);
     assert_eq!(hll_a.null_count(), 0);
     assert_eq!(hll_b.null_count(), 0);
     assert_eq!(stddev.null_count(), 0);
     assert_eq!(p50_a.null_count(), 0);
     assert_eq!(p50_b.null_count(), 0);
-    for expected in [
-        (1_i64, 15_u64, 5_u64, 2_f64.sqrt(), 3_f64, 3_f64),
-        (2_i64, 21_u64, 3_u64, (2_f64 / 3.0).sqrt(), 7_f64, 7_f64),
-        (3_i64, 19_u64, 2_u64, 0.5_f64, 10_f64, 10_f64),
-    ] {
-        let index = (expected.0 - 1) as usize;
-        assert_eq!(group.value(index), expected.0);
+    for (index, expected) in [
+        (None, 15_u64, 5_u64, 2_f64.sqrt(), 3_f64, 3_f64),
+        (
+            Some(2_i64),
+            21_u64,
+            3_u64,
+            (2_f64 / 3.0).sqrt(),
+            7_f64,
+            7_f64,
+        ),
+        (Some(3_i64), 19_u64, 2_u64, 0.5_f64, 10_f64, 10_f64),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            (!group.is_null(index)).then(|| group.value(index)),
+            expected.0
+        );
         assert_eq!(total.value(index), expected.1);
         assert_eq!(hll_a.value(index), expected.2);
         assert_eq!(hll_b.value(index), expected.2);
