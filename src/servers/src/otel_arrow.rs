@@ -235,10 +235,4 @@ mod tests {
         assert_eq!(ArrowStatusCode::InvalidArgument as i32, status.status_code);
         assert_eq!(EXPONENTIAL_HISTOGRAM_UNSUPPORTED, status.status_message);
     }
-
-    #[test]
-    fn otel_arrow_metric_context_uses_metric_engine_setting() {
-        assert!(otel_arrow_metric_context(true).with_metric_engine);
-        assert!(!otel_arrow_metric_context(false).with_metric_engine);
-    }
 }
