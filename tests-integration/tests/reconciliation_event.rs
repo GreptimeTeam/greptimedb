@@ -125,6 +125,36 @@ async fn test_catalog_and_database_reconciliation_events() {
     assert_eventually_eq(
         &frontend,
         &format!(
+            "SELECT parent.procedure_id AS parent_procedure_id, \
+                 child.procedure_id AS child_procedure_id, \
+                 parent.type AS parent_event_type, \
+                 child.type AS child_event_type, \
+                 parent.catalog_name AS parent_catalog_name, \
+                 parent.schema_name AS parent_schema_name, \
+                 child.catalog_name AS child_catalog_name, \
+                 child.schema_name AS child_schema_name \
+             FROM {EVENTS_TABLE} AS parent \
+             JOIN {EVENTS_TABLE} AS child \
+               ON json_get_string(parent.procedure_trigger, 'procedure_id') = child.procedure_id \
+             WHERE parent.procedure_id = '{catalog_procedure_id}' \
+             AND json_get_string(parent.procedure_trigger, 'type') = 'ChildSubmitted' \
+             AND child.procedure_id = '{database_procedure_id}' \
+             AND json_get_string(child.procedure_trigger, 'type') = 'Submitted'"
+        ),
+        &format!(
+            "\
++--------------------------------------+--------------------------------------+-------------------+--------------------+---------------------+--------------------+--------------------+-------------------------------+
+| parent_procedure_id                  | child_procedure_id                   | parent_event_type | child_event_type   | parent_catalog_name | parent_schema_name | child_catalog_name | child_schema_name             |
++--------------------------------------+--------------------------------------+-------------------+--------------------+---------------------+--------------------+--------------------+-------------------------------+
+| {catalog_procedure_id} | {database_procedure_id} | reconcile_catalog | reconcile_database | greptime            |                    | greptime           | reconciliation_event_database |
++--------------------------------------+--------------------------------------+-------------------+--------------------+---------------------+--------------------+--------------------+-------------------------------+"
+        ),
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
             "SELECT count(*) AS event_count, \
                  json_get_string(procedure_trigger, 'outcome') AS outcome \
              FROM {EVENTS_TABLE} \
