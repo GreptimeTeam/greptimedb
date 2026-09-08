@@ -192,6 +192,38 @@ DROP TABLE instant_last_sec;
 DROP TABLE instant_last_micro;
 DROP TABLE instant_last_nano;
 
+-- A field selector chooses the val column; it does not filter val. PromQL must
+-- apply the comparison after selecting the latest eligible sample, rather than
+-- falling back to an older sample that satisfies the comparison.
+CREATE TABLE instant_last_field_filter (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    host STRING,
+    instance STRING,
+    PRIMARY KEY (host, instance)
+) ENGINE=mito;
+
+-- Keep the older matching sample in an SST and the latest non-matching sample
+-- in the memtable. Both timestamps are eligible at 1s.
+INSERT INTO instant_last_field_filter VALUES (900, 10, 'host-a', 'instance-a');
+ADMIN FLUSH_TABLE('instant_last_field_filter');
+INSERT INTO instant_last_field_filter VALUES (1000, 1, 'host-a', 'instance-a');
+
+-- Expected: no rows. The selected latest value is 1, so it must not fall back
+-- to the older value 10 merely because that value is greater than 5.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (1, 1, '1s') instant_last_field_filter{__field__="val"} > 5;
+
+-- A value matcher filters the scan before selecting a sample: the older 10
+-- remains eligible, unlike the post-selection comparison above.
+TQL EVAL (1, 1, '1s') instant_last_field_filter{val="10.0"};
+
+-- SQL filters rows before aggregation, so the older matching value remains.
+-- Expected value: 10.
+SELECT last_value(val ORDER BY ts) FROM instant_last_field_filter WHERE val > 5;
+
+DROP TABLE instant_last_field_filter;
+
 -- Range evaluation is a control: range functions need their complete windows,
 -- not a single last row.  At 10s and 20s, [11s] contains two samples.
 CREATE TABLE instant_last_range_control (

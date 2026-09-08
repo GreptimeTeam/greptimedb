@@ -1,7 +1,7 @@
 # PromQL instant-selector latency regression coverage for #9034.
 #
 # Instant, range, and aggregate controls cover LastRow latency behavior. The
-# candidate instant query may enable the existing LastRow selector; the range
+# candidate instant query must exercise the existing LastRow selector; the range
 # query must not. This is latency regression coverage only: optimizer and
 # sqlness tests own plan and correctness coverage. Evaluation is 0.7s after the
 # final generated sample (last timestamp = start + 1023 * 0.1s =
@@ -44,7 +44,7 @@ distribution = { kind = "deterministic_wave", min = 0.0, max = 1000.0 }
 
 [[scenario.tables.columns]]
 name = "ts"
-type = "TIMESTAMP(9)"
+type = "TIMESTAMP(3)"
 semantic = "timestamp"
 
 [scenario.layout]
@@ -58,7 +58,7 @@ step_nanos = 100000000
 time_range_layout = "non_overlapping_per_sst"
 series_layout = "timestamp_major"
 
-# Candidate instant query may enable the existing LastRow selector.
+# Candidate instant query must exercise the existing LastRow selector.
 [[scenario.queries]]
 name = "instant_selector_last_row_candidate"
 kind = "tql"
