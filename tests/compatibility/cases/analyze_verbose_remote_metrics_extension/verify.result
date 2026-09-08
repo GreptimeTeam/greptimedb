@@ -3,6 +3,7 @@
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (?m)^\|_\|_\|_RepartitionExec:\spartitioning=RoundRobinBatch\(\d+\),\sinput_partitions=\d+.*\n
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
