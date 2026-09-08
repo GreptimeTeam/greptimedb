@@ -19,6 +19,7 @@ use arrow_schema::SortOptions;
 use common_function::aggrs::aggr_wrapper::aggr_state_func_name;
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_time::timestamp::TimeUnit;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{Column, Result};
@@ -136,6 +137,14 @@ impl ScanHintRule {
         provider: &DummyTableProvider,
     ) -> bool {
         let metadata = provider.region_metadata();
+        // Instant evaluation is millisecond-based, so finer time units can
+        // conflate timestamps and must not use the LastRow hint.
+        if !matches!(
+            metadata.time_index_type().unit(),
+            TimeUnit::Second | TimeUnit::Millisecond
+        ) {
+            return false;
+        }
         for filter in &table_scan.filters {
             let Some(filter) = SimpleFilterEvaluator::try_new(filter) else {
                 return false;
