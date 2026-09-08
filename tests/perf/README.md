@@ -406,11 +406,15 @@ query latency percentage is
 `(candidate_latency_ms_median - base_latency_ms_median) / base_latency_ms_median * 100`.
 The configured three warmups occur after the initial query validation and before
 that query's 15 measured endpoint requests, so query latency is a warmed
-frontend/cache measurement. After the datanodes stop, the case also runs seven
-iterations of value-only `parquetbench` for up to four inspected SST files and
-sequential `scanbench` over the corresponding regions, with parallelism one.
-Their per-run output and aggregate
-`parquetbench_median_average_ms` and `scanbench_median_average_ms` are under
+frontend/cache measurement. The case restricts storage inspection to
+`data/greptime/public`, excluding `greptime_private` SSTs. After the datanodes
+stop, it also runs seven iterations of value-only `parquetbench` for all
+inspected SST files and sequential `scanbench` over the corresponding regions,
+with parallelism one. The three explicit flushes yielded six SSTs in the observed
+run—three 1,105,920-row files and three 368,640-row files—because storage split
+each flush; this is an observation, not a guaranteed file layout. Their per-run
+output and aggregate `parquetbench_median_average_ms` and
+`scanbench_median_average_ms` are under
 `targets[].read_bench`; they are quiescent local-file read/scan diagnostics, not
 warmed frontend-query latency measurements. Bench averages include iteration one;
 no OS cache is dropped, and the driver runs base before candidate.

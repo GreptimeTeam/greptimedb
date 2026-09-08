@@ -41,6 +41,7 @@ pending_rows_flush_interval = "1s"
 max_batch_rows = 100000
 
 [scenario.remote_write.storage]
+root_suffix = "data/greptime/public"
 column = "greptime_value"
 min_files = 1
 min_files_with_column = 1
@@ -55,7 +56,6 @@ projection = ["greptime_value"]
 parquet_reader = "direct"
 scan_scanner = "seq"
 parallelism = 1
-max_files = 4
 
 [[scenario.queries]]
 name = "sum_all_values"
