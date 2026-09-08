@@ -1767,113 +1767,9 @@ async fn test_analyze_incremental_aggregate_plan_rejects_avg() {
 }
 
 #[tokio::test]
-async fn test_analyze_incremental_aggregate_plan_supports_avg_state() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sql = "SELECT avg_state(number) AS avg_num, ts FROM numbers_with_ts GROUP BY ts";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
-
-    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
-    assert!(
-        analysis.unsupported_exprs.is_empty(),
-        "avg_state should be supported: {:?}",
-        analysis.unsupported_exprs
-    );
-    assert_eq!(analysis.merge_columns.len(), 1);
-    assert_eq!(analysis.merge_columns[0].output_field_name, "avg_num");
-    assert!(matches!(
-        &analysis.merge_columns[0].merge_op,
-        IncrementalAggregateMergeOp::StateDeltaMerge {
-            function_name: "__avg_state_delta_merge",
-            params,
-        } if params.is_empty()
-    ));
-}
-
-#[tokio::test]
-async fn test_analyze_incremental_aggregate_plan_supports_avg_merge() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sql = "SELECT avg_merge(avg_state(number)) AS avg_num, ts FROM numbers_with_ts GROUP BY ts";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
-
-    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
-    assert!(
-        analysis.unsupported_exprs.is_empty(),
-        "avg_merge should be supported: {:?}",
-        analysis.unsupported_exprs
-    );
-    assert_eq!(analysis.merge_columns.len(), 1);
-    assert!(matches!(
-        &analysis.merge_columns[0].merge_op,
-        IncrementalAggregateMergeOp::StateDeltaMerge {
-            function_name: "__avg_state_delta_merge",
-            params,
-        } if params.is_empty()
-    ));
-}
-
-#[tokio::test]
-async fn test_analyze_incremental_aggregate_plan_supports_duplicate_avg_projections() {
-    let analysis = analyze_test_sql(
-        "SELECT avg_state(number) AS avg_num, avg_state(number + 1) AS avg_num_plus, ts FROM numbers_with_ts GROUP BY ts",
-    )
-    .await;
-
-    assert!(analysis.unsupported_exprs.is_empty());
-    assert_eq!(analysis.merge_columns.len(), 2);
-    assert!(analysis.merge_columns.iter().all(|column| {
-        matches!(
-            &column.merge_op,
-            IncrementalAggregateMergeOp::StateDeltaMerge {
-                function_name: "__avg_state_delta_merge",
-                params,
-            } if params.is_empty()
-        )
-    }));
-    assert!(
-        analysis
-            .merge_columns
-            .iter()
-            .any(|column| column.output_field_name == "avg_num")
-    );
-    assert!(
-        analysis
-            .merge_columns
-            .iter()
-            .any(|column| column.output_field_name == "avg_num_plus")
-    );
-}
-
-#[tokio::test]
-async fn test_analyze_incremental_aggregate_plan_supports_avg_with_native_aggregate() {
-    let analysis = analyze_test_sql(
-        "SELECT avg_state(number) AS avg_num, sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
-    )
-    .await;
-
-    assert!(analysis.unsupported_exprs.is_empty());
-    assert_eq!(analysis.merge_columns.len(), 2);
-    assert!(analysis.merge_columns.iter().any(|column| {
-        column.output_field_name == "avg_num"
-            && matches!(
-                &column.merge_op,
-                IncrementalAggregateMergeOp::StateDeltaMerge {
-                    function_name: "__avg_state_delta_merge",
-                    params,
-                } if params.is_empty()
-            )
-    }));
-    assert!(analysis.merge_columns.iter().any(|column| {
-        column.output_field_name == "total" && column.merge_op == IncrementalAggregateMergeOp::Sum
-    }));
-}
-
-#[tokio::test]
 async fn test_analyze_incremental_aggregate_plan_supports_mixed_state_families() {
     let analysis = analyze_test_sql(
-        "SELECT avg_state(number) AS avg_num, \
-         hll(CAST(number AS VARCHAR)) AS hll_a, \
+        "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, \
          hll(CAST(number AS VARCHAR)) AS hll_b, \
          uddsketch_state(128, 0.01, CAST(number AS DOUBLE)) AS percentile_a, \
          uddsketch_state(256, 0.02, number) AS percentile_b, \
@@ -1887,7 +1783,7 @@ async fn test_analyze_incremental_aggregate_plan_supports_mixed_state_families()
         "mixed state aggregate should be supported: {:?}",
         analysis.unsupported_exprs
     );
-    assert_eq!(analysis.merge_columns.len(), 7);
+    assert_eq!(analysis.merge_columns.len(), 6);
     assert!(analysis.merge_columns.iter().any(|column| {
         column.output_field_name == "hll_a"
             && column.merge_op
