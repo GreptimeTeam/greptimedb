@@ -205,6 +205,15 @@ impl ErrorExt for Error {
             | Error::PhysicalExpr { .. }
             | Error::RecordBatchSliceIndexOverflow { .. } => StatusCode::Internal,
 
+            Error::PollStream {
+                error: datafusion::error::DataFusionError::External(source),
+                ..
+            } => source
+                .downcast_ref::<BoxedError>()
+                .map_or(StatusCode::EngineExecuteQuery, |source| {
+                    source.status_code()
+                }),
+
             Error::PollStream { .. } => StatusCode::EngineExecuteQuery,
 
             Error::ArrowCompute { .. } => StatusCode::IllegalState,
@@ -239,6 +248,49 @@ impl ErrorExt for Error {
                 source.retry_hint()
             }
             _ => RetryHint::NonRetryable,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::PlainError;
+
+    use super::*;
+
+    #[test]
+    fn poll_stream_status_code_preserves_direct_external_boxed_error() {
+        let cases = [
+            (StatusCode::RequestOutdated, StatusCode::RequestOutdated),
+            (StatusCode::Unknown, StatusCode::Unknown),
+        ];
+
+        for (source_status, expected_status) in cases {
+            let error = Error::PollStream {
+                error: datafusion::error::DataFusionError::External(Box::new(BoxedError::new(
+                    PlainError::new("neutral error".to_string(), source_status),
+                ))),
+                location: Location::default(),
+            };
+            assert_eq!(error.status_code(), expected_status);
+        }
+    }
+
+    #[test]
+    fn poll_stream_status_code_defaults_for_unrecognized_datafusion_errors() {
+        let errors = [
+            datafusion::error::DataFusionError::External(Box::new(std::io::Error::other(
+                "neutral io error",
+            ))),
+            datafusion::error::DataFusionError::Internal("neutral internal error".to_string()),
+        ];
+
+        for error in errors {
+            let error = Error::PollStream {
+                error,
+                location: Location::default(),
+            };
+            assert_eq!(error.status_code(), StatusCode::EngineExecuteQuery);
         }
     }
 }

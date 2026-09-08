@@ -277,11 +277,59 @@ pub fn datafusion_status_code<T: ErrorExt + 'static>(
         DataFusionError::External(e) => {
             if let Some(ext) = (*e).downcast_ref::<T>() {
                 ext.status_code()
+            } else if let Some(ext) = (*e).downcast_ref::<BoxedError>() {
+                ext.status_code()
             } else {
                 default_status.unwrap_or(StatusCode::EngineExecuteQuery)
             }
         }
         DataFusionError::Diagnostic(_, e) => datafusion_status_code::<T>(e, default_status),
         _ => default_status.unwrap_or(StatusCode::EngineExecuteQuery),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::PlainError;
+
+    use super::*;
+
+    #[test]
+    fn test_datafusion_status_code_external_errors() {
+        let boxed_error = || {
+            DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                "neutral error".to_string(),
+                StatusCode::RequestOutdated,
+            ))))
+        };
+        assert_eq!(
+            datafusion_status_code::<Error>(&boxed_error(), None),
+            StatusCode::RequestOutdated
+        );
+        assert_eq!(
+            datafusion_status_code::<Error>(&boxed_error(), Some(StatusCode::PlanQuery)),
+            StatusCode::RequestOutdated
+        );
+
+        let direct_error = DataFusionError::External(Box::new(Error::DynFilterPayloadTooLarge {
+            payload_size_bytes: 2,
+            max_payload_bytes: 1,
+            location: Location::default(),
+        }));
+        assert_eq!(
+            datafusion_status_code::<Error>(&direct_error, None),
+            StatusCode::PlanQuery
+        );
+
+        let unknown_error =
+            || DataFusionError::External(Box::new(std::io::Error::other("neutral error")));
+        assert_eq!(
+            datafusion_status_code::<Error>(&unknown_error(), None),
+            StatusCode::EngineExecuteQuery
+        );
+        assert_eq!(
+            datafusion_status_code::<Error>(&unknown_error(), Some(StatusCode::PlanQuery)),
+            StatusCode::PlanQuery
+        );
     }
 }

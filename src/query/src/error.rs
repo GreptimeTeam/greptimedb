@@ -498,7 +498,22 @@ impl From<Error> for DataFusionError {
 
 #[cfg(test)]
 mod tests {
+    use common_error::ext::PlainError;
+
     use super::*;
+
+    #[test]
+    fn test_datafusion_external_boxed_error_status_code() {
+        let error = Error::DataFusion {
+            error: DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                "neutral error".to_string(),
+                StatusCode::RequestOutdated,
+            )))),
+            location: Location::default(),
+        };
+
+        assert_eq!(error.status_code(), StatusCode::RequestOutdated);
+    }
 
     #[test]
     fn test_build_backend_delegates_error_metadata() {
