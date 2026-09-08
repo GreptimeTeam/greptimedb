@@ -3,7 +3,7 @@
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
--- SQLNESS REPLACE (?m)^\|_\|_\|_RepartitionExec:\spartitioning=RoundRobinBatch\(\d+\),\sinput_partitions=\d+.*\n
+-- SQLNESS REPLACE (?m)^(\|\s0_\|\s0_\|_ProjectionExec:.*\n\|_\|_\|_AggregateExec:\smode=Final,.*\n\|_\|_\|_CoalescePartitionsExec.*\n\|_\|_\|_AggregateExec:\smode=Partial,.*\n)\|_\|_\|_RepartitionExec:\spartitioning=RoundRobinBatch\(\d+\),\sinput_partitions=2\b.*\n(\|_\|_\|_MergeScanExec:.*\n) ${1}${2}
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
