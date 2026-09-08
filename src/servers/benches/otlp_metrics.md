@@ -107,3 +107,42 @@ A local client and server share CPU and are useful for smoke checks and local
 comparisons, but not an isolated server throughput result. This harness measures
 warm-schema writes; cold DDL, fixed-rate tail latency, compression and allocation
 profiling are separate experiments.
+
+## Attribute and row reuse comparison (2026-09-08)
+
+Measured on the same Apple M4 Max (16 logical CPUs, 48 GiB RAM), macOS/aarch64,
+with `rustc 1.96.0-nightly (ac7f9ec7d 2026-03-20)` and the production jemalloc
+allocator. Before is `7fc75bab45f29c18e48aa8a272be9e92c260d4a9`; after adds the
+attribute translation and row-template reuse in `otlp/metrics.rs`. The fixtures,
+toolchain, build settings and timing boundaries are unchanged. Each measurement
+uses 20 samples, a 1-second warm-up and a 3-second measurement target.
+
+```sh
+# Before modifying the converter:
+cargo bench -p servers --bench otlp_metrics -- otlp_metrics --save-baseline item1-before
+# With the refactored converter:
+cargo bench -p servers --bench otlp_metrics -- otlp_metrics --baseline item1-before
+```
+
+The table uses Criterion's median estimates. Times include dropping the converted
+rows; the last column includes protobuf decoding as well as conversion.
+
+| Workload | Conversion before | Conversion after | Conversion time reduction | Decode-to-rows time reduction |
+| --- | ---: | ---: | ---: | ---: |
+| `small` | 13.363 µs | 11.787 µs | 11.8% | 9.6% |
+| `shared` | 2.892 ms | 1.709 ms | 40.9% | 34.2% |
+| `resources` | 2.895 ms | 1.904 ms | 34.3% | 29.8% |
+| `wide` | 6.313 ms | 5.178 ms | 18.0% | 13.3% |
+| `delta_sum` | 2.896 ms | 1.747 ms | 39.7% | 33.9% |
+| `histogram_10` | 8.894 ms | 2.080 ms | 76.6% | 75.5% |
+| `histogram_50` | 36.573 ms | 7.738 ms | 78.8% | 77.7% |
+| `summary` | 3.436 ms | 1.043 ms | 69.7% | 67.3% |
+
+All 24 CPU measurements completed with the fixture acceptance, row-count and
+schema-alignment checks passing. The unchanged decode-only controls varied from
+-1.3% to +2.2% in median time; Criterion flagged the delta-sum and summary decode
+controls as regressions of about 2%. These are local CPU measurements, not HTTP
+throughput or storage-capacity results. HTTP benchmarks were not rerun for this
+converter-only change. The saved baseline and comparison data are under
+`target/criterion/otlp_metrics_*/{decode,convert,decode_to_rows}/` in
+`item1-before/` and `new/`, respectively.
