@@ -45,6 +45,7 @@ const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
 const MEMTABLE_BULK_PREFIX: &str = "memtable.bulk.";
+const MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD: &str = "memtable.bulk.encode_bytes_threshold";
 
 /// Legacy memtable type identifier accepted for backward compatibility.
 /// The partition tree memtable has been removed; parsing this value falls
@@ -312,6 +313,21 @@ impl RegionOptions {
         opts.validate()?;
 
         Ok(opts)
+    }
+
+    /// Parses region options using `default_bulk_config` for an implicit bulk threshold.
+    pub(crate) fn try_from_options_with_bulk_config(
+        region_id: RegionId,
+        options_map: &HashMap<String, String>,
+        default_bulk_config: &BulkMemtableConfig,
+    ) -> Result<Self> {
+        let mut options = Self::try_from_options(region_id, options_map)?;
+        if !options_map.contains_key(MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD)
+            && let Some(MemtableOptions::Bulk(config)) = &mut options.memtable
+        {
+            config.encode_bytes_threshold = default_bulk_config.encode_bytes_threshold;
+        }
+        Ok(options)
     }
 }
 
