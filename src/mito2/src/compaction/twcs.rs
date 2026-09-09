@@ -842,7 +842,11 @@ impl Picker for TwcsPicker {
             return Ok(None);
         }
 
-        let max_file_size = self.max_output_file_size.map(|v| v as usize);
+        // The picker treats zero as unlimited, but the SST writer would split every batch.
+        let max_file_size = self
+            .max_output_file_size
+            .filter(|size| *size > 0)
+            .map(|size| size as usize);
         Ok(Some(PickerOutput {
             outputs,
             expired_ssts,
@@ -1109,6 +1113,39 @@ mod tests {
             Duration::from_millis(1),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn test_pick_normalizes_zero_output_size_to_unlimited() {
+        let mut compaction_region = compaction_region_with_ssts(
+            (1..=4).map(|sequence| new_file(0, 10, sequence, 100).meta_ref().clone()),
+            Duration::from_secs(3600),
+        )
+        .await;
+        compaction_region.ttl = None;
+
+        for (max_output_file_size, expected_max_file_size) in
+            [(Some(0), None), (None, None), (Some(1024), Some(1024))]
+        {
+            let picker = TwcsPicker {
+                trigger_file_num: 4,
+                active_window_l1_merge_trigger: 8,
+                inactive_window_trigger_file_num: 4,
+                inactive_window_l1_merge_trigger: 8,
+                time_window_seconds: Some(3),
+                max_output_file_size,
+                append_mode: false,
+                max_background_tasks: None,
+                time_range: None,
+            };
+
+            let output = picker.pick(&compaction_region).await.unwrap().unwrap();
+
+            assert_eq!(output.outputs.len(), 1);
+            assert_eq!(output.outputs[0].inputs.len(), 4);
+            assert!(output.expired_ssts.is_empty());
+            assert_eq!(output.max_file_size, expected_max_file_size);
+        }
     }
 
     #[tokio::test]
