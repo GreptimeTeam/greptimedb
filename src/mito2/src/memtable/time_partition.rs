@@ -455,7 +455,9 @@ impl TimePartitions {
             })
             .map(|part_time_range| {
                 // Forks the latest partition, but compute the time range based on the new duration.
-                let memtable = old_part.memtable.fork(inner.alloc_memtable_id(), metadata);
+                let memtable =
+                    self.builder
+                        .fork(&old_part.memtable, inner.alloc_memtable_id(), metadata);
                 let part = TimePartition {
                     memtable,
                     time_range: part_time_range,
@@ -514,6 +516,23 @@ impl TimePartitions {
     pub(crate) fn next_memtable_id(&self) -> MemtableId {
         let inner = self.inner.lock().unwrap();
         inner.next_memtable_id
+    }
+
+    /// Replaces the builder for an encoding-only change that preserves memtable kind and schema.
+    pub(crate) fn with_memtable_builder(&self, builder: MemtableBuilderRef) -> Self {
+        let inner = self.inner.lock().unwrap();
+
+        Self {
+            inner: Mutex::new(PartitionsInner {
+                parts: inner.parts.clone(),
+                next_memtable_id: inner.next_memtable_id,
+            }),
+            part_duration: self.part_duration,
+            metadata: self.metadata.clone(),
+            builder,
+            primary_key_codec: self.primary_key_codec.clone(),
+            bulk_schema: self.bulk_schema.clone(),
+        }
     }
 
     /// Creates a new empty partition list from this list and a `part_duration`.
@@ -821,12 +840,15 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use parquet::basic::{Encoding, Type as PhysicalType};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::mito_engine_options::FloatFieldEncoding;
     use store_api::storage::SequenceNumber;
 
     use super::*;
+    use crate::memtable::bulk::{BulkMemtableBuilder, BulkMemtableConfig};
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-    use crate::memtable::{IterBuilder, RangesOptions};
+    use crate::memtable::{IterBuilder, MemtableBuilderRef, RangesOptions};
     use crate::test_util::memtable_util::{self, collect_iter_timestamps};
 
     #[test]
@@ -1017,6 +1039,55 @@ mod tests {
     }
 
     #[test]
+    fn test_with_memtable_builder_preserves_existing_partitions() {
+        let metadata = memtable_util::metadata_for_test();
+        let partitions = new_multi_partitions(&metadata);
+        let old_parts = partitions.list_partitions();
+        let new_builder: MemtableBuilderRef = Arc::new(TimeSeriesMemtableBuilder::default());
+
+        let replacement = partitions.with_memtable_builder(new_builder.clone());
+        let replacement_parts = replacement.list_partitions();
+        assert_eq!(2, replacement_parts.len());
+        assert_eq!(0, replacement_parts[0].memtable.id());
+        assert_eq!(1, replacement_parts[1].memtable.id());
+        assert_eq!(
+            partitions.next_memtable_id(),
+            replacement.next_memtable_id()
+        );
+        assert!(Arc::ptr_eq(
+            &old_parts[0].memtable,
+            &replacement_parts[0].memtable
+        ));
+        assert!(Arc::ptr_eq(
+            &old_parts[1].memtable,
+            &replacement_parts[1].memtable
+        ));
+        assert_eq!(
+            &[0, 2000, 3000, 4000],
+            &collect_iter_timestamps(
+                replacement_parts[0]
+                    .memtable
+                    .ranges(None, RangesOptions::default())
+                    .unwrap()
+                    .build(None)
+                    .unwrap(),
+            )[..]
+        );
+        assert_eq!(
+            &[5000, 7000],
+            &collect_iter_timestamps(
+                replacement_parts[1]
+                    .memtable
+                    .ranges(None, RangesOptions::default())
+                    .unwrap()
+                    .build(None)
+                    .unwrap(),
+            )[..]
+        );
+        assert!(Arc::ptr_eq(replacement.memtable_builder(), &new_builder));
+    }
+
+    #[test]
     fn test_fork_empty() {
         let metadata = memtable_util::metadata_for_test();
         let builder = Arc::new(TimeSeriesMemtableBuilder::default());
@@ -1045,6 +1116,123 @@ mod tests {
         assert_eq!(Duration::from_secs(10), new_parts.part_duration());
         assert!(new_parts.list_partitions().is_empty());
         assert_eq!(0, new_parts.next_memtable_id());
+    }
+
+    fn write_encoded_bulk_data(
+        partitions: &TimePartitions,
+        metadata: &RegionMetadataRef,
+        key: &str,
+        start_timestamp: i64,
+        sequence: SequenceNumber,
+    ) {
+        // Parts with 1024 rows bypass BulkMemtable's unordered-part path. Two parts then meet the
+        // merge threshold and are encoded when the memtable is compacted below.
+        for offset in [0, 1024] {
+            let timestamps =
+                (start_timestamp + offset..start_timestamp + offset + 1024).collect::<Vec<_>>();
+            let kvs = memtable_util::build_key_values(
+                metadata,
+                key.to_string(),
+                0,
+                &timestamps,
+                sequence + offset as u64,
+            );
+            partitions.write(&kvs).unwrap();
+        }
+    }
+
+    fn has_byte_stream_split(memtable: &MemtableRef) -> bool {
+        memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .ranges
+            .values()
+            .find_map(|range| range.encoded())
+            .expect("partition should contain an encoded range")
+            .sst_info
+            .file_metadata
+            .unwrap()
+            .row_groups()
+            .iter()
+            .flat_map(|row_group| row_group.columns())
+            .any(|column| {
+                column.column_path().string() == "v1"
+                    && column.column_type() == PhysicalType::DOUBLE
+                    && column
+                        .encodings()
+                        .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+            })
+    }
+
+    #[test]
+    fn test_bulk_builder_replacement_uses_new_encoding_for_new_partition() {
+        let metadata = memtable_util::metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 2,
+            encode_row_threshold: 1,
+            encode_bytes_threshold: usize::MAX,
+            ..Default::default()
+        };
+        let old_builder = Arc::new(
+            BulkMemtableBuilder::new(None, false, Default::default()).with_config(config.clone()),
+        );
+        let partitions = TimePartitions::new(
+            metadata.clone(),
+            old_builder,
+            0,
+            Some(Duration::from_secs(5)),
+        );
+        write_encoded_bulk_data(&partitions, &metadata, "old", 1000, 0);
+        let old_part = partitions.list_partitions().pop().unwrap().memtable;
+        old_part.compact(false).unwrap();
+        assert!(!has_byte_stream_split(&old_part));
+
+        let new_builder: MemtableBuilderRef = Arc::new(
+            BulkMemtableBuilder::new(None, false, Default::default())
+                .with_config(config.clone())
+                .with_float_field_encoding(FloatFieldEncoding::ByteStreamSplit),
+        );
+        let replacement = partitions.with_memtable_builder(new_builder);
+        let replacement_old_part = replacement.list_partitions().pop().unwrap().memtable;
+        assert!(Arc::ptr_eq(&old_part, &replacement_old_part));
+
+        // A write in a different window creates a partition from the replacement builder without
+        // freezing the existing partition first.
+        write_encoded_bulk_data(&replacement, &metadata, "replacement", 6000, 2);
+        let replacement_new_part = replacement.list_partitions().pop().unwrap().memtable;
+        assert_eq!(1, replacement_new_part.id());
+        replacement_new_part.compact(false).unwrap();
+        assert!(has_byte_stream_split(&replacement_new_part));
+
+        // A normal fork keeps the byte-stream-split builder for the successor.
+        replacement.freeze().unwrap();
+        let successor = replacement.fork(&metadata, None);
+        write_encoded_bulk_data(&successor, &metadata, "successor", 6000, 4);
+        let successor_part = successor.list_partitions().pop().unwrap().memtable;
+        assert_eq!(2, successor_part.id());
+        successor_part.compact(false).unwrap();
+        assert!(has_byte_stream_split(&successor_part));
+
+        // A second normal fork also keeps the byte-stream-split builder.
+        successor.freeze().unwrap();
+        let second_successor = successor.fork(&metadata, None);
+        write_encoded_bulk_data(&second_successor, &metadata, "second_successor", 6000, 6);
+        let second_successor_part = second_successor.list_partitions().pop().unwrap().memtable;
+        assert_eq!(3, second_successor_part.id());
+        second_successor_part.compact(false).unwrap();
+        assert!(has_byte_stream_split(&second_successor_part));
+
+        // Replacing the builder again affects the next fork, restoring the default encoding.
+        let unset = second_successor.with_memtable_builder(Arc::new(
+            BulkMemtableBuilder::new(None, false, Default::default()).with_config(config),
+        ));
+        unset.freeze().unwrap();
+        let unset_successor = unset.fork(&metadata, None);
+        write_encoded_bulk_data(&unset_successor, &metadata, "unset", 6000, 8);
+        let unset_part = unset_successor.list_partitions().pop().unwrap().memtable;
+        assert_eq!(4, unset_part.id());
+        unset_part.compact(false).unwrap();
+        assert!(!has_byte_stream_split(&unset_part));
     }
 
     #[test]

@@ -56,9 +56,10 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
-    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
+    FloatFieldEncoding, MAX_ROW_GROUP_ROW_COUNT, MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+    PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1495,6 +1496,8 @@ pub enum SetRegionOption {
     // Modifying the max number of rows in a parquet row group.
     MaxRowGroupRowCount(Option<usize>),
     PreserveRowSequence(bool),
+    /// Modifying the encoding for direct floating-point field columns in Parquet SSTs.
+    FloatFieldEncoding(FloatFieldEncoding),
     // Stops writing new WAL entries. This operation is irreversible.
     SkipWal,
 }
@@ -1560,6 +1563,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::PreserveRowSequence(preserve))
             }
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING => {
+                let encoding = value
+                    .parse::<FloatFieldEncoding>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::FloatFieldEncoding(encoding))
+            }
             SKIP_WAL_KEY if value == "true" => Ok(Self::SkipWal),
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -1582,6 +1591,9 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
             UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
             UnsetRegionOption::PreserveRowSequence => SetRegionOption::PreserveRowSequence(false),
+            UnsetRegionOption::FloatFieldEncoding => {
+                SetRegionOption::FloatFieldEncoding(FloatFieldEncoding::default())
+            }
         }
     }
 }
@@ -1598,6 +1610,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
             PRESERVE_ROW_SEQUENCE => Ok(Self::PreserveRowSequence),
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING => Ok(Self::FloatFieldEncoding),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1612,6 +1625,7 @@ pub enum UnsetRegionOption {
     MaxRowGroupRowCount,
     WriteBufferSize,
     PreserveRowSequence,
+    FloatFieldEncoding,
 }
 
 impl UnsetRegionOption {
@@ -1624,6 +1638,7 @@ impl UnsetRegionOption {
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
             Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
             Self::PreserveRowSequence => PRESERVE_ROW_SEQUENCE,
+            Self::FloatFieldEncoding => EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
         }
     }
 }
@@ -1970,6 +1985,38 @@ mod tests {
             value: "not_a_duration".to_string(),
         };
         assert!(SetRegionOption::try_from(&pb).is_err());
+    }
+
+    #[test]
+    fn test_set_region_option_float_field_encoding_try_from() {
+        for (value, encoding) in [
+            ("default", FloatFieldEncoding::Default),
+            ("byte_stream_split", FloatFieldEncoding::ByteStreamSplit),
+        ] {
+            let option = PbOption {
+                key: EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING.to_string(),
+                value: value.to_string(),
+            };
+            assert_eq!(
+                SetRegionOption::FloatFieldEncoding(encoding),
+                SetRegionOption::try_from(&option).unwrap()
+            );
+        }
+
+        for value in ["", "invalid"] {
+            let option = PbOption {
+                key: EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&option).is_err());
+        }
+
+        let unset = UnsetRegionOption::try_from(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING).unwrap();
+        assert_eq!(UnsetRegionOption::FloatFieldEncoding, unset);
+        assert_eq!(
+            SetRegionOption::FloatFieldEncoding(FloatFieldEncoding::Default),
+            SetRegionOption::from(&unset)
+        );
     }
 
     #[test]

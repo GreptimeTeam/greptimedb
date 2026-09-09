@@ -75,7 +75,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             if !options.skip_wal {
                 info!("Stop writing WAL for follower region: {}", region_id);
                 options.skip_wal = true;
-                region.version_control.alter_options(options);
+                region.version_control.alter_options(options, None);
             }
             sender.send(Ok(0));
             return;
@@ -222,13 +222,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         region.region_id, current_options.write_buffer_size, new_write_buffer_size
                     );
                     current_options.write_buffer_size = new_write_buffer_size;
-                    current_options.validate().map_err(|e| {
-                        store_api::metadata::InvalidRegionRequestSnafu {
-                            region_id: region.region_id,
-                            err: e.to_string(),
-                        }
-                        .build()
-                    })?;
                 }
                 SetRegionOption::Ttl(new_ttl) => {
                     info!(
@@ -314,6 +307,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         current_options.preserve_row_sequence = new_preserve;
                     }
                 }
+                SetRegionOption::FloatFieldEncoding(encoding) => {
+                    if encoding != current_options.float_field_encoding {
+                        info!(
+                            "Update region float_field_encoding: {}, previous: {:?} new: {:?}",
+                            region.region_id, current_options.float_field_encoding, encoding
+                        );
+                        current_options.float_field_encoding = encoding;
+                    }
+                }
                 SetRegionOption::SkipWal => {
                     if !current_options.skip_wal {
                         info!("Stop writing WAL for region: {}", region.region_id);
@@ -323,12 +325,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         }
         let kind = AlterKind::SetRegionOptions { options };
-        // Validate the complete final options. The loop above validates
-        // per-option, but a combined ALTER may flip append_mode and toggle
-        // preserve_row_sequence in the same request, which is only valid when
-        // viewed together (order-independent). Validating the staged outcome
-        // also guarantees that a preserve-only toggle applied via the fast path
-        // below cannot create an invalid state (preserve requires append_mode).
+        // Validate cross-option constraints only after constructing the complete candidate,
+        // so combined changes are independent of their order.
         let candidate = new_region_options_on_empty_memtable(&current_options, &kind)
             .unwrap_or_else(|| current_options.clone());
         candidate.validate().map_err(|e| {
@@ -339,7 +337,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .build()
         })?;
         if all_options_altered {
-            region.version_control.alter_options(candidate);
+            let memtable_builder = (candidate.float_field_encoding
+                != version.options.float_field_encoding)
+                .then(|| {
+                    self.memtable_builder_provider
+                        .builder_for_options(&candidate)
+                });
+            region
+                .version_control
+                .alter_options(candidate, memtable_builder);
             Ok(None)
         } else {
             // Some options require an empty memtable (e.g. append_mode,
@@ -398,6 +404,9 @@ fn new_region_options_on_empty_memtable(
             }
             SetRegionOption::PreserveRowSequence(new_preserve) => {
                 current_options.preserve_row_sequence = *new_preserve;
+            }
+            SetRegionOption::FloatFieldEncoding(encoding) => {
+                current_options.float_field_encoding = *encoding;
             }
         }
     }
