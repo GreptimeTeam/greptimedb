@@ -779,7 +779,7 @@ mod test {
     use common_query::native_histogram::build_histogram_array;
     use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
     use datafusion::arrow::array::{
-        Float64Array, TimestampMicrosecondArray, TimestampNanosecondArray,
+        Float64Array, TimestampMicrosecondArray, TimestampNanosecondArray, TimestampSecondArray,
     };
     use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -966,70 +966,107 @@ mod test {
 
     #[tokio::test]
     async fn logical_normalize_offset_survives_rebuild_and_executes() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                TIME_INDEX_COLUMN,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
+        for (name, time_unit, raw, offset, start, lookback_delta) in [
+            (
+                "millisecond offset",
+                TimeUnit::Millisecond,
+                0,
+                1_000,
+                1_000,
+                0,
             ),
-            Field::new("value", DataType::Float64, true),
-        ]));
-        let input = LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: schema.clone().to_dfschema_ref().unwrap(),
-        });
-        let normalize = crate::extension_plan::SeriesNormalize::new(
-            1_000,
-            TIME_INDEX_COLUMN,
-            false,
-            Vec::new(),
-            input.clone(),
-        );
-        let normalize = crate::extension_plan::SeriesNormalize::deserialize(&normalize.serialize())
-            .unwrap()
-            .with_exprs_and_inputs(vec![], vec![input])
+            (
+                "second timestamp with negative fractional offset",
+                TimeUnit::Second,
+                1,
+                -500,
+                500,
+                0,
+            ),
+        ] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(
+                    TIME_INDEX_COLUMN,
+                    DataType::Timestamp(time_unit, None),
+                    false,
+                ),
+                Field::new("value", DataType::Float64, true),
+            ]));
+            let input = LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            });
+            let normalize = crate::extension_plan::SeriesNormalize::new(
+                offset,
+                TIME_INDEX_COLUMN,
+                false,
+                Vec::new(),
+                input.clone(),
+            );
+            let normalize =
+                crate::extension_plan::SeriesNormalize::deserialize(&normalize.serialize())
+                    .unwrap()
+                    .with_exprs_and_inputs(vec![], vec![input])
+                    .unwrap();
+            let normalized = LogicalPlan::Extension(Extension {
+                node: Arc::new(normalize),
+            });
+            let plan = InstantManipulate::new(
+                start,
+                start,
+                lookback_delta,
+                1,
+                TIME_INDEX_COLUMN.to_string(),
+                Vec::new(),
+                Some("value".to_string()),
+                normalized.clone(),
+            );
+            let rebuilt = InstantManipulate::deserialize(&plan.serialize())
+                .unwrap()
+                .with_exprs_and_inputs(vec![], vec![normalized])
+                .unwrap();
+            let timestamp: Arc<dyn Array> = match time_unit {
+                TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(vec![raw])),
+                TimeUnit::Second => Arc::new(TimestampSecondArray::from(vec![raw])),
+                _ => unreachable!(),
+            };
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![timestamp, Arc::new(Float64Array::from(vec![7.0]))],
+            )
             .unwrap();
-        let normalized = LogicalPlan::Extension(Extension {
-            node: Arc::new(normalize),
-        });
-        let plan = InstantManipulate::new(
-            1_000,
-            1_000,
-            0,
-            1,
-            TIME_INDEX_COLUMN.to_string(),
-            Vec::new(),
-            Some("value".to_string()),
-            normalized.clone(),
-        );
-        let rebuilt = InstantManipulate::deserialize(&plan.serialize())
-            .unwrap()
-            .with_exprs_and_inputs(vec![], vec![normalized])
-            .unwrap();
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![0])),
-                Arc::new(Float64Array::from(vec![7.0])),
-            ],
-        )
-        .unwrap();
-        let exec_input = Arc::new(DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
-        )));
-        let exec = rebuilt.to_execution_plan(exec_input);
-        let output = datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+            let exec_input = Arc::new(DataSourceExec::new(Arc::new(
+                MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+            )));
+            let output = datafusion::physical_plan::collect(
+                rebuilt.to_execution_plan(exec_input),
+                SessionContext::default().task_ctx(),
+            )
             .await
             .unwrap();
-        assert_eq!(
-            output[0]
-                .column(1)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .value(0),
-            7.0
-        );
+            let output = &output[0];
+            assert_eq!(output.num_rows(), 1, "{name}");
+            assert_eq!(
+                output
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .value(0),
+                start,
+                "{name}"
+            );
+            assert_eq!(
+                output
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .value(0),
+                7.0,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1782,60 +1819,81 @@ mod test {
 
     #[test]
     fn native_nanosecond_offset_uses_wide_shifted_timeline() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                TIME_INDEX_COLUMN,
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-                false,
+        for (raw, offset, eval) in [
+            (
+                9_223_112_837_000_000_000_i64,
+                259_200_000,
+                9_223_372_037_000,
             ),
-            Field::new("value", DataType::Float64, true),
-        ]));
-        let raw = 9_223_112_837_000_000_000_i64;
-        let input = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(TimestampNanosecondArray::from(vec![raw])),
-                Arc::new(Float64Array::from(vec![7.0])),
-            ],
-        )
-        .unwrap();
-        let stream = InstantManipulateStream {
-            offset: 3 * 24 * 60 * 60 * 1_000,
-            start: 9_223_372_037_000,
-            end: 9_223_372_037_000,
-            lookback_delta: 300_000,
-            interval: 1,
-            time_index: 0,
-            time_unit: TimeUnit::Nanosecond,
-            field_indices: [Some(1), None],
-            tsid_index: None,
-            reuse_tsid_column: false,
-            schema: Arc::new(Schema::new(vec![
+            (
+                -9_223_112_837_000_000_000_i64,
+                -259_200_000,
+                -9_223_372_037_000,
+            ),
+        ] {
+            let schema = Arc::new(Schema::new(vec![
                 Field::new(
                     TIME_INDEX_COLUMN,
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
                     false,
                 ),
                 Field::new("value", DataType::Float64, true),
-            ])),
-            input: Box::pin(
-                datafusion::physical_plan::memory::MemoryStream::try_new(vec![], schema, None)
-                    .unwrap(),
-            ),
-            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
-            num_series: Count::new(),
-        };
-        let output = stream.manipulate(input).unwrap();
-        assert_eq!(output.num_rows(), 1);
-        assert_eq!(
-            output
-                .column(1)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .value(0),
-            7.0
-        );
+            ]));
+            let input = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampNanosecondArray::from(vec![raw])),
+                    Arc::new(Float64Array::from(vec![7.0])),
+                ],
+            )
+            .unwrap();
+            let stream = InstantManipulateStream {
+                offset,
+                start: eval,
+                end: eval,
+                lookback_delta: 300_000,
+                interval: 1,
+                time_index: 0,
+                time_unit: TimeUnit::Nanosecond,
+                field_indices: [Some(1), None],
+                tsid_index: None,
+                reuse_tsid_column: false,
+                schema: Arc::new(Schema::new(vec![
+                    Field::new(
+                        TIME_INDEX_COLUMN,
+                        DataType::Timestamp(TimeUnit::Millisecond, None),
+                        false,
+                    ),
+                    Field::new("value", DataType::Float64, true),
+                ])),
+                input: Box::pin(
+                    datafusion::physical_plan::memory::MemoryStream::try_new(vec![], schema, None)
+                        .unwrap(),
+                ),
+                metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+                num_series: Count::new(),
+            };
+            let output = stream.manipulate(input).unwrap();
+            assert_eq!(output.num_rows(), 1);
+            assert_eq!(
+                output
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .value(0),
+                eval
+            );
+            assert_eq!(
+                output
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .value(0),
+                7.0
+            );
+        }
     }
 
     #[tokio::test]
