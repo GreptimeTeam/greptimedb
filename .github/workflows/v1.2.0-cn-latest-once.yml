@@ -1,0 +1,116 @@
+name: Promote v1.2.0 CN latest pointers
+
+on:
+  push:
+    branches:
+      - ops-v1.2.0-cn-latest-once
+    paths:
+      - .github/workflows/v1.2.0-cn-latest-once.yml
+
+permissions:
+  contents: read
+
+jobs:
+  promote-cn-latest:
+    name: Promote verified v1.2.0 CN latest pointers
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Guard the GitHub v1.2.0 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$(curl --fail --silent --show-error \
+            https://api.github.com/repos/GreptimeTeam/greptimedb/releases/latest)"
+          release_id="$(jq -r '.id' <<<"$release")"
+          release_tag="$(jq -r '.tag_name' <<<"$release")"
+          prerelease="$(jq -r '.prerelease' <<<"$release")"
+          draft="$(jq -r '.draft' <<<"$release")"
+
+          test "$release_id" = "384058349"
+          test "$release_tag" = "v1.2.0"
+          test "$prerelease" = "false"
+          test "$draft" = "false"
+
+      - name: Install skopeo
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Promote ACR latest image tags by verified digest
+        shell: bash
+        env:
+          ACR_IMAGE_REGISTRY: ${{ vars.ACR_IMAGE_REGISTRY }}
+          ALICLOUD_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
+          ALICLOUD_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test "$ACR_IMAGE_REGISTRY" = "greptime-registry.cn-hangzhou.cr.aliyuncs.com"
+          : "${ALICLOUD_USERNAME:?}" "${ALICLOUD_PASSWORD:?}"
+
+          verify_raw_digest() {
+            local reference="$1"
+            local expected_digest="$2"
+            local actual_digest
+            actual_digest="sha256:$(skopeo inspect --raw \
+              --creds "${ALICLOUD_USERNAME}:${ALICLOUD_PASSWORD}" \
+              "docker://${reference}" | sha256sum | awk '{print $1}')"
+            test "$actual_digest" = "$expected_digest"
+          }
+
+          standard_image="${ACR_IMAGE_REGISTRY}/greptime/greptimedb"
+          standard_digest="sha256:d68f6e3f159e2eb1c0c1a38aabe4ac50dbee2cf2c86746657f4a411e9a3cf6c9"
+          centos_image="${ACR_IMAGE_REGISTRY}/greptime/greptimedb-centos"
+          centos_digest="sha256:0f26753ef60266fdc12a4aaf53e3d760f4bf349fbb92c27e6ba2581b70764c9f"
+
+          verify_raw_digest "${standard_image}:v1.2.0" "$standard_digest"
+          skopeo copy --all --preserve-digests \
+            --src-creds "${ALICLOUD_USERNAME}:${ALICLOUD_PASSWORD}" \
+            --dest-creds "${ALICLOUD_USERNAME}:${ALICLOUD_PASSWORD}" \
+            "docker://${standard_image}@${standard_digest}" \
+            "docker://${standard_image}:latest"
+          verify_raw_digest "${standard_image}:latest" "$standard_digest"
+
+          verify_raw_digest "${centos_image}:v1.2.0" "$centos_digest"
+          skopeo copy --all --preserve-digests \
+            --src-creds "${ALICLOUD_USERNAME}:${ALICLOUD_PASSWORD}" \
+            --dest-creds "${ALICLOUD_USERNAME}:${ALICLOUD_PASSWORD}" \
+            "docker://${centos_image}@${centos_digest}" \
+            "docker://${centos_image}:latest"
+          verify_raw_digest "${centos_image}:latest" "$centos_digest"
+
+      - name: Update and verify the CN latest-version pointer
+        shell: bash
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${PROXY_URL:?}" "${PROXY_USERNAME:?}" "${PROXY_PASSWORD:?}"
+          version_file="$(mktemp)"
+          public_file="$(mktemp)"
+          trap 'rm -f "$version_file" "$public_file"' EXIT
+          printf 'v1.2.0\n' > "$version_file"
+
+          curl --fail --silent --show-error -X PUT \
+            -u "${PROXY_USERNAME}:${PROXY_PASSWORD}" \
+            -F "file=@${version_file};filename=latest-version.txt" \
+            "${PROXY_URL%/}/releases/greptimedb"
+
+          for attempt in {1..6}; do
+            curl --fail --silent --show-error \
+              https://downloads.greptime.cn/releases/greptimedb/latest-version.txt \
+              --output "$public_file"
+            if cmp --silent "$version_file" "$public_file"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 6 ]; then
+              echo "Public latest-version.txt did not contain exactly v1.2.0" >&2
+              exit 1
+            fi
+            sleep 10
+          done
