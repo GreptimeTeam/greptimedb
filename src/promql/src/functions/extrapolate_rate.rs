@@ -30,6 +30,7 @@
 //! Implementations of `rate`, `increase` and `delta` functions in PromQL.
 
 use std::fmt::Display;
+use std::ops::Range;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Float64Array, Float64Builder, TimestampMillisecondArray};
@@ -192,9 +193,18 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         let range_length = self.range_length;
         let range_length_secs = range_length as f64 / 1000.0;
 
-        let mut counter_correction = 0.0;
-        let mut prev_offset = usize::MAX;
-        let mut prev_length = 0usize;
+        // Range windows normally overlap heavily, so scanning each one for counter resets costs
+        // far more than the input has samples. Pay one pass over the values to index the reset
+        // positions once that is the cheaper side of the trade.
+        let mut reset_index = if IS_COUNTER {
+            let scanned_pairs = keys.iter().fold(0usize, |total, &key| {
+                total.saturating_add(unpack(key).1.saturating_sub(1) as usize)
+            });
+            (scanned_pairs > all_values.len().saturating_sub(1))
+                .then(|| CounterResetIndex::new(all_values))
+        } else {
+            None
+        };
 
         for index in 0..num_windows {
             let (raw_offset, raw_length) = unpack(keys[index]);
@@ -203,7 +213,6 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
             if length < 2 {
                 result_builder.append_null();
-                prev_offset = usize::MAX;
                 continue;
             }
 
@@ -212,31 +221,14 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let last_value = all_values[end - 1];
 
             let result_value = if IS_COUNTER {
-                // Adjacent normalized windows usually slide forward by one sample. Reuse the
-                // previous window's accumulated reset correction and adjust only the dropped and
-                // newly added edges, falling back to a full scan when the layout changes.
-                if prev_offset != usize::MAX && offset == prev_offset + 1 && length == prev_length {
-                    if all_values[prev_offset + 1] < all_values[prev_offset] {
-                        counter_correction -= all_values[prev_offset];
-                    }
-                    if all_values[end - 1] < all_values[end - 2] {
-                        counter_correction += all_values[end - 2];
-                    }
-                } else {
-                    counter_correction = 0.0;
-                    for pair in all_values[offset..end].windows(2) {
-                        if pair[1] < pair[0] {
-                            counter_correction += pair[0];
-                        }
-                    }
-                }
+                let counter_correction = match &mut reset_index {
+                    Some(reset_index) => reset_index.correction(offset, end),
+                    None => counter_reset_correction(&all_values[offset..end]),
+                };
                 last_value - first_value + counter_correction
             } else {
                 last_value - first_value
             };
-
-            prev_offset = offset;
-            prev_length = length;
 
             let first_ts = all_timestamps[offset];
             let last_ts = all_timestamps[end - 1];
@@ -283,6 +275,55 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
         let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
+    }
+}
+
+/// Sums the value preceding every counter reset in `values`, in sample order.
+fn counter_reset_correction(values: &[f64]) -> f64 {
+    values
+        .windows(2)
+        .filter(|pair| pair[1] < pair[0])
+        .fold(0.0, |correction, pair| correction + pair[0])
+}
+
+/// Positions of the counter resets in a value array, so that a window's correction can be
+/// reduced over the resets it contains instead of over all of its samples.
+struct CounterResetIndex<'a> {
+    values: &'a [f64],
+    /// Ascending indices `i` where `values[i] < values[i - 1]`.
+    positions: Vec<usize>,
+    /// Slice of `positions` that [`Self::correction`] last reduced.
+    active: Range<usize>,
+    correction: f64,
+}
+
+impl<'a> CounterResetIndex<'a> {
+    fn new(values: &'a [f64]) -> Self {
+        Self {
+            values,
+            positions: (1..values.len())
+                .filter(|&i| values[i] < values[i - 1])
+                .collect(),
+            active: 0..0,
+            correction: 0.0,
+        }
+    }
+
+    /// Correction for the window `values[start..end]`, identical to
+    /// [`counter_reset_correction`] on the same window.
+    fn correction(&mut self, start: usize, end: usize) -> f64 {
+        let left = self.positions.partition_point(|&i| i <= start);
+        let right = self.positions.partition_point(|&i| i < end);
+        if self.active != (left..right) {
+            // Re-reduce in sample order rather than adding and subtracting the resets that
+            // entered and left the window: `a + b - a` does not restore `b` in f64, and an
+            // expired infinity would leave a NaN in the running total forever.
+            self.correction = self.positions[left..right]
+                .iter()
+                .fold(0.0, |correction, &i| correction + self.values[i - 1]);
+            self.active = left..right;
+        }
+        self.correction
     }
 }
 
@@ -407,6 +448,84 @@ mod test {
             ColumnarValue::Array(Arc::new(value_range.into_dict())),
             ColumnarValue::Array(eval_ts),
         )
+    }
+
+    /// Evaluates `ranges` as one batch and asserts every window is bit-identical to evaluating
+    /// that window on its own, which always takes the direct per-window reduction.
+    fn assert_counter_windows_match_single(values: &[f64], ranges: &[(u32, u32)]) {
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
+            (0..values.len()).map(|i| i as i64 * 30_000 + (i % 5) as i64 * 1_000),
+        ));
+        let values = Arc::new(Float64Array::from(values.to_vec()));
+        let evaluate = |ranges: &[(u32, u32)]| {
+            let eval_ts = Arc::new(TimestampMillisecondArray::from_iter_values(
+                ranges.iter().map(|&(offset, length)| {
+                    timestamps.value((offset + length.saturating_sub(1)) as usize) + 5_000
+                }),
+            ));
+            let input = [
+                ColumnarValue::Array(Arc::new(
+                    RangeArray::from_ranges(timestamps.clone(), ranges.iter().copied())
+                        .unwrap()
+                        .into_dict(),
+                )),
+                ColumnarValue::Array(Arc::new(
+                    RangeArray::from_ranges(values.clone(), ranges.iter().copied())
+                        .unwrap()
+                        .into_dict(),
+                )),
+                ColumnarValue::Array(eval_ts),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(3_600_000))),
+            ];
+            extract_array(&Rate::new(3_600_000).calc(&input).unwrap())
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+        };
+
+        for (range, batched) in ranges.iter().zip(evaluate(ranges)) {
+            let single = evaluate(std::slice::from_ref(range))[0];
+            match (batched, single) {
+                (None, None) => {}
+                (Some(batched), Some(single)) => assert!(
+                    batched.to_bits() == single.to_bits() || (batched.is_nan() && single.is_nan()),
+                    "range {range:?}: batched {batched} != single {single}"
+                ),
+                _ => panic!("range {range:?}: batched {batched:?} != single {single:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn counter_correction_survives_huge_and_infinite_resets() {
+        // Both series reset twice inside the first window and once inside the second, but the
+        // first reset is large enough to swallow the second one when they are summed together.
+        for values in [
+            vec![1e16, 1.0, 0.0, 1.0, 2.0],
+            vec![f64::INFINITY, 1.0, 0.0, 1.0, 2.0],
+        ] {
+            assert_counter_windows_match_single(&values, &[(0, 4), (1, 4)]);
+        }
+    }
+
+    #[test]
+    fn counter_correction_matches_single_window_on_irregular_layouts() {
+        let mut values: Vec<f64> = (0..512).map(|i| (i % 37) as f64 * 0.25).collect();
+        values[20] = f64::NAN;
+        values[70] = f64::INFINITY;
+        values[140] = f64::NEG_INFINITY;
+        values[220] = 1e300;
+        values[221] = 1e-200;
+
+        let mut ranges: Vec<(u32, u32)> = (0..390).map(|i| (i, 120)).collect();
+        // Empty, too-short, backward and disjoint windows all break a forward-only slide.
+        ranges.extend([(400, 0), (400, 1), (2, 20), (450, 30), (0, 120)]);
+        ranges.extend((0..390).rev().step_by(10).map(|i| (i, 120)));
+
+        assert_counter_windows_match_single(&values, &ranges);
     }
 
     #[test]
