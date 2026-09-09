@@ -63,7 +63,7 @@ use query::QueryEngineRef;
 use query::parser::QueryStatement;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
-use set::{set_query_timeout, set_read_preference};
+use set::{set_query_timeout, set_read_preference, set_skip_wal};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
 use sql::statements::OptionMap;
@@ -534,6 +534,7 @@ impl StatementExecutor {
 
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
+            "SKIP_WAL" => set_skip_wal(set_var.value, query_ctx)?,
 
             "@@TIME_ZONE" | "@@SESSION.TIME_ZONE" | "TIMEZONE" | "TIME_ZONE" => {
                 set_timezone(set_var.value, query_ctx)?
