@@ -111,6 +111,7 @@ jobs:
           python3 tests/perf/test_query_regression_runner_otlp_trace_load.py
           python3 tests/perf/test_query_regression_summary_otlp.py
           python3 tests/perf/test_query_regression_case_selection.py
+          python3 tests/perf/test_bss_scale_experiment.py
           python3 tests/perf/test_query_regression_nightly_refs.py
           python3 tests/perf/test_aliyun_ecs_runner_scripts.py
 
@@ -747,11 +748,10 @@ jobs:
           OTELGEN_BIN: /usr/local/bin/otelgen
           SUMMARY_SCRIPT: ${{ github.event_name == 'pull_request' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
           QUERY_REGRESSION_RUNNER: ${{ github.workspace }}/query-regression-bins/candidate/query_regression_runner
-        run: >-
-          uv run --no-project python src/.github/scripts/query-regression-run.py
-          --base-src src
-          --candidate-src src
-          --summary-script "${SUMMARY_SCRIPT}"
+        run: |
+          export SOURCE_SHA="${VERIFIED_CANDIDATE_SHA}"
+          uv run --no-project --python 3.12 python src/.github/scripts/bss-scale-experiment.py
+          echo "status=0" >> "$GITHUB_OUTPUT"
 
       - name: Write PR metadata for trusted comment workflow
         if: ${{ always() && github.event_name == 'pull_request' }}
@@ -777,6 +777,9 @@ jobs:
             query-regression-work/**/logs/**
             query-regression-work/**/otelgen/**
             query-regression-summary.md
+            query-regression-work/bss-scale/**/*.json
+            query-regression-work/bss-scale/**/*.toml
+            query-regression-work/bss-scale/**/*.txt
             machine-telemetry.log
           if-no-files-found: warn
           retention-days: 7
