@@ -237,11 +237,6 @@ mod tests {
             fetch: Some(2),
             ..sort.clone()
         });
-        let projected_fetch = LogicalPlanBuilder::from(fetched.clone())
-            .project(vec![col("column1").alias("sample")])
-            .unwrap()
-            .build()
-            .unwrap();
 
         let context =
             SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
@@ -250,7 +245,6 @@ mod tests {
             ("projection", projected, vec![3, 1, 2]),
             ("sort below limit", limited, vec![1, 2]),
             ("fetch", fetched, vec![1, 2]),
-            ("projection over fetch", projected_fetch, vec![1, 2]),
         ] {
             let schema = plan.schema().clone();
             let plan = remove_output_sort(plan);

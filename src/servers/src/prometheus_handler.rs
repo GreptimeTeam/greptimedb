@@ -69,10 +69,8 @@ impl ParsedPromQuery {
         &self.statement
     }
 
-    /// Returns whether the caller consumes the query output in execution order.
-    ///
-    /// Callers that re-derive the order themselves can clear this so the executor
-    /// is allowed to drop the plan's output sort.
+    /// Returns whether the caller observes the query output in execution order.
+    /// When it does not, the executor may drop the plan's output sort.
     pub fn requires_output_ordering(&self) -> bool {
         self.requires_output_ordering
     }
