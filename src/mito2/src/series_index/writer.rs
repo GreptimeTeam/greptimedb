@@ -16,9 +16,11 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common_time::timestamp::TimeUnit;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray, UInt32Array,
-    UInt64Array,
+    Array, ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -112,6 +114,9 @@ pub struct SeriesIndexWriter {
     codec: Arc<dyn PrimaryKeyCodec>,
     tag_columns: Vec<(ColumnId, String)>,
     schema: SchemaRef,
+    /// Unit of the min/max ts Timestamp columns, i.e. the region's time
+    /// index unit at writer creation.
+    time_unit: TimeUnit,
     writer: ParquetIndexWriter,
     current_primary_key: Option<Vec<u8>>,
     current_row: Option<SeriesIndexRow>,
@@ -139,6 +144,7 @@ impl SeriesIndexWriter {
                 reason: "series index row group size must be greater than zero",
             }
         );
+        let time_unit = time_index_unit(&metadata)?;
         let schema = series_index_schema(&metadata)?;
         let tag_columns = tag_columns(&metadata);
         let writer = ParquetIndexWriter::try_new(
@@ -156,6 +162,7 @@ impl SeriesIndexWriter {
             codec,
             tag_columns,
             schema,
+            time_unit,
             writer,
             current_primary_key: None,
             current_row: None,
@@ -239,7 +246,7 @@ impl SeriesIndexWriter {
         let pk_idx = primary_key_column_index(batch.num_columns());
         let ts_idx = time_index_column_index(batch.num_columns());
         let primary_keys = batch.column(pk_idx);
-        let timestamps = timestamp_values(batch.column(ts_idx))?;
+        let timestamps = timestamp_values(batch.column(ts_idx), self.time_unit)?;
         ensure!(
             primary_keys.len() == batch.num_rows() && timestamps.len() == batch.num_rows(),
             InvalidRecordBatchSnafu {
@@ -394,7 +401,7 @@ impl SeriesIndexWriter {
         if self.buffered_rows.is_empty() {
             return Ok(());
         }
-        let batch = rows_to_batch(&self.schema, &self.buffered_rows)?;
+        let batch = rows_to_batch(&self.schema, &self.buffered_rows, self.time_unit)?;
         let start = Instant::now();
         let result = self.writer.write(&batch).await;
         self.metrics.write_elapsed += start.elapsed();
@@ -432,9 +439,13 @@ impl SeriesIndexWriter {
 /// Returns the Arrow schema of a series index.
 pub fn series_index_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
     validate_metadata(metadata)?;
+    // Native Timestamp columns carry the time index unit in their datatype,
+    // so each file is interpreted in the unit it was written with even after
+    // the region's time index unit has been widened.
+    let ts_type = DataType::Timestamp(time_index_unit(metadata)?.into(), None);
     let mut fields = vec![
-        Field::new(MIN_TS_COLUMN, DataType::Int64, false),
-        Field::new(MAX_TS_COLUMN, DataType::Int64, false),
+        Field::new(MIN_TS_COLUMN, ts_type.clone(), false),
+        Field::new(MAX_TS_COLUMN, ts_type, false),
         Field::new(ROW_COUNT_COLUMN, DataType::UInt64, false),
         Field::new(TABLE_ID_COLUMN, DataType::UInt32, false),
         Field::new(TSID_COLUMN, DataType::UInt64, false),
@@ -445,6 +456,21 @@ pub fn series_index_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
             .map(|(_, name)| Field::new(name, DataType::Utf8, true)),
     );
     Ok(Arc::new(Schema::new(fields)))
+}
+
+/// Returns the unit of the region's timestamp time index; the writer stamps
+/// it into index files so a searcher interprets each file in the unit it was
+/// written with (the region's time index unit may have been widened since).
+fn time_index_unit(metadata: &RegionMetadataRef) -> Result<TimeUnit> {
+    Ok(metadata
+        .time_index_column()
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .context(InvalidMetaSnafu {
+            reason: "series index requires a timestamp time index",
+        })?
+        .unit())
 }
 
 fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
@@ -522,32 +548,35 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
     column_id == ReservedColumnId::table_id() || column_id == ReservedColumnId::tsid()
 }
 
-/// Extracts raw i64 timestamp values for the `__series_min_ts`/`__series_max_ts`
-/// columns. NOTE: the unit is dropped; the values must always be interpreted in
-/// the unit of the region metadata the index is written with. Once this index
-/// is wired into scans, files written before/after a time index unit widening
-/// would carry mixed units — the index schema or the searcher must record the
-/// unit per file, or the index must be rebuilt on such an alter.
-fn timestamp_values(array: &ArrayRef) -> Result<Int64Array> {
-    let timestamps = if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
-        array.clone()
-    } else {
-        timestamp_array_to_primitive(array)
-            .map(|(array, _)| array)
-            .with_context(|| InvalidRecordBatchSnafu {
-                reason: format!(
-                    "series index requires an Int64 or timestamp time index, got {:?}",
-                    array.data_type()
-                ),
-            })?
-    };
+/// Extracts the time index column's raw values in the writer's `unit`.
+/// A timestamp array carrying a different unit is an invariant violation:
+/// the alter path flushes memtables before widening the region's time index
+/// unit, so a writer never receives batches in the region's previous unit.
+/// Reject the mismatch rather than reinterpreting or rescaling the values.
+fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Int64Array> {
     ensure!(
-        timestamps.null_count() == 0,
+        array.null_count() == 0,
         InvalidRecordBatchSnafu {
             reason: "series index input contains null timestamps",
         }
     );
-    Ok(timestamps)
+    let (values, array_unit) =
+        timestamp_array_to_primitive(array).with_context(|| InvalidRecordBatchSnafu {
+            reason: format!(
+                "series index requires a timestamp time index column, got {:?}",
+                array.data_type()
+            ),
+        })?;
+    let array_unit: TimeUnit = array_unit.into();
+    ensure!(
+        array_unit == unit,
+        InvalidRecordBatchSnafu {
+            reason: format!(
+                "series index input time index unit {array_unit:?} does not match the index unit {unit:?}"
+            ),
+        }
+    );
+    Ok(values)
 }
 
 // TODO(yingwen): Bench and optimize the performance if this is costly.
@@ -606,14 +635,27 @@ fn decode_primary_key(
     })
 }
 
-fn rows_to_batch(schema: &SchemaRef, rows: &[SeriesIndexRow]) -> Result<RecordBatch> {
+/// Builds a timestamp array in `unit` from raw i64 values.
+fn ts_array(timestamps: impl Iterator<Item = i64>, unit: TimeUnit) -> ArrayRef {
+    match unit {
+        TimeUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(timestamps)),
+        TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from_iter_values(timestamps)),
+        TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from_iter_values(timestamps)),
+        TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from_iter_values(timestamps)),
+    }
+}
+
+/// Builds a batch in the index `schema` from aggregated rows. The rows carry
+/// raw timestamps in `unit` (guaranteed by `timestamp_values`), which
+/// `series_index_schema` stamps into the min/max ts columns.
+fn rows_to_batch(
+    schema: &SchemaRef,
+    rows: &[SeriesIndexRow],
+    unit: TimeUnit,
+) -> Result<RecordBatch> {
     let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(Int64Array::from_iter_values(
-            rows.iter().map(|row| row.min_ts),
-        )),
-        Arc::new(Int64Array::from_iter_values(
-            rows.iter().map(|row| row.max_ts),
-        )),
+        ts_array(rows.iter().map(|row| row.min_ts), unit),
+        ts_array(rows.iter().map(|row| row.max_ts), unit),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|row| row.row_count),
         )),
@@ -636,11 +678,11 @@ fn rows_to_batch(schema: &SchemaRef, rows: &[SeriesIndexRow]) -> Result<RecordBa
 mod tests {
     use api::v1::SemanticType;
     use bytes::Bytes;
+    use common_time::timestamp::TimeUnit;
     use datatypes::arrow::array::{
-        BinaryDictionaryBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
-        TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+        BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
     };
-    use datatypes::arrow::datatypes::{TimeUnit, UInt32Type};
+    use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
     use object_store::ErrorKind;
@@ -660,7 +702,7 @@ mod tests {
         Arc::new(Schema::new(vec![
             Field::new(
                 "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
+                DataType::Timestamp(TimeUnit::Millisecond.into(), None),
                 false,
             ),
             Field::new("__primary_key", primary_key_type, false),
@@ -739,6 +781,15 @@ mod tests {
         );
         assert!(!schema.field(4).is_nullable());
         assert!(schema.field(5).is_nullable());
+        // The min/max ts columns are native timestamps in the time index unit.
+        assert_eq!(
+            &DataType::Timestamp(TimeUnit::Millisecond.into(), None),
+            schema.field(0).data_type()
+        );
+        assert_eq!(
+            &DataType::Timestamp(TimeUnit::Millisecond.into(), None),
+            schema.field(1).data_type()
+        );
 
         let dense = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         assert!(series_index_schema(&dense).is_err());
@@ -782,25 +833,42 @@ mod tests {
 
     #[test]
     fn test_timestamp_values() {
-        let arrays: Vec<ArrayRef> = vec![
-            Arc::new(Int64Array::from(vec![1, 2])),
-            Arc::new(TimestampSecondArray::from(vec![1, 2])),
-            Arc::new(TimestampMillisecondArray::from(vec![1, 2])),
-            Arc::new(TimestampMicrosecondArray::from(vec![1, 2])),
-            Arc::new(TimestampNanosecondArray::from(vec![1, 2])),
-        ];
-        for array in arrays {
-            assert_eq!(timestamp_values(&array).unwrap().values().as_ref(), &[1, 2]);
-        }
+        // Values already in the writer's unit pass through unchanged.
+        let array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1, 2]));
+        assert_eq!(
+            timestamp_values(&array, TimeUnit::Millisecond).unwrap(),
+            Int64Array::from(vec![1, 2])
+        );
+        // A timestamp array carrying a different unit is rejected instead of
+        // being silently reinterpreted or rescaled.
+        let array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1, 2]));
+        let error = timestamp_values(&array, TimeUnit::Microsecond).unwrap_err();
+        assert!(
+            error.to_string().contains("does not match the index unit"),
+            "{error}"
+        );
+
+        // Plain Int64 columns carry no unit to validate against and are
+        // rejected.
+        let int64: ArrayRef = Arc::new(Int64Array::from(vec![1, 2]));
+        let error = timestamp_values(&int64, TimeUnit::Millisecond).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires a timestamp time index column"),
+            "{error}"
+        );
 
         let nulls: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![Some(1), None]));
-        let error = timestamp_values(&nulls).unwrap_err();
+        let error = timestamp_values(&nulls, TimeUnit::Millisecond).unwrap_err();
         assert!(error.to_string().contains("null timestamps"), "{error}");
 
         let unsupported: ArrayRef = Arc::new(UInt8Array::from(vec![1, 2]));
-        let error = timestamp_values(&unsupported).unwrap_err();
+        let error = timestamp_values(&unsupported, TimeUnit::Millisecond).unwrap_err();
         assert!(
-            error.to_string().contains("requires an Int64 or timestamp"),
+            error
+                .to_string()
+                .contains("requires a timestamp time index column"),
             "{error}"
         );
     }
@@ -869,17 +937,17 @@ mod tests {
             batch
                 .column(0)
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<TimestampMillisecondArray>()
                 .unwrap(),
-            &Int64Array::from(vec![70, 200])
+            &TimestampMillisecondArray::from(vec![70, 200])
         );
         assert_eq!(
             batch
                 .column(1)
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<TimestampMillisecondArray>()
                 .unwrap(),
-            &Int64Array::from(vec![130, 230])
+            &TimestampMillisecondArray::from(vec![130, 230])
         );
         assert_eq!(
             batch
