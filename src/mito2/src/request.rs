@@ -76,6 +76,8 @@ pub struct WriteRequest {
     pub name_to_index: HashMap<String, usize>,
     /// Whether each column has null.
     pub has_null: Vec<bool>,
+    /// Whether this insert should skip WAL. Never applies to deletes.
+    pub skip_wal: bool,
     /// Write hint.
     pub hint: Option<WriteHint>,
     /// Region metadata on the time of this request is created.
@@ -137,6 +139,7 @@ impl WriteRequest {
             name_to_index,
             has_null,
             hint: None,
+            skip_wal: false,
             region_metadata,
             partition_expr_version: None,
         })

@@ -585,6 +585,7 @@ impl MetadataRegion {
         };
 
         RegionPutRequest {
+            skip_wal: false,
             rows,
             hint: None,
             partition_expr_version: None,

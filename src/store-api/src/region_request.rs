@@ -217,6 +217,7 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
                 (
                     region_id,
                     RegionRequest::Put(RegionPutRequest {
+                        skip_wal: false,
                         rows,
                         hint: None,
                         partition_expr_version: r.partition_expr_version.map(|v| v.value),
@@ -522,6 +523,9 @@ pub struct RegionPutRequest {
     pub rows: Rows,
     /// Write hint.
     pub hint: Option<WriteHint>,
+    /// Skip WAL for this insert without changing region options.
+    /// Metadata writes must not inherit this option from user inserts.
+    pub skip_wal: bool,
     /// Partition expression version for the region.
     pub partition_expr_version: Option<u64>,
 }

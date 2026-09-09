@@ -233,6 +233,7 @@ impl MetricEngineInner {
         }
 
         let merged_request = RegionPutRequest {
+            skip_wal: false,
             rows: Rows {
                 schema,
                 rows: merged_rows,
@@ -291,6 +292,7 @@ impl MetricEngineInner {
         };
 
         let merged_request = RegionPutRequest {
+            skip_wal: false,
             rows: final_rows,
             hint: None,
             partition_expr_version: merged_version,
@@ -921,6 +923,7 @@ mod tests {
                 (
                     logical_region_1,
                     RegionPutRequest {
+                        skip_wal: false,
                         rows: Rows {
                             schema: schema_1.clone(),
                             rows: rows_1,
@@ -932,6 +935,7 @@ mod tests {
                 (
                     logical_region_2,
                     RegionPutRequest {
+                        skip_wal: false,
                         rows: Rows {
                             schema: schema_2.clone(),
                             rows: rows_2,
@@ -1095,6 +1099,7 @@ mod tests {
         let schema = test_util::row_schema_with_tags(&["job"]);
         let rows = test_util::build_rows(1, 5);
         let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows: Rows { schema, rows },
             hint: None,
             partition_expr_version: None,
@@ -1170,6 +1175,7 @@ mod tests {
         let schema = test_util::row_schema_with_tags(columns);
         let rows = test_util::build_rows(3, 100);
         let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows: Rows { schema, rows },
             hint: None,
             partition_expr_version: None,
@@ -1193,6 +1199,7 @@ mod tests {
         let schema = test_util::row_schema_with_tags(&["abc"]);
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows: Rows { schema, rows },
             hint: None,
             partition_expr_version: None,
@@ -1214,6 +1221,7 @@ mod tests {
         let schema = test_util::row_schema_with_tags(&["def"]);
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows: Rows { schema, rows },
             hint: None,
             partition_expr_version: None,
@@ -1274,6 +1282,7 @@ mod tests {
             (
                 logical_region_1,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: rows1,
@@ -1285,6 +1294,7 @@ mod tests {
             (
                 logical_region_2,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: rows2,
@@ -1296,6 +1306,7 @@ mod tests {
             (
                 logical_region_3,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: rows3,
@@ -1347,6 +1358,7 @@ mod tests {
             (
                 logical_region_1,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: test_util::build_rows(1, 3),
@@ -1358,6 +1370,7 @@ mod tests {
             (
                 nonexistent_region,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: test_util::build_rows(1, 2),
@@ -1369,6 +1382,7 @@ mod tests {
             (
                 logical_region_2,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: test_util::build_rows(1, 5),
@@ -1407,6 +1421,7 @@ mod tests {
         let requests = vec![(
             physical_region_id,
             RegionPutRequest {
+                skip_wal: false,
                 rows: Rows {
                     schema,
                     rows: test_util::build_rows(1, 1),
@@ -1441,6 +1456,7 @@ mod tests {
             (
                 logical_region_id,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: test_util::build_rows(1, 1),
@@ -1452,6 +1468,7 @@ mod tests {
             (
                 physical_region_id,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema,
                         rows: test_util::build_rows(1, 1),
@@ -1487,6 +1504,7 @@ mod tests {
         let requests = vec![(
             logical_region_id,
             RegionPutRequest {
+                skip_wal: false,
                 rows: Rows {
                     schema,
                     rows: test_util::build_rows(1, 5),
@@ -1565,6 +1583,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows,
                     hint: None,
                     partition_expr_version: Some(1),
@@ -1607,6 +1626,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: rows.clone(),
                     hint: None,
                     partition_expr_version: Some(expected_version.wrapping_add(1)),
@@ -1621,6 +1641,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: rows.clone(),
                     hint: None,
                     partition_expr_version: None,
@@ -1635,6 +1656,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows,
                     hint: None,
                     partition_expr_version: Some(expected_version),
@@ -1703,6 +1725,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows { schema, rows },
                     hint: None,
                     partition_expr_version: None,
@@ -1759,6 +1782,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows { schema, rows },
                     hint: None,
                     partition_expr_version: None,
@@ -1813,6 +1837,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows { schema, rows },
                     hint: None,
                     partition_expr_version: None,
