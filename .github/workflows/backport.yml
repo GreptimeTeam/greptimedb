@@ -83,9 +83,18 @@ jobs:
 
             git push origin "${head_branch}"
 
+            # Ensure the version label (e.g. "v1.2") exists before attaching it.
+            # GitHub does not create labels implicitly, so upsert it idempotently.
+            gh label create "${target}" \
+              --color 0e8a16 \
+              --description "Backport to ${release_branch}" \
+              --force \
+              || true
+
             gh pr create \
               --base "${release_branch}" \
               --head "${head_branch}" \
+              --label "${target}" \
               --title "${PR_TITLE} [Backport ${release_branch}]" \
               --body "Backport of #${PR_NUMBER} to ${release_branch}.
 
