@@ -75,7 +75,7 @@ pub fn is_trace_v1_table(table_info: &crate::metadata::TableInfo) -> bool {
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
-pub const VALID_TABLE_OPTION_KEYS: [&str; 14] = [
+pub const VALID_TABLE_OPTION_KEYS: [&str; 15] = [
     // common keys:
     WRITE_BUFFER_SIZE_KEY,
     TTL_KEY,
@@ -94,6 +94,7 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 14] = [
     TABLE_DATA_MODEL,
     OTLP_METRIC_COMPAT_KEY,
     REPARTITION_COLUMN_HINT_KEY,
+    REPARTITION_PARTITION_NUM_HINT_KEY,
 ];
 
 pub const DDL_TIMEOUT: &str = "timeout";
@@ -176,6 +177,9 @@ pub const AUTO_CREATE_TABLE_KEY: &str = "auto_create_table";
 pub const SKIP_WAL_KEY: &str = store_api::mito_engine_options::SKIP_WAL_KEY;
 pub const TRACE_TABLE_PARTITIONS_HINT_KEY: &str = "trace_table_partitions";
 pub const REPARTITION_COLUMN_HINT_KEY: &str = "repartition.column.hint";
+
+/// Table-level partition count hint consumed by the auto-repartition planner.
+pub const REPARTITION_PARTITION_NUM_HINT_KEY: &str = "repartition.partition.num.hint";
 
 impl TableOptions {
     pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
@@ -308,24 +312,26 @@ pub struct ModifyColumnTypeRequest {
 pub enum AnnotationFamily {
     /// `greptime.semantic.*` options (see the [`semantic`] module).
     Semantic,
-    /// `repartition.column.hint`, consumed by the auto-repartition planner.
+    /// Column and partition count hints consumed by the auto-repartition planner.
     RepartitionHint,
 }
 
 impl AnnotationFamily {
-    /// The key namespace: a prefix for [`Self::Semantic`], the exact key for
-    /// [`Self::RepartitionHint`].
+    /// The key namespace used in diagnostics; accepted keys are classified by [`Self::of_key`].
     pub fn namespace(self) -> &'static str {
         match self {
             Self::Semantic => SEMANTIC_PREFIX,
-            Self::RepartitionHint => REPARTITION_COLUMN_HINT_KEY,
+            Self::RepartitionHint => "repartition.",
         }
     }
 
     pub fn of_key(key: &str) -> Option<Self> {
         if key.starts_with(SEMANTIC_PREFIX) {
             Some(Self::Semantic)
-        } else if key == REPARTITION_COLUMN_HINT_KEY {
+        } else if matches!(
+            key,
+            REPARTITION_COLUMN_HINT_KEY | REPARTITION_PARTITION_NUM_HINT_KEY
+        ) {
             Some(Self::RepartitionHint)
         } else {
             None
@@ -342,10 +348,8 @@ impl AnnotationFamily {
         }
     }
 
-    /// Whether this family's SET/UNSET batch must contain exactly one key.
-    /// The repartition hint is a single marker; a batch with several hint
-    /// entries (duplicates included) has no meaningful order.
-    pub fn requires_single_key(self) -> bool {
+    /// Whether duplicate keys are rejected in this family's SET/UNSET batch.
+    pub fn requires_unique_keys(self) -> bool {
         matches!(self, Self::RepartitionHint)
     }
 
@@ -356,10 +360,58 @@ impl AnnotationFamily {
                 "`{SEMANTIC_PREFIX}*` options must be altered separately from other table options"
             ),
             Self::RepartitionHint => {
-                format!("{REPARTITION_COLUMN_HINT_KEY} must be altered separately")
+                "repartition hints must be altered separately from other table options".to_string()
             }
         }
     }
+}
+
+/// Why an annotation SET/UNSET key batch was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationKeyError {
+    MixedFamilies { family: AnnotationFamily },
+    DuplicateKey,
+}
+
+impl fmt::Display for AnnotationKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MixedFamilies { family } => f.write_str(&family.mixed_batch_error()),
+            Self::DuplicateKey => f.write_str("duplicate repartition hint keys"),
+        }
+    }
+}
+
+/// Validates a SET/UNSET batch and returns its annotation family.
+///
+/// Empty batches and batches containing only non-annotation keys return `None`.
+/// Annotation keys cannot share a batch with another family or region options.
+/// Duplicate keys are rejected only for families that require unique keys.
+pub fn validate_annotation_keys<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+) -> std::result::Result<Option<AnnotationFamily>, AnnotationKeyError> {
+    let mut keys = keys.into_iter();
+    let Some(first) = keys.next() else {
+        return Ok(None);
+    };
+    let family = AnnotationFamily::of_key(first);
+    let reject_duplicates = family.is_some_and(|family| family.requires_unique_keys());
+    let mut seen = HashSet::new();
+    if reject_duplicates {
+        seen.insert(first);
+    }
+    for key in keys {
+        let this = AnnotationFamily::of_key(key);
+        if this != family
+            && let Some(family) = family.or(this)
+        {
+            return Err(AnnotationKeyError::MixedFamilies { family });
+        }
+        if reject_duplicates && !seen.insert(key) {
+            return Err(AnnotationKeyError::DuplicateKey);
+        }
+    }
+    Ok(family)
 }
 
 /// Table shape an annotation option is validated against.
@@ -389,6 +441,9 @@ pub enum AnnotationValidationError {
         column: String,
         ty: ConcreteDataType,
     },
+    InvalidPartitionNumHint {
+        value: String,
+    },
     NotSingleColumn,
     PartitionMetadataConflict,
     TimeIndexConflict,
@@ -407,6 +462,10 @@ impl fmt::Display for AnnotationValidationError {
                 "entity column `{column}` (option `{key}`) has type `{ty}`, \
                  which cannot render as a string"
             ),
+            Self::InvalidPartitionNumHint { value } => write!(
+                f,
+                "{REPARTITION_PARTITION_NUM_HINT_KEY} expects a positive integer within u32 range, got `{value}`"
+            ),
             Self::NotSingleColumn => write!(
                 f,
                 "{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"
@@ -424,7 +483,7 @@ impl fmt::Display for AnnotationValidationError {
 }
 
 /// Validates one annotation option and returns the value to store — the
-/// repartition hint is trimmed to the bare column name, semantic values pass
+/// repartition hints are trimmed, semantic values pass
 /// through unchanged.
 pub(crate) fn validate_and_normalize_annotation(
     family: AnnotationFamily,
@@ -460,6 +519,15 @@ pub(crate) fn validate_and_normalize_annotation(
                         });
                     }
                 }
+            }
+            Ok(value.to_string())
+        }
+        AnnotationFamily::RepartitionHint if key == REPARTITION_PARTITION_NUM_HINT_KEY => {
+            let value = value.trim();
+            if !matches!(value.parse::<u32>(), Ok(1..)) {
+                return Err(AnnotationValidationError::InvalidPartitionNumHint {
+                    value: value.to_string(),
+                });
             }
             Ok(value.to_string())
         }
@@ -719,6 +787,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_validate_annotation_keys() {
+        let column = REPARTITION_COLUMN_HINT_KEY;
+        let count = REPARTITION_PARTITION_NUM_HINT_KEY;
+        for (keys, expected) in [
+            (vec![], None),
+            (vec![TTL_KEY, TTL_KEY], None),
+            (vec!["repartition.unknown.hint"], None),
+            (vec![column], Some(AnnotationFamily::RepartitionHint)),
+            (vec![count], Some(AnnotationFamily::RepartitionHint)),
+            (vec![column, count], Some(AnnotationFamily::RepartitionHint)),
+            (vec![count, column], Some(AnnotationFamily::RepartitionHint)),
+            (
+                vec!["greptime.semantic.source", "greptime.semantic.source"],
+                Some(AnnotationFamily::Semantic),
+            ),
+        ] {
+            assert_eq!(validate_annotation_keys(keys), Ok(expected));
+        }
+        for keys in [
+            vec![column, column],
+            vec![count, count],
+            vec![column, count, column],
+        ] {
+            assert_eq!(
+                validate_annotation_keys(keys),
+                Err(AnnotationKeyError::DuplicateKey)
+            );
+        }
+        for keys in [
+            vec![column, TTL_KEY],
+            vec![TTL_KEY, count],
+            vec![column, "greptime.semantic.source"],
+        ] {
+            assert_eq!(
+                validate_annotation_keys(keys),
+                Err(AnnotationKeyError::MixedFamilies {
+                    family: AnnotationFamily::RepartitionHint,
+                })
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_table_option() {
         assert!(validate_table_option(FILE_TABLE_LOCATION_KEY));
         assert!(validate_table_option(FILE_TABLE_FORMAT_KEY));
@@ -728,6 +839,8 @@ mod tests {
         assert!(validate_table_option(STORAGE_KEY));
         assert!(validate_table_option(MEMTABLE_BULK_MERGE_THRESHOLD));
         assert!(validate_table_option(REPARTITION_COLUMN_HINT_KEY));
+        assert!(validate_table_option(REPARTITION_PARTITION_NUM_HINT_KEY));
+        assert_eq!(AnnotationFamily::of_key("repartition.unknown.hint"), None);
         assert!(!validate_table_option("foo"));
 
         // Only whitelisted semantic keys are accepted.
