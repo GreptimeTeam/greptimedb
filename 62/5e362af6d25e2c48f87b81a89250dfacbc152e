@@ -1,0 +1,55 @@
+src/mito2/src/wal/encoder.rs
+  s_cbf051d9e59a54::t_f113d6514c5a1d 58-59,81-132,147-148,150,153,178,187,291-297,303,432,442-580,653-656
+src/flow/src/server.rs
+  s_cbf051d9e59a54::t_c0cecf83cd6a2d 127
+src/mito2/src/engine/basic_test.rs
+  s_cbf051d9e59a54::t_4ea4afeaaa2753 1324-1387
+src/operator/src/insert.rs
+  s_cbf051d9e59a54::t_1ee0e09ee9d101 54,89-105,286-287,320,334-335,368,379,390,403,406,566,1771-1789
+src/operator/src/req_convert/insert/row_to_region.rs
+  s_cbf051d9e59a54::t_8005171106a773 48,59,85-157
+src/mito2/src/region_write_ctx.rs
+  s_cbf051d9e59a54::t_1f1a6a4196c42d 32,93-94,139,160,166,171,173-177,195,199,217-219,536,545-683
+src/store-api/src/region_request.rs
+  s_cbf051d9e59a54::t_55ae35bc9407f7 222,1841-1870
+src/metric-engine/src/metadata_region.rs
+  s_cbf051d9e59a54::t_5ed080bca76cd8 588,824-831
+src/mito2/src/wal.rs
+  s_cbf051d9e59a54::t_cef6d7f338c7c4 29,206-223,231
+src/servers/src/hint_headers.rs
+  s_cbf051d9e59a54::t_bfe95c9f0898e8 62-77
+src/metric-engine/src/engine/put.rs
+  s_cbf051d9e59a54::t_0246d1df130fae 146-147,150-165,167-189,194-215,226,231-246,256-300,308,330-333,345,351,379,402,415,838,845-846,851-852,858,861-1145,1303-1313,1315,1319-1329,1332,1334-1337,1339-1346
+src/mito2/benches/bench_wal_encode.rs
+  s_cbf051d9e59a54::t_f7f0a433eef74a 29,109,112-124
+src/operator/src/req_convert/insert/stmt_to_region.rs
+  s_cbf051d9e59a54::t_152ced591eb369 66,158
+src/operator/src/req_convert/common/partitioner.rs
+  s_cbf051d9e59a54::t_b7a97ea9f957e9 37,48
+src/mito2/src/request.rs
+  s_cbf051d9e59a54::t_0371d85a02c4c2 148-153,684,1886-1904
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_cbf051d9e59a54::t_369295e4eaba10 42,50,104-153,169,172
+src/mito2/src/worker/handle_write.rs
+  s_cbf051d9e59a54::t_4d9e5ccaa8302e 454,617,624-625,628-631,891,920,925-951,962,965,1066,1087
+src/session/src/hints.rs
+  s_cbf051d9e59a54::t_d7a6e7bd0bf922 26-28
+src/mito2/src/region/opener.rs
+  s_cbf051d9e59a54::t_1c57a3c6738bd7 956
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "625e362af6d25e2c48f87b81a89250dfacbc152e",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
