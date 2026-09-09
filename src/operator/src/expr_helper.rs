@@ -789,9 +789,10 @@ fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
         .type_hints()
         .iter()
         .map(|hint| {
-            let data_type = ColumnDataTypeWrapper::try_from(hint.data_type.clone())
-                .map(|w| w.to_parts().0)
-                .context(ColumnDataTypeSnafu)?;
+            let (data_type, datatype_extension) =
+                ColumnDataTypeWrapper::try_from(hint.data_type.clone())
+                    .map(|w| w.to_parts())
+                    .context(ColumnDataTypeSnafu)?;
 
             let default_constraint = hint
                 .default_constraint
@@ -806,6 +807,7 @@ fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
             Ok(PbJsonTypeHint {
                 path: hint.path.clone(),
                 data_type: data_type as i32,
+                datatype_extension,
                 nullable: hint.nullable,
                 default_constraint,
             })

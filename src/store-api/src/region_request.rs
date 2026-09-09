@@ -1574,7 +1574,8 @@ fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> 
         .type_hints
         .into_iter()
         .map(|hint| {
-            let wrapper = ColumnDataTypeWrapper::try_new(hint.data_type, None).map_err(|err| {
+            let wrapper = ColumnDataTypeWrapper::try_new(hint.data_type, hint.datatype_extension)
+                .map_err(|err| {
                 InvalidRawRegionRequestSnafu {
                     err: err.to_string(),
                 }
@@ -2268,6 +2269,7 @@ mod tests {
                     type_hints: vec![v1::JsonTypeHint {
                         path: vec!["service".to_string()],
                         data_type: ColumnDataType::String as i32,
+                        datatype_extension: None,
                         nullable: true,
                         default_constraint: vec![],
                     }],

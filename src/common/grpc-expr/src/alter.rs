@@ -88,7 +88,7 @@ fn json_settings_from_proto(settings: api::v1::JsonSettings) -> Result<JsonSetti
         .into_iter()
         .map(|hint| {
             let data_type = ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(hint.data_type, None)
+                ColumnDataTypeWrapper::try_new(hint.data_type, hint.datatype_extension)
                     .context(error::ColumnDataTypeSnafu)?,
             );
 
