@@ -1943,6 +1943,11 @@ impl PromPlanner {
         if let Some(empty_plan) = self.setup_context().await? {
             return Ok(empty_plan);
         }
+        let offset_ms = match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
         let normalize = self
             .selector_to_series_normalize_plan(offset, matchers, false)
             .await?;
@@ -1974,26 +1979,42 @@ impl PromPlanner {
                     DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
                 })
                 .collect::<Vec<_>>();
-            // `timestamp()` carries the sample timestamp as a value. Cast native
-            // input here because the helper consumes millisecond ticks.
-            let sample_time = col(&time_index_column);
-            let sample_time = if sample_time
+            // `timestamp()` preserves the shifted selector timeline even though
+            // SeriesNormalize now retains raw native timestamp storage. Decimal
+            // arithmetic shifts before truncating to milliseconds.
+            let unit_factor = match col(&time_index_column)
                 .get_type(normalize.schema())
                 .context(DataFusionPlanningSnafu)?
-                == ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None)
             {
-                sample_time
-            } else {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(sample_time),
-                    data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                })
+                ArrowDataType::Timestamp(ArrowTimeUnit::Second, _) => (1_000_i128, 4, 0),
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, _) => (1, 1, 0),
+                ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, _) => (1, 4, 3),
+                ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => (1, 7, 6),
+                _ => unreachable!("time index is a timestamp"),
             };
-            let sample_time = sample_time
+            let sample_time = col(&time_index_column)
                 .cast_to(&ArrowDataType::Int64, normalize.schema())
                 .context(DataFusionPlanningSnafu)?
-                .cast_to(&ArrowDataType::Float64, normalize.schema())
+                .cast_to(&ArrowDataType::Decimal128(19, 0), normalize.schema())
                 .context(DataFusionPlanningSnafu)?;
+            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(sample_time),
+                op: Operator::Multiply,
+                right: Box::new(lit(ScalarValue::Decimal128(
+                    Some(unit_factor.0),
+                    unit_factor.1,
+                    unit_factor.2,
+                ))),
+            });
+            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(sample_time),
+                op: Operator::Plus,
+                right: Box::new(lit(ScalarValue::Decimal128(Some(offset_ms as i128), 19, 0))),
+            })
+            .cast_to(&ArrowDataType::Int64, normalize.schema())
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Float64, normalize.schema())
+            .context(DataFusionPlanningSnafu)?;
             let sample_time = DfExpr::BinaryExpr(BinaryExpr {
                 left: Box::new(sample_time),
                 op: Operator::Divide,
@@ -8877,7 +8898,7 @@ mod test {
             \n  Projection: some_metric.timestamp, value AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
             \n    Projection: some_metric.timestamp, __promql_timestamp_value_ AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
-            \n        Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(some_metric.timestamp AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n        Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(CAST(CAST(some_metric.timestamp AS Int64) AS Decimal128(19, 0)) * Decimal128(Some(1),1,0) + Decimal128(Some(0),19,0) AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
             \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n            Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n              Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
