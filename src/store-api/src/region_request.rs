@@ -1099,7 +1099,7 @@ impl AlterKind {
                     .extension_type::<Json2ExtensionType>()
                     .ok()
                     .flatten()
-                    .is_some_and(|extension| {
+                    .is_none_or(|extension| {
                         let current = extension.metadata().json_settings();
                         if current.max_auto_expanded_paths() != settings.max_auto_expanded_paths() {
                             return true;

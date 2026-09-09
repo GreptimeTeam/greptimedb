@@ -23,7 +23,7 @@ use parquet_variant_compute::VariantType;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 
-use crate::error::{DeserializeSnafu, InvalidJson2LayoutSnafu, SerializeSnafu};
+use crate::error::{InvalidJson2LayoutSnafu, SerializeSnafu};
 pub use crate::json::JSON2_REMAINDER_FIELD_NAME;
 use crate::json::JsonSettings;
 use crate::schema::Metadata;
@@ -130,7 +130,7 @@ pub struct JsonMetadata {
 }
 
 impl JsonMetadata {
-    /// Creates metadata for the JSON2 layout version 2.
+    /// Creates metadata for the latest JSON2 layout (currently V2).
     pub fn new(json_settings: JsonSettings) -> Self {
         Self {
             json_settings,
@@ -154,14 +154,6 @@ impl JsonMetadata {
     /// Consumes the metadata and returns its JSON2 settings.
     pub fn into_json_settings(self) -> JsonSettings {
         self.json_settings
-    }
-
-    /// Returns metadata with the same layout and updated JSON2 settings.
-    pub fn with_json_settings(&self, json_settings: JsonSettings) -> Self {
-        Self {
-            json_settings,
-            layout_version: self.layout_version,
-        }
     }
 
     /// Returns whether this metadata describes JSON2 layout version 2.
@@ -287,17 +279,14 @@ impl ExtensionType for Json2ExtensionType {
     }
 }
 
-/// Returns JSON2 column metadata with updated settings and the existing layout.
+/// Returns JSON2 column metadata with updated settings and the latest layout.
+///
+/// Existing SSTs retain their own physical layout metadata.
 pub fn json2_metadata_with_updated_settings(
     current_metadata: &Metadata,
     settings: JsonSettings,
 ) -> crate::error::Result<Metadata> {
-    let json_metadata = current_metadata
-        .get(EXTENSION_TYPE_METADATA_KEY)
-        .map(|json| serde_json::from_str::<JsonMetadata>(json).context(DeserializeSnafu { json }))
-        .transpose()?
-        .unwrap_or_else(|| JsonMetadata::new_v1(JsonSettings::default()))
-        .with_json_settings(settings);
+    let json_metadata = JsonMetadata::new(settings);
 
     let mut metadata = current_metadata.clone();
     metadata.insert(
@@ -454,33 +443,31 @@ mod tests {
     }
 
     #[test]
-    fn test_json2_metadata_with_updated_settings_preserves_layout() -> crate::error::Result<()> {
-        let v1_metadata = serde_json::to_string(&JsonMetadata::new_v1(JsonSettings::default()))
-            .context(SerializeSnafu)?;
-        let metadata = HashMap::from([
+    fn test_json2_metadata_with_updated_settings_upgrades_layout() -> crate::error::Result<()> {
+        for (name, json) in [
+            (JsonExtensionType::NAME, r#"{"json_settings":{}}"#),
+            (Json2ExtensionType::NAME, r#"{"json_settings":{}}"#),
             (
-                EXTENSION_TYPE_NAME_KEY.to_string(),
-                Json2ExtensionType::NAME.to_string(),
+                Json2ExtensionType::NAME,
+                r#"{"json_settings":{},"layout_version":2}"#,
             ),
-            (EXTENSION_TYPE_METADATA_KEY.to_string(), v1_metadata),
-            ("other".to_string(), "kept".to_string()),
-        ]);
-        let updated = json2_metadata_with_updated_settings(
-            &metadata,
-            JsonSettings::try_new(vec![], Some(10))?,
-        )?;
-        assert_eq!(Some("kept"), updated.get("other").map(String::as_str));
-        let json_metadata: JsonMetadata = serde_json::from_str(
-            updated
-                .get(EXTENSION_TYPE_METADATA_KEY)
-                .expect("extension metadata"),
-        )
-        .unwrap();
-        assert!(!json_metadata.is_version_2());
-        assert_eq!(
-            Some(10),
-            json_metadata.json_settings().max_auto_expanded_paths()
-        );
+        ] {
+            let metadata = HashMap::from([
+                (EXTENSION_TYPE_NAME_KEY.to_string(), name.to_string()),
+                (EXTENSION_TYPE_METADATA_KEY.to_string(), json.to_string()),
+                ("other".to_string(), "kept".to_string()),
+            ]);
+            let settings = JsonSettings::try_new(vec![], Some(10))?;
+            let updated = json2_metadata_with_updated_settings(&metadata, settings.clone())?;
+            assert_eq!(Some("kept"), updated.get("other").map(String::as_str));
+            assert_eq!(
+                Some(Json2ExtensionType::NAME),
+                updated.get(EXTENSION_TYPE_NAME_KEY).map(String::as_str)
+            );
+            let json_metadata: JsonMetadata =
+                serde_json::from_str(updated.get(EXTENSION_TYPE_METADATA_KEY).unwrap()).unwrap();
+            assert_eq!(JsonMetadata::new(settings), json_metadata);
+        }
         Ok(())
     }
 

@@ -1822,7 +1822,7 @@ mod tests {
         let json_metadata: JsonMetadata =
             serde_json::from_str(payload.metadata().get("ARROW:extension:metadata").unwrap())
                 .unwrap();
-        assert!(!json_metadata.is_version_2());
+        assert!(json_metadata.is_version_2());
         assert_eq!(
             Some(10),
             json_metadata.json_settings().max_auto_expanded_paths()
