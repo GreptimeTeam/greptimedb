@@ -1,0 +1,30 @@
+src/mito2/benches/bench_wal_encode.rs
+  h_623774b620da8e 29,109,112-124
+src/mito2/src/engine/basic_test.rs
+  h_623774b620da8e 1324-1661
+src/mito2/src/region/opener.rs
+  h_623774b620da8e 956
+src/mito2/src/region_write_ctx.rs
+  h_623774b620da8e 32,93-94,139,160,166,171,173-177,195,199,217-219,536,545-683
+src/mito2/src/request.rs
+  h_623774b620da8e 148-153,684,1886-1904
+src/mito2/src/wal.rs
+  h_623774b620da8e 29,206-223,231
+src/mito2/src/wal/encoder.rs
+  h_623774b620da8e 58-59,81-132,147-148,150,153,178,187,291-297,303,432,442-580,653-656
+src/mito2/src/worker/handle_write.rs
+  h_623774b620da8e 454,617,624-625,628-631,891,920,925-951,962,965,1066,1087
+src/store-api/src/region_request.rs
+  h_623774b620da8e 222,1841-1870
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "2640323f24c6cc0f046155c0279d53b6bb5c6e99",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
