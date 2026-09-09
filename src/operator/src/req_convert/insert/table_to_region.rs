@@ -160,6 +160,7 @@ mod tests {
         version: Option<u64>,
     ) -> RegionInsertRequest {
         RegionInsertRequest {
+            skip_wal: false,
             region_id,
             rows: Some(Rows {
                 schema: vec![tag_column_schema("a", ColumnDataType::Int32)],

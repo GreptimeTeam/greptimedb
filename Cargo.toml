@@ -159,7 +159,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "32f467fa2ba2b3588a58381a24af83de09fbb00a" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "4b6057ba34b8aaf06221585199ace5002b2af92b" }
 hex = "0.4"
 hostname = "0.4.0"
 http = "1"

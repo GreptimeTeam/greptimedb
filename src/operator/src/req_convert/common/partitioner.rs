@@ -44,6 +44,7 @@ impl<'a> Partitioner<'a> {
             .into_iter()
             .map(
                 |(region_number, (rows, partition_expr_version))| InsertRequest {
+                    skip_wal: false,
                     region_id: RegionId::new(table_id, region_number).into(),
                     rows: Some(rows),
                     partition_expr_version: partition_expr_version
