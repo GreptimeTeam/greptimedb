@@ -58,7 +58,29 @@ step_nanos = 100000000
 time_range_layout = "non_overlapping_per_sst"
 series_layout = "timestamp_major"
 
-# Candidate instant query must exercise the existing LastRow selector.
+# Ordinary query results: the instant selector must exercise LastRow.
+[[scenario.queries]]
+name = "instant_selector_eval"
+kind = "tql"
+query = "TQL EVAL (1704067303, 1704067303, '1s') promql_instant_last_row_9034{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 25
+
+# Ordinary range control: this must not enable the LastRow selector.
+[[scenario.queries]]
+name = "range_selector_eval_control"
+kind = "tql"
+query = "TQL EVAL (1704067293, 1704067303, '1s') promql_instant_last_row_9034{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 25
+
+# Diagnostic ANALYZE results retain the existing LastRow coverage.
 [[scenario.queries]]
 name = "instant_selector_last_row_candidate"
 kind = "tql"
@@ -69,7 +91,7 @@ iterations = 9
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 25
 
-# True range control: this must not enable the LastRow selector.
+# Diagnostic range control: this must not enable the LastRow selector.
 [[scenario.queries]]
 name = "range_selector_last_row_control"
 kind = "tql"
