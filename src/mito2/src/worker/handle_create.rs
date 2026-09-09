@@ -96,6 +96,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(region);
+        if let Some(state) = &self.series_index_task_state {
+            state.wake();
+        }
 
         Ok(0)
     }

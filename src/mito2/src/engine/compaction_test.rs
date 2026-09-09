@@ -38,11 +38,11 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::{CompactionListener, EventListener};
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
 };
+use crate::time_provider::mock::MockTimeProvider;
 
 pub(crate) async fn put_and_flush(
     engine: &MitoEngine,

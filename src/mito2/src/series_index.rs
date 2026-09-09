@@ -12,42 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Series index writer and searcher.
+//! Series index construction, search, and maintenance.
+//!
+//! Under development. Index files are currently stored on the local filesystem.
 
-// These components are consumed by the upcoming query and maintenance integration.
-#[allow(dead_code)]
-mod catalog;
-// Consumed by the follow-up background-maintenance integration.
-#[allow(dead_code)]
 mod bucket;
-// Consumed by the follow-up background-maintenance integration.
-#[allow(dead_code)]
 mod builder;
-#[allow(dead_code)]
+mod catalog;
+mod maintenance;
 mod purger;
 mod searcher;
 mod task;
 #[cfg(test)]
 mod tests;
-#[allow(dead_code)]
 mod version;
 mod writer;
 
 use futures::stream::BoxStream;
-pub use searcher::SeriesIndexSearcher;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
     DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
-};
-pub use writer::{
-    SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,
 };
 
 use crate::error::Result;
 pub(crate) use crate::series_index::catalog::{delete_catalogs, load_version_control};
 pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
+pub use crate::series_index::searcher::SeriesIndexSearcher;
 pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
 pub(crate) use crate::series_index::version::{SeriesIndexVersion, SeriesIndexVersionControl};
+pub use crate::series_index::writer::{
+    SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,
+};
 
 pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";
 pub(crate) const MAX_TS_COLUMN: &str = "__series_max_ts";

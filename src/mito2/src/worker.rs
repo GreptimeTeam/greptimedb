@@ -603,13 +603,17 @@ impl<S: LogStore> WorkerStarter<S> {
             .zip(series_index_task_state.clone())
             .map(|(store, state)| {
                 let (purger, purge_receiver) = series_index_channel(store.clone());
-                series_index_purger = Some(purger);
+                series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
                     self.id,
                     store,
+                    regions.clone(),
                     state,
+                    self.config.experimental_series_index_bucket_width,
+                    purger,
                     purge_receiver,
                     self.config.experimental_series_index_maintenance_interval,
+                    self.time_provider.clone(),
                 )
             });
         let now = self.time_provider.current_time_millis();
@@ -636,6 +640,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.index_build_job_pool,
                 self.config.max_background_index_builds,
             ),
+            series_index_task_state: series_index_task_state.clone(),
             series_index_store: self.series_index_store,
             series_index_purger,
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
@@ -700,9 +705,9 @@ pub(crate) struct RegionWorker {
     sender: Sender<WorkerRequestWithTime>,
     /// Handle to the worker thread.
     handle: Mutex<Option<JoinHandle<()>>>,
-    /// Handle to the series-index maintenance task.
+    /// Handle to the sequential series-index task.
     series_index_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Controls the worker-owned series-index maintenance task.
+    /// Controls the worker-owned series-index task.
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
     /// Whether to run the worker thread.
     running: Arc<AtomicBool>,
@@ -935,6 +940,8 @@ struct RegionWorkerLoop<S> {
     write_buffer_manager: WriteBufferManagerRef,
     /// Scheduler for index build task.
     index_build_scheduler: IndexBuildScheduler,
+    /// Controls the worker-owned series-index task.
+    series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
     /// Store for companion range indexes deleted by the region SST purger.
     series_index_store: Option<ObjectStore>,
     series_index_purger: Option<IndexFilePurger>,
@@ -1625,6 +1632,7 @@ mod tests {
             .create_worker_group(MitoConfig {
                 num_workers: 4,
                 experimental_series_index_root: "series-index".to_string(),
+                experimental_series_index_maintenance_interval: Duration::from_secs(3600),
                 ..Default::default()
             })
             .await;

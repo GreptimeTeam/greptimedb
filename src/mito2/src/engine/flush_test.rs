@@ -17,7 +17,7 @@
 use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -54,7 +54,7 @@ use crate::test_util::{
     prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
     rows_schema, single_kafka_log_store_factory,
 };
-use crate::time_provider::TimeProvider;
+use crate::time_provider::mock::MockTimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
 
 async fn set_write_buffer_size_to_current_usage(engine: &MitoEngine, region_id: RegionId) {
@@ -1332,43 +1332,6 @@ fn kafka_wal_options(topic: &Option<String>) -> HashMap<String, String> {
             )])
         })
         .unwrap_or_default()
-}
-
-#[derive(Debug)]
-pub(crate) struct MockTimeProvider {
-    now: AtomicI64,
-    elapsed: AtomicI64,
-}
-
-impl TimeProvider for MockTimeProvider {
-    fn current_time_millis(&self) -> i64 {
-        self.now.load(Ordering::Relaxed)
-    }
-
-    fn elapsed_since(&self, _current_millis: i64) -> i64 {
-        self.elapsed.load(Ordering::Relaxed)
-    }
-
-    fn wait_duration(&self, _duration: Duration) -> Duration {
-        Duration::from_millis(20)
-    }
-}
-
-impl MockTimeProvider {
-    pub(crate) fn new(now: i64) -> Self {
-        Self {
-            now: AtomicI64::new(now),
-            elapsed: AtomicI64::new(0),
-        }
-    }
-
-    pub(crate) fn set_now(&self, now: i64) {
-        self.now.store(now, Ordering::Relaxed);
-    }
-
-    fn set_elapsed(&self, elapsed: i64) {
-        self.elapsed.store(elapsed, Ordering::Relaxed);
-    }
 }
 
 #[tokio::test]

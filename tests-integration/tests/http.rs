@@ -2383,6 +2383,7 @@ experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_series_index_root = ""
 experimental_series_index_maintenance_interval = "5m"
+experimental_series_index_bucket_width = "5days"
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
 auto_flush_interval = "10m"
