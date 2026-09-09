@@ -14326,6 +14326,7 @@ version = "1.3.0-alpha.1"
 dependencies = [
  "api",
  "aquamarine",
+ "arrow-schema 58.3.0",
  "async-stream",
  "async-trait",
  "bytes",

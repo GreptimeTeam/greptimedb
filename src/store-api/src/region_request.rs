@@ -32,6 +32,7 @@ use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
+use arrow_schema::extension::ExtensionType;
 pub use common_base::AffectedRows;
 use common_base::readable_size::ReadableSize;
 use common_grpc::flight::FlightDecoder;
@@ -1093,11 +1094,23 @@ impl AlterKind {
                 column_name,
                 settings,
             } => metadata.column_by_name(column_name).is_some_and(|column| {
-                json2_metadata_with_updated_settings(
-                    column.column_schema.metadata(),
-                    settings.clone(),
-                )
-                .is_ok_and(|target_metadata| column.column_schema.metadata() != &target_metadata)
+                column
+                    .column_schema
+                    .extension_type::<Json2ExtensionType>()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|extension| {
+                        let current = extension.metadata().json_settings();
+                        if current.max_auto_expanded_paths() != settings.max_auto_expanded_paths() {
+                            return true;
+                        }
+
+                        let mut current_hints = current.type_hints().iter().collect::<Vec<_>>();
+                        let mut target_hints = settings.type_hints().iter().collect::<Vec<_>>();
+                        current_hints.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+                        target_hints.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+                        current_hints != target_hints
+                    })
             }),
             AlterKind::SetRegionOptions { .. } => true,
             AlterKind::UnsetRegionOptions { .. } => true,
