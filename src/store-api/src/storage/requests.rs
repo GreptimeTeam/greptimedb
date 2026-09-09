@@ -82,7 +82,7 @@ pub trait VectorIndexEngine: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
 pub enum TimeSeriesRowSelector {
     /// Only keep the last row of each time-series.
-    #[strum(to_string = "LastRow")]
+    #[strum(to_string = "LastRow {{ after_merge: {after_merge} }}")]
     LastRow {
         /// Whether selection runs after cross-source merge and deduplication.
         after_merge: bool,
@@ -207,16 +207,6 @@ impl Display for ScanRequest {
                 "{}series_row_selector: {}",
                 delimiter.as_str(),
                 series_row_selector
-            )?;
-        }
-        if matches!(
-            self.series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
-        ) {
-            write!(
-                f,
-                "{}series_row_selector_after_merge: true",
-                delimiter.as_str()
             )?;
         }
         if let Some(sequence) = &self.memtable_max_sequence {
@@ -344,7 +334,12 @@ mod tests {
         };
         assert_eq!(
             request.to_string(),
-            "ScanRequest { series_row_selector: LastRow, series_row_selector_after_merge: true, snapshot_on_scan: true, exact_sequence_range: true }"
+            "ScanRequest { series_row_selector: LastRow { after_merge: true }, snapshot_on_scan: true, exact_sequence_range: true }"
+        );
+
+        assert_eq!(
+            TimeSeriesRowSelector::LastRow { after_merge: false }.to_string(),
+            "LastRow { after_merge: false }"
         );
 
         let request = ScanRequest {
