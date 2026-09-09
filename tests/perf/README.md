@@ -228,7 +228,7 @@ case for issue #7913. It writes 8192 series × 20160 samples through remote-writ
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
 TQL selectors. It is not included in the default `all` case set because ingestion
 cost dominates routine CI validation. Adding the `heavy-regression` PR label runs
-only this case; `query-regression` runs the six routine default cases. Manual
+only this case; `query-regression` runs the seven routine default cases. Manual
 workflow dispatch accepts the `heavy` token to select this case.
 
 ## OTLP trace load scenario
@@ -390,11 +390,11 @@ uv run --no-project python .github/scripts/query-regression-run.py \
   --work-dir /tmp/query-regression-work
 ```
 
-### Explicit SST float BSS comparison
+### SST float BSS comparison
 
-`tests/perf/query_cases/sst_float_bss/case.toml` is an explicit-only case for
-comparing a default empty physical metric table with a candidate
-byte-stream-split (BSS) physical table. It writes 1,000 series × 4,320 samples
+`tests/perf/query_cases/sst_float_bss/case.toml` is included in the routine
+`all` default case group and compares a default empty physical metric table with
+a candidate byte-stream-split (BSS) physical table. It writes 1,000 series × 4,320 samples
 (4,320,000 rows) using synthetic `bounded_mixed` values: 95% integral series and
 5% nonintegral series, with bounded per-series fluctuation rather than globally
 unique values. This deliberately matches a 95/5 design; it is not an empirical
@@ -500,7 +500,7 @@ parquetbench/scanbench` as the read-bench tool against each target's data direct
 
 The workflow runs automatically only when `query-regression` or `heavy-regression`
 is added to a non-draft PR; it does not rerun on pushes, ready-for-review, or
-reopen events. `query-regression` runs the six routine default cases, while
+reopen events. `query-regression` runs the seven routine default cases, while
 `heavy-regression` runs only the high-cardinality remote-write #7913 case. PR runs
 build base/candidate once and use `--allow-large-fixture`. Manual
 `workflow_dispatch` runs can pass `all`, `heavy`, one case path, or a

@@ -1,5 +1,4 @@
-# Explicit-only default-versus-BSS storage and warmed-query comparison. This is
-# intentionally outside the routine default case set.
+# Default all-group default-versus-BSS storage and warmed-query comparison.
 
 [case]
 name = "sst_float_bss"
