@@ -28,8 +28,6 @@ pub use writer::{
 };
 
 pub use crate::sst::range_index::deleter::RangeIndexDeleter;
-// Used by the upcoming query and index-building integration.
-#[allow(unused_imports)]
 pub(crate) use crate::sst::range_index::deleter::range_index_path;
 
 const ROW_GROUP_ID_COLUMN: &str = "row_group_id";

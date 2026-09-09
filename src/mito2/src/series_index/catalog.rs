@@ -28,6 +28,8 @@ use crate::series_index::purger::IndexFilePurger;
 use crate::series_index::version::{
     SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl,
 };
+pub(crate) use crate::sst::range_index::range_index_path;
+
 const SERIES_DIR: &str = "series";
 const RANGE_CATALOG: &str = "range-index.json";
 const SERIES_CATALOG: &str = "series-index.json";
@@ -135,9 +137,9 @@ pub(crate) async fn load_version_control(
         .await
         .unwrap_or_default();
     // TODO: Handle catalog entries whose index files are missing from storage.
-    let version = SeriesIndexVersion {
-        range_indexes: range.indexes.into_iter().collect(),
-        series_indexes: series
+    let version = SeriesIndexVersion::new(
+        range.indexes.into_iter().collect(),
+        series
             .indexes
             .into_iter()
             .map(|entry| {
@@ -147,7 +149,7 @@ pub(crate) async fn load_version_control(
                 )
             })
             .collect(),
-    };
+    );
     let control = SeriesIndexVersionControl::default();
     control.publish(std::sync::Arc::new(version));
     control
@@ -164,8 +166,9 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use crate::series_index::catalog::{
-        SeriesIndexCatalog, SeriesIndexEntry, load_catalog, load_version_control,
-        series_catalog_path, series_metadata, store_catalog,
+        RangeIndexCatalog, SeriesIndexCatalog, SeriesIndexEntry, load_catalog,
+        load_version_control, range_catalog_path, series_catalog_path, series_metadata,
+        store_catalog,
     };
     use crate::series_index::purger::series_index_channel;
 
@@ -194,31 +197,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_catalog_returns_none_on_error() {
+    async fn test_load_catalog_defaults_on_missing_invalid_or_unreadable_catalog() {
         let store = ObjectStore::new(Memory::default()).unwrap();
-        let path = series_catalog_path(RegionId::new(1, 1));
-        // Missing catalog.
+        let region_id = RegionId::new(1, 1);
+        let (purger, _receiver) = series_index_channel(store.clone());
         assert!(
-            load_catalog::<SeriesIndexCatalog>(&store, &path)
+            load_catalog::<SeriesIndexCatalog>(&store, &series_catalog_path(region_id))
                 .await
                 .is_none()
         );
-        store.write(&path, "invalid").await.unwrap();
-        assert!(
-            load_catalog::<SeriesIndexCatalog>(&store, &path)
-                .await
-                .is_none()
-        );
+        let control = load_version_control(&store, region_id, &purger).await;
+        assert!(control.current().range_indexes.is_empty());
+        assert!(control.current().series_indexes.is_empty());
+        let file_id = FileId::random();
+        store
+            .write(
+                &range_catalog_path(region_id),
+                serde_json::to_vec(&RangeIndexCatalog {
+                    indexes: vec![file_id],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .write(&series_catalog_path(region_id), "invalid")
+            .await
+            .unwrap();
+        let control = load_version_control(&store, region_id, &purger).await;
+        assert!(control.current().range_indexes.contains(&file_id));
+        assert!(control.current().series_indexes.is_empty());
         let layer = MockLayerBuilder::default()
             .reader_factory(Arc::new(|_, _, _| Box::new(FailingCatalogReader)))
             .build()
             .unwrap();
-        let store = store.layer(layer);
         assert!(
-            load_catalog::<SeriesIndexCatalog>(&store, &path)
+            load_catalog::<SeriesIndexCatalog>(&store, &series_catalog_path(region_id))
                 .await
                 .is_none()
         );
+        let store = store.layer(layer);
+        assert!(
+            load_catalog::<RangeIndexCatalog>(&store, &range_catalog_path(region_id))
+                .await
+                .is_none()
+        );
+        let control = load_version_control(&store, region_id, &purger).await;
+        assert!(control.current().range_indexes.is_empty());
+        assert!(control.current().series_indexes.is_empty());
     }
 
     #[tokio::test]
@@ -248,6 +274,12 @@ mod tests {
             .current();
         assert!(current.range_indexes.is_empty());
         assert_eq!(&entry, current.series_indexes[&entry.index_uuid].entry());
+        assert_eq!(current.index_buckets.len(), 1);
+        let bucket = &current.index_buckets[&entry.bucket_start];
+        assert_eq!(bucket.start, entry.bucket_start);
+        assert_eq!(bucket.end, entry.bucket_end);
+        assert_eq!(bucket.index_ids.as_slice(), &[entry.index_uuid]);
+        assert_eq!(bucket.max_file_sequence, entry.max_file_sequence);
 
         let metadata = series_metadata(&entry).unwrap();
         let decoded: SeriesIndexEntry =
