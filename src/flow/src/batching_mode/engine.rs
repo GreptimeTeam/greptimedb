@@ -1043,6 +1043,8 @@ fn abort_flow_task(flow_id: FlowId, task: Option<BatchingTask>, action: &str) ->
         return false;
     };
 
+    task.stop_execution();
+
     if let Some(handle) = task.state.write().unwrap().task_handle.take() {
         handle.abort();
         debug!("Aborted {action} flow task {flow_id}");
@@ -1256,12 +1258,14 @@ mod tests {
 
     struct TestExecution {
         manual_calls: std::sync::atomic::AtomicUsize,
+        stops: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait::async_trait]
     impl crate::BatchingExecution for TestExecution {
         async fn execute_once(
-            &self,
+            self: Arc<Self>,
+            _guard: crate::BatchingExecutionGuard,
             task: &BatchingTask,
             _engine: &QueryEngineRef,
             _frontend: &Arc<FrontendClient>,
@@ -1282,6 +1286,10 @@ mod tests {
                 new_query: None,
                 result: Ok(None),
             }
+        }
+
+        fn stop(&self) {
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1322,6 +1330,7 @@ mod tests {
 
         let execution = Arc::new(TestExecution {
             manual_calls: Default::default(),
+            stops: Default::default(),
         });
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -1412,6 +1421,7 @@ mod tests {
                 release: None,
                 result: std::sync::Mutex::new(Some(Ok(Some(Arc::new(TestExecution {
                     manual_calls: Default::default(),
+                    stops: Default::default(),
                 }))))),
             })))
             .await;
@@ -1941,11 +1951,30 @@ GROUP BY l.number, time_window
     }
 
     #[tokio::test]
-    async fn test_abort_flow_task_aborts_handle() {
+    async fn test_abort_flow_task_stops_execution_without_loop_handle() {
         let (task, _shutdown_tx) = new_test_task(42).await;
+        let execution = Arc::new(TestExecution {
+            manual_calls: Default::default(),
+            stops: Default::default(),
+        });
+        let task = task.with_execution(Some(execution.clone()));
+
+        assert!(!abort_flow_task(42, Some(task), "test"));
+        assert_eq!(execution.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_abort_flow_task_stops_execution_before_aborting_handle() {
+        let (task, _shutdown_tx) = new_test_task(42).await;
+        let execution = Arc::new(TestExecution {
+            manual_calls: Default::default(),
+            stops: Default::default(),
+        });
+        let task = task.with_execution(Some(execution.clone()));
         let drop_rx = install_abort_observed_handle(&task).await;
 
         assert!(abort_flow_task(42, Some(task), "test"));
+        assert_eq!(execution.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         tokio::time::timeout(Duration::from_secs(1), drop_rx)
             .await

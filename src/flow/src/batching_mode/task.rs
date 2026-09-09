@@ -42,7 +42,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 use tokio::sync::oneshot::error::TryRecvError;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
@@ -199,6 +199,36 @@ fn format_insert_target_columns(plan: &LogicalPlan) -> String {
         .map(|field| quote_identifier(field.name()).to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Owns a whole serialized execution round. It may be moved to an execution
+/// collaborator, so cancellation of the caller cannot release the round early.
+pub struct BatchingExecutionGuard {
+    _lock: OwnedMutexGuard<()>,
+    restore: Option<(Arc<RwLock<TaskState>>, QueryContextRef)>,
+}
+
+impl BatchingExecutionGuard {
+    fn new(lock: OwnedMutexGuard<()>) -> Self {
+        Self {
+            _lock: lock,
+            restore: None,
+        }
+    }
+
+    fn restore_query_context(&mut self, state: Arc<RwLock<TaskState>>, old_ctx: QueryContextRef) {
+        self.restore = Some((state, old_ctx));
+    }
+}
+
+impl Drop for BatchingExecutionGuard {
+    fn drop(&mut self) {
+        if let Some((state, old_ctx)) = self.restore.take() {
+            if let Ok(mut state) = state.write() {
+                state.query_ctx = old_ctx;
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -359,6 +389,12 @@ impl BatchingTask {
     ) -> Self {
         self.execution = execution;
         self
+    }
+
+    pub(crate) fn stop_execution(&self) {
+        if let Some(execution) = &self.execution {
+            execution.stop();
+        }
     }
 
     pub fn last_execution_time_millis(&self) -> Option<i64> {
@@ -1332,20 +1368,22 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
         max_window_cnt: Option<usize>,
     ) -> ExecuteOnceOutcome {
-        let _execution_guard = self.execution_lock.lock().await;
-        self.execute_once_unlocked(engine, frontend_client, max_window_cnt)
+        let guard = BatchingExecutionGuard::new(self.execution_lock.clone().lock_owned().await);
+        self.execute_once_with_guard(guard, engine, frontend_client, max_window_cnt)
             .await
     }
 
-    async fn execute_once_unlocked(
+    async fn execute_once_with_guard(
         &self,
+        guard: BatchingExecutionGuard,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
         max_window_cnt: Option<usize>,
     ) -> ExecuteOnceOutcome {
         if let Some(execution) = &self.execution {
             return execution
-                .execute_once(self, engine, frontend_client, max_window_cnt)
+                .clone()
+                .execute_once(guard, self, engine, frontend_client, max_window_cnt)
                 .await;
         }
         self.execute_once_default_unlocked(engine, frontend_client, max_window_cnt)
@@ -1418,23 +1456,7 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
         scheduled_time_secs: i64,
     ) -> ExecuteOnceOutcome {
-        let _execution_guard = self.execution_lock.lock().await;
-
-        struct QueryContextRestoreGuard {
-            state: Arc<RwLock<TaskState>>,
-            old_ctx: Option<QueryContextRef>,
-        }
-
-        impl Drop for QueryContextRestoreGuard {
-            fn drop(&mut self) {
-                let Some(old_ctx) = self.old_ctx.take() else {
-                    return;
-                };
-                if let Ok(mut state) = self.state.write() {
-                    state.query_ctx = old_ctx;
-                }
-            }
-        }
+        let mut guard = BatchingExecutionGuard::new(self.execution_lock.clone().lock_owned().await);
 
         // Convert to milliseconds before touching the task state so an
         // unrepresentable scheduled time fails as an explicit error without
@@ -1462,21 +1484,12 @@ impl BatchingTask {
             state.query_ctx = Arc::new(new_ctx);
             old
         };
-        let restore_guard = QueryContextRestoreGuard {
-            state: self.state.clone(),
-            old_ctx: Some(old_ctx),
-        };
+        guard.restore_query_context(self.state.clone(), old_ctx);
 
-        let outcome = self
-            .execute_once_unlocked(engine, frontend_client, None)
-            .await;
-
-        // Restore while still holding `execution_lock` so no future manual
-        // flush can observe the temporary scheduled time. The guard also
-        // restores during unwind/cancellation.
-        drop(restore_guard);
-
-        outcome
+        // A collaborator may retain the guard in an owned child task. Its Drop
+        // restores the scheduled context before releasing serialization.
+        self.execute_once_with_guard(guard, engine, frontend_client, None)
+            .await
     }
 
     /// Generate the create table SQL

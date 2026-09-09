@@ -21,17 +21,25 @@ use table::TableRef;
 
 use crate::Result;
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::task::{BatchingTask, ExecuteOnceOutcome};
+use crate::batching_mode::task::{BatchingExecutionGuard, BatchingTask, ExecuteOnceOutcome};
 
 #[async_trait::async_trait]
 pub trait BatchingExecution: Send + Sync + 'static {
+    /// Execute one round while retaining the guard through all task-state updates.
+    /// An implementation that continues after caller cancellation must retain the
+    /// guard with that work and make it stoppable through [`Self::stop`].
     async fn execute_once(
-        &self,
+        self: Arc<Self>,
+        guard: BatchingExecutionGuard,
         task: &BatchingTask,
         engine: &QueryEngineRef,
         frontend: &Arc<FrontendClient>,
         max_window_cnt: Option<usize>,
     ) -> ExecuteOnceOutcome;
+
+    /// Retire this execution instance, rejecting new work and requesting that any
+    /// retained local work stop. This is not an acknowledgement of remote quiescence.
+    fn stop(&self) {}
 }
 
 #[async_trait::async_trait]

@@ -49,7 +49,8 @@ pub use batching_mode::frontend_client::{
     FrontendClient, GrpcQueryHandlerWithBoxedError, PeerDesc,
 };
 pub use batching_mode::task::{
-    BatchingTask, DirtyRestore, ExecuteOnceOutcome, PlanInfo, QueryCoverage, TaskArgs,
+    BatchingExecutionGuard, BatchingTask, DirtyRestore, ExecuteOnceOutcome, PlanInfo,
+    QueryCoverage, TaskArgs,
 };
 pub use batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 pub use batching_mode::utils::sql_to_df_plan;
