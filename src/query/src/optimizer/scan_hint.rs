@@ -132,6 +132,17 @@ impl ScanHintRule {
         Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
     }
 
+    /// Checks whether attached scan predicates permit instant-derived LastRow selection.
+    ///
+    /// Selecting the newest row too early can discard an older matching sample if a
+    /// predicate later rejects that row. Only recognized tag/time predicates are
+    /// allowed: tags select whole series, and supported time predicates constrain
+    /// the scan window before row selection. Field or unrecognized predicates are
+    /// conservatively rejected. Finer-than-millisecond timestamps are also excluded
+    /// because instant evaluation can conflate distinct samples at that precision.
+    ///
+    /// This checks only attached predicates; the rewriter separately rejects residual
+    /// Filter nodes between InstantManipulate and the scan.
     fn filters_preserve_last_row(
         table_scan: &datafusion_expr::logical_plan::TableScan,
         provider: &DummyTableProvider,
