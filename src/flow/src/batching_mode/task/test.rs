@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::task::Poll;
 
 use catalog::memory::MemoryCatalogManager;
 use catalog::{DeregisterTableRequest, RegisterTableRequest};
@@ -67,7 +68,8 @@ struct CountingExecution {
 #[async_trait::async_trait]
 impl crate::BatchingExecution for CountingExecution {
     async fn execute_once(
-        &self,
+        self: Arc<Self>,
+        _guard: BatchingExecutionGuard,
         _task: &BatchingTask,
         _engine: &QueryEngineRef,
         _frontend: &Arc<FrontendClient>,
@@ -86,6 +88,56 @@ impl crate::BatchingExecution for CountingExecution {
         ExecuteOnceOutcome {
             new_query: None,
             result: Ok(None),
+        }
+    }
+}
+
+struct RetainingExecution {
+    calls: std::sync::atomic::AtomicUsize,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    finished: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::BatchingExecution for RetainingExecution {
+    async fn execute_once(
+        self: Arc<Self>,
+        guard: BatchingExecutionGuard,
+        _task: &BatchingTask,
+        _engine: &QueryEngineRef,
+        _frontend: &Arc<FrontendClient>,
+        _max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+            return ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            };
+        }
+
+        let started = self.started.clone();
+        let release = self.release.clone();
+        let finished = self.finished.clone();
+        let child = tokio::spawn(async move {
+            started.notify_one();
+            release.notified().await;
+            drop(guard);
+            finished.notify_one();
+            ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            }
+        });
+        match child.await {
+            Ok(outcome) => outcome,
+            Err(err) => ExecuteOnceOutcome {
+                new_query: None,
+                result: Err(Error::Unexpected {
+                    reason: format!("retaining test child failed: {err}"),
+                    location: snafu::location!(),
+                }),
+            },
         }
     }
 }
@@ -118,6 +170,216 @@ async fn test_execution_delegate_dispatch_is_serialized() {
         1,
         "the existing execution_lock must span delegate execution"
     );
+}
+
+#[tokio::test]
+async fn test_delegate_guard_survives_caller_cancellation_until_child_finishes() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(RetainingExecution {
+        calls: Default::default(),
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        finished: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+
+    let first_task = task.clone();
+    let first_engine = query_engine.clone();
+    let first_frontend = frontend.clone();
+    let first = tokio::spawn(async move {
+        first_task
+            .execute_once_serialized(&first_engine, &first_frontend, None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), execution.started.notified())
+        .await
+        .expect("delegate child did not retain the guard");
+    first.abort();
+    assert!(
+        first
+            .await
+            .expect_err("caller cancellation should abort")
+            .is_cancelled()
+    );
+
+    let second = task.execute_once_serialized(&query_engine, &frontend, None);
+    futures::pin_mut!(second);
+    assert!(
+        matches!(futures::poll!(second.as_mut()), Poll::Pending),
+        "the next round must remain pending while the retained guard is held"
+    );
+    assert_eq!(
+        execution.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the pending waiter must not enter the collaborator"
+    );
+    execution.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), execution.finished.notified())
+        .await
+        .expect("delegate child did not release its guard");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("next round should proceed after child release")
+            .unwrap(),
+        None
+    );
+    assert_eq!(execution.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_scheduled_context_is_retained_until_delegate_child_releases_guard() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(RetainingExecution {
+        calls: Default::default(),
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        finished: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+    let scheduled = 1_700_000_000;
+
+    let task_to_run = task.clone();
+    let engine_to_run = query_engine.clone();
+    let frontend_to_run = frontend.clone();
+    let execution_call = tokio::spawn(async move {
+        task_to_run
+            .execute_once_serialized_at_scheduled_time(&engine_to_run, &frontend_to_run, scheduled)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), execution.started.notified())
+        .await
+        .expect("scheduled delegate child did not start");
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        Some("1700000000000"),
+        "scheduled context restored before the delegate child released the guard"
+    );
+    execution_call.abort();
+    match execution_call.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("scheduled caller cancellation should abort"),
+    }
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        Some("1700000000000"),
+        "scheduled context restored after caller cancellation but before child release"
+    );
+
+    execution.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), execution.finished.notified())
+        .await
+        .expect("scheduled delegate child did not release its guard");
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        None,
+        "scheduled context was not restored when child released guard"
+    );
+}
+
+struct BlockingDefaultExecutionHandler {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    dropped: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+struct DropAck(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for DropAck {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.0.take() {
+            let _ = dropped.send(());
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for BlockingDefaultExecutionHandler
+{
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let _ack = DropAck(self.dropped.lock().unwrap().take());
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn test_default_execution_remains_inline_and_cancellable() {
+    let query = "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window \
+                 FROM numbers_with_ts GROUP BY time_window, number";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_time_window_test_task_with_query(query).await;
+    register_twe_sink(&query_engine, "missing_sink", 9200);
+    task.mark_all_windows_as_dirty().unwrap();
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
+        Arc::new(BlockingDefaultExecutionHandler {
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            dropped: std::sync::Mutex::new(Some(dropped_tx)),
+        });
+    let frontend = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let task_to_cancel = task.clone();
+    let engine_to_cancel = query_engine.clone();
+    let frontend_to_cancel = frontend.clone();
+    let caller = tokio::spawn(async move {
+        task_to_cancel
+            .execute_once_serialized(&engine_to_cancel, &frontend_to_cancel, None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), entered_rx)
+        .await
+        .expect("default execution did not dispatch a frontend query")
+        .expect("default execution handler entry notification dropped");
+    caller.abort();
+    match caller.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("default caller cancellation should abort"),
+    }
+    tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+        .await
+        .expect("cancelling default execution did not drop the active frontend future")
+        .expect("default execution drop acknowledgement was not sent");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        task.execution_lock.clone().lock_owned(),
+    )
+    .await
+    .expect("default execution must not leave an owned child holding the lock");
 }
 
 async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPlan) {
