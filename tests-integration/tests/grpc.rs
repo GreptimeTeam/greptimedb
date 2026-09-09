@@ -15,13 +15,16 @@
 use std::sync::Arc;
 
 use api::v1::alter_table_expr::Kind;
+use api::v1::greptime_database_client::GreptimeDatabaseClient;
+use api::v1::greptime_request::Request as RequestBody;
+use api::v1::greptime_response::Response as ResponseBody;
 use api::v1::promql_request::Promql;
 use api::v1::value::ValueData;
 use api::v1::{
-    AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef,
-    CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
-    PromqlRequest, RequestHeader, Row, RowInsertRequest, RowInsertRequests, SemanticType, Value,
-    column,
+    AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef, ColumnSchema,
+    CreateTableExpr, GreptimeRequest, InsertRequest, InsertRequests, PromInstantQuery,
+    PromRangeQuery, PromqlRequest, RequestHeader, Row, RowInsertRequest, RowInsertRequests, Rows,
+    SemanticType, Value, column,
 };
 use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -61,8 +64,10 @@ use servers::http::prometheus::{
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::{TlsMode, TlsOption};
+use session::hints::{HINTS_KEY, INSERT_SKIP_WAL_HINT};
 use tests_integration::test_util::{
-    StorageType, setup_grpc_server, setup_grpc_server_with,
+    MockInstanceImpl, StorageType, assert_wal_delta, setup_grpc_server,
+    setup_grpc_server_for_frontend_instance, setup_grpc_server_with,
     setup_grpc_server_with_auto_create_table_disabled, setup_grpc_server_with_user_provider,
 };
 use tonic::Request;
@@ -776,6 +781,53 @@ fn gauge_arrow_batch(batch_id: i64, reserved_attr: bool) -> BatchArrowRecords {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_skip_wal_otel_arrow_metrics() {
+    check_otel_arrow_metrics(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_skip_wal_otel_arrow_metrics_distributed() {
+    check_otel_arrow_metrics(true).await;
+}
+
+async fn check_otel_arrow_metrics(distributed: bool) {
+    // OTEL Arrow metrics decode into ordinary metric inserts, unlike Flight DoPut bulk inserts.
+    let mut env = MockInstanceImpl::new("skip_wal_otel_arrow", distributed).await;
+    let server = setup_grpc_server_for_frontend_instance(env.frontend(), None).await;
+    let mut client =
+        ArrowMetricsServiceClient::connect(format!("http://{}", server.bind_addr().unwrap()))
+            .await
+            .unwrap();
+    // Warm up auto-created logical/physical tables and metadata before comparing data-region WAL.
+    for (batch_id, hint) in [None, Some("true"), Some("false"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let before = env.flush_and_snapshot_wal().await;
+        let batch = gauge_arrow_batch(batch_id as i64, false);
+        let request = with_skip_wal_hint(futures::stream::iter([batch]), hint);
+        let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+        let status = response.message().await.unwrap().unwrap();
+        assert_eq!(
+            status.status_code,
+            ArrowStatusCode::Ok as i32,
+            "{}",
+            status.status_message
+        );
+        assert!(response.message().await.unwrap().is_none());
+        if batch_id != 0 {
+            assert_wal_delta(
+                &before,
+                &env.flush_and_snapshot_wal().await,
+                hint == Some("true"),
+            );
+        }
+    }
+    server.shutdown().await.unwrap();
+    env.shutdown().await;
+}
+
 pub async fn test_otel_arrow_delta_histogram(store_type: StorageType) {
     let (_instance, server) =
         setup_grpc_server(store_type, "test_otel_arrow_delta_histogram").await;
@@ -1150,6 +1202,144 @@ fn expect_data() -> (Column, Column, Column, Column) {
         expected_mem_col,
         expected_ts_col,
     )
+}
+
+fn with_skip_wal_hint<T>(body: T, hint: Option<&str>) -> Request<T> {
+    let mut request = Request::new(body);
+    if let Some(hint) = hint {
+        request.metadata_mut().insert(
+            HINTS_KEY,
+            format!("{INSERT_SKIP_WAL_HINT}={hint}").parse().unwrap(),
+        );
+    }
+    request
+}
+
+fn skip_wal_insert_body(columnar: bool) -> RequestBody {
+    if columnar {
+        RequestBody::Inserts(InsertRequests {
+            inserts: vec![InsertRequest {
+                table_name: "skip_wal_grpc".to_string(),
+                row_count: 1,
+                columns: vec![Column {
+                    column_name: "ts".to_string(),
+                    semantic_type: SemanticType::Timestamp as i32,
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    values: Some(column::Values {
+                        timestamp_millisecond_values: vec![1000],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+        })
+    } else {
+        RequestBody::RowInserts(RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "skip_wal_grpc".to_string(),
+                rows: Some(Rows {
+                    schema: vec![ColumnSchema {
+                        column_name: "ts".to_string(),
+                        semantic_type: SemanticType::Timestamp as i32,
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        ..Default::default()
+                    }],
+                    rows: vec![Row {
+                        values: vec![Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                        }],
+                    }],
+                }),
+            }],
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_skip_wal_grpc_unary_stream_and_flight_sql() {
+    check_grpc_unary_stream_and_flight_sql(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_skip_wal_grpc_unary_stream_and_flight_sql_distributed() {
+    check_grpc_unary_stream_and_flight_sql(true).await;
+}
+
+async fn check_grpc_unary_stream_and_flight_sql(distributed: bool) {
+    let mut env = MockInstanceImpl::new("skip_wal_grpc_protocols", distributed).await;
+    let server = setup_grpc_server_for_frontend_instance(env.frontend(), None).await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let mut grpc = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let database = Database::new_with_dbname("greptime-public", Client::with_urls(vec![addr]));
+    database
+        .sql("CREATE TABLE skip_wal_grpc (ts TIMESTAMP TIME INDEX)")
+        .await
+        .unwrap();
+
+    for streaming in [false, true] {
+        for columnar in [false, true] {
+            for hint in [Some("true"), Some("false"), None] {
+                let before = env.flush_and_snapshot_wal().await;
+                let request = GreptimeRequest {
+                    header: Some(RequestHeader {
+                        catalog: "greptime".to_string(),
+                        schema: "public".to_string(),
+                        ..Default::default()
+                    }),
+                    request: Some(skip_wal_insert_body(columnar)),
+                };
+                let response = if streaming {
+                    grpc.handle_requests(with_skip_wal_hint(futures::stream::iter([request]), hint))
+                        .await
+                        .unwrap()
+                } else {
+                    grpc.handle(with_skip_wal_hint(request, hint))
+                        .await
+                        .unwrap()
+                }
+                .into_inner();
+                assert!(
+                    matches!(response.response, Some(ResponseBody::AffectedRows(rows)) if rows.value == 1)
+                );
+                assert_wal_delta(
+                    &before,
+                    &env.flush_and_snapshot_wal().await,
+                    hint == Some("true"),
+                );
+            }
+        }
+    }
+    for hint in [Some("true"), Some("false"), None] {
+        let before = env.flush_and_snapshot_wal().await;
+        let hints = hint
+            .map(|value| vec![(INSERT_SKIP_WAL_HINT, value)])
+            .unwrap_or_default();
+        database
+            .sql_with_hint("INSERT INTO skip_wal_grpc VALUES (1000)", &hints)
+            .await
+            .unwrap();
+        assert_wal_delta(
+            &before,
+            &env.flush_and_snapshot_wal().await,
+            hint == Some("true"),
+        );
+    }
+    // Strict validation must reject the request before any data write.
+    let before = env.flush_and_snapshot_wal().await;
+    assert!(
+        database
+            .sql_with_hint(
+                "INSERT INTO skip_wal_grpc VALUES (1000)",
+                &[(INSERT_SKIP_WAL_HINT, "yes")]
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(before, env.flush_and_snapshot_wal().await);
+    server.shutdown().await.unwrap();
+    env.shutdown().await;
 }
 
 pub async fn test_insert_and_select(store_type: StorageType) {
