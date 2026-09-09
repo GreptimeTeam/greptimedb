@@ -71,7 +71,7 @@ use table::requests::{
     SEMANTIC_METRIC_UNIT, SEMANTIC_VALUE_MIXED,
 };
 
-pub use super::result::prometheus_resp::PrometheusJsonResponse;
+pub use super::result::prometheus_resp::{PromSampleValue, PrometheusJsonResponse};
 use crate::error::{
     CollectRecordbatchSnafu, ConvertScalarValueSnafu, DataFusionSnafu, Error, InvalidQuerySnafu,
     NotSupportedSnafu, Result, TableNotFoundSnafu, UnexpectedResultSnafu,
@@ -100,7 +100,7 @@ pub struct PromSeriesVector {
 pub struct PromSeriesMatrix {
     pub metric: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub values: Vec<(f64, String)>,
+    pub values: Vec<(f64, PromSampleValue)>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub histograms: Vec<(f64, PromNativeHistogram)>,
 }

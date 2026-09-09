@@ -39,7 +39,7 @@ use indexmap::IndexMap;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
 use ryu::Buffer;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
@@ -55,8 +55,43 @@ use crate::http::prometheus::{
 
 #[derive(Default)]
 struct PromSeriesSamples {
-    values: Vec<(f64, String)>,
+    values: Vec<(f64, PromSampleValue)>,
     histograms: Vec<(f64, PromNativeHistogram)>,
+}
+
+/// A sample value of the Prometheus HTTP API JSON format.
+///
+/// Samples read out of a query result are kept as `f64` and formatted while the
+/// response is serialized, which avoids one `String` per sample. Samples parsed
+/// from a JSON body keep their original spelling, so a response that is
+/// deserialized and serialized again is unchanged.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum PromSampleValue {
+    #[serde(skip_deserializing)]
+    Number(f64),
+    Text(String),
+}
+
+impl Serialize for PromSampleValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Number(value) if value.is_finite() => {
+                serializer.serialize_str(Buffer::new().format_finite(*value))
+            }
+            Self::Number(value) => serializer.collect_str(value),
+            Self::Text(value) => serializer.serialize_str(value),
+        }
+    }
+}
+
+impl PromSampleValue {
+    fn into_string(self) -> String {
+        match self {
+            Self::Number(value) => format_prometheus_sample_value(value),
+            Self::Text(value) => value,
+        }
+    }
 }
 
 fn prometheus_native_histogram(histogram: &NativeHistogram) -> Result<PromNativeHistogram> {
@@ -427,7 +462,7 @@ impl PrometheusJsonResponse {
                 } else if let Some((timestamp_millis, value)) = value {
                     samples.values.push((
                         timestamp_millis as f64 / 1000.0,
-                        format_prometheus_sample_value(value),
+                        PromSampleValue::Number(value),
                     ));
                 }
             }
@@ -451,7 +486,10 @@ impl PrometheusJsonResponse {
                 PromQueryResult::Vector(ref mut v) => {
                     let histogram = samples.histograms.pop();
                     let value = if histogram.is_none() {
-                        samples.values.pop()
+                        samples
+                            .values
+                            .pop()
+                            .map(|(timestamp, value)| (timestamp, value.into_string()))
                     } else {
                         None
                     };
@@ -481,7 +519,10 @@ impl PrometheusJsonResponse {
                     });
                 }
                 PromQueryResult::Scalar(ref mut v) => {
-                    *v = samples.values.pop();
+                    *v = samples
+                        .values
+                        .pop()
+                        .map(|(timestamp, value)| (timestamp, value.into_string()));
                 }
                 PromQueryResult::String(ref mut _v) => {
                     // TODO(ruihang): Not supported yet
@@ -666,6 +707,101 @@ mod tests {
     }
 
     #[test]
+    fn sample_value_serialization_matches_eager_formatting() {
+        let mut values = vec![
+            0.0,
+            -0.0,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            1e-7,
+            1e21,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let mut bits = 0x1234_5678_9876_5432_u64;
+        for _ in 0..1000 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            values.push(f64::from_bits(bits));
+        }
+        for value in values {
+            assert_eq!(
+                serde_json::to_string(&PromSampleValue::Number(value)).unwrap(),
+                serde_json::to_string(&format_prometheus_sample_value(value)).unwrap()
+            );
+        }
+        for value in ["1.00", "+Inf", "-0", "NaN", "not-a-number", "", "\"\\\n"] {
+            let json = serde_json::to_string(value).unwrap();
+            let parsed: PromSampleValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+        }
+        for value in ["1", "null", "true", "[]", "{}"] {
+            assert!(serde_json::from_str::<PromSampleValue>(value).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn matrix_response_body_matches_eagerly_formatted_json() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batches = RecordBatches::try_new(
+            schema.clone(),
+            vec![
+                RecordBatch::new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_values([
+                            1000, 2000, 3000, 4000, 5000,
+                        ])) as _,
+                        Arc::new(StringVector::from(vec![Some("a"); 5])) as _,
+                        Arc::new(Float64Vector::from_values([
+                            -0.0,
+                            f64::NAN,
+                            1e-7,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                        ])) as _,
+                    ],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let actual = PrometheusJsonResponse::from_query_result(
+            Ok(Output::new_with_record_batches(batches)),
+            None,
+            ValueType::Matrix,
+            None,
+        )
+        .await;
+        // Deserializing the expectation yields `PromSampleValue::Text`, so this
+        // compares the deferred numeric encoding against eagerly built strings.
+        let expected: PrometheusJsonResponse = serde_json::from_value(serde_json::json!({
+            "status": "success",
+            "data": {"resultType": "matrix", "result": [{
+                "metric": {"host": "a"},
+                "values": [[1.0, "-0.0"], [2.0, "NaN"], [3.0, "1e-7"], [4.0, "inf"], [5.0, "-inf"]]
+            }]}
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&actual).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
+    }
+
+    #[test]
     fn matrix_response_preserves_ordinary_nan_and_filters_stale_markers() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -704,8 +840,8 @@ mod tests {
 
         assert_eq!(series.len(), 1);
         assert_eq!(
-            series[0].values,
-            vec![(1.0, "1.0".to_string()), (2.0, "NaN".to_string())]
+            serde_json::to_value(&series[0].values).unwrap(),
+            serde_json::json!([[1.0, "1.0"], [2.0, "NaN"]])
         );
     }
 
@@ -766,7 +902,10 @@ mod tests {
                 ((index + 1) as f64, expected_value)
             })
             .collect::<Vec<_>>();
-        assert_eq!(series[0].values, expected);
+        assert_eq!(
+            serde_json::to_value(&series[0].values).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
     }
 
     #[test]
@@ -809,12 +948,8 @@ mod tests {
 
         assert_eq!(series.len(), 1);
         assert_eq!(
-            series[0].values,
-            vec![
-                (1.0, "inf".to_string()),
-                (2.0, "-inf".to_string()),
-                (3.0, "NaN".to_string()),
-            ]
+            serde_json::to_value(&series[0].values).unwrap(),
+            serde_json::json!([[1.0, "inf"], [2.0, "-inf"], [3.0, "NaN"]])
         );
     }
 
