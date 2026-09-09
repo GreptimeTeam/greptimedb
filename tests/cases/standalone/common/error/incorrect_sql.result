@@ -19,8 +19,7 @@ Did you mean 'range_fn'?
 -- Wrong aggregate parameters
 SELECT SUM(42, 84, 11, 'hello');
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Internal error: Function 'sum' failed to match any signature, errors: Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4.
-This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues. No function matches the given name and argument types 'sum(Int64, Int64, Int64, Utf8)'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' failed to match any signature, errors: Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4,Error during planning: Function 'sum' expects 1 arguments but received 4. No function matches the given name and argument types 'sum(Int64, Int64, Int64, Utf8)'. You might need to add explicit type casts.
 	Candidate functions:
 	sum(Decimal)
 	sum(UInt64)

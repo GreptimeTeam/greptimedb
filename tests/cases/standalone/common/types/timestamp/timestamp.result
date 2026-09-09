@@ -75,8 +75,7 @@ SELECT MAX(t) FROM timestamp;
 
 SELECT SUM(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Internal error: Function 'sum' failed to match any signature, errors: Error during planning: Function 'sum' requires Decimal, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires UInt64, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires Int64, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires Float64, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires Duration, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires Interval, but received Timestamp(ms) (DataType: Timestamp(ms))..
-This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues. No function matches the given name and argument types 'sum(Timestamp(ms))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' failed to match any signature, errors: Error during planning: Function 'sum' requires Decimal, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires UInt64, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires Int64, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires Float64, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires Duration, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires Interval, but received Timestamp(ms) (DataType: Timestamp(ms)).. No function matches the given name and argument types 'sum(Timestamp(ms))'. You might need to add explicit type casts.
 	Candidate functions:
 	sum(Decimal)
 	sum(UInt64)
@@ -87,8 +86,7 @@ This issue was likely caused by a bug in DataFusion's code. Please help us to re
 
 SELECT AVG(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Internal error: Function 'avg' failed to match any signature, errors: Error during planning: Function 'avg' requires Decimal, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'avg' requires Duration, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'avg' requires Float64, but received Timestamp(ms) (DataType: Timestamp(ms))..
-This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues. No function matches the given name and argument types 'avg(Timestamp(ms))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' failed to match any signature, errors: Error during planning: Function 'avg' requires Decimal, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'avg' requires Duration, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'avg' requires Float64, but received Timestamp(ms) (DataType: Timestamp(ms)).. No function matches the given name and argument types 'avg(Timestamp(ms))'. You might need to add explicit type casts.
 	Candidate functions:
 	avg(Decimal)
 	avg(Duration)
