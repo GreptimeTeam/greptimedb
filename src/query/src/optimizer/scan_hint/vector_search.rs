@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vector_hint_is_skipped_for_single_evaluation() {
+    fn test_vector_hint_is_applied_when_single_evaluation_limit_blocks_last_row() {
         let provider = build_dummy_provider(10);
         let source = Arc::new(DefaultTableSource::new(provider));
         let distance = vec_distance_expr(VEC_L2SQ_DISTANCE);
@@ -632,15 +632,20 @@ mod tests {
             .unwrap()
             .data;
         let request = scan_request_from_plan(&rewritten);
+        assert_eq!(request.series_row_selector, None);
         assert_eq!(
-            request.series_row_selector,
-            Some(store_api::storage::TimeSeriesRowSelector::LastRow { after_merge: true })
+            request.vector_search,
+            Some(VectorSearchRequest {
+                column_id: 10,
+                query_vector: vec![1.0, 2.0],
+                k: 5,
+                metric: VectorDistanceMetric::L2sq,
+            })
         );
-        assert!(request.vector_search.is_none());
     }
 
     #[test]
-    fn test_single_evaluation_consumes_only_its_vector_hint() {
+    fn test_single_evaluation_limit_keeps_vector_hints_on_both_branches() {
         let provider_a = build_dummy_provider(10);
         let provider_b = build_dummy_provider(20);
         let distance_a = vec_distance_expr_with_query(VEC_L2SQ_DISTANCE, "[1.0, 2.0]");
@@ -702,11 +707,16 @@ mod tests {
         let request_a = scan_request_from_plan(&union.inputs[0]);
         let request_b = scan_request_from_plan(&union.inputs[1]);
 
+        assert_eq!(request_a.series_row_selector, None);
         assert_eq!(
-            request_a.series_row_selector,
-            Some(store_api::storage::TimeSeriesRowSelector::LastRow { after_merge: true })
+            request_a.vector_search,
+            Some(VectorSearchRequest {
+                column_id: 10,
+                query_vector: vec![1.0, 2.0],
+                k: 5,
+                metric: VectorDistanceMetric::L2sq,
+            })
         );
-        assert!(request_a.vector_search.is_none());
         assert_eq!(request_b.series_row_selector, None);
         assert_eq!(
             request_b.vector_search,
@@ -720,7 +730,7 @@ mod tests {
 
         // The catalog providers are not mutated; the requests above belong to
         // the two rewritten scan use-sites.
-        assert!(request_b.vector_search != request_a.vector_search);
+        assert_ne!(request_a.vector_search, request_b.vector_search);
     }
 
     #[test]

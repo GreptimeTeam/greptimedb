@@ -26,7 +26,8 @@ use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
-use promql::extension_plan::InstantManipulate;
+use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
+use promql::extension_plan::{InstantManipulate, SeriesDivide, SeriesNormalize};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -92,8 +93,8 @@ impl ScanHintRule {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         };
 
-        // Attached scan filters are checked below; the intervening Filter guard
-        // disables LastRow for residual predicates.
+        // Attached scan filters are checked below; residual Filter nodes are
+        // rejected by the single-evaluation path allowlist.
         let filters_preserve_last_row = if rewriter.inside_single_evaluation {
             Self::filters_preserve_last_row(&table_scan, original)
         } else {
@@ -141,8 +142,8 @@ impl ScanHintRule {
     /// conservatively rejected. Finer-than-millisecond timestamps are also excluded
     /// because instant evaluation can conflate distinct samples at that precision.
     ///
-    /// This checks only attached predicates; the rewriter separately rejects residual
-    /// Filter nodes between InstantManipulate and the scan.
+    /// This checks only attached predicates; the path allowlist separately rejects
+    /// residual Filter nodes between InstantManipulate and the scan.
     fn filters_preserve_last_row(
         table_scan: &datafusion_expr::logical_plan::TableScan,
         provider: &DummyTableProvider,
@@ -344,17 +345,12 @@ impl TreeNodeRewriter for ScanHintRewriter {
             && let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>()
         {
             self.inside_single_evaluation = instant.is_single_evaluation();
-        }
-        // DataFusion uses a synthetic Subquery plan node for expression
-        // subqueries. It is an evaluation boundary: an outer instant query
-        // must not make the subquery's scan use LastRow. SubqueryAlias is not
-        // a boundary here because it can still be part of the direct data flow.
-        if matches!(node, LogicalPlan::Subquery(_)) {
-            self.inside_single_evaluation = false;
-        }
-        // A residual predicate can change which row is last for a series.
-        if matches!(&node, LogicalPlan::Filter(_)) {
-            self.inside_single_evaluation = false;
+        } else if self.inside_single_evaluation {
+            // This allowlist is coupled to the controlled PromQL planner. It
+            // permits only nodes known to preserve the newest row per series;
+            // every other node is a sticky boundary until a nested instant
+            // extension establishes a new evaluation scope.
+            self.inside_single_evaluation = single_evaluation_node_allowed(&node);
         }
         if let LogicalPlan::Aggregate(aggregate) = &node {
             self.ts_row_selector = Self::extract_last_value_selector(aggregate);
@@ -425,6 +421,61 @@ impl TreeNodeRewriter for ScanHintRewriter {
             self.inside_single_evaluation = previous;
         }
         Ok(Transformed::no(node))
+    }
+}
+
+/// Returns whether a plan node can occur on the scan path of a controlled
+/// PromQL single evaluation without changing which row is newest per series.
+fn single_evaluation_node_allowed(node: &LogicalPlan) -> bool {
+    match node {
+        LogicalPlan::TableScan(_) | LogicalPlan::SubqueryAlias(_) => true,
+        LogicalPlan::Sort(sort) => sort.fetch.is_none(),
+        LogicalPlan::Projection(projection) => projection
+            .expr
+            .iter()
+            .all(|expr| single_evaluation_projection_expr_allowed(expr, projection)),
+        LogicalPlan::Extension(extension) => {
+            let extension = extension.node.as_any();
+            extension.is::<SeriesDivide>()
+                || extension
+                    .downcast_ref::<SeriesNormalize>()
+                    .is_some_and(|normalize| !normalize.filter_stale_markers())
+        }
+        _ => false,
+    }
+}
+
+/// This whitelist assumes the planner preserves time-index and series identity;
+/// it is not a proof that an arbitrary plan does so.
+fn single_evaluation_projection_expr_allowed(
+    expr: &Expr,
+    projection: &datafusion_expr::logical_plan::Projection,
+) -> bool {
+    match expr {
+        Expr::Column(_) => true,
+        Expr::Alias(alias) => match alias.expr.as_ref() {
+            Expr::Column(column) => alias.name == column.name,
+            Expr::Cast(cast) => {
+                let Expr::Column(column) = cast.expr.as_ref() else {
+                    return false;
+                };
+                alias.name == column.name
+                    && matches!(
+                        cast.data_type,
+                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None)
+                    )
+                    && matches!(
+                        projection
+                            .input
+                            .schema()
+                            .qualified_field_from_column(column),
+                        Ok((_, field))
+                            if matches!(field.data_type(), DataType::Timestamp(ArrowTimeUnit::Second | ArrowTimeUnit::Millisecond, None))
+                    )
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -516,12 +567,23 @@ mod test {
     use std::sync::Arc;
 
     use datafusion::functions_aggregate::first_last::last_value_udaf;
+    use datafusion::functions_aggregate::min_max::max_udaf;
+    use datafusion::functions_window::row_number::RowNumber;
+    use datafusion::logical_expr::expr::WindowFunction;
+    use datafusion::logical_expr::{WindowFrame, WindowFunctionDefinition};
+    use datafusion::prelude::JoinType;
     use datafusion_common::tree_node::TreeNodeRecursion;
-    use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams, Cast};
+    use datafusion_expr::expr::{
+        AggregateFunction, AggregateFunctionParams, Cast, WindowFunctionParams,
+    };
     use datafusion_expr::expr_fn::scalar_subquery;
     use datafusion_expr::{Extension, LogicalPlan, LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
     use datatypes::arrow::datatypes::DataType;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use promql::extension_plan::RangeManipulate;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
     use store_api::storage::{RegionId, TimeSeriesRowSelector};
 
@@ -590,6 +652,57 @@ mod test {
         .unwrap()
         .build()
         .unwrap()
+    }
+
+    fn mock_table_provider_with_timestamp(
+        region_id: RegionId,
+        timestamp_type: ConcreteDataType,
+    ) -> DummyTableProvider {
+        let mut builder = RegionMetadataBuilder::new(region_id);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("ts", timestamp_type, false),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![1]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+        DummyTableProvider::new(region_id, engine, metadata)
+    }
+
+    fn last_value_aggregate(input: LogicalPlan) -> LogicalPlan {
+        LogicalPlanBuilder::from(input)
+            .aggregate(
+                vec![col("k0")],
+                vec![Expr::AggregateFunction(AggregateFunction {
+                    func: last_value_udaf(),
+                    params: AggregateFunctionParams {
+                        args: vec![col("v0")],
+                        distinct: false,
+                        filter: None,
+                        order_by: vec![Sort {
+                            expr: col("ts"),
+                            asc: true,
+                            nulls_first: true,
+                        }],
+                        null_treatment: None,
+                    },
+                })],
+            )
+            .unwrap()
+            .build()
+            .unwrap()
     }
 
     fn single_evaluation(input: LogicalPlan) -> LogicalPlan {
@@ -662,7 +775,9 @@ mod test {
             )),
         })
     }
-    use crate::optimizer::test_util::{mock_table_provider, mock_table_provider_with_tsid};
+    use crate::optimizer::test_util::{
+        MetaRegionEngine, mock_table_provider, mock_table_provider_with_tsid,
+    };
 
     #[test]
     fn single_evaluation_sets_last_row_on_the_rewritten_scan() {
@@ -679,6 +794,340 @@ mod test {
         );
 
         assert_eq!(provider.scan_request().series_row_selector, None);
+    }
+
+    #[test]
+    fn single_evaluation_limit_sort_does_not_set_last_row_below_limit() {
+        let mut selectors = Vec::new();
+        for input in [
+            // Instant(1000, lookback=1000) -> Limit(0, 1) -> Sort(ts ASC) -> Scan.
+            LogicalPlanBuilder::from(scan_plan(
+                Arc::new(mock_table_provider(RegionId::new(1, 1))),
+                "t",
+            ))
+            .sort(vec![col("ts").sort(true, false)])
+            .unwrap()
+            .limit(0, Some(1))
+            .unwrap()
+            .build()
+            .unwrap(),
+            // Sort.fetch is a limit embedded in the Sort node and has the same boundary.
+            LogicalPlanBuilder::from(scan_plan(
+                Arc::new(mock_table_provider(RegionId::new(1, 1))),
+                "t",
+            ))
+            .sort_with_limit(vec![col("ts").sort(true, false)], Some(1))
+            .unwrap()
+            .build()
+            .unwrap(),
+        ] {
+            let rewritten = ScanHintRule
+                .rewrite(single_evaluation(input), &OptimizerContext::default())
+                .unwrap()
+                .data;
+            selectors.push(scan_requests(&rewritten)[0].series_row_selector);
+        }
+
+        // With samples (ts=100, v=10) and (ts=900, v=1), an unhinted ascending
+        // sort/limit pipeline returns 10. LastRow at the scan instead leaves only
+        // (900, 1) before the limit. A LastRow scan hint cannot cross either limit.
+        assert_eq!(selectors, vec![None, None]);
+    }
+
+    #[test]
+    fn single_evaluation_allows_controlled_promql_selector_chain() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let projection = LogicalPlanBuilder::from(scan_plan(provider, "t"))
+            .project(vec![
+                col("k0").alias("k0"),
+                Expr::Cast(Cast::new(
+                    Box::new(col("ts")),
+                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                ))
+                .alias("ts"),
+                col("v0"),
+            ])
+            .unwrap()
+            .sort(vec![col("ts").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+        let divide = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesDivide::new(
+                vec!["k0".to_string()],
+                "ts".to_string(),
+                projection,
+            )),
+        });
+        let normalize = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesNormalize::new(
+                42,
+                "ts",
+                false,
+                vec!["k0".to_string()],
+                divide,
+            )),
+        });
+        let rewritten = ScanHintRule
+            .rewrite(single_evaluation(normalize), &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
+    }
+
+    #[test]
+    fn single_evaluation_filtering_normalize_does_not_set_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let normalize = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesNormalize::new(
+                42,
+                "ts",
+                true,
+                vec!["k0".to_string()],
+                scan_plan(provider, "t"),
+            )),
+        });
+        let rewritten = ScanHintRule
+            .rewrite(single_evaluation(normalize), &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        // An older finite sample can precede a newest stale marker. LastRow
+        // would discard that sample before SeriesNormalize filters the marker.
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+    }
+
+    #[test]
+    fn single_evaluation_rejects_row_changing_nodes() {
+        let provider = || Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let window = LogicalPlanBuilder::from(scan_plan(provider(), "window"))
+            .window(vec![Expr::WindowFunction(Box::new(WindowFunction {
+                fun: WindowFunctionDefinition::WindowUDF(Arc::new(RowNumber::new().into())),
+                params: WindowFunctionParams {
+                    args: vec![],
+                    partition_by: vec![col("k0")],
+                    order_by: vec![col("ts").sort(true, true)],
+                    window_frame: WindowFrame::new(Some(true)),
+                    filter: None,
+                    null_treatment: None,
+                    distinct: false,
+                },
+            }))])
+            .unwrap()
+            .build()
+            .unwrap();
+        let join = LogicalPlanBuilder::from(scan_plan(provider(), "left"))
+            .join(
+                scan_plan(provider(), "right"),
+                JoinType::Inner,
+                (Vec::<Column>::new(), Vec::<Column>::new()),
+                None,
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let nonlast_aggregate = LogicalPlanBuilder::from(scan_plan(provider(), "aggregate"))
+            .aggregate(
+                vec![col("k0")],
+                vec![Expr::AggregateFunction(AggregateFunction {
+                    func: max_udaf(),
+                    params: AggregateFunctionParams {
+                        args: vec![col("v0")],
+                        distinct: false,
+                        filter: None,
+                        order_by: vec![],
+                        null_treatment: None,
+                    },
+                })],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let range = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                RangeManipulate::new(
+                    1000,
+                    1000,
+                    1000,
+                    1000,
+                    "ts".to_string(),
+                    vec!["v0".to_string()],
+                    scan_plan(provider(), "range"),
+                )
+                .unwrap(),
+            ),
+        });
+
+        for (plan, scan_count) in [(window, 1), (join, 2), (nonlast_aggregate, 1), (range, 1)] {
+            let rewritten = ScanHintRule
+                .rewrite(single_evaluation(plan), &OptimizerContext::default())
+                .unwrap()
+                .data;
+            assert_eq!(
+                scan_requests(&rewritten)
+                    .into_iter()
+                    .map(|request| request.series_row_selector)
+                    .collect::<Vec<_>>(),
+                vec![None; scan_count]
+            );
+        }
+    }
+
+    #[test]
+    fn single_evaluation_last_value_aggregate_keeps_legacy_selector() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let rewritten = ScanHintRule
+            .rewrite(
+                single_evaluation(last_value_aggregate(scan_plan(provider, "t"))),
+                &OptimizerContext::default(),
+            )
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: false })
+        );
+    }
+
+    #[test]
+    fn single_evaluation_allows_second_to_millisecond_time_index_cast() {
+        let provider = Arc::new(mock_table_provider_with_timestamp(
+            RegionId::new(1, 1),
+            ConcreteDataType::timestamp_second_datatype(),
+        ));
+        let input = LogicalPlanBuilder::from(scan_plan(provider, "t"))
+            .project(vec![
+                Expr::Cast(Cast::new(
+                    Box::new(Expr::Column(Column::new(Some("t"), "ts"))),
+                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                ))
+                .alias("ts"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule
+            .rewrite(single_evaluation(input), &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
+    }
+
+    #[test]
+    fn single_evaluation_rejects_microsecond_and_nanosecond_time_index_casts() {
+        for timestamp_type in [
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+        ] {
+            let provider = Arc::new(mock_table_provider_with_timestamp(
+                RegionId::new(1, 1),
+                timestamp_type,
+            ));
+            let input = LogicalPlanBuilder::from(scan_plan(provider, "t"))
+                .project(vec![
+                    Expr::Cast(Cast::new(
+                        Box::new(Expr::Column(Column::new(Some("t"), "ts"))),
+                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    ))
+                    .alias("ts"),
+                ])
+                .unwrap()
+                .build()
+                .unwrap();
+            let rewritten = ScanHintRule
+                .rewrite(single_evaluation(input), &OptimizerContext::default())
+                .unwrap()
+                .data;
+
+            assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+        }
+    }
+
+    #[test]
+    fn single_evaluation_rejects_unresolved_time_index_cast_qualifier() {
+        let provider = Arc::new(mock_table_provider_with_timestamp(
+            RegionId::new(1, 1),
+            ConcreteDataType::timestamp_second_datatype(),
+        ));
+        let input = LogicalPlanBuilder::from(scan_plan(provider, "t"))
+            .project(vec![col("ts")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let LogicalPlan::Projection(projection) = input else {
+            unreachable!();
+        };
+        let unresolved_cast = Expr::Cast(Cast::new(
+            Box::new(Expr::Column(Column::new(Some("missing"), "ts"))),
+            DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+        ))
+        .alias("ts");
+
+        assert!(!single_evaluation_projection_expr_allowed(
+            &unresolved_cast,
+            &projection
+        ));
+    }
+
+    #[test]
+    fn single_evaluation_rejects_projection_expressions_that_change_rows() {
+        let invalid_projections = [
+            vec![col("ts").alias("renamed")],
+            vec![
+                Expr::BinaryExpr(datafusion_expr::expr::BinaryExpr::new(
+                    Box::new(col("v0")),
+                    datafusion_expr::Operator::Plus,
+                    Box::new(lit(1.0_f64)),
+                ))
+                .alias("v0"),
+            ],
+            vec![
+                Expr::Cast(Cast::new(
+                    Box::new(col("ts")),
+                    DataType::Timestamp(ArrowTimeUnit::Second, None),
+                ))
+                .alias("ts"),
+            ],
+            vec![Expr::Cast(Cast::new(Box::new(col("v0")), DataType::Int64)).alias("v0")],
+            vec![
+                Expr::Cast(Cast::new(
+                    Box::new(col("ts")),
+                    DataType::Timestamp(ArrowTimeUnit::Microsecond, None),
+                ))
+                .alias("ts"),
+            ],
+            vec![
+                Expr::Cast(Cast::new(
+                    Box::new(col("ts")),
+                    DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                ))
+                .alias("ts"),
+            ],
+        ];
+
+        for expressions in invalid_projections {
+            let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+            let input = LogicalPlanBuilder::from(scan_plan(provider, "t"))
+                .project(expressions)
+                .unwrap()
+                .build()
+                .unwrap();
+            let rewritten = ScanHintRule
+                .rewrite(single_evaluation(input), &OptimizerContext::default())
+                .unwrap()
+                .data;
+
+            assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+        }
     }
 
     #[test]
@@ -731,15 +1180,17 @@ mod test {
     }
 
     #[test]
-    fn residual_filter_only_blocks_its_union_branch() {
+    fn branch_local_residual_filter_isolation_in_both_orders() {
         for filtered_first in [true, false] {
             let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
-            let filtered = LogicalPlanBuilder::from(scan_plan(provider.clone(), "filtered"))
-                .filter(col("v0").gt(lit(1.0_f64)))
-                .unwrap()
-                .build()
-                .unwrap();
-            let plain = scan_plan(provider.clone(), "plain");
+            let filtered = single_evaluation(
+                LogicalPlanBuilder::from(scan_plan(provider.clone(), "filtered"))
+                    .filter(col("v0").gt(lit(1.0_f64)))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            );
+            let plain = single_evaluation(scan_plan(provider.clone(), "plain"));
             let union = if filtered_first {
                 LogicalPlanBuilder::from(filtered)
                     .union(plain)
@@ -754,7 +1205,7 @@ mod test {
                     .unwrap()
             };
             let rewritten = ScanHintRule
-                .rewrite(single_evaluation(union), &OptimizerContext::default())
+                .rewrite(union, &OptimizerContext::default())
                 .unwrap()
                 .data;
             let requests = scan_requests_with_names(&rewritten)
@@ -768,6 +1219,28 @@ mod test {
             );
             assert_eq!(provider.scan_request().series_row_selector, None);
         }
+    }
+
+    #[test]
+    fn union_inside_single_evaluation_blocks_both_branches() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let union = LogicalPlanBuilder::from(scan_plan(provider.clone(), "left"))
+            .union(scan_plan(provider, "right"))
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule
+            .rewrite(single_evaluation(union), &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)
+                .into_iter()
+                .map(|request| request.series_row_selector)
+                .collect::<Vec<_>>(),
+            vec![None, None]
+        );
     }
 
     #[test]
@@ -906,10 +1379,7 @@ mod test {
         let requests = scan_requests_with_names(&rewritten)
             .into_iter()
             .collect::<HashMap<_, _>>();
-        assert_eq!(
-            requests["outer"].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
-        );
+        assert_eq!(requests["outer"].series_row_selector, None);
         assert_eq!(requests["inner"].series_row_selector, None);
     }
 
@@ -930,10 +1400,7 @@ mod test {
         let requests = scan_requests_with_names(&rewritten)
             .into_iter()
             .collect::<HashMap<_, _>>();
-        assert_eq!(
-            requests["outer"].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
-        );
+        assert_eq!(requests["outer"].series_row_selector, None);
         assert_eq!(
             requests["inner"].series_row_selector,
             Some(TimeSeriesRowSelector::LastRow { after_merge: true })
@@ -1046,29 +1513,7 @@ mod test {
     #[test]
     fn set_time_series_row_selector_hint() {
         let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
-        let table_source = Arc::new(DefaultTableSource::new(provider.clone()));
-        let plan = LogicalPlanBuilder::scan("t", table_source, None)
-            .unwrap()
-            .aggregate(
-                vec![col("k0")],
-                vec![Expr::AggregateFunction(AggregateFunction {
-                    func: last_value_udaf(),
-                    params: AggregateFunctionParams {
-                        args: vec![col("v0")],
-                        distinct: false,
-                        filter: None,
-                        order_by: vec![Sort {
-                            expr: col("ts"),
-                            asc: true,
-                            nulls_first: true,
-                        }],
-                        null_treatment: None,
-                    },
-                })],
-            )
-            .unwrap()
-            .build()
-            .unwrap();
+        let plan = last_value_aggregate(scan_plan(provider.clone(), "t"));
 
         let context = OptimizerContext::default();
         let rewritten = ScanHintRule.rewrite(plan, &context).unwrap().data;
