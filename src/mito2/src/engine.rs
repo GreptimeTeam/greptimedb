@@ -1146,6 +1146,12 @@ impl EngineInner {
             request,
             CacheStrategy::EnableAll(cache_manager),
         )
+        .with_series_index(region.series_index_store.as_ref().map(|store| {
+            crate::series_index::SeriesIndexReadContext {
+                store: store.clone(),
+                version: region.series_index_version(),
+            }
+        }))
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_scan_memory_pool(self.scan_memory_pool.clone())

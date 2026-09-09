@@ -1227,10 +1227,17 @@ async fn test_series_scan_with_format(flat_format: bool) {
 
 #[tokio::test]
 async fn test_two_phase_series_scan() {
+    for use_index in [false, true] {
+        check_two_phase_series_scan(use_index).await;
+    }
+}
+
+async fn check_two_phase_series_scan(use_index: bool) {
     let mut env = TestEnv::with_prefix("test_two_phase_series_scan").await;
     let engine = env
         .create_engine(MitoConfig {
             experimental_series_scan_v2: true,
+            experimental_series_index_root: "series-index".to_string(),
             ..Default::default()
         })
         .await;
@@ -1308,12 +1315,75 @@ async fn test_two_phase_series_scan() {
         .await
         .unwrap();
     test_util::flush_region(&engine, region_id, None).await;
+    if use_index {
+        use datatypes::arrow::array::{BinaryArray, UInt8Array, UInt64Array};
+
+        use crate::series_index::{
+            SeriesIndexEntry, SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexWriter,
+            SeriesIndexWriterOptions, series_index_channel, series_index_path,
+        };
+
+        let region = engine.find_region(region_id).unwrap();
+        let store = region.series_index_store.clone().unwrap();
+        let sequence = region.flushed_sequence();
+        let entry = SeriesIndexEntry {
+            index_uuid: FileId::random(),
+            bucket_start: Timestamp::new_millisecond(0),
+            bucket_end: Timestamp::new_millisecond(2001),
+            source_file_ids: Vec::new(),
+            min_file_sequence: sequence,
+            max_file_sequence: sequence,
+        };
+        let keys = [
+            (10, 0, "a", "x"),
+            (10, u64::MAX, "b", "y"),
+            (20, 0, "c", "z"),
+        ]
+        .map(|(table, tsid, a, b)| new_sparse_primary_key(&[a, b], &metadata, table, tsid));
+        let batch = DfRecordBatch::try_from_iter(vec![
+            (
+                "ts",
+                Arc::new(TimestampMillisecondArray::from(vec![1000; 3])) as ArrayRef,
+            ),
+            (
+                "__primary_key",
+                Arc::new(BinaryArray::from_iter_values(&keys)),
+            ),
+            ("__sequence", Arc::new(UInt64Array::from_value(sequence, 3))),
+            ("__op_type", Arc::new(UInt8Array::from_value(0, 3))),
+        ])
+        .unwrap();
+        let path = series_index_path(region_id, entry.index_uuid);
+        let mut writer = SeriesIndexWriter::try_new(
+            metadata.clone(),
+            store.clone(),
+            &path,
+            SeriesIndexWriterOptions::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        writer.write(&batch).await.unwrap();
+        writer.finish().await.unwrap();
+        let (purger, _receiver) = series_index_channel(store);
+        let handle = SeriesIndexFileHandle::new(region_id, entry.clone(), purger);
+        region
+            .series_index_version_control
+            .publish(Arc::new(SeriesIndexVersion {
+                series_indexes: [(entry.index_uuid, handle)].into(),
+                ..Default::default()
+            }));
+    }
+    // A newer SST remains uncovered; the remaining writes stay in memory.
+    engine
+        .handle_request(region_id, put(rows(&[(10, 0, "a", "x", 11, 1000)])))
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
     engine
         .handle_request(
             region_id,
             put(rows(&[
-                // Replaces the flushed row for this series and timestamp.
-                (10, 0, "a", "x", 11, 1000),
                 (10, 0, "a", "x", 12, 2000),
                 (10, u64::MAX, "b", "y", 21, 2000),
                 (20, u64::MAX, "d", "w", 40, 1000),
@@ -1364,6 +1434,12 @@ async fn test_two_phase_series_scan() {
     }))
     .await
     .unwrap();
+
+    let index_files = metrics_set
+        .clone_inner()
+        .sum_by_name("candidate_index_files")
+        .map_or(0, |value| value.as_usize());
+    assert_eq!(usize::from(use_index), index_files);
 
     let mut series_to_partition = BTreeMap::new();
     let mut actual_rows = Vec::new();
