@@ -103,7 +103,7 @@ async fn test_last_row(append_mode: bool, flat_format: bool) {
         .scanner(
             region_id,
             ScanRequest {
-                series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
                 ..Default::default()
             },
         )
@@ -126,7 +126,7 @@ async fn scan_last_row(
             region_id,
             ScanRequest {
                 filters,
-                series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
                 ..Default::default()
             },
         )
@@ -254,7 +254,7 @@ async fn last_row_scanner(engine: &MitoEngine, region_id: RegionId) -> Scanner {
         .scanner(
             region_id,
             ScanRequest {
-                series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
                 ..Default::default()
             },
         )
@@ -446,8 +446,7 @@ async fn test_last_row_returns_older_put_after_newest_delete_across_ssts() {
             .scanner(
                 region_id,
                 ScanRequest {
-                    series_row_selector: Some(TimeSeriesRowSelector::LastRow),
-                    series_row_selector_after_merge: true,
+                    series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
                     ..Default::default()
                 },
             )

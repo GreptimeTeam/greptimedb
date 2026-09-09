@@ -2197,7 +2197,7 @@ async fn test_exact_sequence_read_with_last_row_selector_keeps_in_range_rows() {
             memtable_min_sequence: Some(0),
             memtable_max_sequence: Some(1),
             exact_sequence_range: true,
-            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
             ..Default::default()
         })
         .await
@@ -2213,7 +2213,7 @@ async fn test_exact_sequence_read_with_last_row_selector_keeps_in_range_rows() {
 | series | 2.0     | 1970-01-01T00:00:02 |
 +--------+---------+---------------------+",
         scan(ScanRequest {
-            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
             ..Default::default()
         })
         .await
@@ -2583,7 +2583,9 @@ async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format
             .scan_to_stream(
                 region_id,
                 ScanRequest {
-                    series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                    series_row_selector: Some(TimeSeriesRowSelector::LastRow {
+                        after_merge: false,
+                    }),
                     ..Default::default()
                 },
             )

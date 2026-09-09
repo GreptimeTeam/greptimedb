@@ -574,7 +574,6 @@ impl ScanRegion {
             .with_filter_deleted(self.filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
-            .with_series_row_selector_after_merge(self.request.series_row_selector_after_merge)
             .with_distribution(self.request.distribution)
             .with_explain_flat_format(
                 self.version.options.sst_format == Some(crate::sst::FormatType::Flat),
@@ -978,8 +977,6 @@ pub struct ScanInput {
     pub(crate) merge_mode: MergeMode,
     /// Hint to select rows from time series.
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
-    /// Whether the selector must run after cross-source merge and deduplication.
-    pub(crate) series_row_selector_after_merge: bool,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
     /// Whether the region's configured SST format is flat.
@@ -1054,7 +1051,6 @@ impl ScanInput {
                 filter_deleted: true,
                 merge_mode: MergeMode::default(),
                 series_row_selector: None,
-                series_row_selector_after_merge: false,
                 distribution: None,
                 explain_flat_format: false,
                 snapshot_sequence: None,
@@ -1203,7 +1199,6 @@ impl ScanInputBuilder {
                 filters,
                 time_filters,
                 series_row_selector: input.series_row_selector,
-                series_row_selector_after_merge: input.series_row_selector_after_merge,
                 append_mode: input.append_mode,
                 filter_deleted: input.filter_deleted,
                 merge_mode: input.merge_mode,
@@ -1383,13 +1378,6 @@ impl ScanInputBuilder {
         series_row_selector: Option<TimeSeriesRowSelector>,
     ) -> Self {
         self.input.series_row_selector = series_row_selector;
-        self
-    }
-
-    /// Sets whether the row selector must run after merge and deduplication.
-    #[must_use]
-    pub(crate) fn with_series_row_selector_after_merge(mut self, after_merge: bool) -> Self {
-        self.input.series_row_selector_after_merge = after_merge;
         self
     }
 
@@ -2515,8 +2503,7 @@ mod tests {
         )
         .await
         .with_distribution(Some(TimeSeriesDistribution::PerSeries))
-        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
-        .with_series_row_selector_after_merge(true)
+        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow { after_merge: true }))
         .with_merge_mode(MergeMode::LastNonNull)
         .with_filter_deleted(false)
         .build();
@@ -2541,8 +2528,7 @@ mod tests {
                 col("v0").gt(lit(1)).to_string(),
             ],
             time_filters: vec![col("ts").gt_eq(ts_lit(1000)).to_string()],
-            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
-            series_row_selector_after_merge: true,
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             append_mode: false,
             filter_deleted: false,
             merge_mode: MergeMode::LastNonNull,
@@ -2551,7 +2537,10 @@ mod tests {
         }
         .build();
         assert_eq!(&expected, fingerprint);
-        assert!(input.series_row_selector_after_merge);
+        assert_eq!(
+            input.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
     }
 
     #[tokio::test]
@@ -2626,7 +2615,6 @@ mod tests {
             filters: vec![col("k0").eq(lit("foo")).to_string()],
             time_filters: vec![],
             series_row_selector: None,
-            series_row_selector_after_merge: false,
             append_mode: false,
             filter_deleted: true,
             merge_mode: MergeMode::LastRow,

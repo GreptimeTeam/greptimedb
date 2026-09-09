@@ -2621,7 +2621,7 @@ mod tests {
         let key = SelectorResultKey {
             file_id,
             row_group_idx: 0,
-            selector: TimeSeriesRowSelector::LastRow,
+            selector: TimeSeriesRowSelector::LastRow { after_merge: false },
         };
         assert!(cache.get_selector_result(&key).is_none());
         let result = Arc::new(SelectorResultValue::new(
@@ -2770,7 +2770,6 @@ mod tests {
                 filters: vec!["tag_0 = 1".to_string()],
                 time_filters: vec![],
                 series_row_selector: None,
-                series_row_selector_after_merge: false,
                 append_mode: false,
                 filter_deleted: true,
                 merge_mode: crate::region::options::MergeMode::LastRow,

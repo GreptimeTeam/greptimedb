@@ -30,7 +30,7 @@ use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
 use snafu::ResultExt;
-use store_api::storage::{RegionId, SequenceRange};
+use store_api::storage::{RegionId, SequenceRange, TimeSeriesRowSelector};
 
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::MemScanMetrics;
@@ -1571,12 +1571,13 @@ pub fn build_flat_file_range_scan_stream(
             let build_reader_start = Instant::now();
             let Some(mut reader) = range
                 .flat_reader(
-                    if stream_ctx.input.sequence_range.is_none()
-                        && !stream_ctx.input.series_row_selector_after_merge
-                    {
-                        stream_ctx.input.series_row_selector
-                    } else {
-                        None
+                    match stream_ctx.input.series_row_selector {
+                        Some(TimeSeriesRowSelector::LastRow { after_merge: false })
+                            if stream_ctx.input.sequence_range.is_none() =>
+                        {
+                            stream_ctx.input.series_row_selector
+                        }
+                        _ => None,
                     },
                     fetch_metrics.as_deref(),
                 )

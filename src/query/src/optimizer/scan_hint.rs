@@ -125,7 +125,9 @@ impl ScanHintRule {
             // Apply the instant-derived hint after the aggregate hint. Both
             // select LastRow today, and this ordering preserves the existing
             // aggregate selector when the instant guard rejects a scan.
-            adapter.with_last_row_selector_after_merge_hint();
+            adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow {
+                after_merge: true,
+            });
         }
         table_scan.source =
             std::sync::Arc::new(DefaultTableSource::new(std::sync::Arc::new(adapter)));
@@ -293,7 +295,9 @@ impl ScanHintRule {
         }
 
         if should_set_selector_hint {
-            adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow);
+            adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow {
+                after_merge: false,
+            });
         }
     }
 }
@@ -643,10 +647,9 @@ mod test {
 
         assert_eq!(
             scan_requests(&rewritten)[0].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
-        assert!(scan_requests(&rewritten)[0].series_row_selector_after_merge);
-        assert!(!provider.scan_request().series_row_selector_after_merge);
+
         assert_eq!(provider.scan_request().series_row_selector, None);
     }
 
@@ -660,9 +663,8 @@ mod test {
             .data;
 
         assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
-        assert!(!scan_requests(&rewritten)[0].series_row_selector_after_merge);
+
         assert_eq!(provider.scan_request().series_row_selector, None);
-        assert!(!provider.scan_request().series_row_selector_after_merge);
     }
 
     #[test]
@@ -676,9 +678,8 @@ mod test {
 
         assert_eq!(
             scan_requests(&rewritten)[0].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
-        assert!(scan_requests(&rewritten)[0].series_row_selector_after_merge);
     }
 
     #[test]
@@ -692,9 +693,8 @@ mod test {
 
         assert_eq!(
             scan_requests(&rewritten)[0].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
-        assert!(scan_requests(&rewritten)[0].series_row_selector_after_merge);
     }
 
     #[test]
@@ -708,7 +708,6 @@ mod test {
             .data;
 
         assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
-        assert!(!scan_requests(&rewritten)[0].series_row_selector_after_merge);
     }
 
     #[test]
@@ -721,7 +720,6 @@ mod test {
             .data;
 
         assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
-        assert!(!scan_requests(&rewritten)[0].series_row_selector_after_merge);
     }
 
     #[test]
@@ -734,7 +732,6 @@ mod test {
             .data;
 
         assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
-        assert!(!scan_requests(&rewritten)[0].series_row_selector_after_merge);
     }
 
     #[test]
@@ -747,7 +744,6 @@ mod test {
             .data;
 
         assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
-        assert!(!scan_requests(&rewritten)[0].series_row_selector_after_merge);
     }
 
     #[test]
@@ -769,7 +765,7 @@ mod test {
             .collect::<HashMap<_, _>>();
         assert_eq!(
             requests["outer"].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
         assert_eq!(requests["inner"].series_row_selector, None);
     }
@@ -793,11 +789,11 @@ mod test {
             .collect::<HashMap<_, _>>();
         assert_eq!(
             requests["outer"].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
         assert_eq!(
             requests["inner"].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
     }
 
@@ -847,9 +843,8 @@ mod test {
             .data;
         assert_eq!(
             scan_requests(&rewritten)[0].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
-        assert!(scan_requests(&rewritten)[0].series_row_selector_after_merge);
     }
 
     #[test]
@@ -869,13 +864,10 @@ mod test {
         assert_eq!(requests.len(), 2);
         assert_eq!(
             requests[0].series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
         assert_eq!(requests[1].series_row_selector, None);
-        assert!(requests[0].series_row_selector_after_merge);
-        assert!(!requests[1].series_row_selector_after_merge);
         assert_eq!(provider.scan_request().series_row_selector, None);
-        assert!(!provider.scan_request().series_row_selector_after_merge);
     }
 
     #[test]
@@ -941,9 +933,8 @@ mod test {
         let scan_req = scan_requests(&rewritten)[0].clone();
         assert_eq!(
             scan_req.series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: false })
         );
-        assert!(!scan_req.series_row_selector_after_merge);
     }
 
     #[test]

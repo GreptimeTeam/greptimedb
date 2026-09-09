@@ -82,7 +82,11 @@ pub trait VectorIndexEngine: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
 pub enum TimeSeriesRowSelector {
     /// Only keep the last row of each time-series.
-    LastRow,
+    #[strum(to_string = "LastRow")]
+    LastRow {
+        /// Whether selection runs after cross-source merge and deduplication.
+        after_merge: bool,
+    },
 }
 
 /// A hint on how to distribute time-series data on the scan output.
@@ -112,11 +116,6 @@ pub struct ScanRequest {
     pub limit: Option<usize>,
     /// Optional hint to select rows from time-series.
     pub series_row_selector: Option<TimeSeriesRowSelector>,
-    /// Whether the row selector must run only after cross-source merge and deduplication.
-    ///
-    /// This is required by instant-derived LastRow scans. Ordinary selector users
-    /// keep the default `false` and may use source-local selector optimization.
-    pub series_row_selector_after_merge: bool,
     /// Optional constraint on the sequence number of the rows to read.
     /// If set, only rows with a sequence number **lesser or equal** to this value
     /// will be returned.
@@ -210,7 +209,10 @@ impl Display for ScanRequest {
                 series_row_selector
             )?;
         }
-        if self.series_row_selector_after_merge {
+        if matches!(
+            self.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        ) {
             write!(
                 f,
                 "{}series_row_selector_after_merge: true",
@@ -335,14 +337,14 @@ mod tests {
         );
 
         let request = ScanRequest {
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             snapshot_on_scan: true,
-            series_row_selector_after_merge: true,
             exact_sequence_range: true,
             ..Default::default()
         };
         assert_eq!(
             request.to_string(),
-            "ScanRequest { series_row_selector_after_merge: true, snapshot_on_scan: true, exact_sequence_range: true }"
+            "ScanRequest { series_row_selector: LastRow, series_row_selector_after_merge: true, snapshot_on_scan: true, exact_sequence_range: true }"
         );
 
         let request = ScanRequest {

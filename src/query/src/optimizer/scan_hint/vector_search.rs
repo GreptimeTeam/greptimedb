@@ -634,7 +634,7 @@ mod tests {
         let request = scan_request_from_plan(&rewritten);
         assert_eq!(
             request.series_row_selector,
-            Some(store_api::storage::TimeSeriesRowSelector::LastRow)
+            Some(store_api::storage::TimeSeriesRowSelector::LastRow { after_merge: false })
         );
         assert!(request.vector_search.is_none());
     }
@@ -704,7 +704,7 @@ mod tests {
 
         assert_eq!(
             request_a.series_row_selector,
-            Some(store_api::storage::TimeSeriesRowSelector::LastRow)
+            Some(store_api::storage::TimeSeriesRowSelector::LastRow { after_merge: false })
         );
         assert!(request_a.vector_search.is_none());
         assert_eq!(request_b.series_row_selector, None);

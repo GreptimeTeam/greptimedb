@@ -202,10 +202,10 @@ impl FileRange {
             ))
             .await?;
 
-        let use_last_row_reader = if selector
-            .map(|s| s == TimeSeriesRowSelector::LastRow)
-            .unwrap_or(false)
-        {
+        let use_last_row_reader = if matches!(
+            selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: false })
+        ) {
             // Only use LastRowReader if row group does not contain DELETE, all
             // rows are selected, and filters that still run after this reader
             // cannot change which row is last. Tag filters are safe because a

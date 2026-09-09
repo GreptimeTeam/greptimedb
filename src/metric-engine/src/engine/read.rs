@@ -429,8 +429,7 @@ mod test {
         let scan_req = ScanRequest {
             projection,
             filters: vec![],
-            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
-            series_row_selector_after_merge: true,
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             ..Default::default()
         };
 
@@ -448,9 +447,8 @@ mod test {
         assert_eq!(scan_req.filters.len(), 1);
         assert_eq!(
             scan_req.series_row_selector,
-            Some(TimeSeriesRowSelector::LastRow)
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
-        assert!(scan_req.series_row_selector_after_merge);
         assert_eq!(
             scan_req.filters[0],
             logical_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)

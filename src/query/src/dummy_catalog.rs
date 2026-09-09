@@ -286,13 +286,6 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().series_row_selector = Some(selector);
     }
 
-    /// Sets the instant-derived LastRow hint, which must run after merge and deduplication.
-    pub fn with_last_row_selector_after_merge_hint(&self) {
-        let mut request = self.scan_request.lock().unwrap();
-        request.series_row_selector = Some(TimeSeriesRowSelector::LastRow);
-        request.series_row_selector_after_merge = true;
-    }
-
     /// Clones this provider for one logical table-scan use-site.
     ///
     /// The optimizer may attach different hints to scans that share the same
