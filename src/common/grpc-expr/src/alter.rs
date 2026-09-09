@@ -112,6 +112,8 @@ fn json_settings_from_proto(settings: api::v1::JsonSettings) -> Result<JsonSetti
                 data_type,
                 nullable: hint.nullable,
                 default_constraint,
+                // Index configuration is not supported yet, so this is temporarily
+                // hardcoded to false.
                 inverted_index: false,
             })
         })
