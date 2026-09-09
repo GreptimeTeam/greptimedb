@@ -474,6 +474,17 @@ experimental_manifest_keep_removed_file_ttl = "1h"
 ## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
 
+## Under development; do not enable. Root directory for local series indexes.
+## Empty disables the feature. Relative paths resolve under `data_home`.
+#+ experimental_series_index_root = ""
+
+## Interval between series-index maintenance runs. Zero uses the default of 5 min.
+#+ experimental_series_index_maintenance_interval = "5m"
+
+## Requested minimum series-index bucket width (default: 5 days), rounded up to
+## an exact multiple of each region's compaction time window.
+#+ experimental_series_index_bucket_width = "5days"
+
 ## Max number of running background flush jobs (default: 1/2 of cpu cores).
 ## @toml2docs:none-default="Auto"
 #+ max_background_flushes = 4

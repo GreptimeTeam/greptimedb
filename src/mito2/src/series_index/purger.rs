@@ -108,3 +108,56 @@ pub(crate) fn series_index_channel(
     let (sender, receiver) = unbounded_channel();
     (IndexFilePurger { store, sender }, receiver)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use object_store::ObjectStore;
+    use object_store::services::Memory;
+    use store_api::storage::{FileId, RegionId};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_purge_drains_queue_after_last_sender_drops() {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let (purger, receiver) = series_index_channel(store.clone());
+        let mut paths = Vec::new();
+        for _ in 0..3 {
+            let file_id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+            let path = series_index_path(file_id.region_id(), file_id.file_id());
+            store.write(&path, "index").await.unwrap();
+            paths.push(path);
+            purger.purge(PurgeRequest { file_id });
+        }
+        drop(purger);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            run_index_purge_task(0, store.clone(), receiver),
+        )
+        .await
+        .unwrap();
+        for path in paths {
+            assert!(!store.exists(&path).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_purge_falls_back_after_receiver_drops() {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let (purger, receiver) = series_index_channel(store.clone());
+        drop(receiver);
+        let file_id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+        let path = series_index_path(file_id.region_id(), file_id.file_id());
+        store.write(&path, "index").await.unwrap();
+        purger.purge(PurgeRequest { file_id });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while store.exists(&path).await.unwrap() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
