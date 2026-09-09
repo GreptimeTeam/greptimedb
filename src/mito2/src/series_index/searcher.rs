@@ -20,6 +20,7 @@ use datafusion_expr::{Expr, col, lit};
 use datatypes::arrow::array::{ArrayRef, UInt32Array, UInt64Array};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
@@ -37,60 +38,68 @@ use crate::sst::parquet::prefilter::simple_tag_filters;
 
 /// Searches a series-index file for metric series matching query predicates.
 pub struct SeriesIndexSearcher {
-    object_store: ObjectStore,
-    filters: Vec<(Expr, SimpleFilterEvaluator)>,
-    time_range: Option<TimestampRange>,
-    empty_time_range: bool,
+    /// The file to search, or `None` when an empty time range rules out
+    /// every series without opening the file.
+    reader: Option<ParquetIndexReader>,
+    /// Row-group pruning predicate built from all of the file's filters.
+    pruning_predicate: Predicate,
+    filters: Vec<SimpleFilterEvaluator>,
 }
 
 impl SeriesIndexSearcher {
-    /// Creates a searcher reusable across series-index files of `metadata`.
-    /// Time-range predicates are built per file from the unit recorded in each
-    /// file's schema, so files written before a time index unit widening keep
-    /// being interpreted in their own unit.
-    pub fn try_new(
+    /// Creates a searcher for the series-index file of `metadata` at `path`.
+    /// Predicates are built from the unit recorded in the file's schema, so a
+    /// file written before a time index unit widening keeps being interpreted
+    /// in its own unit.
+    pub async fn try_new(
         metadata: RegionMetadataRef,
         object_store: ObjectStore,
+        path: &str,
         predicate: Option<&Predicate>,
         time_range: Option<TimestampRange>,
     ) -> Result<Self> {
         // Keep search-time metadata validation identical to the writer.
         series_index_schema(&metadata)?;
-
-        let filters = simple_tag_filters(&metadata, None, predicate);
-        let empty_time_range = time_range.as_ref().is_some_and(TimestampRange::is_empty);
-
-        Ok(Self {
-            object_store,
-            filters,
-            time_range,
-            empty_time_range,
-        })
-    }
-
-    /// Searches `path` and returns sorted batches of matching metric-series IDs.
-    pub async fn search(&self, path: &str) -> Result<MetricSeriesIdStream> {
-        if self.empty_time_range {
-            return Ok(Box::pin(futures::stream::empty()));
+        if time_range.as_ref().is_some_and(TimestampRange::is_empty) {
+            return Ok(Self {
+                reader: None,
+                pruning_predicate: Predicate::new(Vec::new()),
+                filters: Vec::new(),
+            });
         }
 
-        let reader = ParquetIndexReader::open(self.object_store.clone(), path).await?;
+        let reader = ParquetIndexReader::open(object_store, path).await?;
         let unit = validate_index_schema(reader.schema())?;
 
-        // An older index file may not contain tags added by schema evolution.
-        // Ignore filters on those tags to preserve a conservative candidate set.
-        let mut filters = self.filters.clone();
-        for expr in time_range_exprs(unit, self.time_range.as_ref()) {
+        let mut filters = simple_tag_filters(&metadata, None, predicate);
+        for expr in time_range_exprs(unit, time_range.as_ref()) {
             let filter = SimpleFilterEvaluator::try_new(&expr).context(UnexpectedSnafu {
                 reason: "failed to build an internal series-index time filter",
             })?;
             filters.push((expr, filter));
         }
+        // An older index file may not contain tags added by schema evolution.
+        // Ignore filters on those tags to preserve a conservative candidate set.
         let (pruning_predicate, filters) = filters_for_schema(reader.schema(), &filters);
-        let mut projection_columns = Vec::with_capacity(filters.len() + 2);
+
+        Ok(Self {
+            reader: Some(reader),
+            pruning_predicate,
+            filters,
+        })
+    }
+
+    /// Searches the index file and returns sorted batches of matching
+    /// metric-series IDs.
+    pub fn search(&self) -> Result<MetricSeriesIdStream> {
+        let Some(reader) = self.reader.as_ref() else {
+            return Ok(Box::pin(futures::stream::empty()));
+        };
+        let mut projection_columns = Vec::with_capacity(self.filters.len() + 2);
         projection_columns.extend([TABLE_ID_COLUMN, TSID_COLUMN]);
-        projection_columns.extend(filters.iter().map(SimpleFilterEvaluator::column_name));
-        let mut batches = reader.read(&pruning_predicate, &projection_columns)?;
+        projection_columns.extend(self.filters.iter().map(SimpleFilterEvaluator::column_name));
+        let mut batches = reader.read(&self.pruning_predicate, &projection_columns)?;
+        let filters = self.filters.clone();
 
         Ok(Box::pin(try_stream! {
             let mut last_series = None;
@@ -158,14 +167,12 @@ fn filters_for_schema(
 
 // Builds `__series_min_ts`/`__series_max_ts` predicates in `unit`, the unit
 // recorded in the file being searched: its raw i64 bounds were written in that
-// unit even if the region's time index has since been widened.
+// unit even if the region's time index has since been widened. The searcher
+// handles empty ranges itself, so `time_range`, if present, is non-empty.
 fn time_range_exprs(unit: TimeUnit, time_range: Option<&TimestampRange>) -> Vec<Expr> {
     let Some(time_range) = time_range else {
         return Vec::new();
     };
-    if time_range.is_empty() {
-        return Vec::new();
-    }
     let mut exprs = Vec::with_capacity(2);
     // A series overlaps [start, end) only if its maximum is at least start.
     // Round start up so a series ending before an unaligned start is pruned.
@@ -247,10 +254,7 @@ fn validate_index_schema(schema: &SchemaRef) -> Result<TimeUnit> {
     Ok(min_unit)
 }
 
-fn column<'a>(
-    batch: &'a datatypes::arrow::record_batch::RecordBatch,
-    name: &str,
-) -> Result<&'a ArrayRef> {
+fn column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ArrayRef> {
     let index = batch
         .schema()
         .index_of(name)
@@ -419,11 +423,13 @@ mod tests {
         let searcher = SeriesIndexSearcher::try_new(
             metadata.clone(),
             object_store.clone(),
+            path,
             Some(&predicate),
             Some(time_range),
         )
+        .await
         .unwrap();
-        let ids = collect_ids(searcher.search(path).await.unwrap()).await;
+        let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
             vec![MetricSeriesId {
@@ -442,11 +448,13 @@ mod tests {
         let searcher = SeriesIndexSearcher::try_new(
             metadata.clone(),
             object_store.clone(),
+            path,
             None,
             Some(time_range),
         )
+        .await
         .unwrap();
-        let ids = collect_ids(searcher.search(path).await.unwrap()).await;
+        let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
             vec![MetricSeriesId {
@@ -463,8 +471,10 @@ mod tests {
         )
         .unwrap();
         let searcher =
-            SeriesIndexSearcher::try_new(metadata, object_store, None, Some(time_range)).unwrap();
-        let ids = collect_ids(searcher.search(path).await.unwrap()).await;
+            SeriesIndexSearcher::try_new(metadata, object_store, path, None, Some(time_range))
+                .await
+                .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
             vec![MetricSeriesId {
@@ -507,10 +517,16 @@ mod tests {
 
         let predicate =
             Predicate::new(vec![col("tag_0").eq(lit("a")), col("tag_2").eq(lit("new"))]);
-        let searcher =
-            SeriesIndexSearcher::try_new(current_metadata, object_store, Some(&predicate), None)
-                .unwrap();
-        let ids = collect_ids(searcher.search(path).await.unwrap()).await;
+        let searcher = SeriesIndexSearcher::try_new(
+            current_metadata,
+            object_store,
+            path,
+            Some(&predicate),
+            None,
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
             vec![
@@ -565,10 +581,16 @@ mod tests {
             common_time::Timestamp::new_microsecond(25_000),
         )
         .unwrap();
-        let searcher =
-            SeriesIndexSearcher::try_new(widened, object_store.clone(), None, Some(time_range))
-                .unwrap();
-        let ids = collect_ids(searcher.search(path).await.unwrap()).await;
+        let searcher = SeriesIndexSearcher::try_new(
+            widened,
+            object_store.clone(),
+            path,
+            None,
+            Some(time_range),
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
             vec![MetricSeriesId {
@@ -585,8 +607,10 @@ mod tests {
         )
         .unwrap();
         let searcher =
-            SeriesIndexSearcher::try_new(metadata, object_store, None, Some(time_range)).unwrap();
-        let ids = collect_ids(searcher.search(path).await.unwrap()).await;
+            SeriesIndexSearcher::try_new(metadata, object_store, path, None, Some(time_range))
+                .await
+                .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
             vec![MetricSeriesId {
@@ -632,8 +656,8 @@ mod tests {
         )
         .await;
 
-        // One searcher over the widened region must interpret each file in
-        // the unit it was written with. For [10.5ms, 25ms):
+        // Each file is searched by its own searcher, which interprets it in
+        // the unit recorded in its schema. For [10.5ms, 25ms):
         // - the millisecond file (ceil: [11ms, 25ms)) keeps only the 20ms
         //   series; reading it in microseconds would match nothing;
         // - the microsecond file keeps only the 15_000µs series; reading it
@@ -643,9 +667,16 @@ mod tests {
             common_time::Timestamp::new_microsecond(25_000),
         )
         .unwrap();
-        let searcher =
-            SeriesIndexSearcher::try_new(widened, object_store, None, Some(time_range)).unwrap();
-        let ids = collect_ids(searcher.search("old_ms.parquet").await.unwrap()).await;
+        let searcher = SeriesIndexSearcher::try_new(
+            widened.clone(),
+            object_store.clone(),
+            "old_ms.parquet",
+            None,
+            Some(time_range),
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
             vec![MetricSeriesId {
@@ -653,7 +684,16 @@ mod tests {
                 tsid: 20
             }]
         );
-        let ids = collect_ids(searcher.search("new_us.parquet").await.unwrap()).await;
+        let searcher = SeriesIndexSearcher::try_new(
+            widened,
+            object_store,
+            "new_us.parquet",
+            None,
+            Some(time_range),
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
             vec![MetricSeriesId {
@@ -729,10 +769,12 @@ mod tests {
         )
         .await;
 
-        let searcher = SeriesIndexSearcher::try_new(metadata, object_store, None, None).unwrap();
+        let searcher =
+            SeriesIndexSearcher::try_new(metadata, object_store, "batching.parquet", None, None)
+                .await
+                .unwrap();
         let batches = searcher
-            .search("batching.parquet")
-            .await
+            .search()
             .unwrap()
             .try_collect::<Vec<_>>()
             .await
@@ -777,18 +819,15 @@ mod tests {
         )
         .await;
 
-        let predicate = Predicate::new(vec![col("tag_0").eq(lit("m"))]);
-        let searcher = SeriesIndexSearcher::try_new(
-            metadata.clone(),
-            object_store.clone(),
-            Some(&predicate),
-            None,
-        )
-        .unwrap();
         let reader = ParquetIndexReader::open(object_store.clone(), path)
             .await
             .unwrap();
-        let (pruning_predicate, _) = filters_for_schema(reader.schema(), &searcher.filters);
+        let unit = validate_index_schema(reader.schema()).unwrap();
+
+        // Tag predicates prune row groups through the tag-column statistics.
+        let predicate = Predicate::new(vec![col("tag_0").eq(lit("m"))]);
+        let mut filters = simple_tag_filters(&metadata, None, Some(&predicate));
+        let (pruning_predicate, _) = filters_for_schema(reader.schema(), &filters);
         assert_eq!(reader.row_groups_to_read(&pruning_predicate), vec![1]);
 
         // Time-range predicates prune row groups in the file's own unit:
@@ -798,40 +837,30 @@ mod tests {
             common_time::Timestamp::new_millisecond(4),
         )
         .unwrap();
-        let unit = validate_index_schema(reader.schema()).unwrap();
-        let filters = searcher
-            .filters
-            .clone()
-            .into_iter()
-            .chain(
-                time_range_exprs(unit, Some(&time_range))
-                    .into_iter()
-                    .map(|expr| {
-                        (
-                            expr.clone(),
-                            SimpleFilterEvaluator::try_new(&expr)
-                                .context(UnexpectedSnafu {
-                                    reason: "failed to build an internal series-index time filter",
-                                })
-                                .unwrap(),
-                        )
-                    }),
-            )
-            .collect::<Vec<_>>();
+        for expr in time_range_exprs(unit, Some(&time_range)) {
+            let filter = SimpleFilterEvaluator::try_new(&expr)
+                .context(UnexpectedSnafu {
+                    reason: "failed to build an internal series-index time filter",
+                })
+                .unwrap();
+            filters.push((expr, filter));
+        }
         let (pruning_predicate, _) = filters_for_schema(reader.schema(), &filters);
         assert_eq!(reader.row_groups_to_read(&pruning_predicate), vec![1]);
 
+        // An empty time range yields no series without opening the file.
         let empty = SeriesIndexSearcher::try_new(
             metadata,
             object_store,
+            "does-not-need-to-exist.parquet",
             None,
             Some(TimestampRange::empty()),
         )
+        .await
         .unwrap();
         assert!(
             empty
-                .search("does-not-need-to-exist.parquet")
-                .await
+                .search()
                 .unwrap()
                 .try_collect::<Vec<_>>()
                 .await

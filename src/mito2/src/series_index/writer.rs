@@ -16,11 +16,11 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common_time::timestamp::{TimeUnit, Timestamp};
+use common_time::timestamp::TimeUnit;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, DictionaryArray, StringArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
-    UInt64Array,
+    Array, ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -100,8 +100,8 @@ impl SeriesIndexWriterMetrics {
 
 #[derive(Debug)]
 struct SeriesIndexRow {
-    min_ts: Timestamp,
-    max_ts: Timestamp,
+    min_ts: i64,
+    max_ts: i64,
     row_count: u64,
     table_id: u32,
     tsid: u64,
@@ -258,7 +258,8 @@ impl SeriesIndexWriter {
                     reason: "series index input contains null primary keys",
                 }
             );
-            self.write_binary_primary_keys(array, &timestamps).await
+            self.write_binary_primary_keys(array, timestamps.values())
+                .await
         } else if let Some(array) = primary_keys
             .as_any()
             .downcast_ref::<DictionaryArray<UInt32Type>>()
@@ -269,7 +270,8 @@ impl SeriesIndexWriter {
                     reason: "series index input contains null primary keys",
                 }
             );
-            self.write_dictionary_primary_keys(array, &timestamps).await
+            self.write_dictionary_primary_keys(array, timestamps.values())
+                .await
         } else {
             InvalidRecordBatchSnafu {
                 reason: format!(
@@ -284,7 +286,7 @@ impl SeriesIndexWriter {
     async fn write_binary_primary_keys(
         &mut self,
         primary_keys: &BinaryArray,
-        timestamps: &[Timestamp],
+        timestamps: &[i64],
     ) -> Result<()> {
         let mut start = 0;
         while start < primary_keys.len() {
@@ -309,7 +311,7 @@ impl SeriesIndexWriter {
     async fn write_dictionary_primary_keys(
         &mut self,
         primary_keys: &DictionaryArray<UInt32Type>,
-        timestamps: &[Timestamp],
+        timestamps: &[i64],
     ) -> Result<()> {
         let values = primary_keys
             .values()
@@ -342,8 +344,8 @@ impl SeriesIndexWriter {
     async fn update_primary_key(
         &mut self,
         primary_key: &[u8],
-        min_ts: Timestamp,
-        max_ts: Timestamp,
+        min_ts: i64,
+        max_ts: i64,
         row_count: u64,
     ) -> Result<()> {
         if let Some(current) = self.current_primary_key.as_deref() {
@@ -543,12 +545,12 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
     column_id == ReservedColumnId::table_id() || column_id == ReservedColumnId::tsid()
 }
 
-/// Extracts the time index column as timestamps in the writer's `unit`.
+/// Extracts the time index column's raw values in the writer's `unit`.
 /// A timestamp array carrying a different unit is an invariant violation:
 /// the alter path flushes memtables before widening the region's time index
 /// unit, so a writer never receives batches in the region's previous unit.
 /// Reject the mismatch rather than reinterpreting or rescaling the values.
-fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Timestamp>> {
+fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Int64Array> {
     ensure!(
         array.null_count() == 0,
         InvalidRecordBatchSnafu {
@@ -571,19 +573,15 @@ fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Timestamp>> 
             ),
         }
     );
-    Ok(values
-        .values()
-        .iter()
-        .map(|value| Timestamp::new(*value, unit))
-        .collect())
+    Ok(values)
 }
 
 // TODO(yingwen): Bench and optimize the performance if this is costly.
 fn decode_primary_key(
     codec: &dyn PrimaryKeyCodec,
     primary_key: &[u8],
-    min_ts: Timestamp,
-    max_ts: Timestamp,
+    min_ts: i64,
+    max_ts: i64,
     row_count: u64,
     tag_columns: &[(ColumnId, String)],
 ) -> Result<SeriesIndexRow> {
@@ -634,29 +632,27 @@ fn decode_primary_key(
     })
 }
 
-/// Builds a batch in the index `schema` from aggregated rows. The rows'
-/// timestamps already carry `unit` (guaranteed by `timestamp_values`), which
+/// Builds a timestamp array in `unit` from raw i64 values.
+fn ts_array(timestamps: impl Iterator<Item = i64>, unit: TimeUnit) -> ArrayRef {
+    match unit {
+        TimeUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(timestamps)),
+        TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from_iter_values(timestamps)),
+        TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from_iter_values(timestamps)),
+        TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from_iter_values(timestamps)),
+    }
+}
+
+/// Builds a batch in the index `schema` from aggregated rows. The rows carry
+/// raw timestamps in `unit` (guaranteed by `timestamp_values`), which
 /// `series_index_schema` stamps into the min/max ts columns.
 fn rows_to_batch(
     schema: &SchemaRef,
     rows: &[SeriesIndexRow],
     unit: TimeUnit,
 ) -> Result<RecordBatch> {
-    let ts_array = |timestamps: Vec<Timestamp>| -> ArrayRef {
-        let values = timestamps
-            .into_iter()
-            .map(|ts| ts.value())
-            .collect::<Vec<_>>();
-        match unit {
-            TimeUnit::Second => Arc::new(TimestampSecondArray::from(values)),
-            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(values)),
-            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(values)),
-            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(values)),
-        }
-    };
     let mut arrays: Vec<ArrayRef> = vec![
-        ts_array(rows.iter().map(|row| row.min_ts).collect()),
-        ts_array(rows.iter().map(|row| row.max_ts).collect()),
+        ts_array(rows.iter().map(|row| row.min_ts), unit),
+        ts_array(rows.iter().map(|row| row.max_ts), unit),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|row| row.row_count),
         )),
@@ -679,7 +675,7 @@ fn rows_to_batch(
 mod tests {
     use api::v1::SemanticType;
     use bytes::Bytes;
-    use common_time::timestamp::{TimeUnit, Timestamp};
+    use common_time::timestamp::TimeUnit;
     use datatypes::arrow::array::{
         BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
     };
@@ -837,7 +833,7 @@ mod tests {
         let array: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1, 2]));
         assert_eq!(
             timestamp_values(&array, TimeUnit::Millisecond).unwrap(),
-            vec![Timestamp::new_millisecond(1), Timestamp::new_millisecond(2)]
+            Int64Array::from(vec![1, 2])
         );
         // A timestamp array carrying a different unit is rejected instead of
         // being silently reinterpreted or rescaled.
