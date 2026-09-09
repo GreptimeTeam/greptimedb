@@ -106,13 +106,13 @@ pub fn normalize_twcs_trigger_options(
     let Some(canonical_value) = options.get(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM).cloned() else {
         return Ok(());
     };
-    if let Some(legacy_value) = options.get(TWCS_TRIGGER_FILE_NUM) {
-        if legacy_value != &canonical_value {
-            return Err(TwcsTriggerOptionConflict {
-                legacy_value: legacy_value.clone(),
-                canonical_value,
-            });
-        }
+    if let Some(legacy_value) = options.get(TWCS_TRIGGER_FILE_NUM)
+        && legacy_value != &canonical_value
+    {
+        return Err(TwcsTriggerOptionConflict {
+            legacy_value: legacy_value.clone(),
+            canonical_value,
+        });
     }
 
     options.remove(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
