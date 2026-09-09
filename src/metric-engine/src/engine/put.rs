@@ -143,21 +143,74 @@ impl MetricEngineInner {
         let primary_key_encoding = self.get_primary_key_encoding(data_region_id)?;
 
         // Validate all requests
-        self.validate_batch_requests(physical_region_id, &mut requests)
+        let partition_expr_version = self
+            .validate_batch_requests(physical_region_id, &mut requests)
             .await?;
 
-        // Merge requests according to encoding strategy
-        let (merged_request, total_affected_rows) = match primary_key_encoding {
-            PrimaryKeyEncoding::Sparse => self.merge_sparse_batch(physical_region_id, requests)?,
-            PrimaryKeyEncoding::Dense => self.merge_dense_batch(data_region_id, requests)?,
-        };
+        // Keep the common uniform-policy path allocation-free beyond the merge.
+        if requests
+            .iter()
+            .all(|(_, request)| request.skip_wal == requests[0].1.skip_wal)
+        {
+            let (request, affected_rows) = self.merge_batch(
+                physical_region_id,
+                primary_key_encoding,
+                requests,
+                partition_expr_version,
+            )?;
+            self.data_region
+                .write_data(data_region_id, RegionRequest::Put(request))
+                .await?;
+            return Ok(affected_rows);
+        }
 
-        // Write once to the physical region
-        self.data_region
-            .write_data(data_region_id, RegionRequest::Put(merged_request))
-            .await?;
+        // Only merge consecutive requests with the same WAL policy, preserving
+        // write order even when the same logical region occurs more than once.
+        // Prepare every batch before writing so a merge error cannot partially
+        // apply this physical-region group.
+        let batches = Self::split_batch_by_wal_policy(requests);
+        let mut merged_requests = Vec::with_capacity(batches.len());
+        let mut total_affected_rows = 0;
+        for requests in batches {
+            let (request, affected_rows) = self.merge_batch(
+                physical_region_id,
+                primary_key_encoding,
+                requests,
+                partition_expr_version,
+            )?;
+            merged_requests.push(request);
+            total_affected_rows += affected_rows;
+        }
+
+        for request in merged_requests {
+            self.data_region
+                .write_data(data_region_id, RegionRequest::Put(request))
+                .await?;
+        }
 
         Ok(total_affected_rows)
+    }
+
+    fn split_batch_by_wal_policy(
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<Vec<(RegionId, RegionPutRequest)>> {
+        let run_count = requests
+            .chunk_by(|a, b| a.1.skip_wal == b.1.skip_wal)
+            .count();
+        let mut batches = Vec::with_capacity(run_count);
+        let mut requests = requests.into_iter();
+        while let Some(first) = requests.next() {
+            let remaining_run_len = requests
+                .as_slice()
+                .iter()
+                .take_while(|(_, request)| request.skip_wal == first.1.skip_wal)
+                .count();
+            let mut batch = Vec::with_capacity(remaining_run_len + 1);
+            batch.push(first);
+            batch.extend(requests.by_ref().take(remaining_run_len));
+            batches.push(batch);
+        }
+        batches
     }
 
     /// Get primary key encoding for a data region.
@@ -170,12 +223,27 @@ impl MetricEngineInner {
             })
     }
 
-    /// Validates all requests in a batch.
+    /// Validates all requests and returns the physical batch's explicit partition version.
     async fn validate_batch_requests(
         &self,
         physical_region_id: RegionId,
         requests: &mut [(RegionId, RegionPutRequest)],
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
+        // Preserve the original physical-batch version boundary before splitting
+        // by WAL policy. A conflict must fail before any data batch is written.
+        let mut merged_version = None;
+        for (_, request) in requests.iter() {
+            if let Some(version) = request.partition_expr_version {
+                ensure!(
+                    merged_version.is_none_or(|merged| merged == version),
+                    InvalidRequestSnafu {
+                        region_id: physical_region_id,
+                        reason: "inconsistent partition expr version in batch"
+                    }
+                );
+                merged_version = Some(version);
+            }
+        }
         for (logical_region_id, request) in requests {
             self.verify_rows(
                 *logical_region_id,
@@ -185,7 +253,51 @@ impl MetricEngineInner {
             )
             .await?;
         }
-        Ok(())
+        Ok(merged_version)
+    }
+
+    /// Merges one WAL-policy run and attaches the physical batch's write options.
+    fn merge_batch(
+        &self,
+        physical_region_id: RegionId,
+        encoding: PrimaryKeyEncoding,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+        partition_expr_version: Option<u64>,
+    ) -> Result<(RegionPutRequest, AffectedRows)> {
+        let skip_wal = requests
+            .first()
+            .is_some_and(|(_, request)| request.skip_wal);
+        ensure!(
+            requests
+                .iter()
+                .all(|(_, request)| request.skip_wal == skip_wal),
+            InvalidRequestSnafu {
+                region_id: physical_region_id,
+                reason: "inconsistent WAL policy in batch"
+            }
+        );
+        let (rows, hint) = match encoding {
+            PrimaryKeyEncoding::Sparse => (
+                self.merge_sparse_batch(physical_region_id, requests)?,
+                Some(WriteHint {
+                    primary_key_encoding: PrimaryKeyEncodingProto::Sparse.into(),
+                }),
+            ),
+            PrimaryKeyEncoding::Dense => (
+                self.merge_dense_batch(to_data_region_id(physical_region_id), requests)?,
+                None,
+            ),
+        };
+        let affected_rows = rows.rows.len() as AffectedRows;
+        Ok((
+            RegionPutRequest {
+                rows,
+                hint,
+                skip_wal,
+                partition_expr_version,
+            },
+            affected_rows,
+        ))
     }
 
     /// Merges multiple requests using sparse primary key encoding.
@@ -193,26 +305,11 @@ impl MetricEngineInner {
         &self,
         physical_region_id: RegionId,
         requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Result<(RegionPutRequest, AffectedRows)> {
+    ) -> Result<Rows> {
         let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
         let mut modified_requests = Vec::with_capacity(requests.len());
-        let mut total_affected_rows: AffectedRows = 0;
-        let mut merged_version: Option<u64> = None;
 
         for (logical_region_id, mut request) in requests {
-            if let Some(request_version) = request.partition_expr_version {
-                if let Some(merged_version) = merged_version {
-                    ensure!(
-                        merged_version == request_version,
-                        InvalidRequestSnafu {
-                            region_id: physical_region_id,
-                            reason: "inconsistent partition expr version in batch"
-                        }
-                    );
-                } else {
-                    merged_version = Some(request_version);
-                }
-            }
             self.modify_rows(
                 physical_region_id,
                 logical_region_id.table_id(),
@@ -220,8 +317,6 @@ impl MetricEngineInner {
                 PrimaryKeyEncoding::Sparse,
             )?;
 
-            let row_count = request.rows.rows.len();
-            total_affected_rows += row_count as AffectedRows;
             modified_requests.push(request.rows);
         }
 
@@ -232,19 +327,10 @@ impl MetricEngineInner {
             merged_rows.extend(Self::align_rows_to_schema(rows, &schema));
         }
 
-        let merged_request = RegionPutRequest {
-            skip_wal: false,
-            rows: Rows {
-                schema,
-                rows: merged_rows,
-            },
-            hint: Some(WriteHint {
-                primary_key_encoding: PrimaryKeyEncodingProto::Sparse.into(),
-            }),
-            partition_expr_version: merged_version,
-        };
-
-        Ok((merged_request, total_affected_rows))
+        Ok(Rows {
+            schema,
+            rows: merged_rows,
+        })
     }
 
     /// Merges multiple requests using dense primary key encoding.
@@ -256,14 +342,13 @@ impl MetricEngineInner {
         &self,
         data_region_id: RegionId,
         requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Result<(RegionPutRequest, AffectedRows)> {
+    ) -> Result<Rows> {
         // Build union schema from all requests
         let merged_schema =
             Self::build_union_schema(requests.iter().map(|(_, req)| req.rows.schema.as_slice()));
 
         // Align all rows to the merged schema and collect table_ids
-        let (merged_rows, table_ids, merged_version) =
-            Self::align_requests_to_schema(requests, &merged_schema)?;
+        let (merged_rows, table_ids) = Self::align_requests_to_schema(requests, &merged_schema);
 
         // Batch-modify all rows (add __table_id and __tsid columns)
         let final_rows = {
@@ -291,14 +376,7 @@ impl MetricEngineInner {
             )?
         };
 
-        let merged_request = RegionPutRequest {
-            skip_wal: false,
-            rows: final_rows,
-            hint: None,
-            partition_expr_version: merged_version,
-        };
-
-        Ok((merged_request, table_ids.len() as AffectedRows))
+        Ok(final_rows)
     }
 
     fn build_union_schema<'a>(
@@ -321,34 +399,20 @@ impl MetricEngineInner {
     fn align_requests_to_schema(
         requests: Vec<(RegionId, RegionPutRequest)>,
         merged_schema: &[ColumnSchema],
-    ) -> Result<(Vec<Row>, Vec<TableId>, Option<u64>)> {
+    ) -> (Vec<Row>, Vec<TableId>) {
         // Pre-calculate total capacity
         let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
         let mut merged_rows = Vec::with_capacity(total_rows);
         let mut table_ids = Vec::with_capacity(total_rows);
-        let mut merged_version: Option<u64> = None;
 
         for (logical_region_id, request) in requests {
-            if let Some(request_version) = request.partition_expr_version {
-                if let Some(merged_version) = merged_version {
-                    ensure!(
-                        merged_version == request_version,
-                        InvalidRequestSnafu {
-                            region_id: logical_region_id,
-                            reason: "inconsistent partition expr version in batch"
-                        }
-                    );
-                } else {
-                    merged_version = Some(request_version);
-                }
-            }
             let table_id = logical_region_id.table_id();
             let row_count = request.rows.rows.len();
             merged_rows.extend(Self::align_rows_to_schema(request.rows, merged_schema));
             table_ids.extend(std::iter::repeat_n(table_id, row_count));
         }
 
-        Ok((merged_rows, table_ids, merged_version))
+        (merged_rows, table_ids)
     }
 
     fn align_rows_to_schema(rows: Rows, merged_schema: &[ColumnSchema]) -> Vec<Row> {
@@ -771,24 +835,313 @@ mod tests {
     use common_function::utils::partition_expr_version;
     use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use common_recordbatch::RecordBatches;
+    use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value as PartitionValue;
     use partition::expr::col;
     use store_api::metadata::ColumnMetadata;
     use store_api::metric_engine_consts::{
-        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, PRIMARY_KEY_ENCODING,
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_ENGINE_NAME,
+        PHYSICAL_TABLE_METADATA_KEY, PRIMARY_KEY_ENCODING,
     };
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
-        EnterStagingRequest, RegionRequest, StagingPartitionDirective,
+        EnterStagingRequest, PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+        StagingPartitionDirective,
     };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
     use super::*;
+    use crate::engine::MetricEngine;
     use crate::test_util::{self, TestEnv};
+
+    async fn scan_timestamp_values(engine: &MetricEngine, region_id: RegionId) -> Vec<(i64, f64)> {
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let batch = batch.df_record_batch();
+            let timestamp_index = batch.schema().index_of(greptime_timestamp()).unwrap();
+            let value_index = batch.schema().index_of(greptime_value()).unwrap();
+            let timestamps = batch
+                .column(timestamp_index)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let values = batch
+                .column(value_index)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            rows.extend(
+                timestamps
+                    .values()
+                    .iter()
+                    .copied()
+                    .zip(values.values().iter().copied()),
+            );
+        }
+        rows.sort_unstable_by_key(|(timestamp, _)| *timestamp);
+        rows
+    }
+
+    #[tokio::test]
+    async fn test_mixed_wal_batch_partition_versions() {
+        for encoding in ["sparse", "dense"] {
+            let env = TestEnv::new().await;
+            let physical_region_id = env.default_physical_region_id();
+            let logical_region_id = env.default_logical_region_id();
+            env.create_physical_region(
+                physical_region_id,
+                &TestEnv::default_table_dir(),
+                vec![(PRIMARY_KEY_ENCODING.to_string(), encoding.to_string())],
+            )
+            .await;
+            create_logical_region_with_tags(&env, physical_region_id, logical_region_id, &["job"])
+                .await;
+            let build_requests = |versions: [Option<u64>; 3]| {
+                versions
+                    .into_iter()
+                    .zip([false, true, false])
+                    .map(|(partition_expr_version, skip_wal)| {
+                        (
+                            logical_region_id,
+                            RegionPutRequest {
+                                skip_wal,
+                                rows: Rows {
+                                    schema: test_util::row_schema_with_tags(&["job"]),
+                                    rows: test_util::build_rows(1, 1),
+                                },
+                                hint: None,
+                                partition_expr_version,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            // The first run has no version and could otherwise be written
+            // before a later run reveals the conflicting explicit versions.
+            let err = env
+                .metric()
+                .inner
+                .put_regions_batch_single_physical(
+                    physical_region_id,
+                    build_requests([None, Some(10), Some(11)]),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("inconsistent partition expr version")
+            );
+            assert!(
+                scan_timestamp_values(&env.metric(), logical_region_id)
+                    .await
+                    .is_empty()
+            );
+
+            for (versions, expected) in [
+                ([None, None, None], None),
+                ([None, Some(7), None], Some(7)),
+                ([Some(7), None, Some(7)], Some(7)),
+            ] {
+                let mut requests = build_requests(versions);
+                let actual = env
+                    .metric()
+                    .inner
+                    .validate_batch_requests(physical_region_id, &mut requests)
+                    .await
+                    .unwrap();
+                assert_eq!(actual, expected);
+                for ((_, request), original_version) in requests.iter().zip(versions) {
+                    assert_eq!(request.partition_expr_version, original_version);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_put_skip_wal_mixed_batch_recovery() {
+        for encoding in ["sparse", "dense"] {
+            // Paired runs differ only in the middle request's WAL policy.
+            for middle_skip_wal in [false, true] {
+                let env = TestEnv::new().await;
+                let engine = env.metric();
+                engine.inner.flush_task.stop().await.unwrap();
+                let physical_region_id = env.default_physical_region_id();
+                let logical_region_id = env.default_logical_region_id();
+                env.create_physical_region(
+                    physical_region_id,
+                    &TestEnv::default_table_dir(),
+                    vec![(PRIMARY_KEY_ENCODING.to_string(), encoding.to_string())],
+                )
+                .await;
+                create_logical_region_with_tags(
+                    &env,
+                    physical_region_id,
+                    logical_region_id,
+                    &["job"],
+                )
+                .await;
+                let metadata_before = engine.get_metadata(logical_region_id).await.unwrap();
+
+                let requests = [false, middle_skip_wal, false].into_iter().enumerate().map(
+                    |(index, skip_wal)| {
+                        let timestamp = index as i64 + 1;
+                        let value = timestamp as f64 * 10.0;
+                        // Every request updates the same key at timestamp zero and
+                        // also inserts a distinct key, exposing both reordering and
+                        // accidental WAL-policy propagation to neighboring requests.
+                        let rows = [0, timestamp]
+                            .into_iter()
+                            .map(|timestamp| Row {
+                                values: vec![
+                                    Value {
+                                        value_data: Some(ValueData::TimestampMillisecondValue(
+                                            timestamp,
+                                        )),
+                                    },
+                                    Value {
+                                        value_data: Some(ValueData::F64Value(value)),
+                                    },
+                                    Value {
+                                        value_data: Some(ValueData::StringValue(
+                                            "tag_0".to_string(),
+                                        )),
+                                    },
+                                ],
+                            })
+                            .collect();
+                        (
+                            logical_region_id,
+                            RegionPutRequest {
+                                rows: Rows {
+                                    schema: test_util::row_schema_with_tags(&["job"]),
+                                    rows,
+                                },
+                                hint: None,
+                                partition_expr_version: None,
+                                skip_wal,
+                            },
+                        )
+                    },
+                );
+                let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
+                assert_eq!(affected_rows, 6);
+                assert_eq!(
+                    scan_timestamp_values(&engine, logical_region_id).await,
+                    vec![(0, 30.0), (1, 10.0), (2, 20.0), (3, 30.0)]
+                );
+
+                // Neither data nor metadata has an SST to hide missing WAL.
+                for region_id in [
+                    to_data_region_id(physical_region_id),
+                    crate::utils::to_metadata_region_id(physical_region_id),
+                ] {
+                    let stat = env.mito().region_statistic(region_id).unwrap();
+                    assert!(stat.memtable_size > 0);
+                    assert_eq!(stat.sst_num, 0);
+                }
+                engine
+                    .handle_request(
+                        physical_region_id,
+                        RegionRequest::Close(RegionCloseRequest {
+                            flush_on_close: false,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+
+                // Recreate the wrapper as well, discarding its metadata cache.
+                let reopened = MetricEngine::try_new(env.mito(), Default::default()).unwrap();
+                reopened.inner.flush_task.stop().await.unwrap();
+                reopened
+                    .handle_request(
+                        physical_region_id,
+                        RegionRequest::Open(RegionOpenRequest {
+                            engine: METRIC_ENGINE_NAME.to_string(),
+                            table_dir: TestEnv::default_table_dir(),
+                            path_type: PathType::Bare,
+                            options: [
+                                (PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new()),
+                                (PRIMARY_KEY_ENCODING.to_string(), encoding.to_string()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            skip_wal_replay: false,
+                            checkpoint: None,
+                            requirements: Default::default(),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                let recovered_metadata = reopened.get_metadata(logical_region_id).await.unwrap();
+                assert_eq!(
+                    metadata_before.column_metadatas,
+                    recovered_metadata.column_metadatas
+                );
+                let expected = if middle_skip_wal {
+                    vec![(0, 30.0), (1, 10.0), (3, 30.0)]
+                } else {
+                    vec![(0, 30.0), (1, 10.0), (2, 20.0), (3, 30.0)]
+                };
+                assert_eq!(
+                    scan_timestamp_values(&reopened, logical_region_id).await,
+                    expected,
+                    "encoding={encoding}, middle_skip_wal={middle_skip_wal}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_split_batch_by_wal_policy_preserves_order() {
+        let region_id = RegionId::new(1024, 1);
+        let requests = [false, false, true, false, true, true]
+            .into_iter()
+            .enumerate()
+            .map(|(index, skip_wal)| {
+                (
+                    region_id,
+                    RegionPutRequest {
+                        rows: Rows::default(),
+                        hint: None,
+                        partition_expr_version: Some(index as u64),
+                        skip_wal,
+                    },
+                )
+            })
+            .collect();
+        let batches = MetricEngineInner::split_batch_by_wal_policy(requests);
+        let actual: Vec<_> = batches
+            .iter()
+            .map(|batch| {
+                (
+                    batch[0].1.skip_wal,
+                    batch
+                        .iter()
+                        .map(|(_, request)| request.partition_expr_version.unwrap())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                (false, vec![0, 1]),
+                (true, vec![2]),
+                (false, vec![3]),
+                (true, vec![4, 5])
+            ]
+        );
+        assert!(MetricEngineInner::split_batch_by_wal_policy(vec![]).is_empty());
+    }
 
     fn assert_merged_schema(rows: &Rows, expect_sparse: bool) {
         let column_names: HashSet<String> = rows
@@ -947,32 +1300,50 @@ mod tests {
             ]
         };
 
-        let merged_request = if expect_sparse {
-            let (merged_request, _) = env
-                .metric()
-                .inner
-                .merge_sparse_batch(physical_region_id, build_requests())
-                .unwrap();
-            let hint = merged_request
-                .hint
-                .as_ref()
-                .expect("missing sparse write hint");
+        let encoding = if expect_sparse {
+            PrimaryKeyEncoding::Sparse
+        } else {
+            PrimaryKeyEncoding::Dense
+        };
+        let (merged_request, _) = env
+            .metric()
+            .inner
+            .merge_batch(physical_region_id, encoding, build_requests(), None)
+            .unwrap();
+        if expect_sparse {
             assert_eq!(
-                hint.primary_key_encoding,
+                merged_request.hint.as_ref().unwrap().primary_key_encoding,
                 PrimaryKeyEncodingProto::Sparse as i32
             );
-            merged_request
         } else {
-            let (merged_request, _) = env
+            assert!(merged_request.hint.is_none());
+        }
+        assert_merged_schema(&merged_request.rows, expect_sparse);
+        assert!(!merged_request.skip_wal);
+
+        for skip_wal in [false, true] {
+            let mut requests = build_requests();
+            for (_, request) in &mut requests {
+                request.skip_wal = skip_wal;
+            }
+            let (merged, affected_rows) = env
                 .metric()
                 .inner
-                .merge_dense_batch(data_region_id, build_requests())
+                .merge_batch(physical_region_id, encoding, requests, Some(7))
                 .unwrap();
-            assert!(merged_request.hint.is_none());
-            merged_request
-        };
+            assert_eq!(merged.skip_wal, skip_wal);
+            assert_eq!(merged.partition_expr_version, Some(7));
+            assert_eq!(affected_rows, 5);
+        }
 
-        assert_merged_schema(&merged_request.rows, expect_sparse);
+        let mut mixed_requests = build_requests();
+        mixed_requests[1].1.skip_wal = true;
+        assert!(
+            env.metric()
+                .inner
+                .merge_batch(physical_region_id, encoding, mixed_requests, None)
+                .is_err()
+        );
 
         let affected_rows = env
             .metric()
