@@ -294,6 +294,8 @@ struct CounterResetIndex<'a> {
     positions: Vec<usize>,
     /// Slice of `positions` that [`Self::correction`] last reduced.
     active: Range<usize>,
+    /// Window that produced `active`, so the next one can tell whether it may advance in place.
+    previous: Range<usize>,
     correction: f64,
 }
 
@@ -305,15 +307,35 @@ impl<'a> CounterResetIndex<'a> {
                 .filter(|&i| values[i] < values[i - 1])
                 .collect(),
             active: 0..0,
+            previous: 0..0,
             correction: 0.0,
         }
     }
 
     /// Correction for the window `values[start..end]`, identical to
     /// [`counter_reset_correction`] on the same window.
+    #[inline]
     fn correction(&mut self, start: usize, end: usize) -> f64 {
-        let left = self.positions.partition_point(|&i| i <= start);
-        let right = self.positions.partition_point(|&i| i < end);
+        // Windows normally advance, so walk the bounds forward from the previous window and
+        // only search when they move back. Searching every window costs more than the whole
+        // reduction once a series has enough resets to make the search deep.
+        let (left, right) = if start < self.previous.start || end < self.previous.end {
+            (
+                self.positions.partition_point(|&i| i <= start),
+                self.positions.partition_point(|&i| i < end),
+            )
+        } else {
+            let mut left = self.active.start;
+            while left < self.positions.len() && self.positions[left] <= start {
+                left += 1;
+            }
+            let mut right = self.active.end.max(left);
+            while right < self.positions.len() && self.positions[right] < end {
+                right += 1;
+            }
+            (left, right)
+        };
+        self.previous = start..end;
         if self.active != (left..right) {
             // Re-reduce in sample order rather than adding and subtracting the resets that
             // entered and left the window: `a + b - a` does not restore `b` in f64, and an
