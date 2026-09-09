@@ -263,7 +263,7 @@ impl SeqScan {
         };
 
         let reader = match &stream_ctx.input.series_row_selector {
-            Some(TimeSeriesRowSelector::LastRow) => {
+            Some(TimeSeriesRowSelector::LastRow { .. }) => {
                 Box::pin(FlatLastRowReader::new(reader).into_stream()) as _
             }
             None => reader,

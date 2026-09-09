@@ -77,7 +77,12 @@ cycles series labels across rows. `series_layout = "timestamp_major"` writes all
 series for one timestamp before advancing to the next timestamp; use it for
 Prometheus-like high-cardinality scrape fixtures where short query windows should
 still contain many raw samples. `timestamp_major` requires `rows_per_sst` to be
-divisible by `series_count`.
+divisible by `series_count`. `per_sst` uses one series selected from the SST
+index. These describe logical generation order. Before either flat or primary-key
+SST format is written, each completed generated batch is physically sorted by
+encoded primary key ascending, timestamp ascending, and sequence descending, as
+required by the Mito Parquet writer; sorting preserves every generated column and
+row, including deterministic-wave values.
 
 `[scenario]` is required. Other scenario variants are intentionally unsupported
 for now, but `scenario.kind` leaves room for future `write_then_query` and

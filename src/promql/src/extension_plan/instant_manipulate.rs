@@ -231,6 +231,11 @@ impl InstantManipulate {
         "InstantManipulate"
     }
 
+    /// Returns whether this node evaluates a single timestamp rather than a range.
+    pub fn is_single_evaluation(&self) -> bool {
+        self.start == self.end
+    }
+
     fn staleness_field_columns(&self) -> impl Iterator<Item = &str> {
         let [field, companion] = mixed_sample_fields(self.field_column.as_deref());
         [

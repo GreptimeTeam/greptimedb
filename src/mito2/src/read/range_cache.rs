@@ -1441,7 +1441,27 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_and_clears_time_filters() {
+    fn selector_after_merge_changes_fingerprint() {
+        let ordinary = test_scan_fingerprint(
+            vec!["k0 = 'foo'".to_string()],
+            vec![],
+            Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+            true,
+            0,
+        );
+        let after_merge = test_scan_fingerprint(
+            vec!["k0 = 'foo'".to_string()],
+            vec![],
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+            true,
+            0,
+        );
+
+        assert_ne!(ordinary, after_merge);
+    }
+
+    #[test]
+    fn true_selector_after_merge_is_preserved_by_fingerprint_transforms() {
         let normalized =
             test_scan_fingerprint(vec!["k0 = 'foo'".to_string()], vec![], None, true, 0);
 
@@ -1450,18 +1470,32 @@ mod tests {
         let fingerprint = test_scan_fingerprint(
             vec!["k0 = 'foo'".to_string()],
             vec!["ts >= 1000".to_string()],
-            Some(TimeSeriesRowSelector::LastRow),
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             true,
             7,
         );
 
         let reset = fingerprint.without_time_filters();
+        let candidate = fingerprint.for_candidate_series();
+        let series_data = fingerprint.for_series_data(SeriesRange::new(0, 1).unwrap());
 
         assert_eq!(reset.read_columns(), fingerprint.read_columns());
         assert_eq!(reset.read_column_types(), fingerprint.read_column_types());
         assert_eq!(reset.filters(), fingerprint.filters());
         assert!(reset.time_filters().is_empty());
         assert_eq!(reset.series_row_selector, fingerprint.series_row_selector);
+        assert_eq!(
+            fingerprint.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
+        assert_eq!(
+            candidate.series_row_selector,
+            fingerprint.series_row_selector
+        );
+        assert_eq!(
+            series_data.series_row_selector,
+            fingerprint.series_row_selector
+        );
         assert_eq!(reset.append_mode, fingerprint.append_mode);
         assert_eq!(reset.filter_deleted, fingerprint.filter_deleted);
         assert_eq!(reset.merge_mode, fingerprint.merge_mode);

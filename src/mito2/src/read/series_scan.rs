@@ -180,7 +180,7 @@ impl SeriesScan {
     }
 
     fn supports_two_phase(input: &ScanInput) -> bool {
-        if !is_sparse_metric_metadata(input.region_metadata()) {
+        if input.sequence_range.is_some() || !is_sparse_metric_metadata(input.region_metadata()) {
             return false;
         }
         #[cfg(feature = "enterprise")]
@@ -1214,6 +1214,39 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
+    use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::scan_region::PredicateGroup;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
+
+    #[tokio::test]
+    async fn two_phase_eligibility_rejects_exact_sequence_range() {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            store_api::codec::PrimaryKeyEncoding::Sparse,
+        ));
+        let predicate = PredicateGroup::default();
+
+        let eligible = ScanInput::builder(
+            env.access_layer.clone(),
+            FlatProjectionMapper::new(&metadata, [0]).unwrap(),
+        )
+        .with_predicate(predicate.clone())
+        .build();
+        assert!(SeriesScan::supports_two_phase(&eligible));
+
+        let exact_sequence = ScanInput::builder(
+            env.access_layer.clone(),
+            FlatProjectionMapper::new(&metadata, [0]).unwrap(),
+        )
+        .with_predicate(predicate)
+        .with_sequence_range(Some(store_api::storage::SequenceRange::GtLtEq {
+            min: 1,
+            max: 2,
+        }))
+        .build();
+        assert!(!SeriesScan::supports_two_phase(&exact_sequence));
+    }
 
     #[test]
     fn candidate_distributor_stops_after_all_receivers_close() {

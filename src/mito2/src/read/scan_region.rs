@@ -2503,7 +2503,7 @@ mod tests {
         )
         .await
         .with_distribution(Some(TimeSeriesDistribution::PerSeries))
-        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
+        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow { after_merge: true }))
         .with_merge_mode(MergeMode::LastNonNull)
         .with_filter_deleted(false)
         .build();
@@ -2528,7 +2528,7 @@ mod tests {
                 col("v0").gt(lit(1)).to_string(),
             ],
             time_filters: vec![col("ts").gt_eq(ts_lit(1000)).to_string()],
-            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             append_mode: false,
             filter_deleted: false,
             merge_mode: MergeMode::LastNonNull,
@@ -2537,6 +2537,10 @@ mod tests {
         }
         .build();
         assert_eq!(&expected, fingerprint);
+        assert_eq!(
+            input.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
     }
 
     #[tokio::test]
