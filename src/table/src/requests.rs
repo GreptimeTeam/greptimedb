@@ -42,11 +42,11 @@ use store_api::mito_engine_options::{
     TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
     TWCS_FALLBACK_TO_LOCAL, TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
     TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
-    TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key,
+    TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key, normalize_twcs_trigger_options,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
-use crate::error::{ParseTableOptionSnafu, Result};
+use crate::error::{ConflictingTableOptionsSnafu, ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
 use crate::table_reference::TableReference;
 
@@ -199,10 +199,20 @@ impl TableOptions {
     ) -> Result<TableOptions> {
         let mut options = TableOptions::default();
 
-        let kvs: HashMap<String, String> = iter
+        let mut kvs: HashMap<String, String> = iter
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+
+        normalize_twcs_trigger_options(&mut kvs).map_err(|conflict| {
+            ConflictingTableOptionsSnafu {
+                first_key: TWCS_TRIGGER_FILE_NUM,
+                first_value: conflict.legacy_value,
+                second_key: TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+                second_value: conflict.canonical_value,
+            }
+            .build()
+        })?;
 
         if let Some(write_buffer_size) = kvs.get(WRITE_BUFFER_SIZE_KEY) {
             let size = ReadableSize::from_str(write_buffer_size).map_err(|_| {
@@ -732,6 +742,9 @@ pub struct CopyQueryToRequest {
 mod tests {
     use std::time::Duration;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+
     use super::*;
 
     #[test]
@@ -862,6 +875,37 @@ mod tests {
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
+    }
+
+    #[test]
+    fn test_table_options_normalizes_twcs_trigger_aliases() {
+        for options in [
+            vec![(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "4")],
+            vec![
+                (TWCS_TRIGGER_FILE_NUM, "4"),
+                (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "4"),
+            ],
+        ] {
+            let table_options = TableOptions::try_from_iter(options).unwrap();
+            assert_eq!(
+                HashMap::from([(TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string())]),
+                table_options.extra_options
+            );
+        }
+    }
+
+    #[test]
+    fn test_table_options_rejects_conflicting_twcs_trigger_aliases() {
+        let error = TableOptions::try_from_iter([
+            (TWCS_TRIGGER_FILE_NUM, "4"),
+            (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "8"),
+        ])
+        .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!(
+            "Conflicting table options: compaction.twcs.trigger_file_num=4 and compaction.twcs.active_window.trigger_file_num=8",
+            error.to_string()
+        );
     }
 
     #[test]

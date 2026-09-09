@@ -15,6 +15,8 @@
 //! Option keys for the mito engine.
 //! We define them in this mod so the create parser can use it to validate table options.
 
+use std::collections::HashMap;
+
 /// Option key for all WAL options.
 pub use common_wal::options::WAL_OPTIONS_KEY;
 /// Option key for append mode.
@@ -88,6 +90,36 @@ pub const MAX_ROW_GROUP_ROW_COUNT_LIMIT: usize = 10 * 1024 * 1024;
 pub const PRESERVE_ROW_SEQUENCE: &str = "preserve_row_sequence";
 // Note: Adding new options here should also check if this option should be removed in [metric_engine::engine::create::region_options_for_metadata_region].
 
+/// Conflicting values supplied through the legacy and canonical TWCS trigger options.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TwcsTriggerOptionConflict {
+    /// Value supplied under [`TWCS_TRIGGER_FILE_NUM`].
+    pub legacy_value: String,
+    /// Value supplied under [`TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM`].
+    pub canonical_value: String,
+}
+
+/// Normalizes the active-window TWCS trigger option to its legacy storage key.
+pub fn normalize_twcs_trigger_options(
+    options: &mut HashMap<String, String>,
+) -> Result<(), TwcsTriggerOptionConflict> {
+    let Some(canonical_value) = options.get(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM).cloned() else {
+        return Ok(());
+    };
+    if let Some(legacy_value) = options.get(TWCS_TRIGGER_FILE_NUM) {
+        if legacy_value != &canonical_value {
+            return Err(TwcsTriggerOptionConflict {
+                legacy_value: legacy_value.clone(),
+                canonical_value,
+            });
+        }
+    }
+
+    options.remove(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
+    options.insert(TWCS_TRIGGER_FILE_NUM.to_string(), canonical_value);
+    Ok(())
+}
+
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
@@ -129,6 +161,8 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -184,5 +218,45 @@ mod tests {
         assert!(is_mito_engine_option_key("max_row_group_row_count"));
         assert!(is_mito_engine_option_key("preserve_row_sequence"));
         assert!(!is_mito_engine_option_key("foo"));
+    }
+
+    #[test]
+    fn test_normalize_twcs_trigger_aliases_to_legacy_key() {
+        let expected = HashMap::from([(TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string())]);
+        for mut options in [
+            HashMap::from([(TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string())]),
+            HashMap::from([(
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "4".to_string(),
+            )]),
+            HashMap::from([
+                (TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string()),
+                (
+                    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                    "4".to_string(),
+                ),
+            ]),
+        ] {
+            normalize_twcs_trigger_options(&mut options).unwrap();
+            assert_eq!(expected, options);
+        }
+    }
+
+    #[test]
+    fn test_normalize_twcs_trigger_conflicting_aliases() {
+        let mut options = HashMap::from([
+            (TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string()),
+            (
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "8".to_string(),
+            ),
+        ]);
+        let original = options.clone();
+
+        let error = normalize_twcs_trigger_options(&mut options).unwrap_err();
+
+        assert_eq!("4", error.legacy_value);
+        assert_eq!("8", error.canonical_value);
+        assert_eq!(original, options);
     }
 }

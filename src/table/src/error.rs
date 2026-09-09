@@ -135,6 +135,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Conflicting table options: {}={} and {}={}",
+        first_key,
+        first_value,
+        second_key,
+        second_value
+    ))]
+    ConflictingTableOptions {
+        first_key: String,
+        first_value: String,
+        second_key: String,
+        second_value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid alter table({}) request: {}", table, err))]
     InvalidAlterRequest {
         table: String,
@@ -223,7 +239,9 @@ impl ErrorExt for Error {
             Error::InvalidColumnOption { .. } => StatusCode::InvalidArguments,
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::Unsupported { .. } => StatusCode::Unsupported,
-            Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
+            Error::ParseTableOption { .. } | Error::ConflictingTableOptions { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
             Error::SetSkippingOptions { .. }
             | Error::UnsetSkippingOptions { .. }

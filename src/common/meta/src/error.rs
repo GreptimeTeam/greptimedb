@@ -325,6 +325,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Conflicting schema options: {}={} and {}={}",
+        first_key,
+        first_value,
+        second_key,
+        second_value
+    ))]
+    ConflictingSchemaOptions {
+        first_key: String,
+        first_value: String,
+        second_key: String,
+        second_value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Corrupted table route data, err: {}", err_msg))]
     RouteInfoCorrupted {
         err_msg: String,
@@ -1235,7 +1251,8 @@ impl ErrorExt for Error {
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }
-            | InvalidFilePath { .. } => StatusCode::InvalidArguments,
+            | InvalidFilePath { .. }
+            | ConflictingSchemaOptions { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             MissingInterval { .. } | NegativeDuration { .. } | TooLargeDuration { .. } => {
