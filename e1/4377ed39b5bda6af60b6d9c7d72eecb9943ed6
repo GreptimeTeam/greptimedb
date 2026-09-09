@@ -1,0 +1,26 @@
+src/operator/src/statement.rs
+  s_ee5e15630afc9a::t_19fba272cb773d 66,537
+src/operator/src/statement/set.rs
+  s_ee5e15630afc9a::t_b0e62af6256a67 41-69,413-417,420-464
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "e14377ed39b5bda6af60b6d9c7d72eecb9943ed6",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_ee5e15630afc9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08741-8460-7082-b1e4-8cbcb2450830",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
