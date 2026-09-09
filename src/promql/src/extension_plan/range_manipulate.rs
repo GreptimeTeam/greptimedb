@@ -46,8 +46,8 @@ use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, nanoseconds_per_native_tick, native_timestamp_values,
-    resolve_column_name, serialize_column_index, timestamp_unit,
+    METRIC_NUM_SERIES, Millisecond, local_offset, nanoseconds_per_native_tick,
+    native_timestamp_values, resolve_column_name, serialize_column_index, timestamp_unit,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
@@ -190,6 +190,7 @@ impl RangeManipulate {
             properties.boundedness,
         ));
         Arc::new(RangeManipulateExec {
+            offset: local_offset(&self.input, &self.time_index),
             start: self.start,
             end: self.end,
             interval: self.interval,
@@ -423,6 +424,7 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
 
 #[derive(Debug)]
 pub struct RangeManipulateExec {
+    offset: Millisecond,
     start: Millisecond,
     end: Millisecond,
     interval: Millisecond,
@@ -483,6 +485,7 @@ impl ExecutionPlan for RangeManipulateExec {
             properties.boundedness,
         ));
         Ok(Arc::new(Self {
+            offset: self.offset,
             start: self.start,
             end: self.end,
             interval: self.interval,
@@ -532,6 +535,7 @@ impl ExecutionPlan for RangeManipulateExec {
         let aligned_ts_array =
             RangeManipulateStream::build_aligned_ts_array(self.start, self.end, self.interval);
         Ok(Box::pin(RangeManipulateStream {
+            offset: self.offset,
             start: self.start,
             end: self.end,
             interval: self.interval,
@@ -594,6 +598,7 @@ impl DisplayAs for RangeManipulateExec {
 }
 
 pub struct RangeManipulateStream {
+    offset: Millisecond,
     start: Millisecond,
     end: Millisecond,
     interval: Millisecond,
@@ -671,12 +676,29 @@ impl RangeManipulateStream {
             new_columns[*index] = new_column;
         }
 
-        // push timestamp range column
-        let timestamp_values = compute::cast(
-            input.column(self.time_index),
-            &DataType::Timestamp(TimeUnit::Millisecond, None),
-        )?;
-        let ts_range_column = RangeArray::from_ranges(timestamp_values, ranges.clone())
+        // The timestamp range payload is always millisecond ABI. Shift in wide
+        // native precision before truncating toward zero, preserving null validity.
+        let scale = nanoseconds_per_native_tick(self.time_unit);
+        let timestamps = native_timestamp_values(input.column(self.time_index).as_ref())?;
+        let timestamp_values = timestamps
+            .iter()
+            .enumerate()
+            .map(|(index, timestamp)| {
+                if !input.column(self.time_index).is_valid(index) {
+                    return Ok(None);
+                }
+                let shifted_ns = (*timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
+                i64::try_from(shifted_ns / 1_000_000)
+                    .map(Some)
+                    .map_err(|_| {
+                        ArrowError::ComputeError(
+                            "RangeManipulate timestamp payload overflow".into(),
+                        )
+                    })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let timestamp_values = TimestampMillisecondArray::from(timestamp_values);
+        let ts_range_column = RangeArray::from_ranges(Arc::new(timestamp_values), ranges.clone())
             .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
             .into_dict();
         new_columns.push(Arc::new(ts_range_column));
@@ -716,7 +738,8 @@ impl RangeManipulateStream {
         let ts_column = input.column(self.time_index);
         let scale = nanoseconds_per_native_tick(self.time_unit);
         let timestamps = native_timestamp_values(ts_column.as_ref())?;
-        let timestamp = |index| (timestamps[index] as i128) * scale;
+        let timestamp =
+            |index| (timestamps[index] as i128) * scale + (self.offset as i128) * 1_000_000;
         let len = timestamps.len();
         if len == 0 {
             return Ok((vec![], (self.start, self.end)));
@@ -785,13 +808,16 @@ mod test {
         ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMicrosecondArray,
         TimestampNanosecondArray,
     };
+    use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
-    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+    use datafusion::logical_expr::{
+        EmptyRelation, Extension, LogicalPlan, UserDefinedLogicalNodeCore,
+    };
     use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::memory::MemoryStream;
@@ -873,6 +899,7 @@ mod test {
             Boundedness::Bounded,
         ));
         let normalize_exec = Arc::new(RangeManipulateExec {
+            offset: 0,
             start,
             end,
             interval,
@@ -1041,6 +1068,205 @@ mod test {
     }
 
     #[tokio::test]
+    async fn logical_normalize_offset_survives_rebuild_and_executes() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                TimestampMillisecondType::DATA_TYPE,
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: schema.clone().to_dfschema_ref().unwrap(),
+        });
+        let normalize = crate::extension_plan::SeriesNormalize::new(
+            1_000,
+            TIME_INDEX_COLUMN,
+            false,
+            Vec::new(),
+            input.clone(),
+        );
+        let normalize = crate::extension_plan::SeriesNormalize::deserialize(&normalize.serialize())
+            .unwrap()
+            .with_exprs_and_inputs(vec![], vec![input])
+            .unwrap();
+        let normalized = LogicalPlan::Extension(Extension {
+            node: Arc::new(normalize),
+        });
+        let plan = RangeManipulate::new(
+            1_000,
+            1_000,
+            1,
+            1_000,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            normalized.clone(),
+        )
+        .unwrap();
+        let rebuilt = RangeManipulate::deserialize(&plan.serialize())
+            .unwrap()
+            .with_exprs_and_inputs(vec![], vec![normalized])
+            .unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0])),
+                Arc::new(Float64Array::from(vec![7.0])),
+            ],
+        )
+        .unwrap();
+        let exec_input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let output = datafusion::physical_plan::collect(
+            rebuilt.to_execution_plan(exec_input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.len(), 1);
+        let output = &output[0];
+        assert_eq!(output.num_rows(), 1);
+        assert_eq!(
+            output
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .values()
+                .as_ref(),
+            &[1_000]
+        );
+        let values = RangeArray::try_new(
+            output
+                .column(1)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(values.get_offset_length(0), Some((0, 1)));
+        assert_eq!(
+            values.get(0).unwrap().to_data(),
+            Float64Array::from(vec![7.0]).to_data()
+        );
+        let timestamps = RangeArray::try_new(
+            output
+                .column(2)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(timestamps.get_offset_length(0), Some((0, 1)));
+        assert_eq!(
+            timestamps.get(0).unwrap().to_data(),
+            TimestampMillisecondArray::from(vec![1_000]).to_data()
+        );
+    }
+
+    #[tokio::test]
+    async fn range_payload_preserves_null_timestamp_and_rejects_offset_overflow() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let null_timestamp =
+            TimestampMillisecondArray::new(vec![1_000].into(), Some(NullBuffer::from(vec![false])));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(null_timestamp),
+                Arc::new(Float64Array::from(vec![7.0])),
+            ],
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema.clone(), None).unwrap(),
+        )));
+        let plan = RangeManipulate::new(
+            1_000,
+            1_000,
+            1,
+            1,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            }),
+        )
+        .unwrap();
+        let output = datafusion::physical_plan::collect(
+            plan.to_execution_plan(input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+        let timestamps = RangeArray::try_new(
+            output[0]
+                .column(2)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let payload = timestamps.get(0).unwrap();
+        let payload = payload
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(payload.len(), 1);
+        assert!(!payload.is_valid(0));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0, i64::MAX])),
+                Arc::new(Float64Array::from(vec![7.0, 8.0])),
+            ],
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema.clone(), None).unwrap(),
+        )));
+        let normalized = crate::extension_plan::SeriesNormalize::new(
+            1,
+            TIME_INDEX_COLUMN,
+            false,
+            Vec::new(),
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.to_dfschema_ref().unwrap(),
+            }),
+        );
+        let plan = RangeManipulate::new(
+            1,
+            1,
+            1,
+            1,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(normalized),
+            }),
+        )
+        .unwrap();
+        let error = datafusion::physical_plan::collect(
+            plan.to_execution_plan(input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timestamp payload overflow"));
+    }
+
+    #[tokio::test]
     async fn pruning_should_keep_time_and_value_columns_for_exec() {
         let schema = Arc::new(Schema::new(vec![
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
@@ -1194,6 +1420,7 @@ mod test {
         let empty_stream = MemoryStream::try_new(vec![], schema.clone(), None).unwrap();
 
         let stream = RangeManipulateStream {
+            offset: 0,
             start: 1758093274000, // ends in 4000
             end: 1758093334000,   // ends in 4000
             interval: 30000,      // 30s step
@@ -1259,6 +1486,7 @@ mod test {
         )]));
         let empty_stream = MemoryStream::try_new(vec![], schema.clone(), None).unwrap();
         let stream = RangeManipulateStream {
+            offset: 0,
             start: query_start,
             end: query_end,
             interval,

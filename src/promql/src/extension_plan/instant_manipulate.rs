@@ -46,9 +46,9 @@ use snafu::ResultExt;
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::series_divide::SeriesDivide;
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, nanoseconds_per_native_tick,
-    native_timestamp_values, prometheus_stale_sample_column, resolve_column_name,
-    serialize_column_index, timestamp_unit,
+    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, local_offset,
+    nanoseconds_per_native_tick, native_timestamp_values, prometheus_stale_sample_column,
+    resolve_column_name, serialize_column_index, timestamp_unit,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
@@ -354,6 +354,7 @@ impl InstantManipulate {
             input_properties.boundedness,
         ));
         Arc::new(InstantManipulateExec {
+            offset: local_offset(&self.input, &self.time_index_column),
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
@@ -420,6 +421,7 @@ impl InstantManipulate {
 
 #[derive(Debug)]
 pub struct InstantManipulateExec {
+    offset: Millisecond,
     start: Millisecond,
     end: Millisecond,
     lookback_delta: Millisecond,
@@ -474,6 +476,7 @@ impl ExecutionPlan for InstantManipulateExec {
             input_properties.boundedness,
         ));
         Ok(Arc::new(Self {
+            offset: self.offset,
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
@@ -517,6 +520,7 @@ impl ExecutionPlan for InstantManipulateExec {
             .filter(|(_, field)| field.data_type() == &DataType::UInt64)
             .map(|(index, _)| index);
         Ok(Box::pin(InstantManipulateStream {
+            offset: self.offset,
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
@@ -584,6 +588,7 @@ impl DisplayAs for InstantManipulateExec {
 }
 
 pub struct InstantManipulateStream {
+    offset: Millisecond,
     start: Millisecond,
     end: Millisecond,
     lookback_delta: Millisecond,
@@ -654,7 +659,8 @@ impl InstantManipulateStream {
         };
         let timestamps = native_timestamp_values(ts_column.as_ref())?;
         let len = timestamps.len();
-        let to_nanoseconds = |timestamp: i64| (timestamp as i128) * scale;
+        let to_nanoseconds =
+            |timestamp: i64| (timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
         let first_ns = to_nanoseconds(timestamps[0]);
         let last_ns = to_nanoseconds(timestamps[len - 1]);
         // An exact sample remains useful with zero lookback. Otherwise the lower
@@ -780,7 +786,9 @@ mod test {
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
-    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+    use datafusion::logical_expr::{
+        EmptyRelation, Extension, LogicalPlan, UserDefinedLogicalNodeCore,
+    };
     use datafusion::prelude::SessionContext;
 
     use super::*;
@@ -802,6 +810,7 @@ mod test {
             Arc::new(prepare_test_data())
         };
         let normalize_exec = Arc::new(InstantManipulateExec {
+            offset: 0,
             start,
             end,
             lookback_delta,
@@ -953,6 +962,74 @@ mod test {
                 assert_eq!(values.null_count(), 0, "{unit:?}: {name}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn logical_normalize_offset_survives_rebuild_and_executes() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: schema.clone().to_dfschema_ref().unwrap(),
+        });
+        let normalize = crate::extension_plan::SeriesNormalize::new(
+            1_000,
+            TIME_INDEX_COLUMN,
+            false,
+            Vec::new(),
+            input.clone(),
+        );
+        let normalize = crate::extension_plan::SeriesNormalize::deserialize(&normalize.serialize())
+            .unwrap()
+            .with_exprs_and_inputs(vec![], vec![input])
+            .unwrap();
+        let normalized = LogicalPlan::Extension(Extension {
+            node: Arc::new(normalize),
+        });
+        let plan = InstantManipulate::new(
+            1_000,
+            1_000,
+            0,
+            1,
+            TIME_INDEX_COLUMN.to_string(),
+            Vec::new(),
+            Some("value".to_string()),
+            normalized.clone(),
+        );
+        let rebuilt = InstantManipulate::deserialize(&plan.serialize())
+            .unwrap()
+            .with_exprs_and_inputs(vec![], vec![normalized])
+            .unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0])),
+                Arc::new(Float64Array::from(vec![7.0])),
+            ],
+        )
+        .unwrap();
+        let exec_input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let exec = rebuilt.to_execution_plan(exec_input);
+        let output = datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(
+            output[0]
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            7.0
+        );
     }
 
     #[test]
@@ -1129,6 +1206,7 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let normalize_exec = Arc::new(InstantManipulateExec {
+            offset: 0,
             start: 0,
             end: 1_500,
             lookback_delta: 1_000,
@@ -1192,6 +1270,7 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let normalize_exec = Arc::new(InstantManipulateExec {
+            offset: 0,
             start: 0,
             end: 1_500,
             lookback_delta: 1_000,
@@ -1248,6 +1327,7 @@ mod test {
         )));
         let too_many_points = MAX_INSTANT_MANIPULATE_OUTPUT_POINTS as Millisecond + 1;
         let normalize_exec = Arc::new(InstantManipulateExec {
+            offset: 0,
             start: 0,
             end: too_many_points,
             lookback_delta: too_many_points + 1,
@@ -1567,6 +1647,7 @@ mod test {
             )
             .unwrap();
             let stream = InstantManipulateStream {
+                offset: 0,
                 start: 1_000,
                 end: 1_050,
                 lookback_delta: 100,
@@ -1615,6 +1696,7 @@ mod test {
         )]));
         let input = RecordBatch::new_empty(input_schema.clone());
         let stream = InstantManipulateStream {
+            offset: 0,
             start: 0,
             end: 0,
             lookback_delta: 0,
@@ -1664,6 +1746,7 @@ mod test {
         )
         .unwrap();
         let stream = InstantManipulateStream {
+            offset: 0,
             start: i64::MIN + 1,
             end: i64::MAX,
             lookback_delta: 0,
@@ -1697,6 +1780,64 @@ mod test {
         assert_eq!(values.values(), &[7.0]);
     }
 
+    #[test]
+    fn native_nanosecond_offset_uses_wide_shifted_timeline() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let raw = 9_223_112_837_000_000_000_i64;
+        let input = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampNanosecondArray::from(vec![raw])),
+                Arc::new(Float64Array::from(vec![7.0])),
+            ],
+        )
+        .unwrap();
+        let stream = InstantManipulateStream {
+            offset: 3 * 24 * 60 * 60 * 1_000,
+            start: 9_223_372_037_000,
+            end: 9_223_372_037_000,
+            lookback_delta: 300_000,
+            interval: 1,
+            time_index: 0,
+            time_unit: TimeUnit::Nanosecond,
+            field_indices: [Some(1), None],
+            tsid_index: None,
+            reuse_tsid_column: false,
+            schema: Arc::new(Schema::new(vec![
+                Field::new(
+                    TIME_INDEX_COLUMN,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("value", DataType::Float64, true),
+            ])),
+            input: Box::pin(
+                datafusion::physical_plan::memory::MemoryStream::try_new(vec![], schema, None)
+                    .unwrap(),
+            ),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+        let output = stream.manipulate(input).unwrap();
+        assert_eq!(output.num_rows(), 1);
+        assert_eq!(
+            output
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            7.0
+        );
+    }
+
     #[tokio::test]
     async fn ordinary_nan_is_selected_for_exact_and_lookback() {
         let schema = Arc::new(Schema::new(vec![
@@ -1719,6 +1860,7 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let exec = Arc::new(InstantManipulateExec {
+            offset: 0,
             start: 1_000,
             end: 1_500,
             lookback_delta: 1_000,
@@ -1800,6 +1942,7 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let exec = Arc::new(InstantManipulateExec {
+            offset: 0,
             start: 750,
             end: 1_500,
             lookback_delta: 1_001,
@@ -1865,6 +2008,7 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let exec = Arc::new(InstantManipulateExec {
+            offset: 0,
             start: 1_000,
             end: 1_500,
             lookback_delta: 1_001,
@@ -1914,6 +2058,7 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let exec = Arc::new(InstantManipulateExec {
+            offset: 0,
             start: 1_000,
             end: 1_500,
             lookback_delta: 1_000,
