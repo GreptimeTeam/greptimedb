@@ -369,6 +369,11 @@ impl BatchingTask {
         self.state.read().unwrap().start_time_millis()
     }
 
+    /// Returns a stable clone of the task query context without exposing mutable task state.
+    pub fn query_context_snapshot(&self) -> QueryContextRef {
+        self.state.read().unwrap().query_ctx.clone()
+    }
+
     /// Collect flow-related extensions from the task's query context that should be
     /// forwarded to the frontend (e.g. scheduled time).
     fn frontend_extensions(&self) -> HashMap<String, String> {
