@@ -1,0 +1,42 @@
+CREATE TABLE counter_reset_precision (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    series STRING PRIMARY KEY
+);
+
+Affected Rows: 0
+
+INSERT INTO counter_reset_precision VALUES
+    (0,      10000000000000000.0, 'a'),
+    (30000,  1.0,                 'a'),
+    (60000,  0.0,                 'a'),
+    (90000,  1.0,                 'a'),
+    (120000, 2.0,                 'a');
+
+Affected Rows: 5
+
+-- Two adjacent windows over the same samples: (-30s, 90s] and (0s, 120s]. The second
+-- one drops the 1e16 reset and keeps the 1 -> 0 one, so its correction is 1.0. Carrying
+-- the first window's correction forward loses that, since 1e16 + 1.0 rounds to 1e16.
+TQL EVAL (90, 120, '30s') increase(counter_reset_precision[2m]);
+
++---------------------+---------------------------------------------------------+--------+
+| ts                  | prom_increase(ts_range,greptime_value,ts,Int64(120000)) | series |
++---------------------+---------------------------------------------------------+--------+
+| 1970-01-01T00:01:30 | 0.0                                                     | a      |
+| 1970-01-01T00:02:00 | 2.6666666666666665                                      | a      |
++---------------------+---------------------------------------------------------+--------+
+
+TQL EVAL (90, 120, '30s') rate(counter_reset_precision[2m]);
+
++---------------------+-----------------------------------------------------+--------+
+| ts                  | prom_rate(ts_range,greptime_value,ts,Int64(120000)) | series |
++---------------------+-----------------------------------------------------+--------+
+| 1970-01-01T00:01:30 | 0.0                                                 | a      |
+| 1970-01-01T00:02:00 | 0.02222222222222222                                 | a      |
++---------------------+-----------------------------------------------------+--------+
+
+DROP TABLE counter_reset_precision;
+
+Affected Rows: 0
+
