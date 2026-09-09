@@ -115,6 +115,12 @@ pub trait UserProvider: Send + Sync {
         }
     }
 
+    /// Selects authentication after the MySQL handshake supplies a username.
+    /// The user is resolved in the same scope as [`authenticate`](Self::authenticate).
+    async fn mysql_auth_method_for_user(&self, _username: &str) -> Result<MysqlAuthMethod> {
+        Ok(self.mysql_auth_method())
+    }
+
     async fn postgres_auth_info(&self, _id: Identity<'_>, _catalog: &str) -> Result<PgAuthInfo> {
         Ok(PgAuthInfo::Cleartext)
     }
