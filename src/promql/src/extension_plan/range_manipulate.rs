@@ -806,7 +806,7 @@ impl RangeManipulateStream {
 mod test {
     use datafusion::arrow::array::{
         ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMicrosecondArray,
-        TimestampNanosecondArray,
+        TimestampNanosecondArray, TimestampSecondArray,
     };
     use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::{
@@ -1069,104 +1069,140 @@ mod test {
 
     #[tokio::test]
     async fn logical_normalize_offset_survives_rebuild_and_executes() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                TIME_INDEX_COLUMN,
-                TimestampMillisecondType::DATA_TYPE,
-                false,
+        for (name, time_unit, raw, offset, start, range, expected_payload) in [
+            (
+                "millisecond offset",
+                TimeUnit::Millisecond,
+                0,
+                1_000,
+                1_000,
+                1_000,
+                1_000,
             ),
-            Field::new("value", DataType::Float64, true),
-        ]));
-        let input = LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: schema.clone().to_dfschema_ref().unwrap(),
-        });
-        let normalize = crate::extension_plan::SeriesNormalize::new(
-            1_000,
-            TIME_INDEX_COLUMN,
-            false,
-            Vec::new(),
-            input.clone(),
-        );
-        let normalize = crate::extension_plan::SeriesNormalize::deserialize(&normalize.serialize())
-            .unwrap()
-            .with_exprs_and_inputs(vec![], vec![input])
+            (
+                "negative native lower limit with positive window",
+                TimeUnit::Nanosecond,
+                -9_223_112_837_000_000_000,
+                -259_200_000,
+                -9_223_372_037_000,
+                300_000,
+                -9_223_372_037_000,
+            ),
+            (
+                "second timestamp with negative fractional offset",
+                TimeUnit::Second,
+                1,
+                -500,
+                1_000,
+                1_000,
+                500,
+            ),
+        ] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(
+                    TIME_INDEX_COLUMN,
+                    DataType::Timestamp(time_unit, None),
+                    false,
+                ),
+                Field::new("value", DataType::Float64, true),
+            ]));
+            let input = LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            });
+            let normalize = crate::extension_plan::SeriesNormalize::new(
+                offset,
+                TIME_INDEX_COLUMN,
+                false,
+                Vec::new(),
+                input.clone(),
+            );
+            let normalize =
+                crate::extension_plan::SeriesNormalize::deserialize(&normalize.serialize())
+                    .unwrap()
+                    .with_exprs_and_inputs(vec![], vec![input])
+                    .unwrap();
+            let normalized = LogicalPlan::Extension(Extension {
+                node: Arc::new(normalize),
+            });
+            let plan = RangeManipulate::new(
+                start,
+                start,
+                1,
+                range,
+                TIME_INDEX_COLUMN.to_string(),
+                vec!["value".to_string()],
+                normalized.clone(),
+            )
             .unwrap();
-        let normalized = LogicalPlan::Extension(Extension {
-            node: Arc::new(normalize),
-        });
-        let plan = RangeManipulate::new(
-            1_000,
-            1_000,
-            1,
-            1_000,
-            TIME_INDEX_COLUMN.to_string(),
-            vec!["value".to_string()],
-            normalized.clone(),
-        )
-        .unwrap();
-        let rebuilt = RangeManipulate::deserialize(&plan.serialize())
-            .unwrap()
-            .with_exprs_and_inputs(vec![], vec![normalized])
+            let rebuilt = RangeManipulate::deserialize(&plan.serialize())
+                .unwrap()
+                .with_exprs_and_inputs(vec![], vec![normalized])
+                .unwrap();
+            let timestamp: ArrayRef = match time_unit {
+                TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(vec![raw])),
+                TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(vec![raw])),
+                TimeUnit::Second => Arc::new(TimestampSecondArray::from(vec![raw])),
+                _ => unreachable!(),
+            };
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![timestamp, Arc::new(Float64Array::from(vec![7.0]))],
+            )
             .unwrap();
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![0])),
-                Arc::new(Float64Array::from(vec![7.0])),
-            ],
-        )
-        .unwrap();
-        let exec_input = Arc::new(DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
-        )));
-        let output = datafusion::physical_plan::collect(
-            rebuilt.to_execution_plan(exec_input),
-            SessionContext::default().task_ctx(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(output.len(), 1);
-        let output = &output[0];
-        assert_eq!(output.num_rows(), 1);
-        assert_eq!(
-            output
-                .column(0)
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .values()
-                .as_ref(),
-            &[1_000]
-        );
-        let values = RangeArray::try_new(
-            output
-                .column(1)
-                .as_any()
-                .downcast_ref::<DictionaryArray<Int64Type>>()
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        assert_eq!(values.get_offset_length(0), Some((0, 1)));
-        assert_eq!(
-            values.get(0).unwrap().to_data(),
-            Float64Array::from(vec![7.0]).to_data()
-        );
-        let timestamps = RangeArray::try_new(
-            output
-                .column(2)
-                .as_any()
-                .downcast_ref::<DictionaryArray<Int64Type>>()
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        assert_eq!(timestamps.get_offset_length(0), Some((0, 1)));
-        assert_eq!(
-            timestamps.get(0).unwrap().to_data(),
-            TimestampMillisecondArray::from(vec![1_000]).to_data()
-        );
+            let exec_input = Arc::new(DataSourceExec::new(Arc::new(
+                MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+            )));
+            let output = datafusion::physical_plan::collect(
+                rebuilt.to_execution_plan(exec_input),
+                SessionContext::default().task_ctx(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(output.len(), 1, "{name}");
+            let output = &output[0];
+            assert_eq!(output.num_rows(), 1, "{name}");
+            assert_eq!(
+                output
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .value(0),
+                start,
+                "{name}"
+            );
+            let values = RangeArray::try_new(
+                output
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int64Type>>()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+            assert_eq!(values.get_offset_length(0), Some((0, 1)), "{name}");
+            assert_eq!(
+                values.get(0).unwrap().to_data(),
+                Float64Array::from(vec![7.0]).to_data(),
+                "{name}"
+            );
+            let timestamps = RangeArray::try_new(
+                output
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int64Type>>()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+            assert_eq!(timestamps.get_offset_length(0), Some((0, 1)), "{name}");
+            assert_eq!(
+                timestamps.get(0).unwrap().to_data(),
+                TimestampMillisecondArray::from(vec![expected_payload]).to_data(),
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]
