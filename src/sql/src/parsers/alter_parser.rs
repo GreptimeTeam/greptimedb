@@ -465,20 +465,17 @@ impl ParserContext<'_> {
                     if let Some((data_type, json2_options)) =
                         parse_json2_type_and_options(&mut self.parser)?
                     {
-                        Ok(AlterTableOperation::SetJsonSettings {
+                        return Ok(AlterTableOperation::SetJsonSettings {
                             column_name,
                             target_type: data_type,
                             json2_options,
-                        })
-                    } else {
-                        Ok(AlterTableOperation::ModifyColumnType {
-                            column_name,
-                            target_type: self
-                                .parser
-                                .parse_data_type()
-                                .context(error::SyntaxSnafu)?,
-                        })
+                        });
                     }
+
+                    Ok(AlterTableOperation::ModifyColumnType {
+                        column_name,
+                        target_type: self.parser.parse_data_type().context(error::SyntaxSnafu)?,
+                    })
                 }
             }
             _ => self.expected(

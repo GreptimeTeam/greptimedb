@@ -23,9 +23,10 @@ use parquet_variant_compute::VariantType;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 
-use crate::error::InvalidJson2LayoutSnafu;
+use crate::error::{DeserializeSnafu, InvalidJson2LayoutSnafu, SerializeSnafu};
 pub use crate::json::JSON2_REMAINDER_FIELD_NAME;
 use crate::json::JsonSettings;
+use crate::schema::Metadata;
 
 const LEGACY_JSON_STRUCTURE_SETTINGS_KEY: &str = "json_structure_settings";
 const JSON2_LAYOUT_V1: u8 = 1;
@@ -155,6 +156,14 @@ impl JsonMetadata {
         self.json_settings
     }
 
+    /// Returns metadata with the same layout and updated JSON2 settings.
+    pub fn with_json_settings(&self, json_settings: JsonSettings) -> Self {
+        Self {
+            json_settings,
+            layout_version: self.layout_version,
+        }
+    }
+
     /// Returns whether this metadata describes JSON2 layout version 2.
     pub fn is_version_2(&self) -> bool {
         self.layout_version == Some(JSON2_LAYOUT_V2)
@@ -276,6 +285,30 @@ impl ExtensionType for Json2ExtensionType {
         json.supports_data_type(data_type)?;
         Ok(json)
     }
+}
+
+/// Returns JSON2 column metadata with updated settings and the existing layout.
+pub fn json2_metadata_with_updated_settings(
+    current_metadata: &Metadata,
+    settings: JsonSettings,
+) -> crate::error::Result<Metadata> {
+    let json_metadata = current_metadata
+        .get(EXTENSION_TYPE_METADATA_KEY)
+        .map(|json| serde_json::from_str::<JsonMetadata>(json).context(DeserializeSnafu { json }))
+        .transpose()?
+        .unwrap_or_else(|| JsonMetadata::new_v1(JsonSettings::default()))
+        .with_json_settings(settings);
+
+    let mut metadata = current_metadata.clone();
+    metadata.insert(
+        EXTENSION_TYPE_NAME_KEY.to_string(),
+        Json2ExtensionType::NAME.to_string(),
+    );
+    metadata.insert(
+        EXTENSION_TYPE_METADATA_KEY.to_string(),
+        serde_json::to_string(&json_metadata).context(SerializeSnafu)?,
+    );
+    Ok(metadata)
 }
 
 /// Checks whether this field is either a legacy JSONB or JSON2 extension type.
@@ -417,6 +450,37 @@ mod tests {
         let deserialized: JsonMetadata = serde_json::from_str(&serialized)?;
         assert!(deserialized.is_version_2());
         assert_eq!(deserialized, metadata);
+        Ok(())
+    }
+
+    #[test]
+    fn test_json2_metadata_with_updated_settings_preserves_layout() -> crate::error::Result<()> {
+        let v1_metadata = serde_json::to_string(&JsonMetadata::new_v1(JsonSettings::default()))
+            .context(SerializeSnafu)?;
+        let metadata = HashMap::from([
+            (
+                EXTENSION_TYPE_NAME_KEY.to_string(),
+                Json2ExtensionType::NAME.to_string(),
+            ),
+            (EXTENSION_TYPE_METADATA_KEY.to_string(), v1_metadata),
+            ("other".to_string(), "kept".to_string()),
+        ]);
+        let updated = json2_metadata_with_updated_settings(
+            &metadata,
+            JsonSettings::try_new(vec![], Some(10))?,
+        )?;
+        assert_eq!(Some("kept"), updated.get("other").map(String::as_str));
+        let json_metadata: JsonMetadata = serde_json::from_str(
+            updated
+                .get(EXTENSION_TYPE_METADATA_KEY)
+                .expect("extension metadata"),
+        )
+        .unwrap();
+        assert!(!json_metadata.is_version_2());
+        assert_eq!(
+            Some(10),
+            json_metadata.json_settings().max_auto_expanded_paths()
+        );
         Ok(())
     }
 

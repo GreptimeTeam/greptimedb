@@ -141,7 +141,7 @@ pub struct ColumnExtensions {
 }
 
 /// JSON2-specific options represented in the SQL AST.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct Json2Options {
     /// Maximum number of unhinted JSON2 paths expanded into Arrow fields.
     pub(crate) max_auto_expanded_paths: Option<u32>,
@@ -175,12 +175,10 @@ impl Json2Options {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        JsonSettings::try_new(
-            type_hints,
-            self.max_auto_expanded_paths
-                .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS)),
-        )
-        .map_err(Into::into)
+        let max_auto_expanded_paths = self
+            .max_auto_expanded_paths
+            .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS));
+        JsonSettings::try_new(type_hints, max_auto_expanded_paths).map_err(Into::into)
     }
 }
 

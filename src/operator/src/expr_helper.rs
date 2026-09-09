@@ -792,6 +792,7 @@ fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
             let data_type = ColumnDataTypeWrapper::try_from(hint.data_type.clone())
                 .map(|w| w.to_parts().0)
                 .context(ColumnDataTypeSnafu)?;
+
             let default_constraint = hint
                 .default_constraint
                 .clone()
@@ -864,12 +865,15 @@ pub(crate) fn to_alter_table_expr(
         } => {
             let target_type =
                 sql_data_type_to_concrete_data_type(&target_type).context(ParseSqlSnafu)?;
+
+            // Currently disallow modify column type to json2.
             if target_type.is_json2() {
                 return NotSupportedSnafu {
                     feat: "ALTER TABLE MODIFY COLUMN to JSON2 type",
                 }
                 .fail();
             }
+
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;
@@ -894,12 +898,14 @@ pub(crate) fn to_alter_table_expr(
         } => {
             let target_type =
                 sql_data_type_to_concrete_data_type(&target_type).context(ParseSqlSnafu)?;
+
             ensure!(
                 target_type.is_json2(),
                 NotSupportedSnafu {
                     feat: "ALTER TABLE MODIFY JSON settings for non-JSON2 type",
                 }
             );
+
             let settings = match json2_options {
                 Some(options) => options.build_json_settings().context(ParseSqlSnafu)?,
                 None => datatypes::json::JsonSettings::new_v2(),

@@ -22,7 +22,7 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 use datatypes::error::time_index_not_widening_error;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
-use datatypes::extension::json::Json2ExtensionType;
+use datatypes::extension::json::{Json2ExtensionType, json2_metadata_with_updated_settings};
 use datatypes::schema::{
     ColumnSchema, FulltextOptions, Metadata, Schema, SchemaBuilder, SchemaRef, SkippingIndexOptions,
 };
@@ -1204,7 +1204,16 @@ impl TableMeta {
                 err: format!("column '{}' is not a JSON2 column", column.name),
             }
         );
-        validate_json2_metadata(column, &request.target_metadata).map_err(|err| {
+        let target_metadata =
+            json2_metadata_with_updated_settings(column.metadata(), request.settings.clone())
+                .map_err(|err| {
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: err.to_string(),
+                    }
+                    .build()
+                })?;
+        validate_json2_metadata(column, &target_metadata).map_err(|err| {
             error::InvalidAlterRequestSnafu {
                 table: table_name,
                 err,
@@ -1213,9 +1222,7 @@ impl TableMeta {
         })?;
 
         let mut columns = table_schema.column_schemas().to_vec();
-        columns[index] = column
-            .clone()
-            .with_metadata(request.target_metadata.clone());
+        columns[index] = column.clone().with_metadata(target_metadata);
 
         let mut builder = SchemaBuilder::try_from_columns(columns)
             .with_context(|_| error::SchemaBuildSnafu {
@@ -1773,15 +1780,6 @@ mod tests {
         builder.build().unwrap()
     }
 
-    fn json2_column_schema(name: &str, settings: JsonSettings) -> ColumnSchema {
-        let mut column_schema =
-            ColumnSchema::new(name, ConcreteDataType::Json(JsonType::null()), true);
-        column_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
-            settings,
-        ))));
-        column_schema
-    }
-
     #[test]
     fn test_set_json_settings() {
         let schema = Arc::new(
@@ -1793,7 +1791,7 @@ mod tests {
                     false,
                 )
                 .with_time_index(true),
-                json2_column_schema("payload", JsonSettings::new_v2()),
+                json2_column_schema_v1("payload", JsonSettings::new_v2()),
             ])
             .unwrap()
             .version(123)
@@ -1808,12 +1806,10 @@ mod tests {
             .build()
             .unwrap();
 
-        let target_schema =
-            json2_column_schema("payload", JsonSettings::try_new(vec![], Some(10)).unwrap());
         let alter_kind = AlterKind::SetJsonSettings {
             request: SetJsonSettingsRequest {
                 column_name: "payload".to_string(),
-                target_metadata: target_schema.metadata().clone(),
+                settings: JsonSettings::try_new(vec![], Some(10)).unwrap(),
             },
         };
         let new_meta = meta
@@ -1826,12 +1822,22 @@ mod tests {
         let json_metadata: JsonMetadata =
             serde_json::from_str(payload.metadata().get("ARROW:extension:metadata").unwrap())
                 .unwrap();
+        assert!(!json_metadata.is_version_2());
         assert_eq!(
             Some(10),
             json_metadata.json_settings().max_auto_expanded_paths()
         );
         assert_eq!(124, new_meta.schema.version());
         assert_eq!(meta.primary_key_indices, new_meta.primary_key_indices);
+    }
+
+    fn json2_column_schema_v1(name: &str, settings: JsonSettings) -> ColumnSchema {
+        let mut column_schema =
+            ColumnSchema::new(name, ConcreteDataType::Json(JsonType::null()), true);
+        column_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(
+            JsonMetadata::new_v1(settings),
+        )));
+        column_schema
     }
 
     #[test]
@@ -1844,11 +1850,10 @@ mod tests {
             .next_column_id(3)
             .build()
             .unwrap();
-        let target_schema = json2_column_schema("col2", JsonSettings::new_v2());
         let alter_kind = AlterKind::SetJsonSettings {
             request: SetJsonSettingsRequest {
                 column_name: "col2".to_string(),
-                target_metadata: target_schema.metadata().clone(),
+                settings: JsonSettings::new_v2(),
             },
         };
 

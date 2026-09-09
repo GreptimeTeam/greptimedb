@@ -25,9 +25,10 @@ use common_query::AddColumnLocation;
 use common_time::TimeToLive;
 use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::json::JsonSettings;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Metadata, Schema, SkippingIndexOptions,
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions,
 };
 use greptime_proto::v1::region::compact_request;
 use once_cell::sync::Lazy;
@@ -305,7 +306,7 @@ pub struct ModifyColumnTypeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetJsonSettingsRequest {
     pub column_name: String,
-    pub target_metadata: Metadata,
+    pub settings: JsonSettings,
 }
 
 /// A family of annotation table options: pure metadata markers that no region

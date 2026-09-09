@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_table_expr::Kind;
@@ -26,11 +24,10 @@ use api::v1::{
     SkippingIndexType as PbSkippingIndexType, column_def,
 };
 use common_query::AddColumnLocation;
-use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::{JsonSettings, JsonTypeHint};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Metadata, Schema, SkippingIndexOptions,
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions,
 };
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
@@ -42,10 +39,10 @@ use table::requests::{
 
 use crate::error::{
     self, ColumnNotFoundSnafu, InvalidColumnDefSnafu, InvalidIndexOptionSnafu,
-    InvalidSetFulltextOptionRequestSnafu, InvalidSetSkippingIndexOptionRequestSnafu,
-    InvalidSetTableOptionRequestSnafu, InvalidUnsetTableOptionRequestSnafu,
-    MissingAlterIndexOptionSnafu, MissingFieldSnafu, MissingTableMetaSnafu,
-    MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
+    InvalidJsonSettingsSnafu, InvalidSetFulltextOptionRequestSnafu,
+    InvalidSetSkippingIndexOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
+    InvalidUnsetTableOptionRequestSnafu, MissingAlterIndexOptionSnafu, MissingFieldSnafu,
+    MissingTableMetaSnafu, MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
 };
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
@@ -85,7 +82,7 @@ fn annotation_family_of_keys<'a>(
     Ok(family)
 }
 
-fn json_settings_to_metadata(settings: api::v1::JsonSettings) -> Result<Metadata> {
+fn json_settings_from_proto(settings: api::v1::JsonSettings) -> Result<JsonSettings> {
     let type_hints = settings
         .type_hints
         .into_iter()
@@ -94,19 +91,20 @@ fn json_settings_to_metadata(settings: api::v1::JsonSettings) -> Result<Metadata
                 ColumnDataTypeWrapper::try_new(hint.data_type, None)
                     .context(error::ColumnDataTypeSnafu)?,
             );
+
             let default_constraint = if hint.default_constraint.is_empty() {
                 None
             } else {
-                Some(
-                    ColumnDefaultConstraint::try_from(hint.default_constraint.as_slice()).map_err(
-                        |err| {
-                            error::InvalidJsonSettingsSnafu {
-                                err: err.to_string(),
-                            }
-                            .build()
-                        },
-                    )?,
+                let default_constraint = ColumnDefaultConstraint::try_from(
+                    hint.default_constraint.as_slice(),
                 )
+                .map_err(|err| {
+                    InvalidJsonSettingsSnafu {
+                        err: err.to_string(),
+                    }
+                    .build()
+                })?;
+                Some(default_constraint)
             };
 
             Ok(JsonTypeHint {
@@ -118,18 +116,13 @@ fn json_settings_to_metadata(settings: api::v1::JsonSettings) -> Result<Metadata
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let settings =
-        JsonSettings::try_new(type_hints, settings.max_auto_expanded_paths).map_err(|err| {
-            error::InvalidJsonSettingsSnafu {
-                err: err.to_string(),
-            }
-            .build()
-        })?;
-    let mut column_schema = ColumnSchema::new("__json2", ConcreteDataType::json_datatype(), true);
-    column_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
-        settings,
-    ))));
-    Ok(column_schema.metadata().clone())
+
+    JsonSettings::try_new(type_hints, settings.max_auto_expanded_paths).map_err(|err| {
+        InvalidJsonSettingsSnafu {
+            err: err.to_string(),
+        }
+        .build()
+    })
 }
 
 /// Returns the annotation family when `kind` is a SET/UNSET whose keys all
@@ -269,7 +262,7 @@ pub fn alter_expr_to_request(
             AlterKind::SetJsonSettings {
                 request: SetJsonSettingsRequest {
                     column_name: set_json_settings.column_name,
-                    target_metadata: json_settings_to_metadata(settings)?,
+                    settings: json_settings_from_proto(settings)?,
                 },
             }
         }
