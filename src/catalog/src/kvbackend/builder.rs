@@ -31,6 +31,7 @@ use crate::information_schema::{
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::kvbackend::manager::{CATALOG_CACHE_MAX_CAPACITY, SystemCatalog};
 use crate::process_manager::ProcessManagerRef;
+use crate::system_schema::PrivateSystemTableFactoryRef;
 use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 
@@ -53,6 +54,7 @@ pub struct KvBackendCatalogManagerBuilder {
     procedure_manager: Option<ProcedureManagerRef>,
     process_manager: Option<ProcessManagerRef>,
     extra_information_table_factories: HashMap<String, InformationSchemaTableFactoryRef>,
+    private_system_table_factories: HashMap<String, PrivateSystemTableFactoryRef>,
 }
 
 impl KvBackendCatalogManagerBuilder {
@@ -68,6 +70,7 @@ impl KvBackendCatalogManagerBuilder {
             procedure_manager: None,
             process_manager: None,
             extra_information_table_factories: HashMap::new(),
+            private_system_table_factories: HashMap::new(),
         }
     }
 
@@ -90,6 +93,14 @@ impl KvBackendCatalogManagerBuilder {
         self
     }
 
+    pub fn with_private_system_table_factories(
+        mut self,
+        factories: HashMap<String, PrivateSystemTableFactoryRef>,
+    ) -> Self {
+        self.private_system_table_factories = factories;
+        self
+    }
+
     pub fn build(self) -> Arc<KvBackendCatalogManager> {
         let Self {
             information_extension,
@@ -98,6 +109,7 @@ impl KvBackendCatalogManagerBuilder {
             procedure_manager,
             process_manager,
             extra_information_table_factories,
+            private_system_table_factories,
         } = self;
         Arc::new_cyclic(|me| KvBackendCatalogManager {
             information_extension,
@@ -136,6 +148,7 @@ impl KvBackendCatalogManagerBuilder {
                 backend,
                 process_manager,
                 extra_information_table_factories,
+                private_system_table_factories,
             },
             cache_registry,
             procedure_manager,

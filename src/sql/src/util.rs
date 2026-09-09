@@ -266,6 +266,11 @@ fn extract_tables_from_statement(stmt: &Statement, names: &mut HashSet<ObjectNam
             extract_tables_from_sql_or_tql(&create.query, names)
         }
         #[cfg(feature = "enterprise")]
+        Statement::CreateBulkLoad(create) => {
+            names.insert(create.table_name.clone());
+            true
+        }
+        #[cfg(feature = "enterprise")]
         Statement::CreateTrigger(create) => {
             extract_tables_from_sql_or_tql(&create.trigger_on.query, names)
         }

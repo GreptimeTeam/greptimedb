@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+mod bulk_load;
 mod json;
 #[cfg(feature = "enterprise")]
 pub mod trigger;
@@ -127,6 +129,8 @@ impl<'a> ParserContext<'a> {
                     let _ = self.parser.next_token();
                     let uppercase = w.value.to_uppercase();
                     match uppercase.as_str() {
+                        #[cfg(feature = "enterprise")]
+                        "BULK" => self.parse_create_bulk_load(),
                         FLOW => self.parse_create_flow(false),
                         _ => self.unsupported(w.to_string()),
                     }

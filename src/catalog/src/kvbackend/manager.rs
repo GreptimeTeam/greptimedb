@@ -59,10 +59,13 @@ use crate::information_schema::{
 };
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
-use crate::system_schema::SystemSchemaProvider;
 use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 use crate::system_schema::semantic_graph::{EntityGraphProviderRef, SemanticGraphTableProvider};
+use crate::system_schema::{
+    MakePrivateSystemTableRequest, PrivateSystemTableFactoryRef, SystemSchemaProvider,
+    build_system_table,
+};
 
 /// Access all existing catalog, schema and tables.
 ///
@@ -587,6 +590,8 @@ pub(super) struct SystemCatalog {
     pub(super) process_manager: Option<ProcessManagerRef>,
     pub(super) extra_information_table_factories:
         std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
+    pub(super) private_system_table_factories:
+        std::collections::HashMap<String, PrivateSystemTableFactoryRef>,
 }
 
 impl SystemCatalog {
@@ -614,7 +619,17 @@ impl SystemCatalog {
             DEFAULT_SCHEMA_NAME => self.numbers_table_provider.table_names(),
             // Computed entity-graph tables overlay the physical tables of
             // `greptime_private` (the caller appends these to the physical list).
-            DEFAULT_PRIVATE_SCHEMA_NAME => SemanticGraphTableProvider::table_names(),
+            DEFAULT_PRIVATE_SCHEMA_NAME => {
+                let mut names = SemanticGraphTableProvider::table_names();
+                let mut extension_names = self
+                    .private_system_table_factories
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                extension_names.sort_unstable();
+                names.extend(extension_names);
+                names
+            }
             _ => vec![],
         }
     }
@@ -623,7 +638,7 @@ impl SystemCatalog {
         let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         match channel {
             Channel::Postgres => schema == PG_CATALOG_NAME || schema == INFORMATION_SCHEMA_NAME,
-            _ => schema == INFORMATION_SCHEMA_NAME,
+            _ => schema == INFORMATION_SCHEMA_NAME || schema == DEFAULT_PRIVATE_SCHEMA_NAME,
         }
     }
 
@@ -637,6 +652,7 @@ impl SystemCatalog {
             self.pg_catalog_provider.table(table).is_some()
         } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME {
             SemanticGraphTableProvider::table_exists(table)
+                || self.private_system_table_factories.contains_key(table)
         } else {
             false
         }
@@ -680,6 +696,16 @@ impl SystemCatalog {
             }
         } else if schema == DEFAULT_SCHEMA_NAME {
             self.numbers_table_provider.table(table_name)
+        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            && let Some(factory) = self.private_system_table_factories.get(table_name)
+        {
+            Some(build_system_table(
+                catalog.to_string(),
+                DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
+                factory.make_private_system_table(MakePrivateSystemTableRequest {
+                    catalog_name: catalog.to_string(),
+                }),
+            ))
         } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME
             && SemanticGraphTableProvider::table_exists(table_name)
         {
