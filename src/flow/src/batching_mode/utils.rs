@@ -21,6 +21,7 @@ use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_function::aggrs::aggr_wrapper::get_aggr_func;
 use common_telemetry::debug;
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::Expr;
@@ -326,7 +327,10 @@ fn is_literal_or_cast_literal(expr: &Expr) -> bool {
     }
 }
 
-fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateMergeOp, String> {
+fn merge_op_for_aggregate_expr(
+    aggr_expr: &Expr,
+    input_schema: &DFSchema,
+) -> Result<IncrementalAggregateMergeOp, String> {
     let Some(aggr_func) = get_aggr_func(aggr_expr) else {
         return Err(aggr_expr.to_string());
     };
@@ -356,6 +360,9 @@ fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateM
         "bit_or" => Ok(IncrementalAggregateMergeOp::BitOr),
         "bit_xor" => Ok(IncrementalAggregateMergeOp::BitXor),
         // Preserve state-family parameters; value coercion is handled by the aggregate.
+        "avg_state" if aggr_func.params.args.len() == 1 => {
+            state_delta_merge("__avg_state_delta_merge", vec![])
+        }
         "hll" if aggr_func.params.args.len() == 1 => state_delta_merge("__hll_delta_merge", vec![]),
         "stddev_pop_state" if aggr_func.params.args.len() == 1 => {
             state_delta_merge("__stddev_pop_state_delta_merge", vec![])
@@ -373,6 +380,15 @@ fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateM
                 "__uddsketch_state_delta_merge",
                 vec![bucket_size.clone(), error_rate.clone()],
             )
+        }
+        // AVG's binary merge form is admitted because its state argument is
+        // already the aggregate result stored by the sink.
+        "avg_merge"
+            if aggr_func.params.args.len() == 1
+                && aggr_func.params.args[0].get_type(input_schema).ok()
+                    == Some(ArrowDataType::Binary) =>
+        {
+            state_delta_merge("__avg_state_delta_merge", vec![])
         }
         _ => Err(aggr_expr.to_string()),
     }
@@ -520,7 +536,7 @@ pub fn analyze_incremental_aggregate_plan(
         &group_key_names,
     ));
     for aggr_expr in aggr_exprs {
-        let merge_op = match merge_op_for_aggregate_expr(&aggr_expr) {
+        let merge_op = match merge_op_for_aggregate_expr(&aggr_expr, aggregate.input.schema()) {
             Ok(merge_op) => merge_op,
             Err(reason) => {
                 unsupported_exprs.push(reason);
