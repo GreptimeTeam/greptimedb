@@ -1690,6 +1690,70 @@ async fn test_alter_region_ttl_options_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
+async fn test_alter_twcs_option_enables_compaction_override() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let compaction_override = || {
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .compaction_override
+    };
+    assert!(!compaction_override());
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::UnsetRegionOptions {
+                    keys: vec![UnsetRegionOption::TwcsTimeWindow],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!compaction_override());
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::Twsc(
+                        "compaction.twcs.time_window".to_string(),
+                        "2h".to_string(),
+                    )],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(compaction_override());
+}
+
+#[tokio::test]
 async fn test_mixed_region_options_are_published_after_flush() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
@@ -1733,6 +1797,10 @@ async fn test_mixed_region_options_are_published_after_flush() {
                     kind: AlterKind::SetRegionOptions {
                         options: vec![
                             SetRegionOption::Ttl(Some(Duration::from_secs(500).into())),
+                            SetRegionOption::Twsc(
+                                "compaction.twcs.time_window".to_string(),
+                                "2h".to_string(),
+                            ),
                             SetRegionOption::MaxRowGroupRowCount(Some(1024)),
                         ],
                     },
@@ -1745,6 +1813,7 @@ async fn test_mixed_region_options_are_published_after_flush() {
     listener.wait_flush_begin().await;
     let version = engine.get_region(region_id).unwrap().version();
     assert_eq!(None, version.options.ttl);
+    assert!(!version.options.compaction_override);
     assert_eq!(None, version.options.max_row_group_row_count);
 
     listener.wake_flush();
@@ -1752,6 +1821,7 @@ async fn test_mixed_region_options_are_published_after_flush() {
 
     let version = engine.get_region(region_id).unwrap().version();
     assert_eq!(Some(Duration::from_secs(500).into()), version.options.ttl);
+    assert!(version.options.compaction_override);
     assert_eq!(Some(1024), version.options.max_row_group_row_count);
 }
 

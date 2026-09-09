@@ -246,6 +246,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         &value,
                         region.region_id,
                     )?;
+                    if !value.is_empty() {
+                        current_options.compaction_override = true;
+                    }
                 }
                 SetRegionOption::Format(format_str) => {
                     let new_format = format_str.parse::<FormatType>().map_err(|_| {
