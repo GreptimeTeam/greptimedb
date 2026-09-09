@@ -1,0 +1,53 @@
+SELECT host, ts, cpu
+FROM t_twcs_active_window_options
+ORDER BY host, ts;
+
++-------+---------------------+-----+
+| host  | ts                  | cpu |
++-------+---------------------+-----+
+| host1 | 2026-08-01T00:00:00 | 1.0 |
+| host2 | 2026-08-01T00:01:00 | 2.0 |
++-------+---------------------+-----+
+
+SHOW CREATE TABLE t_twcs_active_window_options;
+
++------------------------------+-------------------------------------------------------------+
+| Table                        | Create Table                                                |
++------------------------------+-------------------------------------------------------------+
+| t_twcs_active_window_options | CREATE TABLE IF NOT EXISTS "t_twcs_active_window_options" ( |
+|                              |   "host" STRING NULL,                                       |
+|                              |   "ts" TIMESTAMP(3) NOT NULL,                               |
+|                              |   "cpu" DOUBLE NULL,                                        |
+|                              |   TIME INDEX ("ts"),                                        |
+|                              |   PRIMARY KEY ("host")                                      |
+|                              | )                                                           |
+|                              |                                                             |
+|                              | ENGINE=mito                                                 |
+|                              | WITH(                                                       |
+|                              |   'compaction.override' = 'true',                           |
+|                              |   'compaction.twcs.trigger_file_num' = '3',                 |
+|                              |   'compaction.type' = 'twcs'                                |
+|                              | )                                                           |
++------------------------------+-------------------------------------------------------------+
+
+ALTER TABLE t_twcs_active_window_options
+SET 'compaction.twcs.active_window.trigger_file_num' = '4';
+
+Affected Rows: 0
+
+INSERT INTO t_twcs_active_window_options VALUES
+  ('host3', '2026-08-01 00:02:00+0000', 3.0);
+
+Affected Rows: 1
+
+SELECT host, ts, cpu
+FROM t_twcs_active_window_options
+ORDER BY host, ts;
+
++-------+---------------------+-----+
+| host  | ts                  | cpu |
++-------+---------------------+-----+
+| host1 | 2026-08-01T00:00:00 | 1.0 |
+| host2 | 2026-08-01T00:01:00 | 2.0 |
+| host3 | 2026-08-01T00:02:00 | 3.0 |
++-------+---------------------+-----+

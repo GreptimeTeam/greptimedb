@@ -39,12 +39,14 @@ use store_api::mito_engine_options::{
     APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD,
     MEMTABLE_BULK_ENCODE_ROW_THRESHOLD, MEMTABLE_BULK_MAX_MERGE_GROUPS,
     MEMTABLE_BULK_MERGE_THRESHOLD, MEMTABLE_TYPE, MERGE_MODE_KEY, SST_FORMAT_KEY,
-    TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
-    is_mito_engine_option_key,
+    TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_FALLBACK_TO_LOCAL, TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
+    TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key, normalize_twcs_trigger_options,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
-use crate::error::{ParseTableOptionSnafu, Result};
+use crate::error::{ConflictingTableOptionsSnafu, ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
 use crate::table_reference::TableReference;
 
@@ -118,6 +120,10 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     set.insert(TWCS_FALLBACK_TO_LOCAL);
     set.insert(TWCS_TIME_WINDOW);
     set.insert(TWCS_TRIGGER_FILE_NUM);
+    set.insert(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
+    set.insert(TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER);
+    set.insert(TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM);
+    set.insert(TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER);
     set.insert(TWCS_MAX_OUTPUT_FILE_SIZE);
     set.insert(SST_FORMAT_KEY);
     set
@@ -126,6 +132,32 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
 /// Returns true if the `key` is a valid key for database.
 pub fn validate_database_option(key: &str) -> bool {
     VALID_DB_OPT_KEYS.contains(&key)
+}
+
+/// Validates a database option value, returning the violated constraint on error.
+pub fn validate_database_option_value(
+    key: &str,
+    value: Option<&str>,
+) -> std::result::Result<(), &'static str> {
+    let (minimum, constraint) = match key {
+        TWCS_TRIGGER_FILE_NUM
+        | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
+        | TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM => {
+            (0, "expected a non-negative integer fitting in usize")
+        }
+        TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER | TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER => {
+            (2, "expected an integer greater than or equal to 2")
+        }
+        _ => return Ok(()),
+    };
+    if value
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|files| files >= minimum)
+    {
+        Ok(())
+    } else {
+        Err(constraint)
+    }
 }
 
 /// Returns true if the `key` is a valid key for any engine or storage.
@@ -183,10 +215,20 @@ impl TableOptions {
     ) -> Result<TableOptions> {
         let mut options = TableOptions::default();
 
-        let kvs: HashMap<String, String> = iter
+        let mut kvs: HashMap<String, String> = iter
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+
+        normalize_twcs_trigger_options(&mut kvs).map_err(|conflict| {
+            ConflictingTableOptionsSnafu {
+                first_key: TWCS_TRIGGER_FILE_NUM,
+                first_value: conflict.legacy_value,
+                second_key: TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+                second_value: conflict.canonical_value,
+            }
+            .build()
+        })?;
 
         if let Some(write_buffer_size) = kvs.get(WRITE_BUFFER_SIZE_KEY) {
             let size = ReadableSize::from_str(write_buffer_size).map_err(|_| {
@@ -716,6 +758,9 @@ pub struct CopyQueryToRequest {
 mod tests {
     use std::time::Duration;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+
     use super::*;
 
     #[test]
@@ -748,7 +793,58 @@ mod tests {
             MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD
         ));
         assert!(validate_database_option(MEMTABLE_BULK_MAX_MERGE_GROUPS));
+        assert!(validate_database_option(
+            "compaction.twcs.active_window.trigger_file_num"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.active_window.l1_merge_trigger"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.inactive_window.trigger_file_num"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.inactive_window.l1_merge_trigger"
+        ));
         assert!(!validate_database_option("foo"));
+    }
+
+    #[test]
+    fn test_database_trigger_value_boundaries() {
+        let maximum = usize::MAX.to_string();
+        let overflow = format!("{maximum}0");
+        for (key, minimum) in [
+            (TWCS_TRIGGER_FILE_NUM, 0),
+            (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, 0),
+            (TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, 0),
+            (TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, 2),
+            (TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER, 2),
+        ] {
+            for invalid in [
+                None,
+                Some(""),
+                Some("invalid"),
+                Some("-1"),
+                Some(overflow.as_str()),
+            ] {
+                assert!(
+                    validate_database_option_value(key, invalid).is_err(),
+                    "{key}: {invalid:?}"
+                );
+            }
+            for valid in ["2", maximum.as_str()] {
+                assert!(
+                    validate_database_option_value(key, Some(valid)).is_ok(),
+                    "{key}: {valid}"
+                );
+            }
+            for boundary in ["0", "1"] {
+                assert_eq!(
+                    validate_database_option_value(key, Some(boundary)).is_ok(),
+                    minimum == 0,
+                    "{key}: {boundary}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -818,6 +914,37 @@ mod tests {
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
+    }
+
+    #[test]
+    fn test_table_options_normalizes_twcs_trigger_aliases() {
+        for options in [
+            vec![(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "4")],
+            vec![
+                (TWCS_TRIGGER_FILE_NUM, "4"),
+                (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "4"),
+            ],
+        ] {
+            let table_options = TableOptions::try_from_iter(options).unwrap();
+            assert_eq!(
+                HashMap::from([(TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string())]),
+                table_options.extra_options
+            );
+        }
+    }
+
+    #[test]
+    fn test_table_options_rejects_conflicting_twcs_trigger_aliases() {
+        let error = TableOptions::try_from_iter([
+            (TWCS_TRIGGER_FILE_NUM, "4"),
+            (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "8"),
+        ])
+        .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!(
+            "Conflicting table options: compaction.twcs.trigger_file_num=4 and compaction.twcs.active_window.trigger_file_num=8",
+            error.to_string()
+        );
     }
 
     #[test]
