@@ -92,10 +92,8 @@ impl ScanHintRule {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         };
 
-        // LastRow is only sound when every predicate already attached to this
-        // scan is restricted to columns that preserve the series' last row.
-        // In particular, do not infer this from a Filter node above the scan:
-        // only the filters that DataFusion actually pushed to this scan matter.
+        // Attached scan filters are checked below; the intervening Filter guard
+        // disables LastRow for residual predicates.
         let filters_preserve_last_row = if rewriter.inside_single_evaluation {
             Self::filters_preserve_last_row(&table_scan, original)
         } else {
@@ -343,6 +341,10 @@ impl TreeNodeRewriter for ScanHintRewriter {
         if matches!(node, LogicalPlan::Subquery(_)) {
             self.inside_single_evaluation = false;
         }
+        // A residual predicate can change which row is last for a series.
+        if matches!(&node, LogicalPlan::Filter(_)) {
+            self.inside_single_evaluation = false;
+        }
         if let LogicalPlan::Aggregate(aggregate) = &node {
             self.ts_row_selector = Self::extract_last_value_selector(aggregate);
         }
@@ -579,6 +581,21 @@ mod test {
         .unwrap()
     }
 
+    fn single_evaluation(input: LogicalPlan) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                1000,
+                1000,
+                "ts".to_string(),
+                vec![],
+                Some("v0".to_string()),
+                input,
+            )),
+        })
+    }
+
     fn instant_with_expression_subquery(
         outer_provider: Arc<DummyTableProvider>,
         inner_plan: LogicalPlan,
@@ -665,6 +682,121 @@ mod test {
         assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
 
         assert_eq!(provider.scan_request().series_row_selector, None);
+    }
+
+    #[test]
+    fn residual_field_filter_does_not_set_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let input = LogicalPlanBuilder::from(scan_plan(provider, "t"))
+            .filter(col("v0").gt(lit(1.0_f64)))
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule
+            .rewrite(single_evaluation(input), &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+    }
+
+    #[test]
+    fn outer_residual_filter_does_not_block_last_row() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = LogicalPlanBuilder::from(single_evaluation(scan_plan(provider, "t")))
+            .filter(col("v0").gt(lit(1.0_f64)))
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
+    }
+
+    #[test]
+    fn residual_filter_only_blocks_its_union_branch() {
+        for filtered_first in [true, false] {
+            let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+            let filtered = LogicalPlanBuilder::from(scan_plan(provider.clone(), "filtered"))
+                .filter(col("v0").gt(lit(1.0_f64)))
+                .unwrap()
+                .build()
+                .unwrap();
+            let plain = scan_plan(provider.clone(), "plain");
+            let union = if filtered_first {
+                LogicalPlanBuilder::from(filtered)
+                    .union(plain)
+                    .unwrap()
+                    .build()
+                    .unwrap()
+            } else {
+                LogicalPlanBuilder::from(plain)
+                    .union(filtered)
+                    .unwrap()
+                    .build()
+                    .unwrap()
+            };
+            let rewritten = ScanHintRule
+                .rewrite(single_evaluation(union), &OptimizerContext::default())
+                .unwrap()
+                .data;
+            let requests = scan_requests_with_names(&rewritten)
+                .into_iter()
+                .collect::<HashMap<_, _>>();
+
+            assert_eq!(requests["filtered"].series_row_selector, None);
+            assert_eq!(
+                requests["plain"].series_row_selector,
+                Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+            );
+            assert_eq!(provider.scan_request().series_row_selector, None);
+        }
+    }
+
+    #[test]
+    fn residual_time_filters_do_not_set_last_row() {
+        for predicate in [
+            col("ts").lt(lit(1_i64)),
+            Expr::Cast(Cast::new(Box::new(col("ts")), DataType::Int64)).gt(lit(1_i64)),
+        ] {
+            let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+            let input = LogicalPlanBuilder::from(scan_plan(provider, "t"))
+                .filter(predicate)
+                .unwrap()
+                .build()
+                .unwrap();
+            let rewritten = ScanHintRule
+                .rewrite(single_evaluation(input), &OptimizerContext::default())
+                .unwrap()
+                .data;
+
+            assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
+        }
+    }
+
+    #[test]
+    fn inner_single_evaluation_resets_residual_filter() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let filtered = LogicalPlanBuilder::from(single_evaluation(scan_plan(provider, "t")))
+            .filter(col("v0").gt(lit(1.0_f64)))
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule
+            .rewrite(single_evaluation(filtered), &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
     }
 
     #[test]
