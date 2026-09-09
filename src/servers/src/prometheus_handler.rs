@@ -40,6 +40,7 @@ pub type PrometheusHandlerRef = Arc<dyn PrometheusHandler + Send + Sync>;
 pub struct ParsedPromQuery {
     query: PromQuery,
     statement: QueryStatement,
+    requires_output_ordering: bool,
 }
 
 impl ParsedPromQuery {
@@ -51,7 +52,11 @@ impl ParsedPromQuery {
                     query: query.clone(),
                 }
             })?;
-        Ok(Self { query, statement })
+        Ok(Self {
+            query,
+            statement,
+            requires_output_ordering: true,
+        })
     }
 
     /// Returns the original query parameters.
@@ -62,6 +67,20 @@ impl ParsedPromQuery {
     /// Returns the parsed query statement.
     pub fn statement(&self) -> &QueryStatement {
         &self.statement
+    }
+
+    /// Returns whether the caller consumes the query output in execution order.
+    ///
+    /// Callers that re-derive the order themselves can clear this so the executor
+    /// is allowed to drop the plan's output sort.
+    pub fn requires_output_ordering(&self) -> bool {
+        self.requires_output_ordering
+    }
+
+    /// Marks the output order as irrelevant to the caller.
+    pub(crate) fn with_unordered_output(mut self) -> Self {
+        self.requires_output_ordering = false;
+        self
     }
 
     /// Returns the parsed PromQL expression.
