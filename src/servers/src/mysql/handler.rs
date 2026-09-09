@@ -374,6 +374,15 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         if user == BEARER_TOKEN_USER.as_bytes() {
             return MysqlAuthMethod::ClearPassword.plugin_name();
         }
+        if let Some(provider) = &self.user_provider {
+            let username = String::from_utf8_lossy(user);
+            match provider.mysql_auth_method_for_user(&username).await {
+                Ok(method) => return method.plugin_name(),
+                // This hook cannot return an error. Keep the default challenge;
+                // authentication still validates the credentials separately.
+                Err(e) => warn!(e; "Failed to select MySQL authentication method"),
+            }
+        }
         self.auth_plugin()
     }
 
