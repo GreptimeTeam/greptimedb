@@ -26,7 +26,7 @@ use std::sync::Arc;
 use api::v1::WalEntry;
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
-use encoder::WalEntryEncoder;
+use encoder::{WalEntryEncoder, WalEntryMask};
 use entry_reader::NoopEntryReader;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -204,13 +204,31 @@ impl<S: LogStore> WalWriter<S> {
         wal_entry: &WalEntry,
         provider: &Provider,
     ) -> Result<()> {
+        self.add_entry_with_mask(
+            region_id,
+            entry_id,
+            wal_entry,
+            &WalEntryMask::default(),
+            provider,
+        )
+    }
+
+    /// Adds only the entries selected by an in-memory WAL mask.
+    pub fn add_entry_with_mask(
+        &mut self,
+        region_id: RegionId,
+        entry_id: EntryId,
+        wal_entry: &WalEntry,
+        mask: &WalEntryMask,
+        provider: &Provider,
+    ) -> Result<()> {
         // Gets or inserts with a newly built provider.
         let provider = self
             .providers
             .entry(region_id)
             .or_insert_with(|| provider.clone());
 
-        let data = self.encoder.encode_to_vec(wal_entry);
+        let data = self.encoder.encode_to_vec(wal_entry, mask);
         let entry = self
             .store
             .entry(data, entry_id, region_id, provider)

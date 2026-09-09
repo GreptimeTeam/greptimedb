@@ -55,6 +55,8 @@
 //! Leaf messages are delegated to prost, so changes to them need no update here.
 
 use api::v1::{Mutation, Row, Rows, Value, WalEntry};
+use common_base::BitVec;
+use itertools::Either;
 use prost::Message;
 use prost::encoding::{WireType, encode_key, encode_varint, encoded_len_varint, key_len};
 
@@ -76,6 +78,58 @@ fn msg_field_len(tag: u32, body_len: usize) -> usize {
     key_len(tag) + encoded_len_varint(body_len as u64) + body_len
 }
 
+/// An in-memory selection of mutations to persist. Bulk entries are always selected.
+///
+/// No bitmap is allocated until the first excluded mutation. Once allocated,
+/// each bit corresponds to a mutation in the original entry: true includes it
+/// in WAL, false skips it. The mask is never persisted.
+#[derive(Debug, Default)]
+pub struct WalEntryMask {
+    selected_mutations: Option<BitVec>,
+}
+
+impl WalEntryMask {
+    /// Appends the WAL selection for the mutation at `index` in arrival order.
+    pub fn push_mutation(&mut self, index: usize, write_wal: bool) {
+        if let Some(selected) = &mut self.selected_mutations {
+            debug_assert_eq!(selected.len(), index);
+            selected.push(write_wal);
+        } else if !write_wal {
+            let mut selected = BitVec::with_capacity(index + 1);
+            selected.resize(index, true);
+            selected.push(false);
+            self.selected_mutations = Some(selected);
+        }
+    }
+
+    /// Returns whether any data remains to write to WAL after applying the mask.
+    /// Bulk entries are always included, regardless of the mutation mask.
+    pub fn has_entries(&self, entry: &WalEntry) -> bool {
+        !entry.bulk_entries.is_empty()
+            || match &self.selected_mutations {
+                Some(selected) => {
+                    debug_assert_eq!(selected.len(), entry.mutations.len());
+                    selected.any()
+                }
+                None => !entry.mutations.is_empty(),
+            }
+    }
+
+    /// Borrows selected mutations without cloning payloads or reordering entries.
+    pub fn mutations<'a>(
+        &'a self,
+        mutations: &'a [Mutation],
+    ) -> impl Iterator<Item = &'a Mutation> {
+        match &self.selected_mutations {
+            Some(selected) => {
+                debug_assert_eq!(selected.len(), mutations.len());
+                Either::Left(selected.iter_ones().map(|index| &mutations[index]))
+            }
+            None => Either::Right(mutations.iter()),
+        }
+    }
+}
+
 /// A reusable encoder that caches message body sizes between its size pass and
 /// its encode pass.
 #[derive(Default)]
@@ -90,13 +144,13 @@ impl WalEntryEncoder {
     }
 
     /// Encodes `entry` to a new `Vec<u8>`, byte-for-byte identical to
-    /// `entry.encode_to_vec()`.
-    pub fn encode_to_vec(&mut self, entry: &WalEntry) -> Vec<u8> {
+    /// encoding the selected entries with prost. The default mask selects all entries.
+    pub fn encode_to_vec(&mut self, entry: &WalEntry, mask: &WalEntryMask) -> Vec<u8> {
         self.sizes.clear();
-        let body_len = self.size_entry(entry);
+        let body_len = self.size_entry(entry, mask);
         let mut buf = Vec::with_capacity(body_len);
         let mut cursor = 0;
-        self.encode_entry(entry, &mut buf, &mut cursor);
+        self.encode_entry(entry, mask, &mut buf, &mut cursor);
         // Invariants of the two-pass design. Kept as `debug_assert` to avoid any
         // overhead on the hot write path; correctness is covered by the
         // byte-for-byte equality tests against prost.
@@ -121,7 +175,7 @@ impl WalEntryEncoder {
 
     /// Returns the body length of the `WalEntry` (no length delimiter; it is
     /// the root). Pushes cached slots for all nested message nodes.
-    fn size_entry(&mut self, entry: &WalEntry) -> usize {
+    fn size_entry(&mut self, entry: &WalEntry, mask: &WalEntryMask) -> usize {
         // Exhaustive destructure (no `..`): adding a field to `WalEntry` in
         // greptime-proto makes this fail to compile, forcing this encoder to be
         // updated rather than silently dropping the new field from the WAL.
@@ -130,7 +184,7 @@ impl WalEntryEncoder {
             bulk_entries,
         } = entry;
         let mut body = 0;
-        for m in mutations {
+        for m in mask.mutations(mutations) {
             let mb = self.size_mutation(m);
             body += msg_field_len(MUTATION_TAG, mb);
         }
@@ -234,13 +288,19 @@ impl WalEntryEncoder {
     // `next_size`, consuming that child's slot in pre-order) and writes the
     // key + length delimiter; the callee then writes only the body.
 
-    fn encode_entry(&self, entry: &WalEntry, buf: &mut Vec<u8>, cursor: &mut usize) {
+    fn encode_entry(
+        &self,
+        entry: &WalEntry,
+        mask: &WalEntryMask,
+        buf: &mut Vec<u8>,
+        cursor: &mut usize,
+    ) {
         // Exhaustive destructure: see note in `size_entry`.
         let WalEntry {
             mutations,
             bulk_entries,
         } = entry;
-        for m in mutations {
+        for m in mask.mutations(mutations) {
             let mb = self.next_size(cursor);
             encode_key(MUTATION_TAG, WireType::LengthDelimited, buf);
             encode_varint(mb as u64, buf);
@@ -369,7 +429,7 @@ mod tests {
 
     fn assert_byte_identical(entry: &WalEntry) {
         let expected = entry.encode_to_vec();
-        let actual = WalEntryEncoder::new().encode_to_vec(entry);
+        let actual = WalEntryEncoder::new().encode_to_vec(entry, &WalEntryMask::default());
         assert_eq!(
             expected,
             actual,
@@ -377,6 +437,145 @@ mod tests {
             expected.len(),
             actual.len()
         );
+    }
+
+    #[test]
+    fn test_mask_matches_prost_for_every_mutation_subset() {
+        let entry = WalEntry {
+            mutations: (0..4)
+                .map(|i| Mutation {
+                    op_type: if i == 2 { OpType::Delete } else { OpType::Put } as i32,
+                    sequence: 1 + i * 3,
+                    rows: Some(sample_rows(3, i % 2 == 0)),
+                    write_hint: Some(WriteHint {
+                        primary_key_encoding: 1,
+                    }),
+                })
+                .collect(),
+            bulk_entries: vec![BulkWalEntry {
+                sequence: 13,
+                max_ts: 100,
+                min_ts: 10,
+                timestamp_index: 3,
+                body: None,
+            }],
+        };
+        // Reuse one encoder across every mask to catch stale cached-size slots.
+        let mut encoder = WalEntryEncoder::new();
+        for bits in 0..16 {
+            let mut mask = WalEntryMask::default();
+            for index in 0..4 {
+                mask.push_mutation(index, bits & (1 << index) == 0);
+            }
+            let expected = WalEntry {
+                mutations: entry
+                    .mutations
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| bits & (1 << index) == 0)
+                    .map(|(_, mutation)| mutation.clone())
+                    .collect(),
+                bulk_entries: entry.bulk_entries.clone(),
+            };
+            let actual = encoder.encode_to_vec(&entry, &mask);
+            assert_eq!(actual, expected.encode_to_vec(), "mask {bits:04b}");
+            assert_eq!(WalEntry::decode(actual.as_slice()).unwrap(), expected);
+            assert!(mask.has_entries(&entry), "bulk is never masked out");
+            assert_eq!(entry.mutations.len(), 4, "mask must not consume the input");
+            // Even when every ordinary mutation is skipped, bulk still consumes
+            // exactly one cached size slot and is encoded normally.
+            if bits == 15 {
+                assert_eq!(encoder.sizes.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mask_growth_across_byte_boundaries() {
+        let mut encoder = WalEntryEncoder::new();
+        for count in [17, 65] {
+            let entry = WalEntry {
+                mutations: (0..count)
+                    .map(|index| Mutation {
+                        op_type: OpType::Put as i32,
+                        sequence: index as u64 + 1,
+                        rows: Some(sample_rows(1, false)),
+                        write_hint: None,
+                    })
+                    .collect(),
+                bulk_entries: vec![],
+            };
+            let mut all_selected = WalEntryMask::default();
+            for index in 0..count {
+                all_selected.push_mutation(index, true);
+            }
+            assert!(all_selected.selected_mutations.is_none());
+            assert_eq!(
+                encoder.encode_to_vec(&entry, &all_selected),
+                entry.encode_to_vec()
+            );
+
+            for skip_last in [false, true] {
+                let expected_bits: Vec<_> = (0..count)
+                    .map(|index| {
+                        if index == count - 1 {
+                            !skip_last
+                        } else {
+                            ![0, 8, 16].contains(&index)
+                        }
+                    })
+                    .collect();
+                let mut mask = WalEntryMask::default();
+                for (index, &write_wal) in expected_bits.iter().enumerate() {
+                    mask.push_mutation(index, write_wal);
+                    assert_eq!(mask.selected_mutations.as_ref().unwrap().len(), index + 1);
+                }
+                let selected = mask.selected_mutations.as_ref().unwrap();
+                for (index, &expected) in expected_bits.iter().enumerate() {
+                    assert_eq!(
+                        selected[index], expected,
+                        "count={count}, index={index}, skip_last={skip_last}"
+                    );
+                }
+                let expected = WalEntry {
+                    mutations: entry
+                        .mutations
+                        .iter()
+                        .zip(&expected_bits)
+                        .filter(|(_, selected)| **selected)
+                        .map(|(mutation, _)| mutation.clone())
+                        .collect(),
+                    bulk_entries: vec![],
+                };
+                assert!(mask.has_entries(&entry));
+                let encoded = encoder.encode_to_vec(&entry, &mask);
+                assert_eq!(encoded, expected.encode_to_vec());
+                assert_eq!(WalEntry::decode(encoded.as_slice()).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_all_skip_mask_does_not_size_or_allocate_output() {
+        let entry = WalEntry {
+            mutations: vec![Mutation {
+                op_type: OpType::Put as i32,
+                sequence: 1,
+                rows: Some(sample_rows(100, true)),
+                write_hint: None,
+            }],
+            bulk_entries: vec![],
+        };
+        let mut mask = WalEntryMask::default();
+        assert!(mask.selected_mutations.is_none());
+        assert!(mask.has_entries(&entry));
+        mask.push_mutation(0, false);
+        assert!(!mask.has_entries(&entry));
+        let mut encoder = WalEntryEncoder::new();
+        let encoded = encoder.encode_to_vec(&entry, &mask);
+        assert_eq!(encoded, WalEntry::default().encode_to_vec());
+        assert_eq!(encoded.capacity(), 0);
+        assert_eq!(encoder.sizes.capacity(), 0);
     }
 
     #[test]
@@ -451,7 +650,10 @@ mod tests {
                 }],
                 bulk_entries: vec![],
             };
-            assert_eq!(entry.encode_to_vec(), enc.encode_to_vec(&entry));
+            assert_eq!(
+                entry.encode_to_vec(),
+                enc.encode_to_vec(&entry, &WalEntryMask::default())
+            );
         }
     }
 

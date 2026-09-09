@@ -451,6 +451,7 @@ impl<S> RegionWorkerLoop<S> {
                 sender_req.request.hint,
                 sender_req.sender,
                 None,
+                sender_req.request.skip_wal,
             );
         }
     }
@@ -613,13 +614,20 @@ async fn write_wal<S: LogStore>(
     region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
 ) -> bool {
     let mut wal_writer = wal.writer();
+    let mut has_wal_entries = false;
     for region_ctx in region_ctxs.values_mut() {
         if region_ctx.skip_wal() {
             continue;
         }
         if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
             region_ctx.set_error(e);
+        } else {
+            has_wal_entries = true;
         }
+    }
+    // All-skipped batches should not touch the log store, even with an empty append.
+    if !has_wal_entries {
+        return true;
     }
     match wal_writer.write_to_wal().await.map_err(Arc::new) {
         Ok(response) => {
@@ -880,6 +888,7 @@ mod tests {
 
     fn new_region_ctx(
         region_id: RegionId,
+        skip_wal: bool,
     ) -> (RegionWriteCtx, oneshot::Receiver<Result<AffectedRows>>) {
         let version_control = Arc::new(VersionControlBuilder::new().build());
         let mut ctx = RegionWriteCtx::new(
@@ -908,8 +917,36 @@ mod tests {
             None,
             OptionOutputTx::from(tx),
             None,
+            skip_wal,
         );
         (ctx, rx)
+    }
+
+    #[tokio::test]
+    async fn test_request_skip_wal_does_not_append_empty_batch() {
+        // Only change the request flag. A failing log store demonstrates that
+        // the all-skipped path never invokes append_batch, including empty appends.
+        for skip_wal in [false, true] {
+            let region_id = RegionId::new(1, 1);
+            let wal = Wal::new(Arc::new(MockLogStore {
+                fail_append: true,
+                ..Default::default()
+            }));
+            let (ctx, rx) = new_region_ctx(region_id, skip_wal);
+            let version_control = ctx.version_control().clone();
+            let mut contexts = HashMap::from([(region_id, ctx)]);
+            assert_eq!(write_wal(&wal, &mut contexts).await, skip_wal);
+            if skip_wal {
+                let ctx = contexts.get_mut(&region_id).unwrap();
+                assert_eq!(ctx.next_entry_id(), 1);
+                ctx.write_memtable().await;
+                ctx.publish_sequence_and_entry_id();
+                assert_eq!(version_control.committed_sequence(), 1);
+                assert_eq!(version_control.current().last_entry_id, 0);
+            }
+            drop(contexts);
+            assert_eq!(rx.await.unwrap().is_ok(), skip_wal);
+        }
     }
 
     #[tokio::test]
@@ -922,10 +959,10 @@ mod tests {
         }));
 
         let mut region_ctxs = HashMap::new();
-        let (ctx, failing_rx) = new_region_ctx(failing_region);
+        let (ctx, failing_rx) = new_region_ctx(failing_region, false);
         let failing_committed_sequence = ctx.version_control().committed_sequence();
         region_ctxs.insert(failing_region, ctx);
-        let (ctx, ok_rx) = new_region_ctx(ok_region);
+        let (ctx, ok_rx) = new_region_ctx(ok_region, false);
         let ok_committed_sequence = ctx.version_control().committed_sequence();
         region_ctxs.insert(ok_region, ctx);
         let entry_id = region_ctxs[&ok_region].next_entry_id();
@@ -1026,7 +1063,7 @@ mod tests {
         }));
 
         let mut region_ctxs = HashMap::new();
-        let (ctx, rx) = new_region_ctx(failing_region);
+        let (ctx, rx) = new_region_ctx(failing_region, false);
         region_ctxs.insert(failing_region, ctx);
 
         // Writing an empty batch to the WAL succeeds, the failed region must not panic
@@ -1047,7 +1084,7 @@ mod tests {
         }));
 
         let mut region_ctxs = HashMap::new();
-        let (ctx, rx) = new_region_ctx(region_id);
+        let (ctx, rx) = new_region_ctx(region_id, false);
         region_ctxs.insert(region_id, ctx);
 
         assert!(!write_wal(&wal, &mut region_ctxs).await);

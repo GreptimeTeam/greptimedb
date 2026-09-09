@@ -26,7 +26,7 @@ use std::hint::black_box;
 use api::v1::helper::{field_column_schema, tag_column_schema, time_index_column_schema};
 use api::v1::{ColumnDataType, Mutation, OpType, Row, Rows, Value, WalEntry, value};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use mito2::wal::encoder::WalEntryEncoder;
+use mito2::wal::encoder::{WalEntryEncoder, WalEntryMask};
 use prost::Message;
 
 /// Builds a `Rows` with 3 string tags + timestamp + 3 float fields, mirroring a
@@ -106,8 +106,21 @@ fn bench_wal_encode(c: &mut Criterion) {
 
     group.bench_function("wal_entry_encoder", |b| {
         let mut encoder = WalEntryEncoder::new();
-        b.iter(|| black_box(encoder.encode_to_vec(&entry)));
+        b.iter(|| black_box(encoder.encode_to_vec(&entry, &WalEntryMask::default())));
     });
+
+    // Fixed input and encoder, changing only the WAL selection. Mask setup stays
+    // outside the timed loop; payloads are never cloned by the production path.
+    for skipped_count in [0, 1, 2, 4] {
+        let mut mask = WalEntryMask::default();
+        for index in 0..entry.mutations.len() {
+            mask.push_mutation(index, index >= skipped_count);
+        }
+        group.bench_function(format!("mask_skip_{skipped_count}_of_4"), |b| {
+            let mut encoder = WalEntryEncoder::new();
+            b.iter(|| black_box(encoder.encode_to_vec(black_box(&entry), black_box(&mask))));
+        });
+    }
 
     group.finish();
 }
