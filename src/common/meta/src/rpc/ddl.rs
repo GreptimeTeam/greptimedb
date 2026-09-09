@@ -1223,7 +1223,7 @@ impl TryFrom<PbOption> for SetDatabaseOption {
             }
             _ => {
                 if validate_database_option(&key_lower)
-                    && validate_database_option_value(&key_lower, Some(&value))
+                    && validate_database_option_value(&key_lower, Some(&value)).is_ok()
                 {
                     Ok(SetDatabaseOption::Other(key_lower, value))
                 } else {
@@ -1904,23 +1904,40 @@ mod tests {
     }
 
     #[test]
-    fn test_set_database_option_rejects_invalid_active_window_l1_merge_trigger() {
-        let option = PbOption {
-            key: "compaction.twcs.active_window.l1_merge_trigger".to_string(),
-            value: "1".to_string(),
-        };
-
-        assert!(SetDatabaseOption::try_from(option).is_err());
-    }
-
-    #[test]
-    fn test_set_database_option_rejects_invalid_inactive_window_l1_merge_trigger() {
-        let option = PbOption {
-            key: "compaction.twcs.inactive_window.l1_merge_trigger".to_string(),
-            value: "1".to_string(),
-        };
-
-        assert!(SetDatabaseOption::try_from(option).is_err());
+    fn test_alter_database_rejects_invalid_trigger_values() {
+        let overflow = format!("{}0", usize::MAX);
+        for key in [
+            "compaction.twcs.trigger_file_num",
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.inactive_window.trigger_file_num",
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+        ] {
+            for invalid in ["invalid", "-1", overflow.as_str()] {
+                let kind = PbAlterDatabaseKind::SetDatabaseOptions(api::v1::SetDatabaseOptions {
+                    set_database_options: vec![PbOption {
+                        key: key.to_string(),
+                        value: invalid.to_string(),
+                    }],
+                });
+                let err = AlterDatabaseKind::try_from(kind).unwrap_err();
+                assert!(
+                    matches!(err, error::Error::InvalidSetDatabaseOption { .. }),
+                    "{key}: {invalid}"
+                );
+            }
+            for boundary in ["0", "1", "2"] {
+                let option = PbOption {
+                    key: key.to_string(),
+                    value: boundary.to_string(),
+                };
+                assert_eq!(
+                    SetDatabaseOption::try_from(option).is_ok(),
+                    !key.ends_with("l1_merge_trigger") || boundary == "2",
+                    "{key}: {boundary}"
+                );
+            }
+        }
     }
 
     #[test]

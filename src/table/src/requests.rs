@@ -134,14 +134,30 @@ pub fn validate_database_option(key: &str) -> bool {
     VALID_DB_OPT_KEYS.contains(&key)
 }
 
-/// Returns true if the value is valid for the database option.
-pub fn validate_database_option_value(key: &str, value: Option<&str>) -> bool {
-    !matches!(
-        key,
-        TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER | TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER
-    ) || value
+/// Validates a database option value, returning the violated constraint on error.
+pub fn validate_database_option_value(
+    key: &str,
+    value: Option<&str>,
+) -> std::result::Result<(), &'static str> {
+    let (minimum, constraint) = match key {
+        TWCS_TRIGGER_FILE_NUM
+        | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
+        | TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM => {
+            (0, "expected a non-negative integer fitting in usize")
+        }
+        TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER | TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER => {
+            (2, "expected an integer greater than or equal to 2")
+        }
+        _ => return Ok(()),
+    };
+    if value
         .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|files| files >= 2)
+        .is_some_and(|files| files >= minimum)
+    {
+        Ok(())
+    } else {
+        Err(constraint)
+    }
 }
 
 /// Returns true if the `key` is a valid key for any engine or storage.
@@ -790,22 +806,45 @@ mod tests {
             "compaction.twcs.inactive_window.l1_merge_trigger"
         ));
         assert!(!validate_database_option("foo"));
-        assert!(validate_database_option_value(
-            TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
-            Some("2")
-        ));
-        assert!(!validate_database_option_value(
-            TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
-            Some("1")
-        ));
-        assert!(validate_database_option_value(
-            "compaction.twcs.inactive_window.l1_merge_trigger",
-            Some("2")
-        ));
-        assert!(!validate_database_option_value(
-            "compaction.twcs.inactive_window.l1_merge_trigger",
-            Some("1")
-        ));
+    }
+
+    #[test]
+    fn test_database_trigger_value_boundaries() {
+        let maximum = usize::MAX.to_string();
+        let overflow = format!("{maximum}0");
+        for (key, minimum) in [
+            (TWCS_TRIGGER_FILE_NUM, 0),
+            (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, 0),
+            (TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, 0),
+            (TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, 2),
+            (TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER, 2),
+        ] {
+            for invalid in [
+                None,
+                Some(""),
+                Some("invalid"),
+                Some("-1"),
+                Some(overflow.as_str()),
+            ] {
+                assert!(
+                    validate_database_option_value(key, invalid).is_err(),
+                    "{key}: {invalid:?}"
+                );
+            }
+            for valid in ["2", maximum.as_str()] {
+                assert!(
+                    validate_database_option_value(key, Some(valid)).is_ok(),
+                    "{key}: {valid}"
+                );
+            }
+            for boundary in ["0", "1"] {
+                assert_eq!(
+                    validate_database_option_value(key, Some(boundary)).is_ok(),
+                    minimum == 0,
+                    "{key}: {boundary}"
+                );
+            }
+        }
     }
 
     #[test]

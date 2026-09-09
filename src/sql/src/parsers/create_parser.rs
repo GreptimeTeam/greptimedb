@@ -229,16 +229,16 @@ impl<'a> ParserContext<'a> {
                 InvalidDatabaseOptionSnafu { key: key.clone() }
             );
             let option_value_str = option_value.as_string();
-            ensure!(
-                validate_database_option_value(key, option_value_str),
+            validate_database_option_value(key, option_value_str).map_err(|reason| {
                 InvalidDatabaseOptionValueSnafu {
                     key: key.clone(),
                     value: option_value_str
                         .map(str::to_owned)
                         .unwrap_or_else(|| option_value.to_string()),
-                    reason: "expected an integer greater than or equal to 2".to_string(),
+                    reason: reason.to_string(),
                 }
-            );
+                .build()
+            })?;
         }
         if let Some(append_mode) = options.get("append_mode").and_then(|x| x.as_string())
             && append_mode == "true"
@@ -1594,6 +1594,37 @@ mod tests {
 
     #[test]
     fn test_parse_create_database_option_validation() {
+        let overflow = format!("{}0", usize::MAX);
+        for key in [
+            "compaction.twcs.trigger_file_num",
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.inactive_window.trigger_file_num",
+        ] {
+            for invalid in ["invalid", "-1", overflow.as_str()] {
+                let sql = format!("CREATE DATABASE invalid WITH ('{key}'='{invalid}')");
+                let err = ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "Invalid database option value for {key}: {invalid}, expected a non-negative integer fitting in usize"
+                    )
+                );
+            }
+            for valid in ["0", "1"] {
+                let sql = format!("CREATE DATABASE valid WITH ('{key}'='{valid}')");
+                ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap();
+            }
+        }
         for key in [
             "compaction.twcs.active_window.l1_merge_trigger",
             "compaction.twcs.inactive_window.l1_merge_trigger",
