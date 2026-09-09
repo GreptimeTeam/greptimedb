@@ -41,8 +41,8 @@ use promql::functions::{
 };
 use promql::range_array::RangeArray;
 
-/// Builds `window_size` wide windows advancing by `window_step` samples. A step below the
-/// window size makes consecutive windows overlap, which is the normal PromQL range query shape.
+/// A `window_step` below `window_size` makes consecutive windows overlap, which is the normal
+/// PromQL range query shape.
 fn build_sliding_ranges(
     num_points: usize,
     window_size: u32,

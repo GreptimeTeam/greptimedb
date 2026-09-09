@@ -193,14 +193,19 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         let range_length = self.range_length;
         let range_length_secs = range_length as f64 / 1000.0;
 
-        // Range windows normally overlap heavily, so scanning each one for counter resets costs
-        // far more than the input has samples. Pay one pass over the values to index the reset
-        // positions once that is the cheaper side of the trade.
+        // Range windows normally overlap heavily, so scanning every one for resets costs far
+        // more than a single pass over the values. Index the reset positions once that is the
+        // cheaper side. A short lookback with a long step is the case that is not, and it
+        // settles the comparison after a few windows, so stop counting there.
         let mut reset_index = if IS_COUNTER {
-            let scanned_pairs = keys.iter().fold(0usize, |total, &key| {
-                total.saturating_add(unpack(key).1.saturating_sub(1) as usize)
-            });
-            (scanned_pairs > all_values.len().saturating_sub(1))
+            let budget = all_values.len().saturating_sub(1);
+            let mut scanned_pairs = 0usize;
+            keys.iter()
+                .any(|&key| {
+                    scanned_pairs =
+                        scanned_pairs.saturating_add(unpack(key).1.saturating_sub(1) as usize);
+                    scanned_pairs > budget
+                })
                 .then(|| CounterResetIndex::new(all_values))
         } else {
             None
@@ -292,22 +297,31 @@ struct CounterResetIndex<'a> {
     values: &'a [f64],
     /// Ascending indices `i` where `values[i] < values[i - 1]`.
     positions: Vec<usize>,
-    /// Slice of `positions` that [`Self::correction`] last reduced.
+    /// Slice of `positions` that [`Self::reduce`] last reduced.
     active: Range<usize>,
-    /// Window that produced `active`, so the next one can tell whether it may advance in place.
+    /// Window that produced `active`, so the next one can tell whether it advanced.
     previous: Range<usize>,
+    /// `positions[active.start]`: the reset a later `start` would drop. `usize::MAX` when the
+    /// active slice reaches the end of `positions`.
+    drops_at: usize,
+    /// `positions[active.end]`: the reset a later `end` would gain, saturated the same way.
+    gains_at: usize,
     correction: f64,
 }
 
 impl<'a> CounterResetIndex<'a> {
     fn new(values: &'a [f64]) -> Self {
+        let positions: Vec<usize> = (1..values.len())
+            .filter(|&i| values[i] < values[i - 1])
+            .collect();
+        let first = positions.first().copied().unwrap_or(usize::MAX);
         Self {
             values,
-            positions: (1..values.len())
-                .filter(|&i| values[i] < values[i - 1])
-                .collect(),
+            positions,
             active: 0..0,
             previous: 0..0,
+            drops_at: first,
+            gains_at: first,
             correction: 0.0,
         }
     }
@@ -316,9 +330,23 @@ impl<'a> CounterResetIndex<'a> {
     /// [`counter_reset_correction`] on the same window.
     #[inline]
     fn correction(&mut self, start: usize, end: usize) -> f64 {
-        // Windows normally advance, so walk the bounds forward from the previous window and
-        // only search when they move back. Searching every window costs more than the whole
-        // reduction once a series has enough resets to make the search deep.
+        if start >= self.previous.start
+            && end >= self.previous.end
+            && start < self.drops_at
+            && end <= self.gains_at
+        {
+            // The window only advanced, and it reached neither the reset that would leave it
+            // nor the one that would enter, so it covers exactly the resets `correction` holds.
+            self.previous = start..end;
+            return self.correction;
+        }
+        self.reduce(start, end)
+    }
+
+    fn reduce(&mut self, start: usize, end: usize) -> f64 {
+        // Walk the bounds forward from the previous window and only search when they move
+        // back. On a series that resets often the searches cost more than the reduction they
+        // locate, because they run deep and the reduction is a handful of adds.
         let (left, right) = if start < self.previous.start || end < self.previous.end {
             (
                 self.positions.partition_point(|&i| i <= start),
@@ -344,6 +372,8 @@ impl<'a> CounterResetIndex<'a> {
                 .iter()
                 .fold(0.0, |correction, &i| correction + self.values[i - 1]);
             self.active = left..right;
+            self.drops_at = self.positions.get(left).copied().unwrap_or(usize::MAX);
+            self.gains_at = self.positions.get(right).copied().unwrap_or(usize::MAX);
         }
         self.correction
     }
