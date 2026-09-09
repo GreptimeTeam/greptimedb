@@ -1,7 +1,9 @@
 Cargo.lock
   s_ee5e15630afc9a::t_e44f2d2e3bf733 6100
+  s_cbf051d9e59a54::t_0405661e7ad551 6100
 Cargo.toml
   s_ee5e15630afc9a::t_b31a3829a89588 162
+  s_348dabf0db493c::t_5ace5664ee2ae0 162
 src/flow/src/server.rs
   s_ee5e15630afc9a::t_9a7fb1d6437464 127
 src/operator/src/req_convert/common/partitioner.rs
@@ -15,6 +17,22 @@ src/operator/src/req_convert/insert/table_to_region.rs
   "base_commit_sha": "452af87f336a4ab70f5767748a573b38b31ced0e",
   "prompts": {},
   "sessions": {
+    "s_348dabf0db493c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1de4-7f41-8d62-7f7167f88197",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
     "s_ee5e15630afc9a": {
       "agent_id": {
         "tool": "codex",
