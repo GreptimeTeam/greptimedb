@@ -515,10 +515,12 @@ impl<T: NodeCmp> MergeAlgo<T> {
             return;
         }
 
-        let node_is_cold = self
-            .hot
-            .peek()
-            .is_none_or(|hottest| node.is_behind(hottest));
+        // With no hot nodes, keep the returning global winner out of the
+        // cold heap: refill_hot would immediately pop it again.
+        let node_is_cold = self.hot.peek().map_or_else(
+            || self.cold.peek().is_some_and(|cold| node < *cold),
+            |hottest| node.is_behind(hottest),
+        );
         if node_is_cold {
             self.cold.push(node);
         } else {
@@ -1347,6 +1349,32 @@ mod tests {
 
         assert_eq!(1, algo.hot.peek().unwrap().id);
         assert_eq!((1, 0), (algo.hot.len(), algo.cold.len()));
+    }
+
+    #[test]
+    fn test_merge_algo_batch_transition_preserves_order() {
+        for rank in [5, 10, 12, 20, 30] {
+            for end_rank in [rank, rank + 15] {
+                let mut algo = MergeAlgo::new(vec![
+                    TestNode::new(0, 0, 4),
+                    TestNode::new(1, 10, 14),
+                    TestNode::new(2, 20, 24),
+                ]);
+                let mut returning = algo.pop_hot_for_batch_transition().unwrap();
+                returning.current_rank = Some(rank);
+                returning.end_rank = end_rank;
+                algo.reheap_after_batch_transition(returning);
+                let mut result = Vec::new();
+                while let Some(mut node) = algo.pop_hot_for_batch_transition() {
+                    result.push((node.current_rank.unwrap(), node.id));
+                    node.current_rank = None;
+                    algo.reheap_after_batch_transition(node);
+                }
+                let mut expected = vec![(rank, 0), (10, 1), (20, 2)];
+                expected.sort_unstable();
+                assert_eq!(result, expected);
+            }
+        }
     }
 
     #[test]

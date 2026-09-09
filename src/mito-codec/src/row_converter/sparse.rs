@@ -282,17 +282,26 @@ impl SparsePrimaryKeyCodec {
     where
         I: Iterator<Item = (ColumnId, ValueRef<'a>)>,
     {
-        let mut serializer = Serializer::new(buffer);
         for (column_id, value) in row {
             if value.is_null() {
                 continue;
             }
 
             if let Some(field) = self.get_field(column_id) {
-                column_id
-                    .serialize(&mut serializer)
-                    .context(SerializeFieldSnafu)?;
-                field.serialize(&mut serializer, &value)?;
+                if let ValueRef::String(value) = value
+                    && field.data_type().is_string()
+                {
+                    self.encode_raw_tag_value(
+                        std::iter::once((column_id, value.as_bytes())),
+                        buffer,
+                    )?;
+                } else {
+                    let mut serializer = Serializer::new(&mut *buffer);
+                    column_id
+                        .serialize(&mut serializer)
+                        .context(SerializeFieldSnafu)?;
+                    field.serialize(&mut serializer, &value)?;
+                }
             } else {
                 // TODO(weny): handle the error.
                 common_telemetry::warn!("Column {} is not in primary key, skipping", column_id);
@@ -809,6 +818,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(buffer, buffer_by_raw_encoding);
+    }
+
+    #[test]
+    fn test_encode_to_vec_preserves_memcomparable() {
+        let codec = SparsePrimaryKeyCodec::from_columns(
+            [RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID, 1, 2].into_iter(),
+        );
+        for len in 0..=33 {
+            for unit in ["a", "é", "中", "💡", "\0"] {
+                let value = unit.repeat(len);
+                let row = [
+                    (RESERVED_COLUMN_ID_TABLE_ID, ValueRef::UInt32(u32::MAX)),
+                    (RESERVED_COLUMN_ID_TSID, ValueRef::UInt64(u64::MAX)),
+                    (1, ValueRef::String(&value)),
+                    (2, ValueRef::Null),
+                    (3, ValueRef::String("unknown column")),
+                ];
+                let mut expected = vec![42];
+                let mut serializer = Serializer::new(&mut expected);
+                for (id, value) in &row {
+                    if !value.is_null()
+                        && let Some(field) = codec.get_field(*id)
+                    {
+                        id.serialize(&mut serializer).unwrap();
+                        field.serialize(&mut serializer, value).unwrap();
+                    }
+                }
+                let mut actual = vec![42];
+                codec.encode_to_vec(row.into_iter(), &mut actual).unwrap();
+                assert_eq!(actual, expected, "unit={unit:?}, len={len}");
+            }
+        }
+        for (id, value) in [
+            (RESERVED_COLUMN_ID_TABLE_ID, ValueRef::String("wrong type")),
+            (RESERVED_COLUMN_ID_TSID, ValueRef::String("wrong type")),
+            (1, ValueRef::UInt64(1)),
+        ] {
+            assert!(
+                codec
+                    .encode_to_vec(std::iter::once((id, value)), &mut vec![])
+                    .is_err()
+            );
+        }
     }
 
     #[test]

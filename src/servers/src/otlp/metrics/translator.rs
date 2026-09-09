@@ -270,20 +270,21 @@ pub(crate) fn clean_unit_name(name: &str) -> String {
 
 // See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_label.go#L27
 pub fn normalize_label_name(name: &str) -> String {
-    if name.is_empty() {
-        return name.to_string();
-    }
-
-    let n = NON_ALPHA_NUM_CHAR.replace_all(name, UNDERSCORE);
-    if let Some((_, first)) = n.char_indices().next()
-        && first.is_ascii_digit()
+    let mut normalized = String::with_capacity(name.len());
+    normalized.extend(
+        name.chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }),
+    );
+    if normalized
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_digit)
     {
-        return format!("key_{}", n);
+        normalized.insert_str(0, "key_");
+    } else if normalized.starts_with(UNDERSCORE) && !normalized.starts_with(DOUBLE_UNDERSCORE) {
+        normalized.insert_str(0, "key");
     }
-    if n.starts_with(UNDERSCORE) && !n.starts_with(DOUBLE_UNDERSCORE) {
-        return format!("key{}", n);
-    }
-    n.to_string()
+    normalized
 }
 
 /// Normalize otlp instrumentation, metric and attribute names
@@ -512,6 +513,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_normalize_label_name_matches_regex() {
+        // Preserve one replacement per Unicode scalar and the prefix rules,
+        // including punctuation that becomes a leading underscore.
+        let alphabet = [
+            'a', 'Z', '0', '_', '.', '-', ':', ' ', '\0', 'é', '中', '💡',
+        ];
+        for first in alphabet {
+            for second in alphabet {
+                for suffix in ["", "_value", ".value", "💡é"] {
+                    let name = format!("{first}{second}{suffix}");
+                    let escaped = NON_ALPHA_NUM_CHAR.replace_all(&name, UNDERSCORE);
+                    let expected = if escaped.starts_with(|ch: char| ch.is_ascii_digit()) {
+                        format!("key_{escaped}")
+                    } else if escaped.starts_with('_') && !escaped.starts_with("__") {
+                        format!("key{escaped}")
+                    } else {
+                        escaped.into_owned()
+                    };
+                    assert_eq!(normalize_label_name(&name), expected, "{name:?}");
+                }
+            }
+        }
+        assert_eq!(normalize_label_name(""), "");
+        assert_eq!(normalize_label_name("é"), "key_");
+        assert_eq!(normalize_label_name("0"), "key_0");
     }
 
     #[test]

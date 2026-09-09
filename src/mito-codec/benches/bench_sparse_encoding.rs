@@ -26,7 +26,7 @@ use store_api::storage::ColumnId;
 
 fn encode_sparse(c: &mut Criterion) {
     let num_tags = 10;
-    let codec = SparsePrimaryKeyCodec::from_columns(0..num_tags);
+    let codec = SparsePrimaryKeyCodec::schemaless();
 
     let dummy_table_id = 1024;
     let dummy_ts_id = 42;

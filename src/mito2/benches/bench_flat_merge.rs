@@ -277,5 +277,40 @@ fn bench_merge(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_merge);
+fn bench_batch_transitions(c: &mut Criterion) {
+    let shape = Shape {
+        name: "batch_transitions",
+        num_iters: 32,
+        rows_per_iter: 4096,
+        rows_per_series: 64,
+        num_pk_tags: 40,
+    };
+    let (schema, batches) = build_input(&shape);
+    let mut group = c.benchmark_group("flat_merge_batch_transitions");
+    group.sample_size(20);
+    for batch_size in [1, 64, 512] {
+        group.bench_function(BenchmarkId::from_parameter(batch_size), |b| {
+            b.iter_batched(
+                || {
+                    let iters = batches
+                        .iter()
+                        .cloned()
+                        .map(|batch| {
+                            let rows = batch.num_rows();
+                            Box::new((0..rows).step_by(batch_size).map(move |offset| {
+                                Ok(batch.slice(offset, batch_size.min(rows - offset)))
+                            })) as BoxedRecordBatchIterator
+                        })
+                        .collect();
+                    (Arc::clone(&schema), iters)
+                },
+                |(schema, iters)| run_merge(schema, iters, shape.num_iters * shape.rows_per_iter),
+                criterion::BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_merge, bench_batch_transitions);
 criterion_main!(benches);
