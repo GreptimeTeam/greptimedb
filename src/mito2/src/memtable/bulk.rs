@@ -1605,6 +1605,15 @@ impl MemtableBuilder for BulkMemtableBuilder {
         ))
     }
 
+    fn fork(
+        &self,
+        _previous: &MemtableRef,
+        id: MemtableId,
+        metadata: &RegionMetadataRef,
+    ) -> MemtableRef {
+        self.build(id, metadata)
+    }
+
     fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
         true
     }

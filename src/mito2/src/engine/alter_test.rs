@@ -2839,12 +2839,20 @@ async fn test_alter_region_preserve_row_sequence_lifecycle() {
 
 #[tokio::test]
 async fn test_alter_region_float_field_encoding_lifecycle() {
-    test_alter_region_float_field_encoding_lifecycle_with_write_cache(false).await;
-    test_alter_region_float_field_encoding_lifecycle_with_write_cache(true).await;
+    for flat_format in [false, true] {
+        for enable_write_cache in [false, true] {
+            test_alter_region_float_field_encoding_lifecycle_with_write_cache(
+                enable_write_cache,
+                flat_format,
+            )
+            .await;
+        }
+    }
 }
 
 async fn test_alter_region_float_field_encoding_lifecycle_with_write_cache(
     enable_write_cache: bool,
+    flat_format: bool,
 ) {
     common_telemetry::init_default_ut_logging();
 
@@ -2854,14 +2862,18 @@ async fn test_alter_region_float_field_encoding_lifecycle_with_write_cache(
         "test_alter_region_float_field_encoding_lifecycle"
     };
     let mut env = TestEnv::with_prefix(prefix).await;
+    let config = MitoConfig {
+        default_flat_format: flat_format,
+        ..Default::default()
+    };
     let config = if enable_write_cache {
-        MitoConfig::default().enable_write_cache(
+        config.enable_write_cache(
             env.data_home().to_str().unwrap().to_string(),
             ReadableSize::mb(512),
             None,
         )
     } else {
-        MitoConfig::default()
+        config
     };
     let engine = env.create_engine(config).await;
 
@@ -2921,8 +2933,8 @@ async fn test_alter_region_float_field_encoding_lifecycle_with_write_cache(
         .unwrap();
     assert!(!sst_uses_byte_stream_split(&engine, region_id, initial_file.clone()).await);
 
-    // ALTER must change only the policy for future SSTs: buffered ordinary
-    // memtable rows stay visible, and no SST is created or rewritten.
+    // ALTER must change only the policy for future SSTs: buffered
+    // rows stay visible, and no SST is created or rewritten.
     put_rows(
         &engine,
         region_id,
@@ -2975,7 +2987,7 @@ async fn test_alter_region_float_field_encoding_lifecycle_with_write_cache(
         scan_field_bits(&engine, region_id).await
     );
 
-    // The explicit flush writes the already-buffered ordinary memtable under
+    // The explicit flush writes the buffered, not-yet-encoded rows under
     // the newly selected BSS policy.
     flush_region(&engine, region_id, None).await;
     let bss_file = engine
@@ -3126,6 +3138,187 @@ async fn test_alter_region_append_mode_preserve_combined_flushes_in_both_orders(
         let stream = engine.scan_to_stream(region_id, request).await.unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(3, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    }
+}
+
+#[tokio::test]
+async fn test_alter_region_invalid_combined_options_leave_region_unchanged() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env =
+        TestEnv::with_prefix("test_alter_region_invalid_combined_options_leave_region_unchanged")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    for (region_id, options) in [
+        (
+            RegionId::new(1, 1),
+            vec![
+                SetRegionOption::FloatFieldEncoding(FloatFieldEncoding::ByteStreamSplit),
+                SetRegionOption::PreserveRowSequence(true),
+            ],
+        ),
+        (
+            RegionId::new(1, 2),
+            vec![
+                SetRegionOption::PreserveRowSequence(true),
+                SetRegionOption::FloatFieldEncoding(FloatFieldEncoding::ByteStreamSplit),
+            ],
+        ),
+    ] {
+        let request = CreateRequestBuilder::new().build();
+        let column_schemas = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        // Keep an existing SST and a non-empty memtable so a rejected
+        // combined ALTER must leave both storage layers intact.
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: build_rows(0, 1),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas,
+                rows: build_rows(1, 4),
+            },
+        )
+        .await;
+
+        let before = engine.get_region(region_id).unwrap().version();
+        let before_options = before.options.clone();
+        let before_memtables = before.memtables.list_memtables();
+        let before_memtable_rows = before.memtables.num_rows();
+        let before_ssts: Vec<_> = before.ssts.levels()[0]
+            .files
+            .values()
+            .map(|file| file.file_id())
+            .collect();
+
+        let err = engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::SetRegionOptions { options },
+                }),
+            )
+            .await
+            .unwrap_err();
+        let err = err.as_any().downcast_ref::<error::Error>().unwrap();
+        assert_matches!(
+            err,
+            error::Error::InvalidMetadata { source, .. }
+                if source.to_string().contains("preserve_row_sequence is only supported for append-only tables")
+        );
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+
+        let after = engine.get_region(region_id).unwrap().version();
+        assert_eq!(before_options, after.options);
+        assert_eq!(before_memtable_rows, after.memtables.num_rows());
+        let after_memtables = after.memtables.list_memtables();
+        assert_eq!(before_memtables.len(), after_memtables.len());
+        for (before, after) in before_memtables.iter().zip(after_memtables.iter()) {
+            assert!(Arc::ptr_eq(before, after));
+        }
+        assert_eq!(
+            before_ssts,
+            after.ssts.levels()[0]
+                .files
+                .values()
+                .map(|file| file.file_id())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_alter_region_valid_combined_options_are_order_independent() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env =
+        TestEnv::with_prefix("test_alter_region_valid_combined_options_are_order_independent")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let write_buffer_size = ReadableSize::mb(1);
+    let mut expected_options = None;
+
+    for (region_id, options) in [
+        (
+            RegionId::new(1, 1),
+            vec![
+                SetRegionOption::FloatFieldEncoding(FloatFieldEncoding::ByteStreamSplit),
+                SetRegionOption::PreserveRowSequence(true),
+                SetRegionOption::WriteBufferSize(Some(write_buffer_size)),
+                SetRegionOption::AppendMode(true),
+            ],
+        ),
+        (
+            RegionId::new(1, 2),
+            vec![
+                SetRegionOption::FloatFieldEncoding(FloatFieldEncoding::ByteStreamSplit),
+                SetRegionOption::WriteBufferSize(Some(write_buffer_size)),
+                SetRegionOption::PreserveRowSequence(true),
+                SetRegionOption::AppendMode(true),
+            ],
+        ),
+    ] {
+        let request = CreateRequestBuilder::new().build();
+        let column_schemas = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas,
+                rows: build_rows(0, 3),
+            },
+        )
+        .await;
+
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::SetRegionOptions { options },
+                }),
+            )
+            .await
+            .unwrap();
+
+        let version = engine.get_region(region_id).unwrap().version();
+        assert_eq!(
+            FloatFieldEncoding::ByteStreamSplit,
+            version.options.float_field_encoding
+        );
+        assert!(version.options.append_mode);
+        assert!(version.options.preserve_row_sequence);
+        assert_eq!(Some(write_buffer_size), version.options.write_buffer_size);
+        if let Some(expected_options) = &expected_options {
+            assert_eq!(expected_options, &version.options);
+        } else {
+            expected_options = Some(version.options.clone());
+        }
+        assert_eq!(
+            vec![
+                (0, 0.0_f64.to_bits()),
+                (1000, 1.0_f64.to_bits()),
+                (2000, 2.0_f64.to_bits())
+            ],
+            scan_field_bits(&engine, region_id).await
+        );
     }
 }
 

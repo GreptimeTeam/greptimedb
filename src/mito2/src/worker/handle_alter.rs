@@ -75,7 +75,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             if !options.skip_wal {
                 info!("Stop writing WAL for follower region: {}", region_id);
                 options.skip_wal = true;
-                region.version_control.alter_options(options);
+                region.version_control.alter_options(options, None);
             }
             sender.send(Ok(0));
             return;
@@ -222,13 +222,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         region.region_id, current_options.write_buffer_size, new_write_buffer_size
                     );
                     current_options.write_buffer_size = new_write_buffer_size;
-                    current_options.validate().map_err(|e| {
-                        store_api::metadata::InvalidRegionRequestSnafu {
-                            region_id: region.region_id,
-                            err: e.to_string(),
-                        }
-                        .build()
-                    })?;
                 }
                 SetRegionOption::Ttl(new_ttl) => {
                     info!(
@@ -332,12 +325,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         }
         let kind = AlterKind::SetRegionOptions { options };
-        // Validate the complete final options. The loop above validates
-        // per-option, but a combined ALTER may flip append_mode and toggle
-        // preserve_row_sequence in the same request, which is only valid when
-        // viewed together (order-independent). Validating the staged outcome
-        // also guarantees that a preserve-only toggle applied via the fast path
-        // below cannot create an invalid state (preserve requires append_mode).
+        // Validate cross-option constraints only after constructing the complete candidate,
+        // so combined changes are independent of their order.
         let candidate = new_region_options_on_empty_memtable(&current_options, &kind)
             .unwrap_or_else(|| current_options.clone());
         candidate.validate().map_err(|e| {
@@ -348,7 +337,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .build()
         })?;
         if all_options_altered {
-            region.version_control.alter_options(candidate);
+            let memtable_builder = (candidate.float_field_encoding
+                != version.options.float_field_encoding)
+                .then(|| {
+                    self.memtable_builder_provider
+                        .builder_for_options(&candidate)
+                });
+            region
+                .version_control
+                .alter_options(candidate, memtable_builder);
             Ok(None)
         } else {
             // Some options require an empty memtable (e.g. append_mode,
@@ -576,30 +573,5 @@ mod tests {
         let new_options = new_region_options_on_empty_memtable(&current_options, &kind).unwrap();
         assert!(!new_options.append_mode);
         assert_eq!(Some(1024), new_options.max_row_group_row_count);
-    }
-
-    #[test]
-    fn test_float_field_encoding_fast_candidate_is_atomic_for_invalid_combined_alter() {
-        let current_options = RegionOptions::default();
-        let kind = AlterKind::SetRegionOptions {
-            options: vec![
-                SetRegionOption::FloatFieldEncoding(
-                    store_api::mito_engine_options::FloatFieldEncoding::ByteStreamSplit,
-                ),
-                SetRegionOption::PreserveRowSequence(true),
-            ],
-        };
-
-        let candidate = new_region_options_on_empty_memtable(&current_options, &kind).unwrap();
-        assert_eq!(
-            store_api::mito_engine_options::FloatFieldEncoding::ByteStreamSplit,
-            candidate.float_field_encoding
-        );
-        assert!(candidate.validate().is_err());
-        assert_eq!(
-            store_api::mito_engine_options::FloatFieldEncoding::Default,
-            current_options.float_field_encoding
-        );
-        assert!(!current_options.preserve_row_sequence);
     }
 }
