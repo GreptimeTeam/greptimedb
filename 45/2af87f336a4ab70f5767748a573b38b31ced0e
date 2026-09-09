@@ -1,0 +1,27 @@
+Cargo.lock
+  s_ee5e15630afc9a::t_e44f2d2e3bf733 6100
+Cargo.toml
+  s_ee5e15630afc9a::t_b31a3829a89588 162
+src/flow/src/server.rs
+  s_ee5e15630afc9a::t_9a7fb1d6437464 127
+src/operator/src/req_convert/common/partitioner.rs
+  s_ee5e15630afc9a::t_7a6815c3f7b496 47
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_ee5e15630afc9a::t_a4115f7622f574 163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "452af87f336a4ab70f5767748a573b38b31ced0e",
+  "prompts": {},
+  "sessions": {
+    "s_ee5e15630afc9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08741-8460-7082-b1e4-8cbcb2450830",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
