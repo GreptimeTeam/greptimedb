@@ -275,9 +275,10 @@ mod test {
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use common_query::prelude::{greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
+    use store_api::mito_engine_options::FloatFieldEncoding;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
-        AlterKind, BatchRegionDdlRequest, RegionAlterRequest, SetRegionOption,
+        AlterKind, BatchRegionDdlRequest, RegionAlterRequest, SetRegionOption, UnsetRegionOption,
     };
     use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
@@ -289,7 +290,7 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let engine = env.metric();
-        let engine_inner = engine.inner;
+        let engine_inner = engine.inner.clone();
 
         // alter physical region
         let physical_region_id = env.default_physical_region_id();
@@ -314,6 +315,113 @@ mod test {
             .alter_physical_region(physical_region_id, alter_region_option_request)
             .await
             .unwrap();
+
+        // The float encoding option is forwarded only to the data region. It
+        // is not metric metadata and has no corresponding metric state cache.
+        let data_region_id = crate::utils::to_data_region_id(physical_region_id);
+        let metadata_region_id = crate::utils::to_metadata_region_id(physical_region_id);
+        let mito = env.mito();
+        engine
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Alter(vec![(
+                physical_region_id,
+                RegionAlterRequest {
+                    kind: AlterKind::SetRegionOptions {
+                        options: vec![SetRegionOption::FloatFieldEncoding(
+                            FloatFieldEncoding::ByteStreamSplit,
+                        )],
+                    },
+                },
+            )]))
+            .await
+            .unwrap();
+        assert_eq!(
+            FloatFieldEncoding::ByteStreamSplit,
+            serde_json::from_str::<mito2::region::options::RegionOptions>(
+                &mito
+                    .all_region_infos()
+                    .await
+                    .into_iter()
+                    .find(|info| info.region_id == data_region_id)
+                    .unwrap()
+                    .region_options
+            )
+            .unwrap()
+            .float_field_encoding
+        );
+        assert_eq!(
+            FloatFieldEncoding::Default,
+            serde_json::from_str::<mito2::region::options::RegionOptions>(
+                &mito
+                    .all_region_infos()
+                    .await
+                    .into_iter()
+                    .find(|info| info.region_id == metadata_region_id)
+                    .unwrap()
+                    .region_options
+            )
+            .unwrap()
+            .float_field_encoding
+        );
+
+        let logical_region_id = env.default_logical_region_id();
+        let logical_alter = RegionAlterRequest {
+            kind: AlterKind::SetRegionOptions {
+                options: vec![SetRegionOption::FloatFieldEncoding(
+                    FloatFieldEncoding::Default,
+                )],
+            },
+        };
+        let error = engine
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Alter(vec![(
+                logical_region_id,
+                logical_alter,
+            )]))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Unsupported alter kind: SetRegionOptions"
+        );
+        assert_eq!(
+            FloatFieldEncoding::ByteStreamSplit,
+            serde_json::from_str::<mito2::region::options::RegionOptions>(
+                &mito
+                    .all_region_infos()
+                    .await
+                    .into_iter()
+                    .find(|info| info.region_id == data_region_id)
+                    .unwrap()
+                    .region_options
+            )
+            .unwrap()
+            .float_field_encoding
+        );
+
+        engine
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Alter(vec![(
+                physical_region_id,
+                RegionAlterRequest {
+                    kind: AlterKind::UnsetRegionOptions {
+                        keys: vec![UnsetRegionOption::FloatFieldEncoding],
+                    },
+                },
+            )]))
+            .await
+            .unwrap();
+        assert_eq!(
+            FloatFieldEncoding::Default,
+            serde_json::from_str::<mito2::region::options::RegionOptions>(
+                &mito
+                    .all_region_infos()
+                    .await
+                    .into_iter()
+                    .find(|info| info.region_id == data_region_id)
+                    .unwrap()
+                    .region_options
+            )
+            .unwrap()
+            .float_field_encoding
+        );
 
         // alter logical region
         let metadata_region = env.metadata_region();

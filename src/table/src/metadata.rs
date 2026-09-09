@@ -31,7 +31,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
-    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY,
+    EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, FloatFieldEncoding, MAX_ROW_GROUP_ROW_COUNT,
+    MERGE_MODE_KEY, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -413,6 +414,18 @@ impl TableMeta {
                             .insert(PRESERVE_ROW_SEQUENCE.to_string(), preserve.to_string());
                     } else {
                         new_options.extra_options.remove(PRESERVE_ROW_SEQUENCE);
+                    }
+                }
+                SetRegionOption::FloatFieldEncoding(encoding) => {
+                    if *encoding == FloatFieldEncoding::default() {
+                        new_options
+                            .extra_options
+                            .remove(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING);
+                    } else {
+                        new_options.extra_options.insert(
+                            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING.to_string(),
+                            "byte_stream_split".to_string(),
+                        );
                     }
                 }
                 SetRegionOption::SkipWal => {
@@ -1892,6 +1905,70 @@ mod tests {
                 .options
                 .extra_options
                 .contains_key(PRESERVE_ROW_SEQUENCE)
+        );
+    }
+
+    #[test]
+    fn test_float_field_encoding_option_metadata_reopen_roundtrip() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let set_bss = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::FloatFieldEncoding(
+                FloatFieldEncoding::ByteStreamSplit,
+            )],
+        };
+        let meta = meta
+            .builder_with_alter_kind("my_table", &set_bss)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let serialized = serde_json::to_string(&meta).unwrap();
+        let reopened: TableMeta = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            Some("byte_stream_split"),
+            reopened
+                .options
+                .extra_options
+                .get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING)
+                .map(String::as_str)
+        );
+
+        let set_default = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::FloatFieldEncoding(
+                FloatFieldEncoding::Default,
+            )],
+        };
+        let set_default = reopened
+            .builder_with_alter_kind("my_table", &set_default)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            !set_default
+                .options
+                .extra_options
+                .contains_key(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING)
+        );
+
+        let unset = AlterKind::UnsetTableOptions {
+            keys: vec![UnsetRegionOption::FloatFieldEncoding],
+        };
+        let unset = reopened
+            .builder_with_alter_kind("my_table", &unset)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            !unset
+                .options
+                .extra_options
+                .contains_key(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING)
         );
     }
 

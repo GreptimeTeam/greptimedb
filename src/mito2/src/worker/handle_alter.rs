@@ -314,6 +314,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         current_options.preserve_row_sequence = new_preserve;
                     }
                 }
+                SetRegionOption::FloatFieldEncoding(encoding) => {
+                    if encoding != current_options.float_field_encoding {
+                        info!(
+                            "Update region float_field_encoding: {}, previous: {:?} new: {:?}",
+                            region.region_id, current_options.float_field_encoding, encoding
+                        );
+                        current_options.float_field_encoding = encoding;
+                    }
+                }
                 SetRegionOption::SkipWal => {
                     if !current_options.skip_wal {
                         info!("Stop writing WAL for region: {}", region.region_id);
@@ -398,6 +407,9 @@ fn new_region_options_on_empty_memtable(
             }
             SetRegionOption::PreserveRowSequence(new_preserve) => {
                 current_options.preserve_row_sequence = *new_preserve;
+            }
+            SetRegionOption::FloatFieldEncoding(encoding) => {
+                current_options.float_field_encoding = *encoding;
             }
         }
     }
@@ -564,5 +576,30 @@ mod tests {
         let new_options = new_region_options_on_empty_memtable(&current_options, &kind).unwrap();
         assert!(!new_options.append_mode);
         assert_eq!(Some(1024), new_options.max_row_group_row_count);
+    }
+
+    #[test]
+    fn test_float_field_encoding_fast_candidate_is_atomic_for_invalid_combined_alter() {
+        let current_options = RegionOptions::default();
+        let kind = AlterKind::SetRegionOptions {
+            options: vec![
+                SetRegionOption::FloatFieldEncoding(
+                    store_api::mito_engine_options::FloatFieldEncoding::ByteStreamSplit,
+                ),
+                SetRegionOption::PreserveRowSequence(true),
+            ],
+        };
+
+        let candidate = new_region_options_on_empty_memtable(&current_options, &kind).unwrap();
+        assert_eq!(
+            store_api::mito_engine_options::FloatFieldEncoding::ByteStreamSplit,
+            candidate.float_field_encoding
+        );
+        assert!(candidate.validate().is_err());
+        assert_eq!(
+            store_api::mito_engine_options::FloatFieldEncoding::Default,
+            current_options.float_field_encoding
+        );
+        assert!(!current_options.preserve_row_sequence);
     }
 }

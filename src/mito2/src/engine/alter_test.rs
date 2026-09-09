@@ -24,6 +24,7 @@ use api::v1::value::ValueData;
 use api::v1::{
     ArrowIpc, BulkWalEntry, ColumnDataType, Row, Rows, SemanticType, Value, WalEntry, WriteHint,
 };
+use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
@@ -35,10 +36,12 @@ use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMill
 use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions};
+use parquet::basic::{Encoding, Type as PhysicalType};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{PRIMARY_KEY_ENCODING, TABLE_COLUMN_METADATA_EXTENSION_KEY};
+use store_api::mito_engine_options::FloatFieldEncoding;
 use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
     AddColumn, AddColumnLocation, AlterKind, ModifyColumnType, PathType, RegionAlterRequest,
@@ -53,6 +56,7 @@ use crate::engine::MitoEngine;
 use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::error;
 use crate::sst::FormatType;
+use crate::sst::file::FileHandle;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{
@@ -69,6 +73,65 @@ async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expect
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+async fn sst_uses_byte_stream_split(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    file: FileHandle,
+) -> bool {
+    let region = engine.get_region(region_id).unwrap();
+    let reader = region
+        .access_layer
+        .read_sst(file)
+        .build()
+        .await
+        .unwrap()
+        .expect("flushed SST reader");
+
+    reader
+        .parquet_metadata()
+        .row_groups()
+        .iter()
+        .flat_map(|row_group| row_group.columns())
+        .any(|column| {
+            column.column_path().string() == "field_0"
+                && column.column_type() == PhysicalType::DOUBLE
+                && column
+                    .encodings()
+                    .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+        })
+}
+
+async fn scan_field_bits(engine: &MitoEngine, region_id: RegionId) -> Vec<(i64, u64)> {
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let mut values = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let ts = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let field = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        values.extend(
+            ts.iter()
+                .zip(field.iter())
+                .map(|(ts, field)| (ts.unwrap(), field.unwrap().to_bits())),
+        );
+    }
+    values.sort_by_key(|(ts, _)| *ts);
+    values
 }
 
 fn add_tag1() -> RegionAlterRequest {
@@ -2772,6 +2835,229 @@ async fn test_alter_region_preserve_row_sequence_lifecycle() {
             .filter(|f| f.meta_ref().preserve_row_sequence)
             .count()
     );
+}
+
+#[tokio::test]
+async fn test_alter_region_float_field_encoding_lifecycle() {
+    test_alter_region_float_field_encoding_lifecycle_with_write_cache(false).await;
+    test_alter_region_float_field_encoding_lifecycle_with_write_cache(true).await;
+}
+
+async fn test_alter_region_float_field_encoding_lifecycle_with_write_cache(
+    enable_write_cache: bool,
+) {
+    common_telemetry::init_default_ut_logging();
+
+    let prefix = if enable_write_cache {
+        "test_alter_region_float_field_encoding_lifecycle_with_write_cache"
+    } else {
+        "test_alter_region_float_field_encoding_lifecycle"
+    };
+    let mut env = TestEnv::with_prefix(prefix).await;
+    let config = if enable_write_cache {
+        MitoConfig::default().enable_write_cache(
+            env.data_home().to_str().unwrap().to_string(),
+            ReadableSize::mb(512),
+            None,
+        )
+    } else {
+        MitoConfig::default()
+    };
+    let engine = env.create_engine(config).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let write_rows = |rows: &[(i64, f64)]| Rows {
+        schema: column_schemas.clone(),
+        rows: rows
+            .iter()
+            .map(|(ts, field)| {
+                row(vec![
+                    ValueData::StringValue("a".to_string()),
+                    ValueData::F64Value(*field),
+                    ValueData::TimestampMillisecondValue(*ts),
+                ])
+            })
+            .collect(),
+    };
+    let initial_bits = (-0.0_f64).to_bits();
+    let bss_bits = f64::from_bits(0x3ff0_0000_0000_0001).to_bits();
+    let bss_subnormal_bits = f64::from_bits(1).to_bits();
+    let final_bits = f64::from_bits(0x7fef_ffff_ffff_ffff).to_bits();
+
+    // The first SST uses the default encoding. Its identity and bytes are the
+    // baseline that a later ALTER must not rewrite.
+    put_rows(
+        &engine,
+        region_id,
+        write_rows(&[(0, f64::from_bits(initial_bits))]),
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let initial_file = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()[0]
+        .files
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let initial_path = initial_file.file_path(&table_dir, PathType::Bare);
+    let initial_bytes = env
+        .get_object_store()
+        .unwrap()
+        .read(&initial_path)
+        .await
+        .unwrap();
+    assert!(!sst_uses_byte_stream_split(&engine, region_id, initial_file.clone()).await);
+
+    // ALTER must change only the policy for future SSTs: buffered ordinary
+    // memtable rows stay visible, and no SST is created or rewritten.
+    put_rows(
+        &engine,
+        region_id,
+        write_rows(&[
+            (1, f64::from_bits(bss_bits)),
+            (2, f64::from_bits(bss_subnormal_bits)),
+        ]),
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::FloatFieldEncoding(
+                        FloatFieldEncoding::ByteStreamSplit,
+                    )],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    assert_eq!(
+        FloatFieldEncoding::ByteStreamSplit,
+        version.options.float_field_encoding
+    );
+    assert_eq!(1, version.ssts.levels()[0].files.len());
+    assert_eq!(
+        initial_file.file_id(),
+        version.ssts.levels()[0]
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .file_id()
+    );
+    assert_eq!(2, version.memtables.num_rows());
+    assert_eq!(
+        initial_bytes.to_vec(),
+        env.get_object_store()
+            .unwrap()
+            .read(&initial_path)
+            .await
+            .unwrap()
+            .to_vec()
+    );
+    assert_eq!(
+        vec![(0, initial_bits), (1, bss_bits), (2, bss_subnormal_bits)],
+        scan_field_bits(&engine, region_id).await
+    );
+
+    // The explicit flush writes the already-buffered ordinary memtable under
+    // the newly selected BSS policy.
+    flush_region(&engine, region_id, None).await;
+    let bss_file = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()[0]
+        .files
+        .values()
+        .find(|file| file.file_id() != initial_file.file_id())
+        .unwrap()
+        .clone();
+    assert!(sst_uses_byte_stream_split(&engine, region_id, bss_file.clone()).await);
+
+    // Unsetting the option affects only subsequent flushes, restoring the
+    // default encoding without rewriting either existing SST.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::UnsetRegionOptions {
+                    keys: vec![UnsetRegionOption::FloatFieldEncoding],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        write_rows(&[(3, f64::from_bits(final_bits))]),
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let version = engine.get_region(region_id).unwrap().version();
+    assert_eq!(
+        FloatFieldEncoding::Default,
+        version.options.float_field_encoding
+    );
+    assert_eq!(3, version.ssts.levels()[0].files.len());
+    let final_file = version.ssts.levels()[0]
+        .files
+        .values()
+        .find(|file| {
+            file.file_id() != initial_file.file_id() && file.file_id() != bss_file.file_id()
+        })
+        .unwrap()
+        .clone();
+    assert!(!sst_uses_byte_stream_split(&engine, region_id, final_file).await);
+    let expected_bits = vec![
+        (0, initial_bits),
+        (1, bss_bits),
+        (2, bss_subnormal_bits),
+        (3, final_bits),
+    ];
+    assert_eq!(expected_bits, scan_field_bits(&engine, region_id).await);
+
+    // Stable table options come from the open request. Reopen with the
+    // post-UNSET default instead of relying on this engine instance to retain
+    // table options across its lifecycle.
+    reopen_region(
+        &engine,
+        region_id,
+        table_dir,
+        true,
+        HashMap::from([(
+            "experimental_sst_float_field_encoding".to_string(),
+            "default".to_string(),
+        )]),
+    )
+    .await;
+    assert_eq!(
+        FloatFieldEncoding::Default,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .float_field_encoding
+    );
+    assert_eq!(expected_bits, scan_field_bits(&engine, region_id).await);
 }
 
 #[tokio::test]
