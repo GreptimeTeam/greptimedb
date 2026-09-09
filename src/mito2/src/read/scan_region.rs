@@ -76,6 +76,7 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
+use crate::series_index::SeriesIndexReadContext;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
@@ -235,6 +236,8 @@ impl Scanner {
 pub(crate) struct ScanRegion {
     /// Version of the region at scan.
     version: VersionRef,
+    /// Pinned index snapshot and its storage for candidate discovery.
+    series_index: Option<SeriesIndexReadContext>,
     /// Access layer of the region.
     access_layer: AccessLayerRef,
     /// Scan request.
@@ -276,6 +279,7 @@ impl ScanRegion {
     ) -> ScanRegion {
         ScanRegion {
             version,
+            series_index: None,
             access_layer,
             request,
             cache_strategy,
@@ -292,6 +296,16 @@ impl ScanRegion {
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
+    }
+
+    /// Pins the series-index snapshot used by candidate discovery.
+    #[must_use]
+    pub(crate) fn with_series_index(
+        mut self,
+        series_index: Option<SeriesIndexReadContext>,
+    ) -> Self {
+        self.series_index = series_index;
+        self
     }
 
     /// Sets counters that should receive query-load metrics.
@@ -559,6 +573,7 @@ impl ScanRegion {
         });
 
         let input = ScanInput::builder(self.access_layer, mapper)
+            .with_series_index(self.series_index)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
@@ -927,6 +942,8 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 
 /// Common input for different scanners.
 pub struct ScanInput {
+    /// Pinned series-index snapshot and its storage, when configured.
+    pub(crate) series_index: Option<SeriesIndexReadContext>,
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
@@ -1025,6 +1042,7 @@ impl ScanInput {
     ) -> ScanInputBuilder {
         ScanInputBuilder {
             input: ScanInput {
+                series_index: None,
                 access_layer,
                 read_cols: mapper.read_columns().clone(),
                 mapper: Arc::new(mapper),
@@ -1089,6 +1107,16 @@ impl ScanInput {
 }
 
 impl ScanInputBuilder {
+    /// Sets the pinned series-index context for candidate discovery.
+    #[must_use]
+    pub(crate) fn with_series_index(
+        mut self,
+        series_index: Option<SeriesIndexReadContext>,
+    ) -> Self {
+        self.input.series_index = series_index;
+        self
+    }
+
     /// Sets time range filter for time index.
     #[must_use]
     pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {

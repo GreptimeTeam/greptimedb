@@ -87,6 +87,17 @@ impl PartitionPruner {
         }
     }
 
+    /// Excludes files replaced by another candidate source from prefetching.
+    pub(crate) fn excluding_files(mut self, excluded: &HashSet<usize>) -> Self {
+        self.file_indices.retain(|index| !excluded.contains(index));
+        self
+    }
+
+    /// Balances a range replaced by another source without pruning its data.
+    pub(crate) fn skip_file_range(&self, index: RowGroupIndex, metrics: &mut ReaderMetrics) {
+        self.pruner.skip_file_range(index, metrics);
+    }
+
     /// Gets or creates the FileRangeBuilder for a file.
     ///
     /// This method also triggers pre-fetching of upcoming files in the background
