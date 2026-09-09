@@ -21,10 +21,10 @@ chunk_series_count = 128
 timeout_seconds = 600
 visibility_timeout_seconds = 300
 
-# Keep the physical-table definition identical except for float encoding. The
-# high shared TWCS trigger avoids compaction changing the three-flush layout.
+# Omit the default encoding from base setup because older binaries do not recognize it.
+# The high shared TWCS trigger avoids compaction changing the three-flush layout.
 base_setup_sql = [
-  "CREATE TABLE sst_float_bss_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'experimental_sst_float_field_encoding'='default', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE sst_float_bss_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'compaction.twcs.trigger_file_num'='100')",
 ]
 candidate_setup_sql = [
   "CREATE TABLE sst_float_bss_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'experimental_sst_float_field_encoding'='byte_stream_split', 'compaction.twcs.trigger_file_num'='100')",
