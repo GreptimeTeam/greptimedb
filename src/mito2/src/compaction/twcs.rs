@@ -806,14 +806,6 @@ impl Picker for TwcsPicker {
                         inferred
                     });
 
-                // Prefer the max-sequence file across all levels so the active
-                // window survives L0 compaction; fall back to the L0-based rule
-                // for legacy files that carry no sequence.
-                let active_window = find_active_window_by_sequence(
-                    levels.iter().flat_map(LevelMeta::files),
-                    time_window_size,
-                )
-                .or_else(|| find_latest_window_in_seconds(levels[0].files(), time_window_size));
                 let windows = assign_to_windows(
                     levels
                         .iter()
@@ -821,6 +813,21 @@ impl Picker for TwcsPicker {
                         .filter(|file| !expired_file_ids.contains(&file.file_id())),
                     time_window_size,
                 );
+                // Compute activity from the candidate files so expired or
+                // compacting files cannot identify a window absent from `windows`.
+                let active_window = find_active_window_by_sequence(
+                    windows.values().flat_map(Window::files),
+                    time_window_size,
+                )
+                .or_else(|| {
+                    find_latest_window_in_seconds(
+                        windows
+                            .values()
+                            .flat_map(Window::files)
+                            .filter(|file| file.level() == 0),
+                        time_window_size,
+                    )
+                });
 
                 (expired_ssts, time_window_size, active_window, windows)
             })
@@ -1053,23 +1060,17 @@ mod tests {
         }
     }
 
-    async fn compaction_region_with_expired_sst() -> CompactionRegion {
+    async fn compaction_region_with_ssts(
+        files: impl IntoIterator<Item = FileMeta>,
+        ttl: Duration,
+    ) -> CompactionRegion {
         let env = SchedulerEnv::new().await;
         let metadata = metadata_for_test();
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let mut ssts = SstVersion::new();
         ssts.add_files(
             Arc::new(crate::sst::file_purger::NoopFilePurger),
-            (1..=4).map(|sequence| FileMeta {
-                file_id: FileId::random(),
-                time_range: (
-                    Timestamp::new_millisecond(0),
-                    Timestamp::new_millisecond(10),
-                ),
-                level: 0,
-                sequence: NonZeroU64::new(sequence),
-                ..Default::default()
-            }),
+            files.into_iter(),
         );
 
         CompactionRegion {
@@ -1087,10 +1088,27 @@ mod tests {
                 compaction_time_window: None,
             },
             file_purger: None,
-            ttl: Some(Duration::from_millis(1).into()),
+            ttl: Some(ttl.into()),
             max_parallelism: 1,
             plugins: Plugins::new(),
         }
+    }
+
+    async fn compaction_region_with_expired_sst() -> CompactionRegion {
+        compaction_region_with_ssts(
+            (1..=4).map(|sequence| FileMeta {
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_millisecond(0),
+                    Timestamp::new_millisecond(10),
+                ),
+                level: 0,
+                sequence: NonZeroU64::new(sequence),
+                ..Default::default()
+            }),
+            Duration::from_millis(1),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -1113,6 +1131,60 @@ mod tests {
         assert!(output.outputs.is_empty());
         assert!(!output.expired_ssts.is_empty());
         assert!(output.expired_ssts.iter().all(|file| !file.compacting()));
+    }
+
+    #[tokio::test]
+    async fn test_expired_sst_does_not_determine_active_window() {
+        let now = Timestamp::current_millis().value();
+        let files = [
+            FileMeta {
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_millisecond(0),
+                    Timestamp::new_millisecond(10),
+                ),
+                level: 0,
+                sequence: NonZeroU64::new(100),
+                ..Default::default()
+            },
+            FileMeta {
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_millisecond(now - 1000),
+                    Timestamp::new_millisecond(now),
+                ),
+                level: 0,
+                sequence: NonZeroU64::new(1),
+                ..Default::default()
+            },
+            FileMeta {
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_millisecond(now - 1000),
+                    Timestamp::new_millisecond(now),
+                ),
+                level: 0,
+                sequence: NonZeroU64::new(2),
+                ..Default::default()
+            },
+        ];
+        let compaction_region = compaction_region_with_ssts(files, Duration::from_secs(60)).await;
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            active_window_l1_merge_trigger: 8,
+            inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker.pick(&compaction_region).await.unwrap().unwrap();
+
+        assert_eq!(1, output.expired_ssts.len());
+        assert!(output.outputs.is_empty());
     }
 
     #[tokio::test]
