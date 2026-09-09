@@ -204,8 +204,13 @@ case for issue #7913. It writes 8192 series × 20160 samples through remote-writ
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
 TQL selectors. It is not included in the default `all` case set because ingestion
 cost dominates routine CI validation. Commenting `/query-regression heavy` runs
-only this case; `/query-regression` runs the seven routine default cases. Manual
+only this case; `/query-regression` runs the eight routine default cases. Manual
 workflow dispatch accepts the `heavy` token to select this case.
+
+The routine default set also includes
+`tests/perf/query_cases/mito_prefilter_all_match/case.toml`. It covers the
+Mito prefilter all-match path, a mixed integer/float filter, and integer and
+float selective controls over a 262144-row direct SST fixture.
 
 ## OTLP trace load scenario
 
@@ -366,7 +371,7 @@ uv run --no-project python .github/scripts/query-regression-run.py \
   --work-dir /tmp/query-regression-work
 ```
 
-For a focused manual reproduction of the Mito prefilter all-match optimization, use the existing lifecycle command above with `--cases tests/perf/query_cases/mito_prefilter_all_match/case.toml`. Its three count probes require explicit result inspection rather than automatic validation: expect `262144`, `16896`, and `16896` in query order. For a cold comparison, run with the page, range, and prefilter caches disabled.
+For a focused manual reproduction of the Mito prefilter all-match optimization, use the existing lifecycle command above with `--cases tests/perf/query_cases/mito_prefilter_all_match/case.toml`. Its four count probes require explicit result inspection rather than automatic validation: expect `262144`, `131072`, `16896`, and `16896` in query order. The default lifecycle retains caches, so the optimization remains exercised but its timing includes warm-cache effects; use an explicitly configured cold environment when a cold comparison is required.
 
 The Rust runner subcommands are also useful for focused diagnostics:
 
@@ -395,12 +400,13 @@ parquetbench/scanbench` as the read-bench tool against each target's data direct
 
 The workflow runs when an allowlisted repository admin comments
 `/query-regression` on a non-draft PR. It does not rerun on pushes,
-ready-for-review, or reopen events. `/query-regression` runs the seven routine
-default cases, including `promql_instant_last_row_9034`;
-`/query-regression heavy` runs only the high-cardinality remote-write #7913 case.
-PR runs build base/candidate once and use `--allow-large-fixture`. Manual
-`workflow_dispatch` runs can pass `all`, `heavy`, one case path, or a
-comma/whitespace-separated list of case paths, and can override refs.
+ready-for-review, or reopen events. `/query-regression` runs the eight routine
+default cases, including `promql_instant_last_row_9034` and
+`mito_prefilter_all_match`; `/query-regression heavy` runs only the
+high-cardinality remote-write #7913 case. PR runs build base/candidate once and
+use `--allow-large-fixture`. Manual `workflow_dispatch` runs can pass `all`,
+`heavy`, one case path, or a comma/whitespace-separated list of case paths, and
+can override refs.
 
 Comment admission is two workflows. `slash-command-dispatch.yml` uses
 [peter-evans/slash-command-dispatch](https://github.com/peter-evans/slash-command-dispatch)

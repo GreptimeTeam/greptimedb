@@ -1,11 +1,12 @@
-# Manual reproduction for the Mito prefilter all-match optimization.
+# Performance regression coverage for the Mito prefilter all-match optimization.
 #
 # The count probes are deliberately not automatic assertions: inspect their
-# results manually. Each should return 262144, 16896, and 16896 respectively.
+# results manually. Each should return 262144, 131072, 16896, and 16896
+# respectively.
 
 [case]
 name = "mito_prefilter_all_match"
-description = "Manual Mito prefilter all-match reproduction with a selective control"
+description = "Mito prefilter all-match regression coverage with integer and float selective controls"
 
 [scenario]
 kind = "direct_readable_sst"
@@ -150,12 +151,28 @@ query = "EXPLAIN ANALYZE VERBOSE SELECT * FROM mito_prefilter_all_match WHERE fi
 warmup = 2
 iterations = 10
 
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
 [[scenario.queries]]
 name = "all_match_field_01_and_field_02"
 kind = "sql"
 query = "EXPLAIN ANALYZE VERBOSE SELECT * FROM mito_prefilter_all_match WHERE field_01 >= 0 AND field_02 > 1.98"
 warmup = 2
 iterations = 10
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "selective_control_field_01"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT * FROM mito_prefilter_all_match WHERE field_01 >= 131072"
+warmup = 2
+iterations = 10
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
 
 [[scenario.queries]]
 name = "selective_control_field_02"
@@ -164,10 +181,20 @@ query = "EXPLAIN ANALYZE VERBOSE SELECT * FROM mito_prefilter_all_match WHERE fi
 warmup = 2
 iterations = 10
 
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
 [[scenario.queries]]
 name = "count_all_match_field_01"
 kind = "sql"
 query = "SELECT count(*) FROM mito_prefilter_all_match WHERE field_01 >= 0"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "count_selective_control_field_01"
+kind = "sql"
+query = "SELECT count(*) FROM mito_prefilter_all_match WHERE field_01 >= 131072"
 warmup = 0
 iterations = 1
 
