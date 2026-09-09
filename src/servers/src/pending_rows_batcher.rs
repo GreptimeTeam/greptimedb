@@ -61,7 +61,7 @@ use crate::metrics::{
 };
 use crate::prom_row_builder::{
     build_metric_create_table_schema_from_proto, identify_missing_columns_from_proto,
-    rows_to_aligned_record_batch,
+    metric_record_batch_to_aligned, rows_to_aligned_record_batch,
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
@@ -130,6 +130,7 @@ impl PendingRowsBatcherOptions {
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
 const MAX_CONCURRENT_FLOW_NOTIFICATIONS: usize = 8;
+const MAX_CONCURRENT_TABLE_RESOLUTIONS: usize = 32;
 
 /// Batches protocol-neutral metric rows for ingestion.
 #[async_trait]
@@ -141,6 +142,30 @@ pub trait MetricRowBatcher: Send + Sync {
         ctx: QueryContextRef,
         protocol: MetricRowBatchProtocol,
     ) -> Result<u64>;
+
+    /// Submits rows, or returns them unchanged when the batcher cannot safely
+    /// use the requested physical table.
+    async fn submit_with_fallback(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<MetricRowBatchSubmission> {
+        self.submit(requests, ctx, protocol)
+            .await
+            .map(|_| MetricRowBatchSubmission::Submitted)
+    }
+
+    /// Submits pre-built scalar metric Arrow batches. Implementations that do
+    /// not support this fast path request a fallback to ordinary row inserts.
+    async fn submit_record_batches_with_fallback(
+        &self,
+        _batches: Vec<MetricRecordBatch>,
+        _ctx: QueryContextRef,
+        _protocol: MetricRowBatchProtocol,
+    ) -> Result<MetricRecordBatchSubmission> {
+        Ok(MetricRecordBatchSubmission::UnmatchedPhysicalTable)
+    }
 }
 
 pub type MetricRowBatcherRef = Arc<dyn MetricRowBatcher>;
@@ -157,6 +182,108 @@ impl MetricRowBatchProtocol {
             Self::Prometheus => "prometheus",
             Self::Otlp => "otlp",
         }
+    }
+}
+
+/// Result of a metric row batch submission that supports Inserter fallback.
+pub enum MetricRowBatchSubmission {
+    /// The batcher accepted and persisted the rows.
+    Submitted,
+    /// The logical tables do not belong to the requested physical table.
+    UnmatchedPhysicalTable(RowInsertRequests),
+}
+
+/// Result of submitting pre-built scalar metric Arrow batches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricRecordBatchSubmission {
+    /// The batcher accepted and persisted the batches.
+    Submitted,
+    /// At least one logical table uses a different physical table.
+    UnmatchedPhysicalTable,
+}
+
+/// A scalar metric table represented directly as Arrow arrays.
+#[derive(Debug)]
+pub struct MetricRecordBatch {
+    table_name: String,
+    request_schema: Vec<ColumnSchema>,
+    batch: RecordBatch,
+}
+
+impl MetricRecordBatch {
+    /// Creates a batch after validating its scalar metric schema and Arrow fields.
+    pub fn try_new(
+        table_name: String,
+        request_schema: Vec<ColumnSchema>,
+        batch: RecordBatch,
+    ) -> Result<Self> {
+        ensure!(
+            !table_name.is_empty() && is_scalar_metric_schema(&request_schema),
+            error::InvalidParameterSnafu {
+                reason: format!("Invalid scalar metric record batch for table '{table_name}'")
+            }
+        );
+        ensure!(
+            request_schema.len() == batch.num_columns(),
+            error::InvalidParameterSnafu {
+                reason: format!(
+                    "Schema width mismatch for table '{}', expected {}, got {}",
+                    table_name,
+                    request_schema.len(),
+                    batch.num_columns()
+                )
+            }
+        );
+        let batch_schema = batch.schema();
+        for (column, field) in request_schema.iter().zip(batch_schema.fields()) {
+            let expected = match ColumnDataType::try_from(column.datatype) {
+                Ok(ColumnDataType::String) => ArrowDataType::Utf8,
+                Ok(ColumnDataType::Float64) => ArrowDataType::Float64,
+                Ok(ColumnDataType::TimestampMillisecond) => {
+                    ArrowDataType::Timestamp(TimeUnit::Millisecond, None)
+                }
+                Ok(ColumnDataType::TimestampNanosecond) => {
+                    ArrowDataType::Timestamp(TimeUnit::Nanosecond, None)
+                }
+                _ => {
+                    return error::InvalidParameterSnafu {
+                        reason: format!(
+                            "Unsupported datatype {} in scalar metric table '{}'",
+                            column.datatype, table_name
+                        ),
+                    }
+                    .fail();
+                }
+            };
+            ensure!(
+                column.column_name == field.name().as_str() && expected == *field.data_type(),
+                error::InvalidParameterSnafu {
+                    reason: format!(
+                        "Arrow field mismatch for table '{}', expected '{}: {}', got '{}: {}'",
+                        table_name,
+                        column.column_name,
+                        expected,
+                        field.name(),
+                        field.data_type()
+                    )
+                }
+            );
+        }
+        Ok(Self {
+            table_name,
+            request_schema,
+            batch,
+        })
+    }
+
+    /// Returns the target logical table name.
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_parts(self) -> (String, Vec<ColumnSchema>, RecordBatch) {
+        (self.table_name, self.request_schema, self.batch)
     }
 }
 
@@ -399,6 +526,14 @@ struct TableResolutionPlan {
     tables_to_alter: Vec<(String, Vec<String>)>,
 }
 
+enum TableResolutionOutcome {
+    Resolved(TableResolutionPlan),
+    PlacementMismatch {
+        table_name: String,
+        physical_table: String,
+    },
+}
+
 struct PendingBatch {
     tables: HashMap<TableId, TableBatch>,
     total_row_count: usize,
@@ -584,20 +719,14 @@ pub fn metric_table_matches_physical_table(table_info: &TableInfo, physical_tabl
             .is_some_and(|table| table == physical_table)
 }
 
-fn ensure_logical_table_matches_physical_table(
-    table_info: &TableInfo,
-    physical_table: &str,
-) -> Result<()> {
-    ensure!(
-        metric_table_matches_physical_table(table_info, physical_table),
-        error::InvalidPromRemoteRequestSnafu {
-            msg: format!(
-                "Metric table '{}' does not belong to physical table '{}'",
-                table_info.name, physical_table
-            ),
-        }
-    );
-    Ok(())
+fn logical_table_placement_error(table_name: &str, physical_table: &str) -> Error {
+    error::InvalidPromRemoteRequestSnafu {
+        msg: format!(
+            "Metric table '{}' does not belong to physical table '{}'",
+            table_name, physical_table
+        ),
+    }
+    .build()
 }
 
 /// Metric pending rows batcher.
@@ -671,6 +800,40 @@ impl PendingRowsBatcher {
         ctx: QueryContextRef,
         protocol: MetricRowBatchProtocol,
     ) -> Result<u64> {
+        let plan = match self.plan_request_tables(&requests, &ctx).await? {
+            TableResolutionOutcome::Resolved(plan) => plan,
+            TableResolutionOutcome::PlacementMismatch {
+                table_name,
+                physical_table,
+            } => return Err(logical_table_placement_error(&table_name, &physical_table)),
+        };
+        self.submit_resolved(requests, ctx, protocol, plan).await
+    }
+
+    async fn submit_with_fallback(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<MetricRowBatchSubmission> {
+        let plan = match self.plan_request_tables(&requests, &ctx).await? {
+            TableResolutionOutcome::Resolved(plan) => plan,
+            TableResolutionOutcome::PlacementMismatch { .. } => {
+                return Ok(MetricRowBatchSubmission::UnmatchedPhysicalTable(requests));
+            }
+        };
+        self.submit_resolved(requests, ctx, protocol, plan)
+            .await
+            .map(|_| MetricRowBatchSubmission::Submitted)
+    }
+
+    async fn submit_resolved(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+        plan: TableResolutionPlan,
+    ) -> Result<u64> {
         METRIC_ROW_BATCH_SUBMISSIONS
             .with_label_values(&[protocol.as_str()])
             .inc();
@@ -678,8 +841,20 @@ impl PendingRowsBatcher {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["submit_build_and_align"])
                 .start_timer();
-            self.build_and_align_table_batches(requests, &ctx).await?
+            self.build_and_align_table_batches(requests, &ctx, plan)
+                .await?
         };
+        self.submit_aligned(table_batches, total_rows, ctx, protocol)
+            .await
+    }
+
+    async fn submit_aligned(
+        &self,
+        table_batches: Vec<(String, u32, RecordBatchWithTsIdx)>,
+        total_rows: usize,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<u64> {
         if total_rows == 0 {
             return Ok(0);
         }
@@ -757,6 +932,71 @@ impl PendingRowsBatcher {
         }
     }
 
+    async fn submit_record_batches_with_fallback(
+        &self,
+        batches: Vec<MetricRecordBatch>,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<MetricRecordBatchSubmission> {
+        let unique_tables = batches
+            .iter()
+            .filter(|batch| batch.batch.num_rows() > 0)
+            .map(|batch| (batch.table_name.as_str(), batch.request_schema.as_slice()))
+            .collect::<Vec<_>>();
+        let mut plan = match self
+            .plan_table_resolution(
+                ctx.current_catalog(),
+                &ctx.current_schema(),
+                &ctx,
+                &unique_tables,
+            )
+            .await?
+        {
+            TableResolutionOutcome::Resolved(plan) => plan,
+            TableResolutionOutcome::PlacementMismatch { .. } => {
+                return Ok(MetricRecordBatchSubmission::UnmatchedPhysicalTable);
+            }
+        };
+
+        METRIC_ROW_BATCH_SUBMISSIONS
+            .with_label_values(&[protocol.as_str()])
+            .inc();
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+        self.create_missing_tables_and_refresh_schemas(
+            catalog,
+            &schema,
+            &ctx,
+            &unique_tables,
+            &mut plan,
+        )
+        .await?;
+        self.alter_tables_and_refresh_schemas(catalog, &schema, &ctx, &mut plan)
+            .await?;
+
+        let total_rows = batches.iter().map(|batch| batch.batch.num_rows()).sum();
+        let mut aligned = Vec::with_capacity(batches.len());
+        for batch in batches {
+            if batch.batch.num_rows() == 0 {
+                continue;
+            }
+            let (region_schema, table_id) = plan
+                .region_schemas
+                .get(&batch.table_name)
+                .cloned()
+                .with_context(|| error::UnexpectedResultSnafu {
+                    reason: format!("Region schema not resolved for table: {}", batch.table_name),
+                })?;
+            let record_batch =
+                metric_record_batch_to_aligned(&batch.batch, region_schema.as_ref())?;
+            aligned.push((batch.table_name, table_id, record_batch));
+        }
+
+        self.submit_aligned(aligned, total_rows, ctx, protocol)
+            .await
+            .map(|_| MetricRecordBatchSubmission::Submitted)
+    }
+
     /// Converts proto `RowInsertRequests` directly into aligned `RecordBatch`es
     /// in a single pass, handling table creation, schema alteration, column
     /// renaming, reordering, and null-filling without building intermediate
@@ -765,6 +1005,7 @@ impl PendingRowsBatcher {
         &self,
         requests: RowInsertRequests,
         ctx: &QueryContextRef,
+        mut plan: TableResolutionPlan,
     ) -> Result<(Vec<(String, u32, RecordBatchWithTsIdx)>, usize)> {
         let catalog = ctx.current_catalog().to_string();
         let schema = ctx.current_schema();
@@ -774,16 +1015,14 @@ impl PendingRowsBatcher {
             return Ok((Vec::new(), 0));
         }
 
-        let unique_tables = Self::collect_unique_table_schemas(&table_rows)?;
-        let mut plan = self
-            .plan_table_resolution(&catalog, &schema, ctx, &unique_tables)
-            .await?;
-
         self.create_missing_tables_and_refresh_schemas(
             &catalog,
             &schema,
             ctx,
-            &table_rows,
+            &table_rows
+                .iter()
+                .map(|(name, rows)| (name.as_str(), rows.schema.as_slice()))
+                .collect::<Vec<_>>(),
             &mut plan,
         )
         .await?;
@@ -820,20 +1059,27 @@ impl PendingRowsBatcher {
     /// Returns unique `(table_name, proto_schema)` pairs while keeping the
     /// first-seen schema for duplicate table names.
     fn collect_unique_table_schemas(
-        table_rows: &[(String, Rows)],
+        requests: &RowInsertRequests,
     ) -> Result<Vec<(&str, &[ColumnSchema])>> {
-        let mut unique_tables: Vec<(&str, &[ColumnSchema])> = Vec::with_capacity(table_rows.len());
+        let mut unique_tables: Vec<(&str, &[ColumnSchema])> =
+            Vec::with_capacity(requests.inserts.len());
         let mut seen = HashSet::new();
 
-        for (table_name, rows) in table_rows {
-            if seen.insert(table_name.as_str()) {
-                unique_tables.push((table_name.as_str(), &rows.schema));
+        for request in &requests.inserts {
+            let Some(rows) = &request.rows else {
+                continue;
+            };
+            if rows.rows.is_empty() {
+                continue;
+            }
+
+            if seen.insert(request.table_name.as_str()) {
+                unique_tables.push((request.table_name.as_str(), &rows.schema));
             } else {
-                // table_rows should group rows by table name.
                 return error::InvalidPromRemoteRequestSnafu {
                     msg: format!(
                         "Found duplicated table name in RowInsertRequest: {}",
-                        table_name
+                        request.table_name
                     ),
                 }
                 .fail();
@@ -841,6 +1087,21 @@ impl PendingRowsBatcher {
         }
 
         Ok(unique_tables)
+    }
+
+    async fn plan_request_tables(
+        &self,
+        requests: &RowInsertRequests,
+        ctx: &QueryContextRef,
+    ) -> Result<TableResolutionOutcome> {
+        let unique_tables = Self::collect_unique_table_schemas(requests)?;
+        self.plan_table_resolution(
+            ctx.current_catalog(),
+            &ctx.current_schema(),
+            ctx,
+            &unique_tables,
+        )
+        .await
     }
 
     /// Resolves table metadata and classifies each table into existing,
@@ -851,7 +1112,7 @@ impl PendingRowsBatcher {
         schema: &str,
         ctx: &QueryContextRef,
         unique_tables: &[(&str, &[ColumnSchema])],
-    ) -> Result<TableResolutionPlan> {
+    ) -> Result<TableResolutionOutcome> {
         let physical_table = ctx
             .extension(PHYSICAL_TABLE_KEY)
             .unwrap_or(GREPTIME_PHYSICAL_TABLE);
@@ -865,11 +1126,17 @@ impl PendingRowsBatcher {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["align_resolve_table"])
                 .start_timer();
-            futures::future::join_all(unique_tables.iter().map(|(table_name, _)| {
-                self.catalog_manager
-                    .table(catalog, schema, table_name, Some(ctx.as_ref()))
-            }))
-            .await
+            let mut resolved_tables = Vec::with_capacity(unique_tables.len());
+            for tables in unique_tables.chunks(MAX_CONCURRENT_TABLE_RESOLUTIONS) {
+                resolved_tables.extend(
+                    futures::future::join_all(tables.iter().map(|(table_name, _)| {
+                        self.catalog_manager
+                            .table(catalog, schema, table_name, Some(ctx.as_ref()))
+                    }))
+                    .await,
+                );
+            }
+            resolved_tables
         };
 
         for ((table_name, rows_schema), table_result) in unique_tables.iter().zip(resolved_tables) {
@@ -877,8 +1144,13 @@ impl PendingRowsBatcher {
 
             if let Some(table) = table {
                 let table_info = table.table_info();
-                if self.with_metric_engine {
-                    ensure_logical_table_matches_physical_table(&table_info, physical_table)?;
+                if self.with_metric_engine
+                    && !metric_table_matches_physical_table(&table_info, physical_table)
+                {
+                    return Ok(TableResolutionOutcome::PlacementMismatch {
+                        table_name: (*table_name).to_string(),
+                        physical_table: physical_table.to_string(),
+                    });
                 }
                 let table_id = table_info.ident.table_id;
                 let region_schema = table_info.meta.schema.arrow_schema().clone();
@@ -907,7 +1179,7 @@ impl PendingRowsBatcher {
             }
         }
 
-        Ok(plan)
+        Ok(TableResolutionOutcome::Resolved(plan))
     }
 
     /// Batch-creates missing tables, refreshes their schema metadata, and
@@ -917,7 +1189,7 @@ impl PendingRowsBatcher {
         catalog: &str,
         schema: &str,
         ctx: &QueryContextRef,
-        table_rows: &[(String, Rows)],
+        table_schemas: &[(&str, &[ColumnSchema])],
         plan: &mut TableResolutionPlan,
     ) -> Result<()> {
         if plan.tables_to_create.is_empty() {
@@ -970,7 +1242,12 @@ impl PendingRowsBatcher {
                 let physical_table = ctx
                     .extension(PHYSICAL_TABLE_KEY)
                     .unwrap_or(GREPTIME_PHYSICAL_TABLE);
-                ensure_logical_table_matches_physical_table(&table_info, physical_table)?;
+                if !metric_table_matches_physical_table(&table_info, physical_table) {
+                    return Err(logical_table_placement_error(
+                        &table_info.name,
+                        physical_table,
+                    ));
+                }
             }
             let table_id = table_info.ident.table_id;
             let region_schema = table_info.meta.schema.arrow_schema().clone();
@@ -978,7 +1255,7 @@ impl PendingRowsBatcher {
                 .insert(table_name.clone(), (region_schema, table_id));
         }
 
-        Self::enqueue_alter_for_new_tables(table_rows, plan)?;
+        Self::enqueue_alter_for_new_tables(table_schemas, plan)?;
 
         Ok(())
     }
@@ -986,7 +1263,7 @@ impl PendingRowsBatcher {
     /// For newly created tables, re-checks all row schemas and appends alter
     /// operations when additional tag columns are still missing.
     fn enqueue_alter_for_new_tables(
-        table_rows: &[(String, Rows)],
+        table_schemas: &[(&str, &[ColumnSchema])],
         plan: &mut TableResolutionPlan,
     ) -> Result<()> {
         let created_tables: HashSet<&str> = plan
@@ -995,16 +1272,17 @@ impl PendingRowsBatcher {
             .map(|(table_name, _)| table_name.as_str())
             .collect();
 
-        for (table_name, rows) in table_rows {
-            if !created_tables.contains(table_name.as_str()) {
+        for (table_name, request_schema) in table_schemas {
+            if !created_tables.contains(table_name) {
                 continue;
             }
 
-            let Some((region_schema, _)) = plan.region_schemas.get(table_name) else {
+            let Some((region_schema, _)) = plan.region_schemas.get(*table_name) else {
                 continue;
             };
 
-            let missing_columns = identify_missing_columns_from_proto(&rows.schema, region_schema)?;
+            let missing_columns =
+                identify_missing_columns_from_proto(request_schema, region_schema)?;
             if missing_columns.is_empty()
                 || plan
                     .tables_to_alter
@@ -1015,7 +1293,7 @@ impl PendingRowsBatcher {
             }
 
             plan.tables_to_alter
-                .push((table_name.clone(), missing_columns));
+                .push(((*table_name).to_string(), missing_columns));
         }
 
         Ok(())
@@ -1172,6 +1450,24 @@ impl MetricRowBatcher for PendingRowsBatcher {
         protocol: MetricRowBatchProtocol,
     ) -> Result<u64> {
         PendingRowsBatcher::submit(self, requests, ctx, protocol).await
+    }
+
+    async fn submit_with_fallback(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<MetricRowBatchSubmission> {
+        PendingRowsBatcher::submit_with_fallback(self, requests, ctx, protocol).await
+    }
+
+    async fn submit_record_batches_with_fallback(
+        &self,
+        batches: Vec<MetricRecordBatch>,
+        ctx: QueryContextRef,
+        protocol: MetricRowBatchProtocol,
+    ) -> Result<MetricRecordBatchSubmission> {
+        PendingRowsBatcher::submit_record_batches_with_fallback(self, batches, ctx, protocol).await
     }
 }
 
@@ -2151,7 +2447,8 @@ mod tests {
         StructValue, Value,
     };
     use arrow::array::{
-        BinaryArray, BooleanArray, StringArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        BinaryArray, BooleanArray, Float64Array, StringArray, TimestampMillisecondArray,
+        TimestampNanosecondArray,
     };
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
@@ -2197,7 +2494,8 @@ mod tests {
 
     use super::{
         BatchKey, CatalogManagerPhysicalFlushAdapter, Error, FlushBatch, FlushRegionWrite,
-        FlushWaiter, MetricRowBatchProtocol, NodeManagerPhysicalFlushAdapter,
+        FlushWaiter, MetricRecordBatch, MetricRecordBatchSubmission, MetricRowBatchProtocol,
+        MetricRowBatchSubmission, NodeManagerPhysicalFlushAdapter,
         PartitionManagerPhysicalFlushAdapter, PendingBatch, PendingRowsBatchMode,
         PendingRowsBatcher, PendingRowsSchemaAlterer, PendingWorker, PhysicalFlushCatalogProvider,
         PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
@@ -3031,6 +3329,34 @@ mod tests {
         requests
     }
 
+    fn synchronous_metric_record_batch() -> MetricRecordBatch {
+        let request_schema = synchronous_submit_request().inserts[0]
+            .rows
+            .as_ref()
+            .unwrap()
+            .schema
+            .clone();
+        let schema = ArrowSchema::new(vec![
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", ArrowDataType::Float64, true),
+            Field::new("tag1", ArrowDataType::Utf8, true),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1000])),
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(StringArray::from(vec!["host-1"])),
+            ],
+        )
+        .unwrap();
+        MetricRecordBatch::try_new("cpu".to_string(), request_schema, batch).unwrap()
+    }
+
     fn test_synchronous_submit_batcher(
         node_requester: Arc<dyn PhysicalFlushNodeRequester>,
     ) -> Arc<PendingRowsBatcher> {
@@ -3140,6 +3466,77 @@ mod tests {
                 .to_string()
                 .contains("does not belong to physical table 'greptime_physical_table'"),
             "{error:?}"
+        );
+        assert_eq!(0, writes.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_submit_with_fallback_returns_mismatched_request_without_writing() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let batcher = test_synchronous_submit_batcher_with_physical_table(
+            Arc::new(MockFlushNodeRequester {
+                writes: writes.clone(),
+                fail: false,
+            }),
+            "other_physical_table",
+        );
+
+        let submission = batcher
+            .submit_with_fallback(
+                synchronous_submit_request(),
+                session::context::QueryContext::arc(),
+                MetricRowBatchProtocol::Otlp,
+            )
+            .await
+            .unwrap();
+
+        let MetricRowBatchSubmission::UnmatchedPhysicalTable(requests) = submission else {
+            panic!("expected placement mismatch to fall back")
+        };
+        assert_eq!("cpu", requests.inserts[0].table_name);
+        assert_eq!(0, writes.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_submit_record_batch_writes_without_proto_rows() {
+        let (batcher, writes) = test_successful_synchronous_submit_batcher();
+
+        let submission = batcher
+            .submit_record_batches_with_fallback(
+                vec![synchronous_metric_record_batch()],
+                session::context::QueryContext::arc(),
+                MetricRowBatchProtocol::Otlp,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(MetricRecordBatchSubmission::Submitted, submission);
+        assert_eq!(1, writes.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_submit_record_batch_returns_placement_mismatch() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let batcher = test_synchronous_submit_batcher_with_physical_table(
+            Arc::new(MockFlushNodeRequester {
+                writes: writes.clone(),
+                fail: false,
+            }),
+            "other_physical_table",
+        );
+
+        let submission = batcher
+            .submit_record_batches_with_fallback(
+                vec![synchronous_metric_record_batch()],
+                session::context::QueryContext::arc(),
+                MetricRowBatchProtocol::Otlp,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            MetricRecordBatchSubmission::UnmatchedPhysicalTable,
+            submission
         );
         assert_eq!(0, writes.load(Ordering::SeqCst));
     }

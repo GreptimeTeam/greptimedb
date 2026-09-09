@@ -12,13 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ahash::HashSet;
+use std::sync::Arc;
+
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::greptime_proto::io::prometheus::write::v2::histogram::{
     Count as PromCount, ResetHint, ZeroCount as PromZeroCount,
 };
 use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram as PromHistogram};
 use api::v1::value::ValueData;
-use api::v1::{RowInsertRequests, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequests, SemanticType, Value};
+use arrow::array::{ArrayRef, Float64Array, StringBuilder, TimestampNanosecondArray};
+use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit};
+use arrow::record_batch::RecordBatch;
 use common_grpc::precision::Precision;
 use common_query::native_histogram::{
     encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
@@ -34,6 +39,7 @@ use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetrics
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{metric, number_data_point, *};
 use session::protocol_ctx::{MetricType, OtlpMetricCtx};
+use snafu::ResultExt;
 use table::requests::{
     METADATA_QUALITY_DECLARED, METRIC_TEMPORALITY_CUMULATIVE, METRIC_TEMPORALITY_DELTA,
     SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_ORIGINAL_NAME, SEMANTIC_METRIC_TEMPORALITY,
@@ -42,6 +48,7 @@ use table::requests::{
 
 use crate::error::{self, Result};
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE};
+use crate::pending_rows_batcher::MetricRecordBatch;
 use crate::query_handler::MetricsIngestOutcome;
 use crate::row_writer::{self, MultiTableData, TableData};
 pub use crate::semantic::SemanticIndex;
@@ -117,6 +124,212 @@ pub struct MetricsConversion {
     /// metric data. See [`resource_info`].
     pub resource_info: Option<RowInsertRequests>,
     pub outcome: MetricsIngestOutcome,
+}
+
+/// A Gauge/Sum-only OTLP conversion that materializes Arrow arrays directly.
+pub struct ScalarMetricsConversion {
+    /// Per-table scalar metric batches.
+    pub batches: Vec<MetricRecordBatch>,
+    /// All emitted logical tables, including metrics without data points.
+    pub permission_tables: Vec<String>,
+    /// Total metric row count.
+    pub rows: usize,
+    /// Semantic metadata used by logical-table auto-creation.
+    pub semantic_index: SemanticIndex,
+    /// OTLP accepted/rejected data point counts.
+    pub outcome: MetricsIngestOutcome,
+}
+
+enum ScalarColumnValues {
+    Tag(Vec<Option<String>>),
+    Timestamp(Vec<Option<i64>>),
+    Field(Vec<Option<f64>>),
+}
+
+struct ScalarColumn {
+    name: String,
+    values: ScalarColumnValues,
+}
+
+struct ScalarTableBuilder {
+    name: String,
+    columns: Vec<ScalarColumn>,
+    column_indexes: HashMap<String, usize>,
+    rows: usize,
+}
+
+impl ScalarTableBuilder {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            columns: Vec::with_capacity(APPROXIMATE_COLUMN_COUNT),
+            column_indexes: HashMap::with_capacity(APPROXIMATE_COLUMN_COUNT),
+            rows: 0,
+        }
+    }
+
+    fn begin_row(&mut self) {
+        for column in &mut self.columns {
+            match &mut column.values {
+                ScalarColumnValues::Tag(values) => values.push(None),
+                ScalarColumnValues::Timestamp(values) => values.push(None),
+                ScalarColumnValues::Field(values) => values.push(None),
+            }
+        }
+        self.rows += 1;
+    }
+
+    fn write_tag(&mut self, name: &str, value: &str) -> Result<()> {
+        let index = self.ensure_column(name, ScalarColumnKind::Tag)?;
+        let ScalarColumnValues::Tag(values) = &mut self.columns[index].values else {
+            return self.column_kind_error(name, "tag");
+        };
+        values[self.rows - 1] = Some(value.to_string());
+        Ok(())
+    }
+
+    fn write_timestamp(&mut self, timestamp_nanos: u64) -> Result<()> {
+        let timestamp = i64::try_from(timestamp_nanos).map_err(|_| {
+            error::TimestampOverflowSnafu {
+                error: format!(
+                    "timestamp {timestamp_nanos} overflow with precision {}",
+                    Precision::Nanosecond
+                ),
+            }
+            .build()
+        })?;
+        let name = greptime_timestamp();
+        let index = self.ensure_column(name, ScalarColumnKind::Timestamp)?;
+        let ScalarColumnValues::Timestamp(values) = &mut self.columns[index].values else {
+            return self.column_kind_error(name, "timestamp");
+        };
+        values[self.rows - 1] = Some(timestamp);
+        Ok(())
+    }
+
+    fn write_field(&mut self, value: f64) -> Result<()> {
+        let name = greptime_value();
+        let index = self.ensure_column(name, ScalarColumnKind::Field)?;
+        let ScalarColumnValues::Field(values) = &mut self.columns[index].values else {
+            return self.column_kind_error(name, "field");
+        };
+        values[self.rows - 1] = Some(value);
+        Ok(())
+    }
+
+    fn ensure_column(&mut self, name: &str, kind: ScalarColumnKind) -> Result<usize> {
+        if let Some(index) = self.column_indexes.get(name).copied() {
+            let matches = matches!(
+                (&self.columns[index].values, kind),
+                (ScalarColumnValues::Tag(_), ScalarColumnKind::Tag)
+                    | (
+                        ScalarColumnValues::Timestamp(_),
+                        ScalarColumnKind::Timestamp
+                    )
+                    | (ScalarColumnValues::Field(_), ScalarColumnKind::Field)
+            );
+            if !matches {
+                return self.column_kind_error(name, kind.as_str());
+            }
+            return Ok(index);
+        }
+
+        let values = match kind {
+            ScalarColumnKind::Tag => ScalarColumnValues::Tag(vec![None; self.rows]),
+            ScalarColumnKind::Timestamp => ScalarColumnValues::Timestamp(vec![None; self.rows]),
+            ScalarColumnKind::Field => ScalarColumnValues::Field(vec![None; self.rows]),
+        };
+        let index = self.columns.len();
+        self.columns.push(ScalarColumn {
+            name: name.to_string(),
+            values,
+        });
+        self.column_indexes.insert(name.to_string(), index);
+        Ok(index)
+    }
+
+    fn column_kind_error<T>(&self, name: &str, expected: &str) -> Result<T> {
+        error::InvalidOtlpMetricInputSnafu {
+            reason: format!(
+                "OTLP metric column '{}' in table '{}' conflicts with the {} column",
+                name, self.name, expected
+            ),
+        }
+        .fail()
+    }
+
+    fn has_field(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|column| matches!(column.values, ScalarColumnValues::Field(_)))
+    }
+
+    fn finish(self) -> Result<MetricRecordBatch> {
+        let mut request_schema = Vec::with_capacity(self.columns.len());
+        let mut fields = Vec::with_capacity(self.columns.len());
+        let mut arrays = Vec::with_capacity(self.columns.len());
+        for column in self.columns {
+            let (datatype, semantic_type, arrow_type, array): (_, _, _, ArrayRef) =
+                match column.values {
+                    ScalarColumnValues::Tag(values) => {
+                        let mut builder = StringBuilder::new();
+                        for value in values {
+                            builder.append_option(value.as_deref());
+                        }
+                        (
+                            ColumnDataType::String,
+                            SemanticType::Tag,
+                            ArrowDataType::Utf8,
+                            Arc::new(builder.finish()),
+                        )
+                    }
+                    ScalarColumnValues::Timestamp(values) => (
+                        ColumnDataType::TimestampNanosecond,
+                        SemanticType::Timestamp,
+                        ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                        Arc::new(TimestampNanosecondArray::from(values)),
+                    ),
+                    ScalarColumnValues::Field(values) => (
+                        ColumnDataType::Float64,
+                        SemanticType::Field,
+                        ArrowDataType::Float64,
+                        Arc::new(Float64Array::from(values)),
+                    ),
+                };
+            request_schema.push(ColumnSchema {
+                column_name: column.name.clone(),
+                datatype: datatype as i32,
+                semantic_type: semantic_type as i32,
+                ..Default::default()
+            });
+            fields.push(Field::new(
+                column.name,
+                arrow_type,
+                semantic_type != SemanticType::Timestamp,
+            ));
+            arrays.push(array);
+        }
+        let batch = RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), arrays)
+            .context(error::ArrowSnafu)?;
+        MetricRecordBatch::try_new(self.name, request_schema, batch)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScalarColumnKind {
+    Tag,
+    Timestamp,
+    Field,
+}
+
+impl ScalarColumnKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Tag => "tag",
+            Self::Timestamp => "timestamp",
+            Self::Field => "field",
+        }
+    }
 }
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
@@ -212,6 +425,139 @@ pub fn to_grpc_insert_requests(
         outcome,
         resource_info,
     })
+}
+
+/// Converts requests containing only Gauge and Sum metrics directly into Arrow
+/// record batches. Returns `None` when the whole request must use the general
+/// OTLP conversion path.
+pub fn try_to_scalar_record_batches(
+    request: &ExportMetricsServiceRequest,
+    metric_ctx: &OtlpMetricCtx,
+) -> Result<Option<ScalarMetricsConversion>> {
+    if metric_ctx.is_legacy
+        || metric_ctx.resource_info
+        || request
+            .resource_metrics
+            .iter()
+            .flat_map(|resource| &resource.scope_metrics)
+            .flat_map(|scope| &scope.metrics)
+            .filter_map(|metric| metric.data.as_ref())
+            .any(|data| !matches!(data, metric::Data::Gauge(_) | metric::Data::Sum(_)))
+    {
+        return Ok(None);
+    }
+
+    let mut tables = HashMap::<String, ScalarTableBuilder>::new();
+    let mut semantic_index = SemanticIndex::default();
+    let mut outcome = MetricsIngestOutcome::default();
+    let mut direct_ctx = metric_ctx.clone();
+    let mut permission_tables = HashSet::new();
+
+    for resource in &request.resource_metrics {
+        let resource_attrs = resource.resource.as_ref().map(|resource| {
+            let mut attrs = resource.attributes.clone();
+            process_resource_attrs(&mut attrs, &direct_ctx);
+            attrs
+        });
+        let resource_tags = normalize_attributes(
+            resource_attrs.as_ref(),
+            AttributeType::Resource,
+            &direct_ctx,
+        )?;
+
+        for scope in &resource.scope_metrics {
+            let scope_attrs = process_scope_attrs(scope, &direct_ctx);
+            let scope_tags =
+                normalize_attributes(scope_attrs.as_ref(), AttributeType::Scope, &direct_ctx)?;
+
+            for metric in &scope.metrics {
+                let Some(data) = metric.data.as_ref() else {
+                    continue;
+                };
+                direct_ctx.set_metric_type(from_metric_type(data));
+                let name = translate_metric_name(
+                    metric,
+                    &direct_ctx.metric_type,
+                    direct_ctx.metric_translation_strategy,
+                );
+                let (data_points, is_delta) = match data {
+                    metric::Data::Gauge(gauge) => (gauge.data_points.as_slice(), false),
+                    metric::Data::Sum(sum) => (
+                        sum.data_points.as_slice(),
+                        matches!(
+                            AggregationTemporality::try_from(sum.aggregation_temporality),
+                            Ok(AggregationTemporality::Delta)
+                        ),
+                    ),
+                    _ => return Ok(None),
+                };
+                permission_tables.insert(name.clone());
+                if data_points.is_empty() {
+                    continue;
+                }
+
+                add_accepted_data_points(&mut outcome, data_points.len())?;
+                let table = tables
+                    .entry(name.clone())
+                    .or_insert_with(|| ScalarTableBuilder::new(name.clone()));
+                for data_point in data_points {
+                    table.begin_row();
+                    for (key, value) in &resource_tags {
+                        table.write_tag(key, value)?;
+                    }
+                    for (key, value) in &scope_tags {
+                        table.write_tag(key, value)?;
+                    }
+                    for (key, value) in normalize_attributes(
+                        Some(&data_point.attributes),
+                        AttributeType::DataPoint,
+                        &direct_ctx,
+                    )? {
+                        table.write_tag(&key, &value)?;
+                    }
+                    table.write_timestamp(data_point.time_unix_nano)?;
+                    if is_delta {
+                        table.write_tag(
+                            OTLP_AGGREGATION_TEMPORALITY_LABEL,
+                            GREPTIME_TEMPORALITY_DELTA,
+                        )?;
+                    }
+                    if matches!(data, metric::Data::Sum(_))
+                        && has_no_recorded_value(data_point.flags)
+                    {
+                        table.write_field(f64::from_bits(PROMETHEUS_STALE_NAN_BITS))?;
+                    } else if let Some(value) = number_data_point_value(&data_point.value) {
+                        table.write_field(value)?;
+                    }
+                }
+                record_metric_semantics(&mut semantic_index, metric, &name, &direct_ctx);
+            }
+        }
+    }
+
+    if tables.values().any(|table| !table.has_field()) {
+        return Ok(None);
+    }
+    let rows = tables.values().map(|table| table.rows).sum();
+    let batches = tables
+        .into_values()
+        .map(ScalarTableBuilder::finish)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(ScalarMetricsConversion {
+        batches,
+        permission_tables: permission_tables.into_iter().collect(),
+        rows,
+        semantic_index,
+        outcome,
+    }))
+}
+
+fn number_data_point_value(value: &Option<number_data_point::Value>) -> Option<f64> {
+    match value {
+        Some(number_data_point::Value::AsInt(value)) => Some(*value as f64),
+        Some(number_data_point::Value::AsDouble(value)) => Some(*value),
+        None => None,
+    }
 }
 
 fn validate_sample_kinds(requests: &RowInsertRequests) -> Result<()> {
@@ -929,8 +1275,19 @@ fn write_attributes(
     attribute_type: AttributeType,
     metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
+    let tags = normalize_attributes(attrs, attribute_type, metric_ctx)?;
+    row_writer::write_tags(writer, tags.into_iter(), row)?;
+
+    Ok(())
+}
+
+fn normalize_attributes(
+    attrs: Option<&Vec<KeyValue>>,
+    attribute_type: AttributeType,
+    metric_ctx: &OtlpMetricCtx,
+) -> Result<Vec<(String, String)>> {
     let Some(attrs) = attrs else {
-        return Ok(());
+        return Ok(Vec::new());
     };
 
     let mut tags = Vec::with_capacity(attrs.len());
@@ -962,9 +1319,7 @@ fn write_attributes(
         }
         tags.push((key, value));
     }
-    row_writer::write_tags(writer, tags.into_iter(), row)?;
-
-    Ok(())
+    Ok(tags)
 }
 
 fn write_timestamp(table: &mut TableData, row: &mut Vec<Value>, time_nano: u64) -> Result<()> {
@@ -1571,6 +1926,97 @@ mod tests {
                 ..Default::default()
             }],
         }
+    }
+
+    #[test]
+    fn test_scalar_record_batch_matches_row_conversion() {
+        set_default_prefix(None).unwrap();
+        let mut request = gauge_request(
+            vec![keyvalue("service.name", "api"), keyvalue("host.id", "h-1")],
+            "temperature",
+        );
+        let metric::Data::Gauge(gauge) = request.resource_metrics[0].scope_metrics[0].metrics[0]
+            .data
+            .as_mut()
+            .unwrap()
+        else {
+            panic!("expected gauge")
+        };
+        gauge.data_points[0].time_unix_nano = 1_000_123;
+        gauge.data_points[0]
+            .attributes
+            .push(keyvalue("sensor.id", "s-1"));
+        gauge.data_points.push(NumberDataPoint {
+            attributes: vec![keyvalue("zone", "west")],
+            time_unix_nano: 2_000_456,
+            value: Some(Value::AsDouble(2.5)),
+            ..Default::default()
+        });
+
+        let direct = try_to_scalar_record_batches(&request, &OtlpMetricCtx::default())
+            .unwrap()
+            .unwrap();
+        let rows = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default())
+            .unwrap()
+            .requests;
+        let old = rows
+            .inserts
+            .iter()
+            .find(|insert| insert.table_name == "temperature")
+            .unwrap()
+            .rows
+            .as_ref()
+            .unwrap();
+        let (_, request_schema, direct_batch) = direct
+            .batches
+            .into_iter()
+            .find(|batch| batch.table_name() == "temperature")
+            .unwrap()
+            .into_parts();
+
+        assert_eq!(old.schema, request_schema);
+        let old_batch = crate::prom_row_builder::rows_to_aligned_record_batch(
+            old,
+            direct_batch.schema().as_ref(),
+        )
+        .unwrap()
+        .into_parts()
+        .0;
+        assert_eq!(old_batch, direct_batch);
+        assert_eq!(2, direct.rows);
+        assert_eq!(2, direct.outcome.accepted_data_points);
+    }
+
+    #[test]
+    fn test_scalar_record_batch_falls_back_without_a_sample_field() {
+        let mut request = gauge_request(Vec::new(), "temperature");
+        let metric::Data::Gauge(gauge) = request.resource_metrics[0].scope_metrics[0].metrics[0]
+            .data
+            .as_mut()
+            .unwrap()
+        else {
+            panic!("expected gauge");
+        };
+        gauge.data_points[0].value = None;
+
+        assert!(
+            try_to_scalar_record_batches(&request, &OtlpMetricCtx::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_scalar_record_batch_falls_back_for_non_scalar_metric() {
+        let mut request = gauge_request(Vec::new(), "temperature");
+        request.resource_metrics[0].scope_metrics[0].metrics[0].data =
+            Some(metric::Data::Summary(Summary::default()));
+
+        assert!(
+            try_to_scalar_record_batches(&request, &OtlpMetricCtx::default())
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn column_names(request: &RowInsertRequests, table: &str) -> Vec<String> {

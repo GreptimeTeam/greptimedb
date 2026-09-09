@@ -199,6 +199,75 @@ pub(crate) fn rows_to_aligned_record_batch(
     RecordBatchWithTsIdx::try_new(batch, timestamp_index)
 }
 
+/// Aligns an Arrow scalar metric batch to an existing logical table schema.
+///
+/// Source arrays are reused when possible; only missing target columns allocate
+/// null arrays. Timestamp and value columns are matched by semantic shape so
+/// existing tables may use non-default names.
+pub(crate) fn metric_record_batch_to_aligned(
+    source: &RecordBatch,
+    target_schema: &ArrowSchema,
+) -> Result<RecordBatchWithTsIdx> {
+    let source_schema = source.schema();
+    let (target_ts_name, target_field_name, _) = unzip_logical_region_schema(target_schema)?;
+    let timestamp_index = target_schema
+        .column_with_name(&target_ts_name)
+        .map(|(index, _)| index)
+        .with_context(|| error::UnexpectedResultSnafu {
+            reason: format!(
+                "Failed to resolve timestamp column '{}' in target schema",
+                target_ts_name
+            ),
+        })?;
+    let target_timestamp_type = target_schema.field(timestamp_index).data_type();
+    let mut source_map = HashMap::with_capacity(source.num_columns());
+
+    for (index, field) in source_schema.fields().iter().enumerate() {
+        let effective_name = match field.data_type() {
+            ArrowDataType::Float64 => target_field_name.as_str(),
+            ArrowDataType::Timestamp(_, _) => {
+                ensure!(
+                    field.data_type() == target_timestamp_type,
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "Metric row timestamp type mismatch, expected {}, actual {}",
+                            target_timestamp_type,
+                            field.data_type()
+                        )
+                    }
+                );
+                target_ts_name.as_str()
+            }
+            ArrowDataType::Utf8 => field.name(),
+            other => {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "Unexpected metric record batch type {}, field name: {}",
+                        other,
+                        field.name()
+                    ),
+                }
+                .fail();
+            }
+        };
+        source_map.insert(effective_name, index);
+    }
+
+    let columns = target_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            source_map
+                .get(field.name().as_str())
+                .map(|index| source.column(*index).clone())
+                .unwrap_or_else(|| new_null_array(field.data_type(), source.num_rows()))
+        })
+        .collect();
+    let batch = RecordBatch::try_new(Arc::new(target_schema.clone()), columns)
+        .context(error::ArrowSnafu)?;
+    RecordBatchWithTsIdx::try_new(batch, timestamp_index)
+}
+
 /// Identify tag columns in the proto `rows_schema` that are absent from the
 /// target region schema, without building an intermediate `RecordBatch`.
 pub(crate) fn identify_missing_columns_from_proto(
@@ -330,17 +399,63 @@ fn build_arrow_array(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
     use arrow::array::{
-        Array, Float64Array, StringArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        Array, ArrayRef, Float64Array, StringArray, TimestampMillisecondArray,
+        TimestampNanosecondArray,
     };
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
 
     use super::{
         build_metric_create_table_schema_from_proto, identify_missing_columns_from_proto,
-        rows_to_aligned_record_batch,
+        metric_record_batch_to_aligned, rows_to_aligned_record_batch,
     };
+
+    #[test]
+    fn test_metric_record_batch_aligns_without_proto_materialization() {
+        let source = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new(
+                    "greptime_timestamp",
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    false,
+                ),
+                Field::new("host", DataType::Utf8, true),
+                Field::new("greptime_value", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(TimestampNanosecondArray::from(vec![2_000_123])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["h1"])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![42.0])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let target = ArrowSchema::new(vec![
+            Field::new("region", DataType::Utf8, true),
+            Field::new("my_value", DataType::Float64, true),
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+        ]);
+
+        let (aligned, timestamp_index) = metric_record_batch_to_aligned(&source, &target)
+            .unwrap()
+            .into_parts();
+
+        assert_eq!(2, timestamp_index);
+        assert_eq!(aligned.schema().as_ref(), &target);
+        assert_eq!(1, aligned.column(0).null_count());
+        assert!(Arc::ptr_eq(source.column(2), aligned.column(1)));
+        assert!(Arc::ptr_eq(source.column(0), aligned.column(2)));
+        assert!(Arc::ptr_eq(source.column(1), aligned.column(3)));
+    }
 
     #[test]
     fn test_rows_to_aligned_record_batch_renames_and_reorders() {

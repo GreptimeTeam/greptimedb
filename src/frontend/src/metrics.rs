@@ -45,6 +45,15 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Elapsed time of OTLP metrics ingest stages on the frontend node.
+    pub static ref OTLP_METRICS_INGEST_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_frontend_otlp_metrics_ingest_stage_elapsed",
+        "Elapsed time of OTLP metrics ingest stages on the frontend node",
+        &["stage"],
+        vec![0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+    )
+    .unwrap();
+
     /// Failed writes of the synthesized OTLP resource descriptor table; these
     /// surface as OTLP partial-success warnings, not request failures.
     pub static ref OTLP_RESOURCE_INFO_WRITE_ERRORS: IntCounter = register_int_counter!(

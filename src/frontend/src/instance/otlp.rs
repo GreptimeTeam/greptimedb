@@ -39,8 +39,8 @@ use servers::metrics::METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS;
 use servers::otlp;
 use servers::otlp::trace::span::TraceSpanGroup;
 use servers::pending_rows_batcher::{
-    MetricRowBatchProtocol, MetricRowBatcherRef, is_scalar_metric_batchable,
-    metric_table_matches_physical_table,
+    MetricRecordBatchSubmission, MetricRowBatchProtocol, MetricRowBatchSubmission,
+    MetricRowBatcherRef, is_scalar_metric_batchable,
 };
 use servers::query_handler::{
     MetricsIngestOutcome, OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
@@ -55,52 +55,10 @@ use table::requests::{
 
 use self::trace_ingest::trace_conventions;
 use crate::instance::Instance;
-use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_RESOURCE_INFO_WRITE_ERRORS};
-
-impl Instance {
-    async fn metric_table_matches_physical_table(
-        &self,
-        table_name: &str,
-        physical_table: &str,
-        ctx: &QueryContextRef,
-    ) -> ServerResult<bool> {
-        let table = self
-            .catalog_manager()
-            .table(
-                ctx.current_catalog(),
-                &ctx.current_schema(),
-                table_name,
-                Some(ctx.as_ref()),
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
-        Ok(table.is_none_or(|table| {
-            metric_table_matches_physical_table(&table.table_info(), physical_table)
-        }))
-    }
-
-    async fn existing_metric_tables_match_physical_table(
-        &self,
-        requests: &api::v1::RowInsertRequests,
-        ctx: &QueryContextRef,
-    ) -> ServerResult<bool> {
-        let physical_table = ctx
-            .extension(PHYSICAL_TABLE_PARAM)
-            .unwrap_or(GREPTIME_PHYSICAL_TABLE);
-
-        for request in &requests.inserts {
-            if !self
-                .metric_table_matches_physical_table(&request.table_name, physical_table, ctx)
-                .await?
-            {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-}
+use crate::metrics::{
+    OTLP_LOGS_ROWS, OTLP_METRICS_INGEST_STAGE_ELAPSED, OTLP_METRICS_ROWS,
+    OTLP_RESOURCE_INFO_WRITE_ERRORS,
+};
 
 fn trace_permission_targets(
     table_name: &str,
@@ -133,6 +91,23 @@ fn trace_permission_targets(
     PermissionTableTargets::resolved(targets)
 }
 
+fn metric_write_context(
+    ctx: &QueryContextRef,
+    semantic_index: &otlp::metrics::SemanticIndex,
+    is_legacy: bool,
+) -> QueryContextRef {
+    let mut ctx = ctx.as_ref().clone();
+    ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
+    ctx.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+    if let Some(index) = semantic_index.encode(&ctx.current_schema()) {
+        ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
+    }
+    if !is_legacy {
+        ctx.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
+    }
+    Arc::new(ctx)
+}
+
 #[async_trait]
 impl OpenTelemetryProtocolHandler for Instance {
     #[tracing::instrument(skip_all)]
@@ -142,11 +117,16 @@ impl OpenTelemetryProtocolHandler for Instance {
         metric_row_batcher: Option<MetricRowBatcherRef>,
         ctx: QueryContextRef,
     ) -> ServerResult<MetricsIngestOutcome> {
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Action(OTLP_WRITE))
-            .context(AuthSnafu)?;
+        {
+            let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                .with_label_values(&["request_permission"])
+                .start_timer();
+            self.plugins
+                .get::<PermissionCheckerRef>()
+                .as_ref()
+                .check_permission(ctx.current_user(), PermissionReq::Action(OTLP_WRITE))
+                .context(AuthSnafu)?;
+        }
 
         let interceptor_ref = self
             .plugins
@@ -162,7 +142,12 @@ impl OpenTelemetryProtocolHandler for Instance {
             .collect::<Vec<_>>();
 
         // See [`OtlpMetricCtx`] for details
-        let is_legacy = self.check_otlp_legacy(&input_names, &ctx).await?;
+        let is_legacy = {
+            let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                .with_label_values(&["legacy_check"])
+                .start_timer();
+            self.check_otlp_legacy(&input_names, &ctx).await?
+        };
 
         let mut metric_ctx = ctx
             .protocol_ctx()
@@ -172,13 +157,84 @@ impl OpenTelemetryProtocolHandler for Instance {
         metric_ctx.is_legacy = is_legacy;
         metric_ctx.resource_info = self.otlp_resource_info;
 
+        let mut batching_candidate =
+            !metric_ctx.is_legacy && metric_ctx.with_metric_engine && metric_row_batcher.is_some();
+        if batching_candidate {
+            let direct_conversion = {
+                let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["direct_conversion"])
+                    .start_timer();
+                otlp::metrics::try_to_scalar_record_batches(&request, &metric_ctx)?
+            };
+            if let Some(otlp::metrics::ScalarMetricsConversion {
+                batches,
+                permission_tables,
+                rows,
+                semantic_index,
+                mut outcome,
+            }) = direct_conversion
+            {
+                if outcome.accepted_data_points == 0 {
+                    return Ok(outcome);
+                }
+                let targets = PermissionTableTargets::resolved(
+                    permission_tables
+                        .into_iter()
+                        .map(|table_name| {
+                            PermissionTableTarget::new(
+                                ctx.current_catalog(),
+                                ctx.current_schema(),
+                                table_name,
+                            )
+                        })
+                        .collect(),
+                );
+                self.check_table_permission(&ctx, PermissionReq::Action(OTLP_WRITE), targets)
+                    .context(AuthSnafu)?;
+                let write_ctx = metric_write_context(&ctx, &semantic_index, is_legacy);
+                let Some(metric_row_batcher) = metric_row_batcher.as_ref() else {
+                    return Err(error::InternalSnafu {
+                        err_msg: "OTLP batching candidate has no batcher".to_string(),
+                    }
+                    .build());
+                };
+                let submission = {
+                    let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                        .with_label_values(&["batch_submit"])
+                        .start_timer();
+                    metric_row_batcher
+                        .submit_record_batches_with_fallback(
+                            batches,
+                            write_ctx,
+                            MetricRowBatchProtocol::Otlp,
+                        )
+                        .await?
+                };
+                if submission == MetricRecordBatchSubmission::Submitted {
+                    self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
+                    OTLP_METRICS_ROWS.inc_by(rows as u64);
+                    outcome.write_cost = 0;
+                    return Ok(outcome);
+                }
+                METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS
+                    .with_label_values(&[MetricRowBatchProtocol::Otlp.as_str()])
+                    .inc();
+                batching_candidate = false;
+            }
+        }
+
         let otlp::metrics::MetricsConversion {
             requests,
             rows,
             semantic_index,
             resource_info,
             mut outcome,
-        } = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
+        } = {
+            let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                .with_label_values(&["conversion"])
+                .start_timer();
+            otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?
+        };
         if outcome.rejected_data_points > 0 {
             warn!(
                 "Rejected {} OTLP metrics data points: {}",
@@ -190,64 +246,73 @@ impl OpenTelemetryProtocolHandler for Instance {
             return Ok(outcome);
         }
 
-        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
-            .context(AuthSnafu)?;
+        {
+            let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                .with_label_values(&["row_permission"])
+                .start_timer();
+            self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
+                .context(AuthSnafu)?;
+        }
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
-        let ctx = {
-            let mut c = (*ctx).clone();
-            c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
-            c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
-            // Per-table metric specifics + resource/scope lineage ride this
-            // internal channel; the auto-create path folds them per schema and
-            // table name.
-            if let Some(index) = semantic_index.encode(&c.current_schema()) {
-                c.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
-            }
-            if !is_legacy {
-                c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
-            }
-            Arc::new(c)
-        };
+        let ctx = metric_write_context(&ctx, &semantic_index, is_legacy);
 
-        let batching_candidate =
-            !metric_ctx.is_legacy && metric_ctx.with_metric_engine && metric_row_batcher.is_some();
-        let batchable = batching_candidate
-            && is_scalar_metric_batchable(&requests)?
-            && self
-                .existing_metric_tables_match_physical_table(&requests, &ctx)
-                .await?;
-        let write_cost =
-            if let Some(metric_row_batcher) = metric_row_batcher.as_ref().filter(|_| batchable) {
+        let scalar_batchable = if batching_candidate {
+            let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                .with_label_values(&["batchability"])
+                .start_timer();
+            is_scalar_metric_batchable(&requests)?
+        } else {
+            false
+        };
+        let direct_requests = if let Some(metric_row_batcher) =
+            metric_row_batcher.as_ref().filter(|_| scalar_batchable)
+        {
+            let submission = {
+                let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["batch_submit"])
+                    .start_timer();
                 metric_row_batcher
-                    .submit(requests, ctx.clone(), MetricRowBatchProtocol::Otlp)
-                    .await?;
-                0
-            } else {
-                if batching_candidate {
-                    METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS
-                        .with_label_values(&[MetricRowBatchProtocol::Otlp.as_str()])
-                        .inc();
-                }
-                // OTLP tables have one sample field in both the legacy and physical paths.
-                let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
-                    self.handle_row_inserts(requests, ctx.clone(), false, true)
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(error::ExecuteGrpcQuerySnafu)
-                } else {
-                    let physical_table = ctx
-                        .extension(PHYSICAL_TABLE_PARAM)
-                        .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-                        .to_string();
-                    self.handle_metric_row_inserts(requests, ctx.clone(), physical_table)
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(error::ExecuteGrpcQuerySnafu)
-                }?;
-                output.meta.cost
+                    .submit_with_fallback(requests, ctx.clone(), MetricRowBatchProtocol::Otlp)
+                    .await?
             };
+            match submission {
+                MetricRowBatchSubmission::Submitted => None,
+                MetricRowBatchSubmission::UnmatchedPhysicalTable(requests) => Some(requests),
+            }
+        } else {
+            Some(requests)
+        };
+        let write_cost = if let Some(requests) = direct_requests {
+            if batching_candidate {
+                METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS
+                    .with_label_values(&[MetricRowBatchProtocol::Otlp.as_str()])
+                    .inc();
+            }
+            let _timer = OTLP_METRICS_INGEST_STAGE_ELAPSED
+                .with_label_values(&["direct_write"])
+                .start_timer();
+            // OTLP tables have one sample field in both the legacy and physical paths.
+            let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+                self.handle_row_inserts(requests, ctx.clone(), false, true)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteGrpcQuerySnafu)
+            } else {
+                let physical_table = ctx
+                    .extension(PHYSICAL_TABLE_PARAM)
+                    .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+                    .to_string();
+                self.handle_metric_row_inserts(requests, ctx.clone(), physical_table)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteGrpcQuerySnafu)
+            }?;
+            output.meta.cost
+        } else {
+            0
+        };
         outcome.write_cost = write_cost;
 
         // Derived enrichment, written after the metric data is committed:
@@ -393,6 +458,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -422,7 +488,9 @@ mod tests {
     };
     use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource as MetricResource;
     use servers::metrics::METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS;
-    use servers::pending_rows_batcher::{MetricRowBatchProtocol, MetricRowBatcher};
+    use servers::pending_rows_batcher::{
+        MetricRecordBatch, MetricRecordBatchSubmission, MetricRowBatchProtocol, MetricRowBatcher,
+    };
     use session::context::QueryContext;
     use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 
@@ -436,9 +504,11 @@ mod tests {
     #[derive(Default)]
     struct FakeMetricRowBatcher {
         requests: Mutex<Vec<RowInsertRequests>>,
+        record_batch_tables: Mutex<Vec<Vec<String>>>,
         protocols: Mutex<Vec<MetricRowBatchProtocol>>,
         flush_error: Option<&'static str>,
         accepted_rows: u64,
+        reject_placement: bool,
     }
 
     impl FakeMetricRowBatcher {
@@ -452,6 +522,13 @@ mod tests {
         fn failing(message: &'static str) -> Self {
             Self {
                 flush_error: Some(message),
+                ..Default::default()
+            }
+        }
+
+        fn rejecting_placement() -> Self {
+            Self {
+                reject_placement: true,
                 ..Default::default()
             }
         }
@@ -474,6 +551,47 @@ mod tests {
                 .build());
             }
             Ok(self.accepted_rows)
+        }
+
+        async fn submit_with_fallback(
+            &self,
+            requests: RowInsertRequests,
+            ctx: QueryContextRef,
+            protocol: MetricRowBatchProtocol,
+        ) -> ServerResult<MetricRowBatchSubmission> {
+            if self.reject_placement {
+                self.requests.lock().unwrap().push(requests.clone());
+                self.protocols.lock().unwrap().push(protocol);
+                return Ok(MetricRowBatchSubmission::UnmatchedPhysicalTable(requests));
+            }
+            self.submit(requests, ctx, protocol)
+                .await
+                .map(|_| MetricRowBatchSubmission::Submitted)
+        }
+
+        async fn submit_record_batches_with_fallback(
+            &self,
+            batches: Vec<MetricRecordBatch>,
+            _ctx: QueryContextRef,
+            protocol: MetricRowBatchProtocol,
+        ) -> ServerResult<MetricRecordBatchSubmission> {
+            self.record_batch_tables.lock().unwrap().push(
+                batches
+                    .iter()
+                    .map(|batch| batch.table_name().to_string())
+                    .collect(),
+            );
+            self.protocols.lock().unwrap().push(protocol);
+            if self.reject_placement {
+                return Ok(MetricRecordBatchSubmission::UnmatchedPhysicalTable);
+            }
+            if let Some(message) = self.flush_error {
+                return Err(servers::error::InternalSnafu {
+                    err_msg: message.to_string(),
+                }
+                .build());
+            }
+            Ok(MetricRecordBatchSubmission::Submitted)
         }
     }
 
@@ -537,6 +655,7 @@ mod tests {
     #[derive(Default)]
     struct CountingPermissionChecker {
         checks: AtomicUsize,
+        targets: Mutex<Vec<PermissionTableTargets>>,
     }
 
     impl PermissionChecker for CountingPermissionChecker {
@@ -553,9 +672,10 @@ mod tests {
             &self,
             _user_info: UserInfoRef,
             _req: PermissionReq,
-            _targets: PermissionTableTargets,
+            targets: PermissionTableTargets,
         ) -> auth::error::Result<PermissionResp> {
             self.checks.fetch_add(1, Ordering::Relaxed);
+            self.targets.lock().unwrap().push(targets);
             Ok(PermissionResp::Allow)
         }
     }
@@ -665,9 +785,79 @@ mod tests {
         assert_eq!(1, outcome.accepted_data_points);
         assert_eq!(0, outcome.rejected_data_points);
         assert_eq!(0, outcome.write_cost);
-        let requests = batcher.requests.lock().unwrap();
-        assert_eq!(1, requests.len());
-        assert_eq!("temperature", requests[0].inserts[0].table_name);
+        assert!(batcher.requests.lock().unwrap().is_empty());
+        assert_eq!(
+            vec![vec!["temperature".to_string()]],
+            *batcher.record_batch_tables.lock().unwrap()
+        );
+        assert_eq!(
+            vec![MetricRowBatchProtocol::Otlp],
+            *batcher.protocols.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_direct_metrics_permission_includes_empty_metric_table() {
+        let checker = Arc::new(CountingPermissionChecker::default());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let instance = test_instance_with(FrontendOptions::default(), plugins).await;
+        let batcher = Arc::new(FakeMetricRowBatcher::successful(1));
+        let mut empty = gauge_metric("empty_temperature");
+        let Some(metric::Data::Gauge(gauge)) = empty.data.as_mut() else {
+            panic!("expected gauge")
+        };
+        gauge.data_points.clear();
+
+        instance
+            .metrics(
+                metrics_request(vec![gauge_metric("temperature"), empty]),
+                Some(batcher),
+                metric_query_ctx(true),
+            )
+            .await
+            .unwrap();
+
+        let targets = checker.targets.lock().unwrap();
+        let PermissionTableTargets::Resolved(targets) = &targets[0] else {
+            panic!("expected resolved table targets")
+        };
+        let table_names = targets
+            .iter()
+            .map(|target| target.table.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            HashSet::from(["temperature", "empty_temperature"]),
+            table_names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_metrics_falls_back_when_batcher_rejects_placement() {
+        let instance = test_instance().await;
+        let batcher = Arc::new(FakeMetricRowBatcher::rejecting_placement());
+
+        let error = instance
+            .metrics(
+                gauge_request("temperature"),
+                Some(batcher.clone()),
+                metric_query_ctx(true),
+            )
+            .await
+            .unwrap_err();
+
+        let servers::error::Error::ExecuteGrpcQuery { source, .. } = error else {
+            panic!("expected ExecuteGrpcQuery from Inserter, got {error:?}");
+        };
+        assert!(
+            source
+                .as_any()
+                .downcast_ref::<crate::error::Error>()
+                .is_some_and(|source| matches!(source, crate::error::Error::TableOperation { .. })),
+            "expected frontend TableOperation from Inserter, got {source:?}"
+        );
+        assert!(batcher.requests.lock().unwrap().is_empty());
+        assert_eq!(1, batcher.record_batch_tables.lock().unwrap().len());
         assert_eq!(
             vec![MetricRowBatchProtocol::Otlp],
             *batcher.protocols.lock().unwrap()

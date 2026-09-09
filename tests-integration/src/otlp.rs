@@ -65,7 +65,7 @@ mod test {
         let mut output = instance
             .do_query(
                 "CREATE TABLE fixed_delta_total (\
-                 \"stream\" STRING, greptime_timestamp TIMESTAMP(3) NOT NULL, \
+                 \"stream\" STRING, greptime_timestamp TIMESTAMP(9) NOT NULL, \
                  greptime_value DOUBLE, TIME INDEX (greptime_timestamp), \
                  PRIMARY KEY (\"stream\")) ENGINE=mito",
                 ctx.clone(),
@@ -123,7 +123,7 @@ mod test {
         let mut output = instance
             .do_query(
                 "CREATE TABLE raw_delta_mito_total (\
-                 \"stream\" STRING, greptime_timestamp TIMESTAMP(3) NOT NULL, \
+                 \"stream\" STRING, greptime_timestamp TIMESTAMP(9) NOT NULL, \
                  greptime_value DOUBLE, TIME INDEX (greptime_timestamp), \
                  PRIMARY KEY (\"stream\")) ENGINE=mito",
                 ctx.clone(),
@@ -404,12 +404,12 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+----------------+---------------------+----------------+
-| container_name | greptime_timestamp  | greptime_value |
-+----------------+---------------------+----------------+
-| testserver     | 1970-01-01T00:00:00 | 105.0          |
-| testsevrer     | 1970-01-01T00:00:00 | 100.0          |
-+----------------+---------------------+----------------+",
++----------------+-------------------------------+----------------+
+| container_name | greptime_timestamp            | greptime_value |
++----------------+-------------------------------+----------------+
+| testsevrer     | 1970-01-01T00:00:00.000000100 | 100.0          |
+| testserver     | 1970-01-01T00:00:00.000000105 | 105.0          |
++----------------+-------------------------------+----------------+",
         );
 
         let mut output = instance
@@ -449,11 +449,11 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+---------------------+----------------+
-| host       | greptime_timestamp  | greptime_value |
-+------------+---------------------+----------------+
-| testserver | 1970-01-01T00:00:00 | 51.0           |
-+------------+---------------------+----------------+",
++------------+-------------------------------+----------------+
+| host       | greptime_timestamp            | greptime_value |
++------------+-------------------------------+----------------+
+| testserver | 1970-01-01T00:00:00.000000100 | 51.0           |
++------------+-------------------------------+----------------+",
         );
 
         let mut output = instance
@@ -470,11 +470,11 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+---------------------+----------------+
-| host       | greptime_timestamp  | greptime_value |
-+------------+---------------------+----------------+
-| testserver | 1970-01-01T00:00:00 | 4.0            |
-+------------+---------------------+----------------+",
++------------+-------------------------------+----------------+
+| host       | greptime_timestamp            | greptime_value |
++------------+-------------------------------+----------------+
+| testserver | 1970-01-01T00:00:00.000000100 | 4.0            |
++------------+-------------------------------+----------------+",
         );
     }
 
