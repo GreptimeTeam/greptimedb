@@ -120,46 +120,6 @@ pub trait SystemTable {
 
 pub type SystemTableRef = Arc<dyn SystemTable + Send + Sync>;
 
-pub fn build_system_table(
-    catalog_name: String,
-    schema_name: String,
-    table: SystemTableRef,
-) -> TableRef {
-    let table_meta = TableMetaBuilder::empty()
-        .schema(table.schema())
-        .primary_key_indices(vec![])
-        .next_column_id(0)
-        .build()
-        .unwrap();
-    let table_info = Arc::new(
-        TableInfoBuilder::default()
-            .table_id(table.table_id())
-            .name(table.table_name().to_string())
-            .catalog_name(catalog_name)
-            .schema_name(schema_name)
-            .meta(table_meta)
-            .table_type(table.table_type())
-            .build()
-            .unwrap(),
-    );
-    Arc::new(Table::new(
-        table_info,
-        FilterPushDownType::Inexact,
-        Arc::new(SystemTableDataSource::new(table)),
-    ))
-}
-
-pub struct MakePrivateSystemTableRequest {
-    pub catalog_name: String,
-}
-
-/// Extension seam for enterprise-owned virtual tables in `greptime_private`.
-pub trait PrivateSystemTableFactory: Send + Sync {
-    fn make_private_system_table(&self, req: MakePrivateSystemTableRequest) -> SystemTableRef;
-}
-
-pub type PrivateSystemTableFactoryRef = Arc<dyn PrivateSystemTableFactory>;
-
 struct SystemTableDataSource {
     table: SystemTableRef,
 }

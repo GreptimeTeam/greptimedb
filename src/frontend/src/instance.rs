@@ -372,17 +372,6 @@ impl Instance {
         query_ctx: QueryContextRef,
         query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
     ) -> Result<Output> {
-        #[cfg(feature = "enterprise")]
-        if matches!(&stmt, Statement::CreateBulkLoad(_))
-            || matches!(&stmt, Statement::Delete(delete) if operator::statement::bulk_load::targets_bulk_load_jobs(delete, &query_ctx))
-        {
-            query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
-            return self
-                .statement_executor
-                .execute_sql(stmt, query_ctx)
-                .await
-                .context(TableOperationSnafu);
-        }
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
                 // TODO: remove this when format is supported in datafusion
@@ -1636,10 +1625,6 @@ pub fn check_permission(
         Statement::Insert(insert) => {
             let name = insert.table_name().context(ParseSqlSnafu)?;
             validate_param(name, query_ctx)?;
-        }
-        #[cfg(feature = "enterprise")]
-        Statement::CreateBulkLoad(stmt) => {
-            validate_param(&stmt.table_name, query_ctx)?;
         }
         Statement::CreateTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;

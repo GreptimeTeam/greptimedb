@@ -13,8 +13,6 @@
 // limitations under the License.
 
 mod admin;
-#[cfg(feature = "enterprise")]
-pub mod bulk_load;
 mod comment;
 mod copy_database;
 mod copy_query_to;
@@ -152,8 +150,6 @@ pub struct StatementExecutor {
     create_database_handler: Option<CreateDatabaseHandlerRef>,
     #[cfg(feature = "enterprise")]
     trigger_querier: Option<TriggerQuerierRef>,
-    #[cfg(feature = "enterprise")]
-    bulk_load_handler: Option<bulk_load::BulkLoadHandlerRef>,
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
@@ -209,8 +205,6 @@ impl StatementExecutor {
             create_database_handler: None,
             #[cfg(feature = "enterprise")]
             trigger_querier: None,
-            #[cfg(feature = "enterprise")]
-            bulk_load_handler: None,
         }
     }
 
@@ -234,12 +228,6 @@ impl StatementExecutor {
         self
     }
 
-    #[cfg(feature = "enterprise")]
-    pub fn with_bulk_load_handler(mut self, handler: bulk_load::BulkLoadHandlerRef) -> Self {
-        self.bulk_load_handler = Some(handler);
-        self
-    }
-
     #[cfg(feature = "testing")]
     pub async fn execute_stmt(
         &self,
@@ -255,24 +243,8 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
-            Statement::Query(_) | Statement::Explain(_) => {
+            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
                 self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
-            }
-
-            Statement::Delete(delete) => {
-                #[cfg(feature = "enterprise")]
-                if let Some(request) = bulk_load::extract_bulk_load_delete(&delete, &query_ctx)? {
-                    let handler = self.bulk_load_handler.as_ref().context(NotSupportedSnafu {
-                        feat: "CREATE/DELETE BULK LOAD is unavailable in this deployment",
-                    })?;
-                    let affected = handler
-                        .delete(request.catalog, request.job_ids)
-                        .await
-                        .context(ExternalSnafu)?;
-                    return Ok(Output::new_with_affected_rows(affected));
-                }
-                self.plan_exec(QueryStatement::Sql(Statement::Delete(delete)), query_ctx)
-                    .await
             }
 
             Statement::DeclareCursor(declare_cursor) => {
@@ -363,17 +335,6 @@ impl StatementExecutor {
                 Ok(Output::new_with_affected_rows(0))
             }
             Statement::CreateFlow(stmt) => self.create_flow(stmt, query_ctx).await,
-            #[cfg(feature = "enterprise")]
-            Statement::CreateBulkLoad(stmt) => {
-                let handler = self.bulk_load_handler.as_ref().context(NotSupportedSnafu {
-                    feat: "CREATE/DELETE BULK LOAD is unavailable in this deployment",
-                })?;
-                handler
-                    .start(stmt, query_ctx)
-                    .await
-                    .context(ExternalSnafu)?;
-                Ok(Output::new_with_affected_rows(0))
-            }
             #[cfg(feature = "enterprise")]
             Statement::CreateTrigger(stmt) => self.create_trigger(stmt, query_ctx).await,
             Statement::DropFlow(stmt) => {

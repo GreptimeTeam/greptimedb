@@ -64,9 +64,6 @@ pub enum Statement {
     CreateTableLike(CreateTableLike),
     // CREATE FLOW
     CreateFlow(CreateFlow),
-    // CREATE BULK LOAD
-    #[cfg(feature = "enterprise")]
-    CreateBulkLoad(crate::statements::create::bulk_load::CreateBulkLoad),
     // CREATE VIEW ... AS
     CreateView(CreateView),
     // CREATE TRIGGER
@@ -227,9 +224,6 @@ impl Statement {
             | Statement::Admin(_) => false,
 
             #[cfg(feature = "enterprise")]
-            Statement::CreateBulkLoad(_) => false,
-
-            #[cfg(feature = "enterprise")]
             Statement::UndropTable(_) => false,
 
             #[cfg(feature = "enterprise")]
@@ -251,8 +245,6 @@ impl Display for Statement {
             Statement::CreateExternalTable(s) => s.fmt(f),
             Statement::CreateTableLike(s) => s.fmt(f),
             Statement::CreateFlow(s) => s.fmt(f),
-            #[cfg(feature = "enterprise")]
-            Statement::CreateBulkLoad(s) => s.fmt(f),
             #[cfg(feature = "enterprise")]
             Statement::CreateTrigger(s) => s.fmt(f),
             Statement::DropFlow(s) => s.fmt(f),

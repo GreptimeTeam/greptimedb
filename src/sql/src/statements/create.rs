@@ -68,8 +68,6 @@ macro_rules! format_list_comma {
 }
 
 #[cfg(feature = "enterprise")]
-pub mod bulk_load;
-#[cfg(feature = "enterprise")]
 pub mod trigger;
 
 fn format_table_constraint(constraints: &[TableConstraint]) -> String {
