@@ -38,7 +38,7 @@ use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
-use session::hints::{READ_PREFERENCE_HINT, is_reserved_extension_key};
+use session::hints::{INSERT_SKIP_WAL_HINT, READ_PREFERENCE_HINT, is_reserved_extension_key};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -255,6 +255,16 @@ pub(crate) fn create_query_context(
     }
 
     for (key, value) in extensions {
+        if key == INSERT_SKIP_WAL_HINT {
+            let skip_wal = value.parse::<bool>().map_err(|_| {
+                UnknownHintSnafu {
+                    hint: format!("{key}={value}"),
+                }
+                .build()
+            })?;
+            ctx_builder = ctx_builder.skip_wal(skip_wal);
+            continue;
+        }
         if is_reserved_extension_key(&key) {
             debug!(
                 key = key.as_str(),
@@ -321,6 +331,55 @@ mod tests {
 
     use super::*;
     use crate::error::{ExecuteGrpcRequestSnafu, InvalidParameterSnafu};
+
+    #[test]
+    fn test_create_query_context_typed_skip_wal() {
+        let ctx = create_query_context(Channel::Grpc, None, vec![], HashMap::new()).unwrap();
+        assert!(!ctx.skip_wal());
+        let legacy = create_query_context(
+            Channel::Grpc,
+            None,
+            vec![("skip_wal".to_string(), "true".to_string())],
+            HashMap::new(),
+        )
+        .unwrap();
+        assert!(!legacy.skip_wal());
+        assert_eq!(legacy.extension("skip_wal"), Some("true"));
+        for (value, expected) in [("true", true), ("false", false)] {
+            let ctx = create_query_context(
+                Channel::Grpc,
+                None,
+                vec![(INSERT_SKIP_WAL_HINT.to_string(), value.to_string())],
+                HashMap::new(),
+            )
+            .unwrap();
+            assert_eq!(ctx.skip_wal(), expected);
+            assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
+        }
+        for value in ["", "TRUE", "1", "invalid"] {
+            assert!(
+                create_query_context(
+                    Channel::Grpc,
+                    None,
+                    vec![(INSERT_SKIP_WAL_HINT.to_string(), value.to_string())],
+                    HashMap::new()
+                )
+                .is_err()
+            );
+        }
+        let ctx = create_query_context(
+            Channel::Grpc,
+            None,
+            vec![
+                (INSERT_SKIP_WAL_HINT.to_string(), "true".to_string()),
+                (INSERT_SKIP_WAL_HINT.to_string(), "false".to_string()),
+            ],
+            HashMap::new(),
+        )
+        .unwrap();
+        assert!(!ctx.skip_wal());
+        assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
+    }
 
     #[test]
     fn test_create_query_context() {

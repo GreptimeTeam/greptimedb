@@ -265,6 +265,8 @@ impl Inserter {
         accommodate_existing_schema: bool,
         is_single_value: bool,
     ) -> Result<Output> {
+        let skip_wal = ctx.skip_wal();
+
         // remove empty requests
         requests.inserts.retain(|req| {
             req.rows
@@ -297,7 +299,7 @@ impl Inserter {
             instant_table_ids,
             self.partition_manager.as_ref(),
         )
-        .convert(requests)
+        .convert(requests, skip_wal)
         .await?;
 
         self.do_request(inserts, &table_infos, &ctx).await
@@ -311,6 +313,8 @@ impl Inserter {
         statement_executor: &StatementExecutor,
         physical_table: String,
     ) -> Result<Output> {
+        let skip_wal = ctx.skip_wal();
+
         // remove empty requests
         requests.inserts.retain(|req| {
             req.rows
@@ -343,7 +347,7 @@ impl Inserter {
             .map(|info| (info.name.clone(), info.clone()))
             .collect::<HashMap<_, _>>();
         let inserts = RowToRegion::new(name_to_info, instant_table_ids, &self.partition_manager)
-            .convert(requests)
+            .convert(requests, skip_wal)
             .await?;
 
         self.do_request(inserts, &table_infos, &ctx).await
@@ -354,6 +358,7 @@ impl Inserter {
         request: TableInsertRequest,
         ctx: QueryContextRef,
     ) -> Result<Output> {
+        let skip_wal = ctx.skip_wal();
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table_name = request.table_name.as_str();
@@ -364,7 +369,7 @@ impl Inserter {
         let table_info = table.table_info();
 
         let inserts = TableToRegion::new(&table_info, &self.partition_manager)
-            .convert(request)
+            .convert(request, skip_wal)
             .await?;
 
         let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);
@@ -1741,6 +1746,21 @@ mod tests {
 
         assert!(request_is_native_histogram(&request_schema));
         assert!(table_is_native_histogram(&table));
+    }
+
+    #[test]
+    fn test_skip_wal_does_not_change_table_options() {
+        for skip_wal in [false, true] {
+            let ctx = Arc::new(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            ));
+            ctx.set_skip_wal(skip_wal);
+            let mut options = Default::default();
+            fill_table_options_for_create(&mut options, &AutoCreateTableType::Physical, &ctx);
+            assert!(!options.contains_key(session::hints::INSERT_SKIP_WAL_HINT));
+            assert!(!options.contains_key("skip_wal"));
+        }
     }
 
     #[test]

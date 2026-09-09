@@ -39,6 +39,7 @@ impl<'a> TableToRegion<'a> {
     pub async fn convert(
         &self,
         request: TableInsertRequest,
+        skip_wal: bool,
     ) -> Result<InstantAndNormalInsertRequests> {
         let row_count = row_count(&request.columns_values)?;
         let schema = column_schema(self.table_info, &request.columns_values)?;
@@ -46,7 +47,7 @@ impl<'a> TableToRegion<'a> {
 
         let rows = Rows { schema, rows };
         let requests = Partitioner::new(self.partition_manager)
-            .partition_insert_requests(self.table_info, rows)
+            .partition_insert_requests(self.table_info, rows, skip_wal)
             .await?;
 
         let requests = RegionInsertRequests { requests };
@@ -100,49 +101,56 @@ mod tests {
 
         let converter = TableToRegion::new(&table_info, &partition_manager);
 
-        let table_request = build_table_request(Arc::new(Int32Vector::from(vec![
-            Some(1),
-            None,
-            Some(11),
-            Some(101),
-        ])));
-        let versions = partition_manager
-            .find_physical_partition_info(1)
-            .await
-            .unwrap()
-            .partitions
-            .iter()
-            .map(|p| (p.id.as_u64(), p.partition_expr_version))
-            .collect::<HashMap<_, _>>();
+        for skip_wal in [false, true] {
+            let table_request = build_table_request(Arc::new(Int32Vector::from(vec![
+                Some(1),
+                None,
+                Some(11),
+                Some(101),
+            ])));
+            let versions = partition_manager
+                .find_physical_partition_info(1)
+                .await
+                .unwrap()
+                .partitions
+                .iter()
+                .map(|p| (p.id.as_u64(), p.partition_expr_version))
+                .collect::<HashMap<_, _>>();
 
-        let region_requests = converter.convert(table_request).await.unwrap();
-        let mut region_id_to_region_requests = region_requests
-            .normal_requests
-            .requests
-            .into_iter()
-            .map(|r| (r.region_id, r))
-            .collect::<HashMap<_, _>>();
+            let region_requests = converter.convert(table_request, skip_wal).await.unwrap();
+            let mut region_id_to_region_requests = region_requests
+                .normal_requests
+                .requests
+                .into_iter()
+                .map(|r| (r.region_id, r))
+                .collect::<HashMap<_, _>>();
 
-        let region_id = RegionId::new(1, 1).as_u64();
-        let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
-        assert_eq!(
-            region_request,
-            build_region_request(vec![Some(101)], region_id, versions[&region_id])
-        );
+            let region_id = RegionId::new(1, 1).as_u64();
+            let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
+            assert_eq!(
+                region_request,
+                build_region_request(vec![Some(101)], region_id, versions[&region_id], skip_wal)
+            );
 
-        let region_id = RegionId::new(1, 2).as_u64();
-        let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
-        assert_eq!(
-            region_request,
-            build_region_request(vec![Some(11)], region_id, versions[&region_id])
-        );
+            let region_id = RegionId::new(1, 2).as_u64();
+            let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
+            assert_eq!(
+                region_request,
+                build_region_request(vec![Some(11)], region_id, versions[&region_id], skip_wal)
+            );
 
-        let region_id = RegionId::new(1, 3).as_u64();
-        let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
-        assert_eq!(
-            region_request,
-            build_region_request(vec![Some(1), None], region_id, versions[&region_id])
-        );
+            let region_id = RegionId::new(1, 3).as_u64();
+            let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
+            assert_eq!(
+                region_request,
+                build_region_request(
+                    vec![Some(1), None],
+                    region_id,
+                    versions[&region_id],
+                    skip_wal
+                )
+            );
+        }
     }
 
     fn build_table_request(vector: VectorRef) -> TableInsertRequest {
@@ -158,9 +166,10 @@ mod tests {
         rows: Vec<Option<i32>>,
         region_id: u64,
         version: Option<u64>,
+        skip_wal: bool,
     ) -> RegionInsertRequest {
         RegionInsertRequest {
-            skip_wal: false,
+            skip_wal,
             region_id,
             rows: Some(Rows {
                 schema: vec![tag_column_schema("a", ColumnDataType::Int32)],
