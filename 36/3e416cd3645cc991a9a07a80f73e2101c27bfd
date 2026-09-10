@@ -1,0 +1,27 @@
+src/operator/src/insert.rs
+  s_cbf051d9e59a54::t_f8e6a2008d9765 371
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_cbf051d9e59a54::t_97ce6f95bd14c3 49,104,110,120,162
+src/operator/src/statement/copy_table_from.rs
+  s_cbf051d9e59a54::t_6ace0996f8610b 490
+src/query/src/datafusion.rs
+  s_cbf051d9e59a54::t_af0d0b260add87 395
+src/table/src/requests.rs
+  s_cbf051d9e59a54::t_b23a88a668b972 607-608
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "363e416cd3645cc991a9a07a80f73e2101c27bfd",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
