@@ -624,7 +624,11 @@ async fn do_range_query(
 ) -> PrometheusJsonResponse {
     let (metric_name, _) = retrieve_metric_name_and_result_type(prom_query.expr());
     let query_id = query_ctx.remote_query_id().map(str::to_string);
-    let result = handler.do_query_parsed(prom_query, query_ctx).await;
+    // Matrix serialization sorts samples and series, so execution order never
+    // reaches the response.
+    let result = handler
+        .do_query_parsed(prom_query.with_unordered_output(), query_ctx)
+        .await;
     PrometheusJsonResponse::from_query_result(
         result,
         metric_name,
@@ -2404,6 +2408,7 @@ mod tests {
         denied_table: Option<&'static str>,
         metric_names: Vec<String>,
         queries: Mutex<Vec<String>>,
+        ordered_outputs: Mutex<Vec<bool>>,
     }
 
     #[async_trait::async_trait]
@@ -2417,6 +2422,10 @@ mod tests {
             query: ParsedPromQuery,
             _: QueryContextRef,
         ) -> Result<Output> {
+            self.ordered_outputs
+                .lock()
+                .unwrap()
+                .push(query.requires_output_ordering());
             self.queries
                 .lock()
                 .unwrap()
@@ -2532,6 +2541,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn range_query_does_not_require_execution_output_ordering() {
+        let handler = Arc::new(TestPrometheusHandler {
+            catalog_manager: MemoryCatalogManager::new(),
+            deny_operation: false,
+            denied_table: None,
+            metric_names: Vec::new(),
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+        });
+        let state: PrometheusHandlerRef = handler.clone();
+        instant_query(
+            State(state.clone()),
+            Query(InstantQuery {
+                query: Some("sort(vector(1))".to_string()),
+                time: Some("0".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(InstantQuery::default()),
+        )
+        .await;
+
+        // Both a single-point and a multi-step range query take the same path.
+        for end in ["0", "1"] {
+            range_query(
+                State(state.clone()),
+                Query(RangeQuery {
+                    query: Some("sort(vector(1))".to_string()),
+                    start: Some("0".to_string()),
+                    end: Some(end.to_string()),
+                    step: Some("1s".to_string()),
+                    ..Default::default()
+                }),
+                Extension(QueryContext::with(
+                    DEFAULT_CATALOG_NAME,
+                    DEFAULT_SCHEMA_NAME,
+                )),
+                Form(RangeQuery::default()),
+            )
+            .await;
+        }
+
+        // `sort()` stays observable for instant queries, but not for range queries.
+        assert_eq!(
+            *handler.ordered_outputs.lock().unwrap(),
+            vec![true, false, false]
+        );
+    }
+
+    #[tokio::test]
     async fn test_promql_timer_records_parse_errors() {
         let handler: PrometheusHandlerRef = Arc::new(TestPrometheusHandler {
             catalog_manager: MemoryCatalogManager::new(),
@@ -2539,6 +2601,7 @@ mod tests {
             denied_table: None,
             metric_names: Vec::new(),
             queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
         });
         let query_ctx = QueryContext::with("promql_timer_test", "parse_error");
         let db = query_ctx.get_db_string();
@@ -2622,6 +2685,7 @@ mod tests {
                 denied_table: Some("denied"),
                 metric_names: Vec::new(),
                 queries: Mutex::new(Vec::new()),
+                ordered_outputs: Mutex::new(Vec::new()),
             })),
             Path(FIELD_NAME_LABEL.to_string()),
             Extension(query_ctx),
@@ -2665,6 +2729,7 @@ mod tests {
             denied_table: None,
             metric_names: vec!["cpu_user".to_string(), "cpu_system".to_string()],
             queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
         });
         let state: PrometheusHandlerRef = handler.clone();
         let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
@@ -3571,6 +3636,7 @@ mod tests {
                 denied_table: None,
                 metric_names: Vec::new(),
                 queries: Mutex::new(Vec::new()),
+                ordered_outputs: Mutex::new(Vec::new()),
             })),
             Query(MetadataQuery::default()),
             Extension(query_ctx.clone()),
@@ -3584,6 +3650,7 @@ mod tests {
             denied_table: Some("denied"),
             metric_names: Vec::new(),
             queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
         });
         let response = metadata_query(
             State(handler.clone()),

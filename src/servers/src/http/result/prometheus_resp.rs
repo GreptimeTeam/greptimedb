@@ -356,13 +356,12 @@ impl PrometheusJsonResponse {
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(&str, &str)>, PromSeriesSamples>::new();
 
-        // Query output is clustered by series (the range plan sorts by series
-        // key + timestamp), so consecutive rows usually belong to the same
-        // series. Remember the index of the previous row's entry in `buffer`,
-        // and reuse it directly when its tags are unchanged. This avoids
-        // building and hashing the label vector on every row; the worst case
-        // adds one `Vec` comparison per series transition before falling back
-        // to the map lookup.
+        // Consecutive rows often belong to the same series: instant query plans
+        // keep their output sort, and range query plans, which no longer do, still
+        // tend to emit a series' rows together. Remember the index of the previous
+        // row's entry in `buffer` and reuse it when the tags are unchanged, so the
+        // label vector is not rebuilt and rehashed per row. Unclustered rows only
+        // cost one `Vec` comparison before falling back to the map lookup.
         let mut last_entry_index = None;
 
         let schema = batches.schema();
@@ -1022,6 +1021,123 @@ mod tests {
         assert_eq!(series[0].value, Some((4.0, "4.0".to_string())));
         assert_eq!(series[1].value, Some((5.0, "5.0".to_string())));
         assert_eq!(series[2].value, Some((6.0, "6.0".to_string())));
+    }
+
+    #[test]
+    fn matrix_response_is_independent_of_input_row_order() {
+        // Range queries run without the plan's output sort, so this function sees
+        // series interleaved across batches with timestamps out of order. The
+        // serialized matrix must be the same either way.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("rack", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("histogram", native_histogram_value_type().clone(), true),
+        ]));
+        let histogram = |sum: f64| NativeHistogram {
+            sum,
+            ..sample_histogram()
+        };
+        // timestamp, host, rack, float value, histogram value
+        type Row = (
+            i64,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<f64>,
+            Option<NativeHistogram>,
+        );
+        let rows: Vec<Row> = vec![
+            (1_000, Some("a"), Some("r"), Some(1.0), None),
+            (3_000, Some("a"), Some("r"), Some(3.0), None),
+            (2_000, Some("a"), Some("r"), Some(2.0), None),
+            (5_000, Some("a"), None, Some(5.0), None),
+            (4_000, Some("a"), None, Some(4.0), None),
+            (7_000, Some(""), None, Some(7.0), None),
+            (8_000, None, None, Some(8.0), None),
+            (6_000, None, None, Some(6.0), None),
+            (2_000, Some("h"), None, None, Some(histogram(20.0))),
+            (1_000, Some("h"), None, None, Some(histogram(10.0))),
+        ];
+        let matrix = |order: &[usize], splits: &[usize]| {
+            let batch = RecordBatch::new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondVector::from_vec(
+                        order.iter().map(|&row| rows[row].0).collect(),
+                    )) as _,
+                    Arc::new(StringVector::from(
+                        order.iter().map(|&row| rows[row].1).collect::<Vec<_>>(),
+                    )) as _,
+                    Arc::new(StringVector::from(
+                        order.iter().map(|&row| rows[row].2).collect::<Vec<_>>(),
+                    )) as _,
+                    Arc::new(Float64Vector::from(
+                        order.iter().map(|&row| rows[row].3).collect::<Vec<_>>(),
+                    )) as _,
+                    histogram_vector(
+                        &order
+                            .iter()
+                            .map(|&row| rows[row].4.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                ],
+            )
+            .unwrap();
+            let mut batches = Vec::new();
+            let mut start = 0;
+            for &end in splits.iter().chain(std::iter::once(&order.len())) {
+                batches.push(batch.slice(start, end - start).unwrap());
+                start = end;
+            }
+            let response = PrometheusJsonResponse::record_batches_to_data(
+                RecordBatches::try_new(schema.clone(), batches).unwrap(),
+                Some("metric".to_string()),
+                ValueType::Matrix,
+            )
+            .unwrap();
+            let PrometheusResponse::PromData(PromData {
+                result: PromQueryResult::Matrix(series),
+                ..
+            }) = response
+            else {
+                panic!("expected matrix response");
+            };
+            series
+        };
+
+        let clustered = matrix(&[0, 2, 1, 4, 3, 5, 7, 6, 9, 8], &[5]);
+        let interleaved = matrix(&[8, 5, 1, 6, 0, 3, 9, 2, 7, 4], &[3, 6]);
+        assert_eq!(
+            serde_json::to_value(&interleaved).unwrap(),
+            serde_json::to_value(&clustered).unwrap()
+        );
+
+        // Pin the canonical arrangement itself, not only its stability.
+        assert_eq!(
+            serde_json::to_value(&clustered[..4]).unwrap(),
+            serde_json::json!([
+                {"metric": {"__name__": "metric"}, "values": [[6.0, "6.0"], [8.0, "8.0"]]},
+                {"metric": {"__name__": "metric", "host": ""}, "values": [[7.0, "7.0"]]},
+                {"metric": {"__name__": "metric", "host": "a"},
+                 "values": [[4.0, "4.0"], [5.0, "5.0"]]},
+                {"metric": {"__name__": "metric", "host": "a", "rack": "r"},
+                 "values": [[1.0, "1.0"], [2.0, "2.0"], [3.0, "3.0"]]},
+            ])
+        );
+        assert_eq!(clustered[4].metric["host"], "h");
+        assert_eq!(
+            clustered[4]
+                .histograms
+                .iter()
+                .map(|(timestamp, histogram)| (*timestamp, histogram.sum.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1.0, "10"), (2.0, "20")]
+        );
     }
 
     #[test]
