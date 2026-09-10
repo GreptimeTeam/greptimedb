@@ -238,6 +238,40 @@ fn make_quantile_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue
     ]
 }
 
+fn make_quantile_input_with_values(
+    num_points: usize,
+    window_size: u32,
+    values: Vec<f64>,
+) -> Vec<ColumnarValue> {
+    let (ts_range, val_range, _) = build_sliding_ranges(num_points, window_size, values, 0);
+    vec![
+        ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+        ColumnarValue::Array(Arc::new(val_range.into_dict())),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(0.9))),
+    ]
+}
+
+fn build_descending_values(num_points: usize) -> Vec<f64> {
+    (0..num_points).map(|i| (num_points - i) as f64).collect()
+}
+
+fn build_pseudorandom_values(num_points: usize) -> Vec<f64> {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    (0..num_points)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        })
+        .collect()
+}
+
+fn build_low_cardinality_values(num_points: usize) -> Vec<f64> {
+    const VALUES: [f64; 4] = [-2.0, 0.0, 1.0, 4.0];
+    (0..num_points).map(|i| VALUES[i % VALUES.len()]).collect()
+}
+
 fn make_predict_linear_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
     let (ts_range, val_range, _) =
         build_sliding_ranges(num_points, window_size, build_default_values(num_points), 0);
@@ -458,6 +492,25 @@ fn bench_range_functions(c: &mut Criterion) {
             &(n, w),
             |b, _| b.iter(|| invoke_prepared(&quantile_udf, &prepared)),
         );
+    }
+
+    // --- quantile_over_time (value-shape matrix) ---
+    let quantile_shape_params = [
+        ("descending", build_descending_values(4_096)),
+        ("pseudorandom", build_pseudorandom_values(4_096)),
+        ("low_cardinality", build_low_cardinality_values(4_096)),
+        ("gauge", build_gauge_values(4_096)),
+    ];
+    for (shape, values) in quantile_shape_params {
+        for w in [60, 360] {
+            let prepared =
+                PreparedUdfCall::new(make_quantile_input_with_values(4_096, w, values.clone()));
+            group.bench_with_input(
+                BenchmarkId::new("quantile_over_time", format!("{shape}_n4096_w{w}")),
+                &w,
+                |b, _| b.iter(|| invoke_prepared(&quantile_udf, &prepared)),
+            );
+        }
     }
 
     // --- predict_linear ---
