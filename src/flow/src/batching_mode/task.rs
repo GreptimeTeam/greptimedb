@@ -223,10 +223,10 @@ impl BatchingExecutionGuard {
 
 impl Drop for BatchingExecutionGuard {
     fn drop(&mut self) {
-        if let Some((state, old_ctx)) = self.restore.take() {
-            if let Ok(mut state) = state.write() {
-                state.query_ctx = old_ctx;
-            }
+        if let Some((state, old_ctx)) = self.restore.take()
+            && let Ok(mut state) = state.write()
+        {
+            state.query_ctx = old_ctx;
         }
     }
 }
