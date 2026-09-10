@@ -54,6 +54,7 @@ use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::QueryEngineContext;
+use crate::datafusion::promql_plan_cache::PromqlPlanCache;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
     MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
@@ -98,6 +99,7 @@ pub struct QueryEngineState {
     table_functions: Arc<RwLock<HashMap<String, Arc<TableFunction>>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
+    promql_plan_cache: Option<Arc<PromqlPlanCache>>,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -294,6 +296,11 @@ impl QueryEngineState {
             extension_rules,
             plugins,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
+            promql_plan_cache: (options.experimental_promql_plan_cache_size > 0).then(|| {
+                Arc::new(PromqlPlanCache::new(
+                    options.experimental_promql_plan_cache_size as u64,
+                ))
+            }),
         })
     }
 
@@ -438,6 +445,11 @@ impl QueryEngineState {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    /// Returns the PromQL logical plan template cache, if template reuse is enabled.
+    pub(crate) fn promql_plan_cache(&self) -> Option<&Arc<PromqlPlanCache>> {
+        self.promql_plan_cache.as_ref()
     }
 
     pub fn dyn_filter_registry_manager(&self) -> Arc<DynFilterRegistryManager> {

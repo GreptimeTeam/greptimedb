@@ -2407,6 +2407,7 @@ experimental_spill_mode = "default"
 experimental_spill_max_temp_directory_size = "1GiB"
 experimental_spill_compression = "uncompressed"
 experimental_memory_pool_policy = "greedy"
+experimental_promql_plan_cache_size = 512
 
 [memory]
 enable_heap_profiling = true

@@ -67,7 +67,7 @@ fn mixed_sample_fields(field: Option<&str>) -> [Option<&str>; 2] {
 /// This plan will try to align the input time series, for every timestamp between
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
 /// is missing at the given timestamp.
-#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
 pub struct InstantManipulate {
     start: Millisecond,
     end: Millisecond,
@@ -82,7 +82,7 @@ pub struct InstantManipulate {
     unfix: Option<UnfixIndices>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
 struct UnfixIndices {
     pub time_index_idx: u64,
     pub field_index_idx: u64,
@@ -229,6 +229,20 @@ impl InstantManipulate {
 
     pub const fn name() -> &'static str {
         "InstantManipulate"
+    }
+
+    /// Evaluation bounds, independent of the selector's offset and lookback.
+    pub fn time_bounds(&self) -> (Millisecond, Millisecond) {
+        (self.start, self.end)
+    }
+
+    /// Rebinds evaluation bounds, leaving step, lookback and staleness handling untouched.
+    pub fn with_time_bounds(&self, start: Millisecond, end: Millisecond) -> Self {
+        Self {
+            start,
+            end,
+            ..self.clone()
+        }
     }
 
     /// Returns whether this node evaluates a single timestamp rather than a range.
