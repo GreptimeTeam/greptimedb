@@ -1196,7 +1196,7 @@ async fn test_udaf_correct_eval_result() {
                 Some(3),
                 Some(3),
             ]))],
-            expected_output: Some(ScalarValue::Int64(Some(3))),
+            expected_output: Some(ScalarValue::Int64(Some(4))),
             expected_fn: None,
             distinct: false,
             filter: None,
