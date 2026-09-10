@@ -1,0 +1,89 @@
+-- Regression coverage for aggregate expressions with multiple MAX aggregates.
+CREATE DATABASE max_abs_regression;
+
+Affected Rows: 1
+
+USE max_abs_regression;
+
+Affected Rows: 0
+
+CREATE TABLE t (
+    ts TIMESTAMP TIME INDEX,
+    v INT,
+    PRIMARY KEY (v),
+) PARTITION ON COLUMNS (v) (
+    v < 0,
+    v >= 0
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO t VALUES
+    ('2024-01-01 00:00:00', -11),
+    ('2024-01-01 00:01:00', 3),
+    ('2024-01-01 00:02:00', -7),
+    ('2024-01-01 00:03:00', 5);
+
+Affected Rows: 4
+
+-- Expression aggregate regression.
+SELECT MAX(ABS(v)), MAX(ts) FROM t;
+
++---------------+---------------------+
+| max(abs(t.v)) | max(t.ts)           |
++---------------+---------------------+
+| 11            | 2024-01-01T00:03:00 |
++---------------+---------------------+
+
+SELECT MAX(ts), MAX(ABS(v)) FROM t;
+
++---------------------+---------------+
+| max(t.ts)           | max(abs(t.v)) |
++---------------------+---------------+
+| 2024-01-01T00:03:00 | 11            |
++---------------------+---------------+
+
+-- Column-only multiple-MAX positive control.
+SELECT MAX(v), MAX(ts) FROM t;
+
++----------+---------------------+
+| max(t.v) | max(t.ts)           |
++----------+---------------------+
+| 5        | 2024-01-01T00:03:00 |
++----------+---------------------+
+
+-- The plan must retain Partial and Final aggregation without an incomplete filter.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT MAX(ABS(v)), MAX(ts) FROM t;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Aggregate: groupBy=[[]], aggr=[[__max_merge(__max_state(abs(t.v))) AS max(abs(t.v)), __max_merge(__max_state(t.ts)) AS max(t.ts)]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__max_state(abs(t.v)), __max_state(t.ts)]]_|
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[max(abs(t.v)), max(t.ts)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[max(abs(t.v)), max(t.ts)]_|
+|_|_RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=2_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE t;
+
+Affected Rows: 0
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE max_abs_regression;
+
+Affected Rows: 0
+
