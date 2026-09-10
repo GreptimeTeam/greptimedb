@@ -11,30 +11,31 @@ INSERT INTO counter_reset_precision VALUES
     (30000,  1.0,                 'a'),
     (60000,  0.0,                 'a'),
     (90000,  1.0,                 'a'),
-    (120000, 2.0,                 'a');
+    (120000, 2.0,                 'a'),
+    (150000, 3.0,                 'a'),
+    (180000, 4.0,                 'a');
 
-Affected Rows: 5
+Affected Rows: 7
 
--- Two adjacent windows over the same samples: (-30s, 90s] and (0s, 120s]. The second
--- one drops the 1e16 reset and keeps the 1 -> 0 one, so its correction is 1.0. Carrying
--- the first window's correction forward loses that, since 1e16 + 1.0 rounds to 1e16.
-TQL EVAL (90, 120, '30s') increase(counter_reset_precision[2m]);
+-- The counter resets twice, at 30s from 1e16 and at 60s from 1.0, and 1e16 + 1.0 is 1e16 in
+-- f64. Windows are two minutes wide and step by one sample, so every row here depends on the
+-- 1.0 reset surviving.
+--
+-- Summing the two corrections on their own drops the 1.0 and then cancels against the first
+-- sample, so the 90s window reports no increase. Carrying that sum into the next window and
+-- subtracting the 1e16 that left it reports half the increase, and the windows after that
+-- subtract a reset the sum never held, so the correction turns negative and stays there for
+-- the rest of the batch.
+TQL EVAL (90, 180, '30s') increase(counter_reset_precision[2m]);
 
 +---------------------+---------------------------------------------------------+--------+
 | ts                  | prom_increase(ts_range,greptime_value,ts,Int64(120000)) | series |
 +---------------------+---------------------------------------------------------+--------+
-| 1970-01-01T00:01:30 | 0.0                                                     | a      |
+| 1970-01-01T00:01:30 | 1.3333333333333333                                      | a      |
 | 1970-01-01T00:02:00 | 2.6666666666666665                                      | a      |
+| 1970-01-01T00:02:30 | 3.0                                                     | a      |
+| 1970-01-01T00:03:00 | 4.0                                                     | a      |
 +---------------------+---------------------------------------------------------+--------+
-
-TQL EVAL (90, 120, '30s') rate(counter_reset_precision[2m]);
-
-+---------------------+-----------------------------------------------------+--------+
-| ts                  | prom_rate(ts_range,greptime_value,ts,Int64(120000)) | series |
-+---------------------+-----------------------------------------------------+--------+
-| 1970-01-01T00:01:30 | 0.0                                                 | a      |
-| 1970-01-01T00:02:00 | 0.02222222222222222                                 | a      |
-+---------------------+-----------------------------------------------------+--------+
 
 DROP TABLE counter_reset_precision;
 

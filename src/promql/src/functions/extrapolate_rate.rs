@@ -195,8 +195,9 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
         // Range windows normally overlap heavily, so scanning every one for resets costs far
         // more than a single pass over the values. Index the reset positions once that is the
-        // cheaper side. A short lookback with a long step is the case that is not, and it
-        // settles the comparison after a few windows, so stop counting there.
+        // cheaper side, and stop counting as soon as the requested pairs pass that budget,
+        // which heavy overlap does within the first few windows. A short lookback with a long
+        // step is the shape that never reaches it, and there the per-window scans do win.
         let mut reset_index = if IS_COUNTER {
             let budget = all_values.len().saturating_sub(1);
             let mut scanned_pairs = 0usize;
@@ -225,15 +226,13 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let first_value = all_values[offset];
             let last_value = all_values[end - 1];
 
-            let result_value = if IS_COUNTER {
-                let counter_correction = match &mut reset_index {
-                    Some(reset_index) => reset_index.correction(offset, end),
-                    None => counter_reset_correction(&all_values[offset..end]),
+            let mut result_value = last_value - first_value;
+            if IS_COUNTER {
+                result_value = match &mut reset_index {
+                    Some(reset_index) => reset_index.add_resets(result_value, offset, end),
+                    None => add_counter_resets(result_value, &all_values[offset..end]),
                 };
-                last_value - first_value + counter_correction
-            } else {
-                last_value - first_value
-            };
+            }
 
             let first_ts = all_timestamps[offset];
             let last_ts = all_timestamps[end - 1];
@@ -283,30 +282,34 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
     }
 }
 
-/// Sums the value preceding every counter reset in `values`, in sample order.
-fn counter_reset_correction(values: &[f64]) -> f64 {
+/// Adds the value preceding every counter reset in `values` to `result`, in sample order.
+///
+/// Prometheus accumulates the resets into the running result rather than summing them on
+/// their own, and the two are not interchangeable in f64: a reset large enough to swallow a
+/// later one in an isolated sum still leaves it visible once the first difference is folded
+/// in first.
+fn add_counter_resets(result: f64, values: &[f64]) -> f64 {
     values
         .windows(2)
         .filter(|pair| pair[1] < pair[0])
-        .fold(0.0, |correction, pair| correction + pair[0])
+        .fold(result, |result, pair| result + pair[0])
 }
 
-/// Positions of the counter resets in a value array, so that a window's correction can be
-/// reduced over the resets it contains instead of over all of its samples.
+/// Positions of the counter resets in a value array, so that a window can accumulate the
+/// resets it contains instead of scanning all of its samples.
 struct CounterResetIndex<'a> {
     values: &'a [f64],
     /// Ascending indices `i` where `values[i] < values[i - 1]`.
     positions: Vec<usize>,
-    /// Slice of `positions` that [`Self::reduce`] last reduced.
+    /// Slice of `positions` covered by the last window.
     active: Range<usize>,
-    /// Window that produced `active`, so the next one can tell whether it advanced.
+    /// That window, so the next one can tell whether it advanced.
     previous: Range<usize>,
     /// `positions[active.start]`: the reset a later `start` would drop. `usize::MAX` when the
     /// active slice reaches the end of `positions`.
     drops_at: usize,
     /// `positions[active.end]`: the reset a later `end` would gain, saturated the same way.
     gains_at: usize,
-    correction: f64,
 }
 
 impl<'a> CounterResetIndex<'a> {
@@ -322,31 +325,40 @@ impl<'a> CounterResetIndex<'a> {
             previous: 0..0,
             drops_at: first,
             gains_at: first,
-            correction: 0.0,
         }
     }
 
-    /// Correction for the window `values[start..end]`, identical to
-    /// [`counter_reset_correction`] on the same window.
+    /// Same additions [`add_counter_resets`] performs over `values[start..end]`, in the same
+    /// order, reached through the index instead of by scanning the window.
     #[inline]
-    fn correction(&mut self, start: usize, end: usize) -> f64 {
-        if start >= self.previous.start
-            && end >= self.previous.end
-            && start < self.drops_at
-            && end <= self.gains_at
+    fn add_resets(&mut self, result: f64, start: usize, end: usize) -> f64 {
+        // The active slice only stays put if the window advanced without reaching either of
+        // the resets that bound it.
+        if start < self.previous.start
+            || end < self.previous.end
+            || start >= self.drops_at
+            || end > self.gains_at
         {
-            // The window only advanced, and it reached neither the reset that would leave it
-            // nor the one that would enter, so it covers exactly the resets `correction` holds.
-            self.previous = start..end;
-            return self.correction;
+            self.locate(start, end);
         }
-        self.reduce(start, end)
+        self.previous = start..end;
+
+        if self.active.start == self.active.end {
+            // A counter that has not reset inside this window, which is the normal case, would
+            // otherwise pay a range bounds check and an empty iterator for nothing.
+            return result;
+        }
+
+        let values = self.values;
+        self.positions[self.active.start..self.active.end]
+            .iter()
+            .fold(result, |result, &i| result + values[i - 1])
     }
 
-    fn reduce(&mut self, start: usize, end: usize) -> f64 {
+    fn locate(&mut self, start: usize, end: usize) {
         // Walk the bounds forward from the previous window and only search when they move
-        // back. On a series that resets often the searches cost more than the reduction they
-        // locate, because they run deep and the reduction is a handful of adds.
+        // back. On a series that resets often the searches cost more than the additions they
+        // locate, because they run deep and a window holds a handful of resets.
         let (left, right) = if start < self.previous.start || end < self.previous.end {
             (
                 self.positions.partition_point(|&i| i <= start),
@@ -363,19 +375,9 @@ impl<'a> CounterResetIndex<'a> {
             }
             (left, right)
         };
-        self.previous = start..end;
-        if self.active != (left..right) {
-            // Re-reduce in sample order rather than adding and subtracting the resets that
-            // entered and left the window: `a + b - a` does not restore `b` in f64, and an
-            // expired infinity would leave a NaN in the running total forever.
-            self.correction = self.positions[left..right]
-                .iter()
-                .fold(0.0, |correction, &i| correction + self.values[i - 1]);
-            self.active = left..right;
-            self.drops_at = self.positions.get(left).copied().unwrap_or(usize::MAX);
-            self.gains_at = self.positions.get(right).copied().unwrap_or(usize::MAX);
-        }
-        self.correction
+        self.active = left..right;
+        self.drops_at = self.positions.get(left).copied().unwrap_or(usize::MAX);
+        self.gains_at = self.positions.get(right).copied().unwrap_or(usize::MAX);
     }
 }
 
@@ -549,6 +551,28 @@ mod test {
                 _ => panic!("range {range:?}: batched {batched:?} != single {single:?}"),
             }
         }
+    }
+
+    #[test]
+    fn counter_resets_accumulate_into_the_running_result() {
+        // Summed on their own, 1e16 and 1.0 round to 1e16, which then cancels against the
+        // first sample and reports no increase at all. Folding each reset into `last - first`
+        // as Prometheus does keeps the 1.0. Both paths detect the same two resets.
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3, 4].into_iter().map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([1e16, 1.0, 0.0, 1.0]));
+        let ranges = [(0, 4)];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter([Some(4)])) as _;
+
+        extrapolated_rate_runner::<true, false>(
+            ts_range,
+            value_range,
+            timestamps,
+            vec![1.1666666666666667],
+        );
     }
 
     #[test]
