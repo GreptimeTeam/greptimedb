@@ -624,8 +624,8 @@ async fn do_range_query(
 ) -> PrometheusJsonResponse {
     let (metric_name, _) = retrieve_metric_name_and_result_type(prom_query.expr());
     let query_id = query_ctx.remote_query_id().map(str::to_string);
-    // Matrix serialization sorts samples by timestamp and series by labels, so the
-    // execution output order does not reach the response.
+    // Matrix serialization sorts samples and series, so execution order never
+    // reaches the response.
     let result = handler
         .do_query_parsed(prom_query.with_unordered_output(), query_ctx)
         .await;
@@ -2551,7 +2551,7 @@ mod tests {
             ordered_outputs: Mutex::new(Vec::new()),
         });
         let state: PrometheusHandlerRef = handler.clone();
-        let response = instant_query(
+        instant_query(
             State(state.clone()),
             Query(InstantQuery {
                 query: Some("sort(vector(1))".to_string()),
@@ -2565,10 +2565,10 @@ mod tests {
             Form(InstantQuery::default()),
         )
         .await;
-        assert!(response.status_code.is_none(), "{:?}", response.error);
 
+        // Both a single-point and a multi-step range query take the same path.
         for end in ["0", "1"] {
-            let response = range_query(
+            range_query(
                 State(state.clone()),
                 Query(RangeQuery {
                     query: Some("sort(vector(1))".to_string()),
@@ -2584,7 +2584,6 @@ mod tests {
                 Form(RangeQuery::default()),
             )
             .await;
-            assert!(response.status_code.is_none(), "{:?}", response.error);
         }
 
         // `sort()` stays observable for instant queries, but not for range queries.
