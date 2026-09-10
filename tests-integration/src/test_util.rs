@@ -81,7 +81,7 @@ use store_api::storage::RegionId;
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 
-/// Maps `(node_id, region_id)` to `(written_bytes, flushed_entry_id)`.
+/// Maps `(node_id, region_id)` to `(flushed_sequence, flushed_entry_id)`.
 pub type WalSnapshot = BTreeMap<(u64, RegionId), (u64, u64)>;
 
 /// Flush user data regions before observing their persisted WAL watermarks.
@@ -101,7 +101,7 @@ async fn flush_and_snapshot_region_wal(engine: &MitoEngine) -> WalSnapshot {
         snapshot.insert(
             (0, id),
             (
-                statistic.written_bytes,
+                region.flushed_sequence(),
                 statistic.manifest.data_flushed_entry_id(),
             ),
         );
@@ -117,9 +117,9 @@ pub fn assert_wal_delta(before: &WalSnapshot, after: &WalSnapshot, skip_wal: boo
         "warm up table creation before taking the snapshot"
     );
     let mut written = 0;
-    for (id, &(written_bytes, flushed_entry_id)) in after {
-        let (previous_written_bytes, previous_flushed_entry_id) = before[id];
-        if written_bytes > previous_written_bytes {
+    for (id, &(flushed_sequence, flushed_entry_id)) in after {
+        let (previous_flushed_sequence, previous_flushed_entry_id) = before[id];
+        if flushed_sequence > previous_flushed_sequence {
             written += 1;
             if skip_wal {
                 assert_eq!(
@@ -843,11 +843,27 @@ async fn setup_test_prom_app_with_frontend_inner(
     let sql = "INSERT INTO mito(host, val, ts) VALUES (1, 1.1, 0)";
     run_sql(sql, &instance).await;
 
+    let http_server = build_test_prom_server(
+        instance.fe_instance().clone(),
+        enable_batcher,
+        experimental_enable_prometheus_native_histogram,
+    )
+    .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+    .build();
+    let app = http_server.build(http_server.make_app()).unwrap();
+    (app, instance.guard)
+}
+
+/// Builds Prometheus HTTP routes for either a standalone or distributed frontend.
+pub fn build_test_prom_server(
+    frontend_ref: Arc<Instance>,
+    enable_batcher: bool,
+    experimental_enable_prometheus_native_histogram: bool,
+) -> HttpServerBuilder {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
     };
-    let frontend_ref = instance.fe_instance().clone();
     // Mirror the production wiring at `frontend::server`: build the batcher from the
     // instance's managers. A short flush interval keeps the test responsive.
     let pending_rows_batcher = if enable_batcher {
@@ -868,9 +884,10 @@ async fn setup_test_prom_app_with_frontend_inner(
     } else {
         None
     };
-    let http_server = HttpServerBuilder::new(http_opts)
+    assert_eq!(pending_rows_batcher.is_some(), enable_batcher);
+    HttpServerBuilder::new(http_opts)
         .with_sql_handler(frontend_ref.clone())
-        .with_logs_handler(instance.fe_instance().clone())
+        .with_logs_handler(frontend_ref.clone())
         .with_prom_handler(
             frontend_ref.clone(),
             Some(frontend_ref.clone()),
@@ -880,10 +897,6 @@ async fn setup_test_prom_app_with_frontend_inner(
             pending_rows_batcher,
         )
         .with_prometheus_handler(frontend_ref)
-        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
-        .build();
-    let app = http_server.build(http_server.make_app()).unwrap();
-    (app, instance.guard)
 }
 
 pub async fn setup_grpc_server(
