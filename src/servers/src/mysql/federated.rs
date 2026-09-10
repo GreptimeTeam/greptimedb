@@ -37,7 +37,7 @@ static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
 static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
 static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
+    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES(?: LIKE (.*))?\\s*;?\\s*)$").unwrap());
 static SHOW_WARNINGS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(/\\* ApplicationName=.*)?SHOW WARNINGS").unwrap());
 
@@ -415,6 +415,10 @@ mod test {
 |               |       |
 +---------------+-------+";
         test(query, expected);
+
+        let query = "show variables enable_aggregate_dynamic_filter_pushdown";
+        let output = check(query, QueryContext::arc(), session.clone());
+        assert!(output.is_none());
 
         let query = "show variables like 'lower_case_table_names'";
         let expected = "\
