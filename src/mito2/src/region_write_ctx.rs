@@ -96,7 +96,7 @@ pub(crate) struct RegionWriteCtx {
     /// Notifiers to send write results to waiters.
     ///
     /// The i-th notify is for the i-th mutation in `wal_entry`.
-    notifiers: Vec<WriteNotify>,
+    wal_notifiers: Vec<WriteNotify>,
     /// Notifiers for bulk requests.
     bulk_notifiers: Vec<WriteNotify>,
     /// Pending bulk write requests
@@ -137,7 +137,7 @@ impl RegionWriteCtx {
             wal_entry: WalEntry::default(),
             memtable_mutations: Vec::new(),
             provider,
-            notifiers: Vec::new(),
+            wal_notifiers: Vec::new(),
             bulk_notifiers: vec![],
             failed: false,
             put_num: 0,
@@ -176,7 +176,7 @@ impl RegionWriteCtx {
             self.memtable_mutations.push((mutation, notify));
         } else {
             self.wal_entry.mutations.push(mutation);
-            self.notifiers.push(notify);
+            self.wal_notifiers.push(notify);
         }
 
         // Increase sequence number.
@@ -225,7 +225,7 @@ impl RegionWriteCtx {
     pub(crate) fn set_error(&mut self, err: Arc<Error>) {
         // Set error for all notifiers.
         for notify in self
-            .notifiers
+            .wal_notifiers
             .iter_mut()
             .chain(self.memtable_mutations.iter_mut().map(|(_, notify)| notify))
         {
@@ -257,7 +257,7 @@ impl RegionWriteCtx {
 
     /// Consumes mutations and writes them into mutable memtable.
     pub(crate) async fn write_memtable(&mut self) {
-        debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
+        debug_assert_eq!(self.wal_notifiers.len(), self.wal_entry.mutations.len());
 
         if self.failed {
             return;
@@ -272,7 +272,7 @@ impl RegionWriteCtx {
 
         let mut mutations = mem::take(&mut self.wal_entry.mutations)
             .into_iter()
-            .zip(&mut self.notifiers)
+            .zip(&mut self.wal_notifiers)
             .chain(
                 self.memtable_mutations
                     .iter_mut()
@@ -587,11 +587,17 @@ mod tests {
             );
         }
         // Unequal row counts make a notifier/mutation pairing mismatch visible.
-        for (mutation, notify) in ctx.wal_entry.mutations.iter().zip(&ctx.notifiers).chain(
-            ctx.memtable_mutations
-                .iter()
-                .map(|(mutation, notify)| (mutation, notify)),
-        ) {
+        for (mutation, notify) in ctx
+            .wal_entry
+            .mutations
+            .iter()
+            .zip(&ctx.wal_notifiers)
+            .chain(
+                ctx.memtable_mutations
+                    .iter()
+                    .map(|(mutation, notify)| (mutation, notify)),
+            )
+        {
             assert_eq!(mutation.rows.as_ref().unwrap().rows.len(), notify.num_rows);
         }
         assert!(ctx.push_bulk(OptionOutputTx::none(), new_bulk_part(), None));
