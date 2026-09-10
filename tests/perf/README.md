@@ -461,9 +461,11 @@ fails preparation. It flushes the logical metric table, checks all 262144 rows,
 and verifies the stored timestamp retains the `+123ns` remainder.
 
 The measured requests are ordinary `TQL EVAL` instant and range selectors (3
-warmups, 9 iterations). Untimed `TQL EXPLAIN VERBOSE` evidence is retained in
-the report, and every measured response is row-normalized and compared with
-the base target, ignoring only timing metadata. This is explicitly
+warmups, 9 iterations). Untimed `TQL ANALYZE VERBOSE` evidence is retained in
+the report. Measured queries request `greptimedb_v1` responses and compare the
+complete ordered column schema and unordered row multiset with the base target
+on every iteration. Row values are preserved verbatim; response-envelope timing
+metadata is outside the comparison. This is explicitly
 legacy-data query coverage; it does not assert the new default OTLP
 millisecond table behavior. Use the usual remote-case dispatch:
 
