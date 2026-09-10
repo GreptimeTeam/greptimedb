@@ -27,8 +27,10 @@ use common_query::request::QueryRequest;
 use common_recordbatch::adapter::{AsyncRecordBatchStreamAdapter, DfRecordBatchStreamAdapter};
 use common_recordbatch::util::{ChainedRecordBatchStream, LimitedRecordBatchStream};
 use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
+use datafusion::common::Result;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
@@ -171,13 +173,9 @@ impl ExecutionPlan for DistributedInspectExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
-        ) -> datafusion::common::Result<
-            datafusion::common::tree_node::TreeNodeRecursion,
-        >,
-    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
-        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(

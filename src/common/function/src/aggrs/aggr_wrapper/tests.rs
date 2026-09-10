@@ -24,6 +24,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use common_telemetry::init_default_ut_logging;
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::average::avg_udaf;
@@ -38,8 +39,7 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion_common::arrow::array::AsArray;
 use datafusion_common::arrow::datatypes::{Float64Type, UInt64Type};
-use datafusion_common::tree_node::TreeNodeRecursion;
-use datafusion_common::{Column, TableReference};
+use datafusion_common::{Column, Result, TableReference};
 use datafusion_expr::expr::{AggregateFunction, NullTreatment};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{
@@ -48,7 +48,7 @@ use datafusion_expr::{
 };
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
 use datafusion_physical_expr::expressions::{Column as PhysicalColumn, col, lit as physical_lit};
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use futures::{Stream, StreamExt as _};
 use hyperloglogplus::HyperLogLog;
 use pretty_assertions::assert_eq;
@@ -107,10 +107,8 @@ impl ExecutionPlan for MockInputExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &Arc<dyn datafusion_physical_expr::PhysicalExpr>,
-        ) -> datafusion_common::Result<TreeNodeRecursion>,
-    ) -> datafusion_common::Result<TreeNodeRecursion> {
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
         Ok(TreeNodeRecursion::Continue)
     }
 
