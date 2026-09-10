@@ -3,7 +3,9 @@
 set -e
 
 # - If it's a tag push release or manual dispatch on a tag with REUSE_EXISTING_RELEASE_TAG=true, the version is the tag name(${{ github.ref_name }});
-# - If it's a scheduled release, the version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-$buildTime', like 'v0.2.0-nightly-20230313';
+# - If it's a scheduled release, the version is '<base-version>-nightly-$buildTime', like 'v0.2.0-nightly-20230313';
+#   the pre-release extension of $NEXT_RELEASE_VERSION (like '-alpha.1') is stripped,
+#   'nightly' itself becomes the pre-release extension;
 # - If it's a manual non-tag release, the version is '${{ env.NEXT_RELEASE_VERSION }}-$(git rev-parse --short HEAD)-YYYYMMDDSS', like 'v0.2.0-e5b243c-2023071245';
 # - If it's a nightly build, the version is 'nightly-YYYYMMDD-$(git rev-parse --short HEAD)', like 'nightly-20230712-e5b243c'.
 # create_version ${GIHUB_EVENT_NAME} ${NEXT_RELEASE_VERSION} ${NIGHTLY_RELEASE_PREFIX}
@@ -72,7 +74,11 @@ function create_version() {
   elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
     echo "$NEXT_RELEASE_VERSION-$(git rev-parse --short HEAD)-$(date "+%Y%m%d-%s")"
   elif [ "$GITHUB_EVENT_NAME" = schedule ]; then
-    echo "$NEXT_RELEASE_VERSION-$NIGHTLY_RELEASE_PREFIX-$(date "+%Y%m%d")"
+    # Strip the pre-release extension (like '-alpha.1') from the version and use
+    # 'nightly' as the (only) pre-release extension, so 'v0.2.0-alpha.1' becomes
+    # 'v0.2.0-nightly-20230313' rather than 'v0.2.0-alpha.1-nightly-20230313'.
+    BASE_VERSION=${NEXT_RELEASE_VERSION%%-*}
+    echo "$BASE_VERSION-$NIGHTLY_RELEASE_PREFIX-$(date "+%Y%m%d")"
   else
     echo "Unsupported GITHUB_EVENT_NAME: $GITHUB_EVENT_NAME" >&2
     exit 1
@@ -84,6 +90,7 @@ function create_version() {
 #  GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF_TYPE=tag REUSE_EXISTING_RELEASE_TAG=true GITHUB_REF_NAME=v0.3.0 NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 #  GITHUB_EVENT_NAME=workflow_dispatch NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 #  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
+#  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=v0.4.0-alpha.1 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 #  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=nightly NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 #  GITHUB_EVENT_NAME=workflow_dispatch COMMIT_SHA=f0e7216c4bb6acce9b29a21ec2d683be2e3f984a NEXT_RELEASE_VERSION=dev NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 create_version

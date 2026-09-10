@@ -167,11 +167,15 @@ servers = { workspace = true, features = ["testing"] }
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
+tokio = { workspace = true, features = ["test-util"] }
 tokio-postgres.workspace = true
 tokio-postgres-rustls = "0.14"
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
+
+[target.'cfg(not(windows))'.dev-dependencies]
+tikv-jemallocator = "0.6"
 
 [build-dependencies]
 common-version.workspace = true
@@ -187,6 +191,10 @@ required-features = ["testing"]
 
 [[bench]]
 name = "to_http_output"
+harness = false
+
+[[bench]]
+name = "prometheus_response"
 harness = false
 
 [[bench]]

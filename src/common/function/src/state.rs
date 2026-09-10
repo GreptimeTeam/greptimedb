@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::Plugins;
+
 use crate::handlers::{FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef};
 
 /// Shared state for SQL functions.
 /// The handlers in state may be `None` in cli command-line or test cases.
 #[derive(Clone, Default)]
 pub struct FunctionState {
+    /// Process plugins available to dynamically registered functions.
+    pub plugins: Plugins,
     // The table mutation handler
     pub table_mutation_handler: Option<TableMutationHandlerRef>,
     // The procedure service handler
@@ -212,6 +216,7 @@ impl FunctionState {
         }
 
         Self {
+            plugins: Plugins::default(),
             table_mutation_handler: Some(Arc::new(MockTableMutationHandler)),
             procedure_service_handler: Some(Arc::new(MockProcedureServiceHandler)),
             flow_service_handler: Some(Arc::new(MockFlowServiceHandler)),

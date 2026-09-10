@@ -26,7 +26,7 @@ auth.workspace = true
 axum.workspace = true
 base64.workspace = true
 cache.workspace = true
-catalog = { workspace = true, features = ["testing"] }
+catalog.workspace = true
 chrono.workspace = true
 clap.workspace = true
 client = { workspace = true, features = ["testing"] }
@@ -96,6 +96,7 @@ uuid.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+catalog = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datafusion.workspace = true

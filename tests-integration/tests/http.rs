@@ -2317,6 +2317,7 @@ read_preference = "Leader"
 
 [logging]
 max_log_files = 720
+max_log_dir_size = "0KiB"
 append_stdout = true
 enable_file_logging = true
 enable_otlp_tracing = false
@@ -2331,6 +2332,8 @@ manifest_checkpoint_distance = 10
 experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
+experimental_series_index_root = ""
+experimental_series_index_maintenance_interval = "5m"
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
 auto_flush_interval = "10m"

@@ -49,33 +49,14 @@ const LOCATION_TYPE_AFTER: i32 = LocationType::After as i32;
 /// mixed batch — annotation alters skip region dispatch, so they cannot share
 /// a statement with options that regions must see.
 fn annotation_family_of_keys<'a>(
-    mut keys: impl Iterator<Item = &'a str>,
+    keys: impl Iterator<Item = &'a str>,
 ) -> Result<Option<AnnotationFamily>> {
-    let Some(first) = keys.next() else {
-        return Ok(None);
-    };
-    let family = AnnotationFamily::of_key(first);
-    let mut count = 1usize;
-    for key in keys {
-        count += 1;
-        let this = AnnotationFamily::of_key(key);
-        if this != family {
-            return error::InvalidTableOptionRequestSnafu {
-                err_msg: family.or(this).unwrap().mixed_batch_error(),
-            }
-            .fail();
+    table::requests::validate_annotation_keys(keys).map_err(|err| {
+        error::InvalidTableOptionRequestSnafu {
+            err_msg: err.to_string(),
         }
-    }
-    if let Some(family) = family
-        && family.requires_single_key()
-        && count > 1
-    {
-        return error::InvalidTableOptionRequestSnafu {
-            err_msg: family.mixed_batch_error(),
-        }
-        .fail();
-    }
-    Ok(family)
+        .build()
+    })
 }
 
 /// Returns the annotation family when `kind` is a SET/UNSET whose keys all
@@ -584,6 +565,131 @@ mod tests {
     }
 
     #[test]
+    fn test_repartition_hints_together() {
+        let keys = [
+            REPARTITION_COLUMN_HINT_KEY,
+            table::requests::REPARTITION_PARTITION_NUM_HINT_KEY,
+        ];
+        let options = vec![
+            (keys[0].to_string(), "host".to_string()),
+            (keys[1].to_string(), "10".to_string()),
+        ];
+        let set = Kind::SetTableOptions(SetTableOptions {
+            table_options: options
+                .iter()
+                .map(|(key, value)| PbOption {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        });
+        let unset = Kind::UnsetTableOptions(UnsetTableOptions {
+            keys: keys.map(str::to_string).to_vec(),
+        });
+        for kind in [set, unset] {
+            assert_eq!(
+                annotation_alter_family(&kind).unwrap(),
+                Some(AnnotationFamily::RepartitionHint)
+            );
+            let request = alter_expr_to_request(
+                1,
+                AlterTableExpr {
+                    kind: Some(kind),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            match request.alter_kind {
+                AlterKind::SetAnnotations {
+                    family,
+                    options: actual,
+                } => {
+                    assert_eq!(family, AnnotationFamily::RepartitionHint);
+                    assert_eq!(actual, options);
+                }
+                AlterKind::UnsetAnnotations {
+                    family,
+                    keys: actual,
+                } => {
+                    assert_eq!(family, AnnotationFamily::RepartitionHint);
+                    assert_eq!(actual, keys);
+                }
+                other => panic!("unexpected alter kind: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_repartition_partition_num_hint_expr() {
+        let key = table::requests::REPARTITION_PARTITION_NUM_HINT_KEY;
+        let set = Kind::SetTableOptions(SetTableOptions {
+            table_options: vec![PbOption {
+                key: key.to_string(),
+                value: "8".to_string(),
+            }],
+        });
+        let unset = Kind::UnsetTableOptions(UnsetTableOptions {
+            keys: vec![key.to_string()],
+        });
+        for kind in [set, unset] {
+            assert_eq!(
+                annotation_alter_family(&kind).unwrap(),
+                Some(AnnotationFamily::RepartitionHint)
+            );
+            let request = alter_expr_to_request(
+                1,
+                AlterTableExpr {
+                    kind: Some(kind),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            match request.alter_kind {
+                AlterKind::SetAnnotations { family, options } => {
+                    assert_eq!(family, AnnotationFamily::RepartitionHint);
+                    assert_eq!(options, vec![(key.to_string(), "8".to_string())]);
+                }
+                AlterKind::UnsetAnnotations { family, keys } => {
+                    assert_eq!(family, AnnotationFamily::RepartitionHint);
+                    assert_eq!(keys, vec![key.to_string()]);
+                }
+                other => panic!("unexpected alter kind: {other:?}"),
+            }
+        }
+        for other in [key, table::requests::TTL_KEY] {
+            for kind in [
+                Kind::SetTableOptions(SetTableOptions {
+                    table_options: [key, other]
+                        .into_iter()
+                        .map(|key| PbOption {
+                            key: key.to_string(),
+                            value: "8".to_string(),
+                        })
+                        .collect(),
+                }),
+                Kind::UnsetTableOptions(UnsetTableOptions {
+                    keys: vec![key.to_string(), other.to_string()],
+                }),
+            ] {
+                assert!(annotation_alter_family(&kind).is_err());
+                assert!(
+                    alter_expr_to_request(
+                        1,
+                        AlterTableExpr {
+                            kind: Some(kind),
+                            ..Default::default()
+                        },
+                        None
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_set_repartition_column_hint_expr() {
         let expr = AlterTableExpr {
             catalog_name: "test_catalog".to_string(),
@@ -633,7 +739,7 @@ mod tests {
         let err = alter_expr_to_request(1, expr, None).unwrap_err();
         assert!(
             err.to_string()
-                .contains("repartition.column.hint must be altered separately")
+                .contains("repartition hints must be altered separately")
         );
 
         // Duplicate hint entries are not a meaningful batch either.
@@ -655,10 +761,7 @@ mod tests {
             })),
         };
         let err = alter_expr_to_request(1, dup, None).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("repartition.column.hint must be altered separately")
-        );
+        assert!(err.to_string().contains("duplicate repartition hint keys"));
     }
 
     #[test]

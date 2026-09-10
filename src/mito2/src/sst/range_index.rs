@@ -14,6 +14,7 @@
 
 //! Per-SST series row-range index.
 
+mod deleter;
 mod searcher;
 mod writer;
 
@@ -25,6 +26,11 @@ use store_api::metric_engine_consts::{
 pub use writer::{
     SstRangeIndexWriter, SstRangeIndexWriterMetrics, SstRangeIndexWriterOptions, range_index_schema,
 };
+
+pub use crate::sst::range_index::deleter::RangeIndexDeleter;
+// Used by the upcoming query and index-building integration.
+#[allow(unused_imports)]
+pub(crate) use crate::sst::range_index::deleter::range_index_path;
 
 const ROW_GROUP_ID_COLUMN: &str = "row_group_id";
 const START_COLUMN: &str = "start";

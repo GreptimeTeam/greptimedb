@@ -286,6 +286,17 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().series_row_selector = Some(selector);
     }
 
+    /// Clones this provider for one logical table-scan use-site.
+    ///
+    /// The optimizer may attach different hints to scans that share the same
+    /// catalog provider, so the per-scan request must not share its mutex.
+    pub fn clone_for_scan(&self) -> Self {
+        Self {
+            scan_request: Arc::new(Mutex::new(self.scan_request.lock().unwrap().clone())),
+            ..self.clone()
+        }
+    }
+
     pub fn with_vector_search_hint(&self, hint: VectorSearchRequest) {
         self.scan_request.lock().unwrap().vector_search = Some(hint);
     }

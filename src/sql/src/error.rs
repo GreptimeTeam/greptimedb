@@ -164,6 +164,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid database option value for {}: {}, {}", key, value, reason))]
+    InvalidDatabaseOptionValue {
+        key: String,
+        value: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid table name: {}", name))]
     InvalidTableName {
         name: String,
@@ -375,6 +384,7 @@ impl ErrorExt for Error {
             | InvalidExprAsOptionValue { .. }
             | InvalidDatabaseName { .. }
             | InvalidDatabaseOption { .. }
+            | InvalidDatabaseOptionValue { .. }
             | ColumnTypeMismatch { .. }
             | InvalidTableName { .. }
             | InvalidFlowName { .. }

@@ -147,6 +147,7 @@ impl SstRangeIndexWriter {
             path,
             &schema,
             options.index_row_group_size,
+            None,
         )
         .await?;
         let codec = SparsePrimaryKeyCodec::new(&metadata);

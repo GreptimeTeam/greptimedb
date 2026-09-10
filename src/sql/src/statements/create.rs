@@ -141,7 +141,7 @@ pub struct ColumnExtensions {
 }
 
 /// JSON2-specific options represented in the SQL AST.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default, Serialize)]
 pub struct Json2Options {
     /// Maximum number of unhinted JSON2 paths expanded into Arrow fields.
     pub(crate) max_auto_expanded_paths: Option<u32>,
