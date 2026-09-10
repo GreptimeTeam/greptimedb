@@ -27,17 +27,17 @@ INSERT INTO native_time_us VALUES
     (1000000, 'window', 3),
     (1000001, 'window', 4);
 
--- The native projection and exact zero-lookback bounds must reach the scan;
+-- The native projection and exact 1ms-lookback bounds must reach the scan;
 -- the 1s+tick row must not displace 201.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE native_time_us.__table_id\s*=\s*UInt32\(\d+\) native_time_us.__table_id=UInt32(REDACTED)
-TQL EXPLAIN (1, 1, '1s', '0s') native_time_us{series="exact"};
+TQL EXPLAIN (1, 1, '1s', '1ms') native_time_us{series="exact"};
 
 -- The actual memtable scan must use LastRow { after_merge: true } with native
--- zero-lookback bounds; it must select exact 1s rather than the future tick.
+-- 1ms-lookback bounds; it must select exact 1s rather than the future tick.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -45,10 +45,11 @@ TQL EXPLAIN (1, 1, '1s', '0s') native_time_us{series="exact"};
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
-TQL ANALYZE VERBOSE (1, 1, '1s', '0s') native_time_us{series="exact"};
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+TQL ANALYZE VERBOSE (1, 1, '1s', '1ms') native_time_us{series="exact"};
 
 -- The same-series future tick is in the memtable, while exact 1s remains selected.
-TQL EVAL (1, 1, '1s', '0s') native_time_us{series="exact"};
+TQL EVAL (1, 1, '1s', '1ms') native_time_us{series="exact"};
 
 -- Future-only selection is empty before flushing, exercising the memtable path.
 TQL EVAL (1, 1, '1s', '300s') native_time_us{series="future"};
@@ -56,7 +57,7 @@ TQL EVAL (1, 1, '1s', '300s') native_time_us{series="future"};
 ADMIN FLUSH_TABLE('native_time_us');
 
 -- The exact native sample remains selected from the flushed SST.
-TQL EVAL (1, 1, '1s', '0s') native_time_us{series="exact"};
+TQL EVAL (1, 1, '1s', '1ms') native_time_us{series="exact"};
 TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_us{series="future"});
 TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_us{series="exact"});
 
@@ -112,17 +113,17 @@ INSERT INTO native_time_ns VALUES
     (1000000000, 'window', 3),
     (1000000001, 'window', 4);
 
--- The native projection and exact zero-lookback bounds must reach the scan;
+-- The native projection and exact 1ms-lookback bounds must reach the scan;
 -- the 1s+tick row must not displace 201.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE native_time_ns.__table_id\s*=\s*UInt32\(\d+\) native_time_ns.__table_id=UInt32(REDACTED)
-TQL EXPLAIN (1, 1, '1s', '0s') native_time_ns{series="exact"};
+TQL EXPLAIN (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 
 -- The actual memtable scan must use LastRow { after_merge: true } with native
--- zero-lookback bounds; it must select exact 1s rather than the future tick.
+-- 1ms-lookback bounds; it must select exact 1s rather than the future tick.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -130,10 +131,11 @@ TQL EXPLAIN (1, 1, '1s', '0s') native_time_ns{series="exact"};
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
-TQL ANALYZE VERBOSE (1, 1, '1s', '0s') native_time_ns{series="exact"};
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+TQL ANALYZE VERBOSE (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 
 -- The same-series future tick is in the memtable, while exact 1s remains selected.
-TQL EVAL (1, 1, '1s', '0s') native_time_ns{series="exact"};
+TQL EVAL (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 
 -- Future-only selection is empty before flushing, exercising the memtable path.
 TQL EVAL (1, 1, '1s', '300s') native_time_ns{series="future"};
@@ -141,7 +143,7 @@ TQL EVAL (1, 1, '1s', '300s') native_time_ns{series="future"};
 ADMIN FLUSH_TABLE('native_time_ns');
 
 -- The exact native sample remains selected from the flushed SST.
-TQL EVAL (1, 1, '1s', '0s') native_time_ns{series="exact"};
+TQL EVAL (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_ns{series="future"});
 TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_ns{series="exact"});
 
@@ -179,14 +181,14 @@ CREATE TABLE native_time_ns_lower_overflow (
     val DOUBLE,
 );
 INSERT INTO native_time_ns_lower_overflow VALUES
-    (-9223372036854000000, 'exact', 1),
-    (-9223372036853000000, 'exact', 2);
+    (-9223200000000000000, 'exact', 1),
+    (-9223199999999000000, 'exact', 2);
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE native_time_ns_lower_overflow.__table_id\s*=\s*UInt32\(\d+\) native_time_ns_lower_overflow.__table_id=UInt32(REDACTED)
-TQL EXPLAIN (0, 0, '1s', '300s') native_time_ns_lower_overflow{series="exact"} offset 9223372036854ms;
+TQL EXPLAIN (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -195,10 +197,13 @@ TQL EXPLAIN (0, 0, '1s', '300s') native_time_ns_lower_overflow{series="exact"} o
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
-TQL ANALYZE VERBOSE (0, 0, '1s', '300s') native_time_ns_lower_overflow{series="exact"} offset 9223372036854ms;
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+TQL ANALYZE VERBOSE (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
 
 -- The representable upper bound selects only the exact row.
-TQL EVAL (0, 0, '1s', '300s') native_time_ns_lower_overflow{series="exact"} offset 9223372036854ms;
+TQL EVAL (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
+ADMIN FLUSH_TABLE('native_time_ns_lower_overflow');
+TQL EVAL (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
 DROP TABLE native_time_ns_lower_overflow;
 
 -- Second precision is promoted before applying fractional-second offsets.
