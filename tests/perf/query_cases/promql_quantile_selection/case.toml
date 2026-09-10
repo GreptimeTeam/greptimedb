@@ -1,0 +1,99 @@
+# PromQL quantile-over-time latency regression coverage.
+#
+# This is wave-only end-to-end coverage. Ascending- and descending-value
+# microbenchmark controls remain separately required.
+
+[case]
+name = "promql_quantile_selection"
+description = "PromQL quantile_over_time q=0.9 selection latency on deterministic nonmonotonic wave values"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 901
+
+[[scenario.tables]]
+database = "public"
+name = "promql_quantile_selection"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 128, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 1000.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 13
+rows_per_sst = 7680
+row_group_size = 1920
+series_count = 128
+start_unix_nanos = 1704067200000000000
+step_nanos = 15000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+# Selector and response-path control; it does not cover quantile behavior.
+[[scenario.queries]]
+name = "plain_selector_control_2h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') promql_quantile_selection{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+# Four samples per full window: small-window selection control.
+[[scenario.queries]]
+name = "quantile_over_time_q90_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') quantile_over_time(0.9, promql_quantile_selection{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+# Twenty samples per full window: representative overlapping selection work.
+[[scenario.queries]]
+name = "quantile_over_time_q90_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') quantile_over_time(0.9, promql_quantile_selection{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+# 240 samples per full window: wide-window quantile selection stress case.
+[[scenario.queries]]
+name = "quantile_over_time_q90_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') quantile_over_time(0.9, promql_quantile_selection{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
