@@ -15183,7 +15183,7 @@ dependencies = [
 [[package]]
 name = "tikv-jemalloc-sys"
 version = "0.7.0+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8"
-source = "git+https://github.com/GreptimeTeam/jemallocator?rev=a3b9ad8a41ff7ee14c7ddec06f5864f310d2d245#a3b9ad8a41ff7ee14c7ddec06f5864f310d2d245"
+source = "git+https://github.com/GreptimeTeam/jemallocator?rev=e1846d8c12bbb65c39dcd224a86b24586478e264#e1846d8c12bbb65c39dcd224a86b24586478e264"
 dependencies = [
  "cc",
  "libc",
