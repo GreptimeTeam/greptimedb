@@ -24,9 +24,10 @@ use api::v1::column_def::{options_from_column_schema, try_as_column_schema};
 use api::v1::{
     AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
     ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend, ModifyColumnType,
+    DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
+    JsonSettings as PbJsonSettings, JsonTypeHint as PbJsonTypeHint, ModifyColumnType,
     ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetDefaults, SetFulltext,
-    SetIndex, SetIndexes, SetInverted, SetSkipping, SetTableOptions,
+    SetIndex, SetIndexes, SetInverted, SetJsonSettings, SetSkipping, SetTableOptions,
     SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
     UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions, set_index,
     unset_index,
@@ -36,6 +37,7 @@ use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
+use datatypes::json::JsonSettings;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
@@ -782,6 +784,42 @@ pub(crate) fn to_repartition_request(
     })
 }
 
+fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
+    let type_hints = settings
+        .type_hints()
+        .iter()
+        .map(|hint| {
+            let (data_type, datatype_extension) =
+                ColumnDataTypeWrapper::try_from(hint.data_type.clone())
+                    .map(|w| w.to_parts())
+                    .context(ColumnDataTypeSnafu)?;
+
+            let default_constraint = hint
+                .default_constraint
+                .clone()
+                .map(TryInto::try_into)
+                .transpose()
+                .context(ConvertColumnDefaultConstraintSnafu {
+                    column_name: &hint.path.join("."),
+                })?
+                .unwrap_or_default();
+
+            Ok(PbJsonTypeHint {
+                path: hint.path.clone(),
+                data_type: data_type as i32,
+                datatype_extension,
+                nullable: hint.nullable,
+                default_constraint,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(PbJsonSettings {
+        type_hints,
+        max_auto_expanded_paths: settings.max_auto_expanded_paths(),
+    })
+}
+
 /// Converts a SQL alter table statement into a gRPC alter table expression.
 pub(crate) fn to_alter_table_expr(
     alter_table: AlterTable,
@@ -829,6 +867,15 @@ pub(crate) fn to_alter_table_expr(
         } => {
             let target_type =
                 sql_data_type_to_concrete_data_type(&target_type).context(ParseSqlSnafu)?;
+
+            // Currently disallow modify column type to json2.
+            if target_type.is_json2() {
+                return NotSupportedSnafu {
+                    feat: "ALTER TABLE MODIFY COLUMN to JSON2 type",
+                }
+                .fail();
+            }
+
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;
@@ -844,6 +891,31 @@ pub(crate) fn to_alter_table_expr(
                     target_type: target_type as i32,
                     target_type_extension,
                 }],
+            })
+        }
+        AlterTableOperation::SetJsonSettings {
+            column_name,
+            target_type,
+            json2_options,
+        } => {
+            let target_type =
+                sql_data_type_to_concrete_data_type(&target_type).context(ParseSqlSnafu)?;
+
+            ensure!(
+                target_type.is_json2(),
+                NotSupportedSnafu {
+                    feat: "ALTER TABLE MODIFY JSON settings for non-JSON2 type",
+                }
+            );
+
+            let settings = match json2_options {
+                Some(options) => options.build_json_settings().context(ParseSqlSnafu)?,
+                None => datatypes::json::JsonSettings::new_v2(),
+            };
+
+            AlterTableKind::SetJsonSettings(SetJsonSettings {
+                column_name: column_name.value,
+                settings: Some(json_settings_to_proto(settings)?),
             })
         }
         AlterTableOperation::DropColumn { name } => AlterTableKind::DropColumns(DropColumns {
@@ -1742,6 +1814,51 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             modify_column_type.target_type
         );
         assert!(modify_column_type.target_type_extension.is_none());
+    }
+
+    #[test]
+    fn test_to_alter_set_json_settings_expr() {
+        let sql = "ALTER TABLE monitor MODIFY COLUMN payload JSON2 (service STRING);";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+        let expr = to_alter_table_expr(alter_table, &QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let AlterTableKind::SetJsonSettings(modify) = kind else {
+            unreachable!()
+        };
+        assert_eq!("payload", modify.column_name);
+        let settings = modify.settings.as_ref().unwrap();
+        assert_eq!(Some(100), settings.max_auto_expanded_paths);
+        assert_eq!(1, settings.type_hints.len());
+        assert_eq!(["service"], &settings.type_hints[0].path[..]);
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN payload JSON2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+        let expr = to_alter_table_expr(alter_table, &QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let AlterTableKind::SetJsonSettings(modify) = kind else {
+            unreachable!()
+        };
+        let settings = modify.settings.as_ref().unwrap();
+        assert_eq!(Some(100), settings.max_auto_expanded_paths);
+        assert!(settings.type_hints.is_empty());
     }
 
     #[test]

@@ -25,6 +25,7 @@ use common_query::AddColumnLocation;
 use common_time::TimeToLive;
 use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::json::JsonSettings;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions,
@@ -343,6 +344,13 @@ pub struct ModifyColumnTypeRequest {
     pub target_type: ConcreteDataType,
 }
 
+/// Set JSON2 settings request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetJsonSettingsRequest {
+    pub column_name: String,
+    pub settings: JsonSettings,
+}
+
 /// A family of annotation table options: pure metadata markers that no region
 /// consumes. Setting or unsetting them only rewrites the table's
 /// `extra_options`, so the alter skips region dispatch entirely.
@@ -558,6 +566,9 @@ pub enum AlterKind {
     },
     ModifyColumnTypes {
         columns: Vec<ModifyColumnTypeRequest>,
+    },
+    SetJsonSettings {
+        request: SetJsonSettingsRequest,
     },
     RenameTable {
         new_table_name: String,

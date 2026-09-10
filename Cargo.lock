@@ -6097,7 +6097,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=32f467fa2ba2b3588a58381a24af83de09fbb00a#32f467fa2ba2b3588a58381a24af83de09fbb00a"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2d7458f20d03f450b7910fb92a631fc73bc719cf#2d7458f20d03f450b7910fb92a631fc73bc719cf"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -14361,6 +14361,7 @@ version = "1.3.0-alpha.1"
 dependencies = [
  "api",
  "aquamarine",
+ "arrow-schema 58.3.0",
  "async-stream",
  "async-trait",
  "bytes",

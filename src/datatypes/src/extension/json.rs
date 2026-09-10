@@ -23,9 +23,10 @@ use parquet_variant_compute::VariantType;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 
-use crate::error::InvalidJson2LayoutSnafu;
+use crate::error::{InvalidJson2LayoutSnafu, SerializeSnafu};
 pub use crate::json::JSON2_REMAINDER_FIELD_NAME;
 use crate::json::JsonSettings;
+use crate::schema::Metadata;
 
 const LEGACY_JSON_STRUCTURE_SETTINGS_KEY: &str = "json_structure_settings";
 const JSON2_LAYOUT_V1: u8 = 1;
@@ -129,7 +130,7 @@ pub struct JsonMetadata {
 }
 
 impl JsonMetadata {
-    /// Creates metadata for the JSON2 layout version 2.
+    /// Creates metadata for the latest JSON2 layout (currently V2).
     pub fn new(json_settings: JsonSettings) -> Self {
         Self {
             json_settings,
@@ -278,6 +279,27 @@ impl ExtensionType for Json2ExtensionType {
     }
 }
 
+/// Returns JSON2 column metadata with updated settings and the latest layout.
+///
+/// Existing SSTs retain their own physical layout metadata.
+pub fn json2_metadata_with_updated_settings(
+    current_metadata: &Metadata,
+    settings: JsonSettings,
+) -> crate::error::Result<Metadata> {
+    let json_metadata = JsonMetadata::new(settings);
+
+    let mut metadata = current_metadata.clone();
+    metadata.insert(
+        EXTENSION_TYPE_NAME_KEY.to_string(),
+        Json2ExtensionType::NAME.to_string(),
+    );
+    metadata.insert(
+        EXTENSION_TYPE_METADATA_KEY.to_string(),
+        serde_json::to_string(&json_metadata).context(SerializeSnafu)?,
+    );
+    Ok(metadata)
+}
+
 /// Checks whether this field is either a legacy JSONB or JSON2 extension type.
 pub fn is_any_json_extension_type<T: AsRef<Field>>(field: T) -> bool {
     let name = field.as_ref().extension_type_name();
@@ -417,6 +439,35 @@ mod tests {
         let deserialized: JsonMetadata = serde_json::from_str(&serialized)?;
         assert!(deserialized.is_version_2());
         assert_eq!(deserialized, metadata);
+        Ok(())
+    }
+
+    #[test]
+    fn test_json2_metadata_with_updated_settings_upgrades_layout() -> crate::error::Result<()> {
+        for (name, json) in [
+            (JsonExtensionType::NAME, r#"{"json_settings":{}}"#),
+            (Json2ExtensionType::NAME, r#"{"json_settings":{}}"#),
+            (
+                Json2ExtensionType::NAME,
+                r#"{"json_settings":{},"layout_version":2}"#,
+            ),
+        ] {
+            let metadata = HashMap::from([
+                (EXTENSION_TYPE_NAME_KEY.to_string(), name.to_string()),
+                (EXTENSION_TYPE_METADATA_KEY.to_string(), json.to_string()),
+                ("other".to_string(), "kept".to_string()),
+            ]);
+            let settings = JsonSettings::try_new(vec![], Some(10))?;
+            let updated = json2_metadata_with_updated_settings(&metadata, settings.clone())?;
+            assert_eq!(Some("kept"), updated.get("other").map(String::as_str));
+            assert_eq!(
+                Some(Json2ExtensionType::NAME),
+                updated.get(EXTENSION_TYPE_NAME_KEY).map(String::as_str)
+            );
+            let json_metadata: JsonMetadata =
+                serde_json::from_str(updated.get(EXTENSION_TYPE_METADATA_KEY).unwrap()).unwrap();
+            assert_eq!(JsonMetadata::new(settings), json_metadata);
+        }
         Ok(())
     }
 

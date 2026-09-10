@@ -1,0 +1,152 @@
+CREATE TABLE application_logs (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+INSERT INTO application_logs VALUES
+    (1, '{"service":"frontend","duration":12,"trace_id":"before-1"}'),
+    (2, '{"service":"ingester","duration":34,"trace_id":"before-2"}');
+
+Affected Rows: 2
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2 (
+        max_auto_expanded_paths = 2000,
+        service STRING,
+        duration INT64 DEFAULT 0,
+        trace_id STRING
+    );
+
+Affected Rows: 0
+
+SELECT COUNT(*) AS alter_flushed_sst_num
+FROM information_schema.ssts_manifest
+WHERE visible
+  AND table_id IN (
+      SELECT table_id FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'application_logs'
+  );
+
++-----------------------+
+| alter_flushed_sst_num |
++-----------------------+
+| 1                     |
++-----------------------+
+
+INSERT INTO application_logs VALUES
+    (3, '{"service":"frontend","duration":56,"trace_id":"after-1"}'),
+    (4, '{"service":"compactor","trace_id":"after-2"}');
+
+Affected Rows: 2
+
+SELECT ts, attrs.service, attrs.duration, attrs.trace_id
+FROM application_logs
+ORDER BY ts;
+
++-------------------------+--------------------------------------------------+---------------------------------------------------+---------------------------------------------------+
+| ts                      | json_get(application_logs.attrs,Utf8("service")) | json_get(application_logs.attrs,Utf8("duration")) | json_get(application_logs.attrs,Utf8("trace_id")) |
++-------------------------+--------------------------------------------------+---------------------------------------------------+---------------------------------------------------+
+| 1970-01-01T00:00:00.001 | frontend                                         | 12                                                | before-1                                          |
+| 1970-01-01T00:00:00.002 | ingester                                         | 34                                                | before-2                                          |
+| 1970-01-01T00:00:00.003 | frontend                                         | 56                                                | after-1                                           |
+| 1970-01-01T00:00:00.004 | compactor                                        | 0                                                 | after-2                                           |
++-------------------------+--------------------------------------------------+---------------------------------------------------+---------------------------------------------------+
+
+ADMIN FLUSH_TABLE('application_logs');
+
++---------------------------------------+
+| ADMIN FLUSH_TABLE('application_logs') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+SELECT ts, attrs.service, attrs.duration, attrs.trace_id
+FROM application_logs
+ORDER BY ts;
+
++-------------------------+--------------------------------------------------+---------------------------------------------------+---------------------------------------------------+
+| ts                      | json_get(application_logs.attrs,Utf8("service")) | json_get(application_logs.attrs,Utf8("duration")) | json_get(application_logs.attrs,Utf8("trace_id")) |
++-------------------------+--------------------------------------------------+---------------------------------------------------+---------------------------------------------------+
+| 1970-01-01T00:00:00.001 | frontend                                         | 12                                                | before-1                                          |
+| 1970-01-01T00:00:00.002 | ingester                                         | 34                                                | before-2                                          |
+| 1970-01-01T00:00:00.003 | frontend                                         | 56                                                | after-1                                           |
+| 1970-01-01T00:00:00.004 | compactor                                        | 0                                                 | after-2                                           |
++-------------------------+--------------------------------------------------+---------------------------------------------------+---------------------------------------------------+
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2 (
+        trace_id STRING,
+        user.id STRING NOT NULL,
+        user.name STRING DEFAULT 'anonymous',
+        request_id STRING INVERTED INDEX
+    );
+
+Affected Rows: 0
+
+INSERT INTO application_logs VALUES
+    (5, '{"trace_id":"after-3","user":{"id":"u1","name":"alice"},"request_id":"r1"}');
+
+Affected Rows: 1
+
+SELECT ts, attrs.trace_id, attrs.user.id, attrs.user.name, attrs.request_id
+FROM application_logs
+ORDER BY ts;
+
++-------------------------+---------------------------------------------------+--------------------------------------------------+----------------------------------------------------+-----------------------------------------------------+
+| ts                      | json_get(application_logs.attrs,Utf8("trace_id")) | json_get(application_logs.attrs,Utf8("user.id")) | json_get(application_logs.attrs,Utf8("user.name")) | json_get(application_logs.attrs,Utf8("request_id")) |
++-------------------------+---------------------------------------------------+--------------------------------------------------+----------------------------------------------------+-----------------------------------------------------+
+| 1970-01-01T00:00:00.001 | before-1                                          |                                                  |                                                    |                                                     |
+| 1970-01-01T00:00:00.002 | before-2                                          |                                                  |                                                    |                                                     |
+| 1970-01-01T00:00:00.003 | after-1                                           |                                                  |                                                    |                                                     |
+| 1970-01-01T00:00:00.004 | after-2                                           |                                                  |                                                    |                                                     |
+| 1970-01-01T00:00:00.005 | after-3                                           | u1                                               | alice                                              | r1                                                  |
++-------------------------+---------------------------------------------------+--------------------------------------------------+----------------------------------------------------+-----------------------------------------------------+
+
+ALTER TABLE application_logs
+    MODIFY COLUMN attrs JSON2 (
+        max_auto_expanded_paths = 2000,
+        trace_id STRING,
+        user.id STRING NOT NULL,
+        user.name STRING DEFAULT 'anonymous',
+        request_id STRING INVERTED INDEX
+    );
+
+Affected Rows: 0
+
+INSERT INTO application_logs VALUES
+    (6, '{"trace_id":"after-4","user":{"id":"u2"},"request_id":"r2"}');
+
+Affected Rows: 1
+
+SELECT ts, attrs.trace_id, attrs.user.id, attrs.user.name, attrs.request_id
+FROM application_logs
+ORDER BY ts;
+
++-------------------------+---------------------------------------------------+--------------------------------------------------+----------------------------------------------------+-----------------------------------------------------+
+| ts                      | json_get(application_logs.attrs,Utf8("trace_id")) | json_get(application_logs.attrs,Utf8("user.id")) | json_get(application_logs.attrs,Utf8("user.name")) | json_get(application_logs.attrs,Utf8("request_id")) |
++-------------------------+---------------------------------------------------+--------------------------------------------------+----------------------------------------------------+-----------------------------------------------------+
+| 1970-01-01T00:00:00.001 | before-1                                          |                                                  |                                                    |                                                     |
+| 1970-01-01T00:00:00.002 | before-2                                          |                                                  |                                                    |                                                     |
+| 1970-01-01T00:00:00.003 | after-1                                           |                                                  |                                                    |                                                     |
+| 1970-01-01T00:00:00.004 | after-2                                           |                                                  |                                                    |                                                     |
+| 1970-01-01T00:00:00.005 | after-3                                           | u1                                               | alice                                              | r1                                                  |
+| 1970-01-01T00:00:00.006 | after-4                                           | u2                                               | anonymous                                          | r2                                                  |
++-------------------------+---------------------------------------------------+--------------------------------------------------+----------------------------------------------------+-----------------------------------------------------+
+
+ADMIN FLUSH_TABLE('application_logs');
+
++---------------------------------------+
+| ADMIN FLUSH_TABLE('application_logs') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+DROP TABLE application_logs;
+
+Affected Rows: 0
+
