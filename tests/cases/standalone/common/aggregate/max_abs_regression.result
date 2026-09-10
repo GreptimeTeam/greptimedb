@@ -11,9 +11,6 @@ CREATE TABLE t (
     ts TIMESTAMP TIME INDEX,
     v INT,
     PRIMARY KEY (v),
-) PARTITION ON COLUMNS (v) (
-    v < 0,
-    v >= 0
 ) ENGINE = mito;
 
 Affected Rows: 0
@@ -52,28 +49,73 @@ SELECT MAX(v), MAX(ts) FROM t;
 | 5        | 2024-01-01T00:03:00 |
 +----------+---------------------+
 
--- The plan must retain Partial and Final aggregation without an incomplete filter.
+-- A mixed expression/column MAX must not send an incomplete dynamic filter to DN SeqScans.
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
-EXPLAIN SELECT MAX(ABS(v)), MAX(ts) FROM t;
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
+-- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
+EXPLAIN ANALYZE VERBOSE SELECT MAX(ABS(v)), MAX(ts) FROM t;
 
-+-+-+
-| plan_type_| plan_|
-+-+-+
-| logical_plan_| Aggregate: groupBy=[[]], aggr=[[__max_merge(__max_state(abs(t.v))) AS max(abs(t.v)), __max_merge(__max_state(t.ts)) AS max(t.ts)]] |
-|_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Aggregate: groupBy=[[]], aggr=[[__max_state(abs(t.v)), __max_state(t.ts)]]_|
-|_|_TableScan: t_|
-|_| ]]_|
-| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[max(abs(t.v)), max(t.ts)]_|
-|_|_CoalescePartitionsExec_|
-|_|_AggregateExec: mode=Partial, gby=[], aggr=[max(abs(t.v)), max(t.ts)]_|
-|_|_RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=2_|
-|_|_MergeScanExec: REDACTED
-|_|_|
-+-+-+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[max(abs(t.v)), max(t.ts)] metrics=REDACTED_|
+|_|_|_CoalescePartitionsExec metrics=REDACTED_|
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[max(abs(t.v)), max(t.ts)] metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts", "v"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- A column-only multiple-MAX query remains a dynamic-filter positive control.
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
+-- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
+EXPLAIN ANALYZE VERBOSE SELECT MAX(v), MAX(ts) FROM t;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[max(t.v), max(t.ts)] metrics=REDACTED_|
+|_|_|_CoalescePartitionsExec metrics=REDACTED_|
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[max(t.v), max(t.ts)] metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts", "v"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
 
 DROP TABLE t;
 
