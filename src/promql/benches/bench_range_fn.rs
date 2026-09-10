@@ -37,7 +37,8 @@ use datatypes::arrow::datatypes::{DataType, Field};
 use futures::StreamExt;
 use promql::extension_plan::RangeManipulate;
 use promql::functions::{
-    Changes, Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate, Resets, SumOverTime,
+    Changes, Delta, IDelta, Increase, MaxOverTime, MinOverTime, PredictLinear, QuantileOverTime,
+    Rate, Resets, SumOverTime,
 };
 use promql::range_array::RangeArray;
 
@@ -228,6 +229,19 @@ fn make_edge_count_input_with_ranges(
     ]
 }
 
+fn make_extrema_input_with_ranges(values: Vec<f64>, ranges: Vec<(u32, u32)>) -> Vec<ColumnarValue> {
+    let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
+        (0..values.len()).map(|index| index as i64 * 1_000),
+    ));
+    let values = Arc::new(Float64Array::from(values));
+    let timestamp_ranges = RangeArray::from_ranges(timestamps, ranges.clone()).unwrap();
+    let value_ranges = RangeArray::from_ranges(values, ranges).unwrap();
+    vec![
+        ColumnarValue::Array(Arc::new(timestamp_ranges.into_dict())),
+        ColumnarValue::Array(Arc::new(value_ranges.into_dict())),
+    ]
+}
+
 fn make_quantile_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
     let (ts_range, val_range, _) =
         build_sliding_ranges(num_points, window_size, build_default_values(num_points), 0);
@@ -336,6 +350,46 @@ fn assert_edge_count_output(
     let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
     let actual = output.iter().collect::<Vec<_>>();
     assert_eq!(actual, expected);
+}
+
+fn extrema_oracle(
+    values: &[f64],
+    ranges: &[(u32, u32)],
+    is_better: impl Fn(f64, f64) -> bool,
+) -> Vec<Option<f64>> {
+    ranges
+        .iter()
+        .map(|(offset, length)| {
+            let window = &values[*offset as usize..(*offset + *length) as usize];
+            let mut extrema = *window.first()?;
+            for value in &window[1..] {
+                if is_better(*value, extrema) || extrema.is_nan() {
+                    extrema = *value;
+                }
+            }
+            Some(extrema)
+        })
+        .collect()
+}
+
+fn assert_extrema_output(
+    udf: &datafusion::logical_expr::ScalarUDF,
+    prepared: &PreparedUdfCall,
+    expected: &[Option<f64>],
+) {
+    let output = invoke_prepared_output(udf, prepared);
+    let ColumnarValue::Array(output) = output else {
+        panic!("extrema range UDF must return an array");
+    };
+    let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+    assert_eq!(output.len(), expected.len());
+    for (actual, expected) in output.iter().zip(expected) {
+        match (actual, expected) {
+            (Some(actual), Some(expected)) => assert_eq!(actual.to_bits(), expected.to_bits()),
+            (None, None) => {}
+            (actual, expected) => panic!("expected {expected:?}, got {actual:?}"),
+        }
+    }
 }
 
 fn bench_range_functions(c: &mut Criterion) {
@@ -547,6 +601,97 @@ fn bench_delta_rate_comparison(c: &mut Criterion) {
             &(),
             |b, _| b.iter(|| invoke_prepared(&cumulative_udf, &cumulative)),
         );
+    }
+
+    group.finish();
+}
+
+fn bench_extrema_functions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("extrema_fn");
+    let num_points = 4_096;
+    let values = build_gauge_values(num_points);
+    let min_udf = MinOverTime::scalar_udf();
+    let max_udf = MaxOverTime::scalar_udf();
+    let mut backwards_ranges = (0..=num_points - 20)
+        .step_by(5)
+        .map(|offset| (offset as u32, 20))
+        .collect::<Vec<_>>();
+    backwards_ranges.extend((0..=512).step_by(5).map(|offset| (offset as u32, 20)));
+
+    // The last two controls use explicit ranges instead of a regular window/step sweep.
+    let cases = vec![
+        (
+            "w4_step1",
+            (0..=num_points - 4)
+                .map(|offset| (offset as u32, 4))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "w20_step1",
+            (0..=num_points - 20)
+                .map(|offset| (offset as u32, 20))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "w20_step5",
+            (0..=num_points - 20)
+                .step_by(5)
+                .map(|offset| (offset as u32, 20))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "w240_step1",
+            (0..=num_points - 240)
+                .map(|offset| (offset as u32, 240))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "w240_step240",
+            (0..=num_points - 240)
+                .step_by(240)
+                .map(|offset| (offset as u32, 240))
+                .collect::<Vec<_>>(),
+        ),
+        ("backwards_reset_rebuild_w20_step5", backwards_ranges),
+        (
+            "low_coverage_full_backing_w4",
+            vec![
+                (0, 4),
+                (512, 4),
+                (1_024, 4),
+                (1_536, 4),
+                (2_048, 4),
+                (2_560, 4),
+                (3_584, 4),
+                (4_092, 4),
+            ],
+        ),
+    ];
+    let functions: [(
+        &str,
+        &datafusion::logical_expr::ScalarUDF,
+        fn(f64, f64) -> bool,
+    ); 2] = [
+        ("min_over_time", &min_udf, |value, extrema| value < extrema),
+        ("max_over_time", &max_udf, |value, extrema| value > extrema),
+    ];
+
+    for (case_name, ranges) in cases {
+        let prepared = PreparedUdfCall::new(make_extrema_input_with_ranges(
+            values.clone(),
+            ranges.clone(),
+        ));
+        for (function_name, udf, is_better) in functions {
+            assert_extrema_output(udf, &prepared, &extrema_oracle(&values, &ranges, is_better));
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("{function_name}_{case_name}"),
+                    format!("N{num_points}"),
+                ),
+                &(),
+                |b, _| b.iter(|| invoke_prepared(udf, &prepared)),
+            );
+        }
     }
 
     group.finish();
@@ -882,5 +1027,6 @@ criterion_group!(
     bench_range_functions,
     bench_delta_rate_comparison,
     bench_edge_count_functions,
+    bench_extrema_functions,
     bench_range_manipulate_wall_time
 );

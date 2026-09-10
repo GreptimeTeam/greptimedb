@@ -185,3 +185,27 @@ tql eval (60, 60, '1s') max_over_time(data[2m]);
 tql eval (60, 60, '1s') last_over_time(data[2m]);
 
 drop table data;
+
+-- Sliding min/max regression: overlapping 30s windows expire extrema at the
+-- left boundary, retain equal extrema, and end with a sparse empty window.
+create table moving_extrema (ts timestamp(3) time index, val double, series string primary key);
+
+insert into moving_extrema values
+    (0, 5::double, 'moving'),
+    (10000, 1::double, 'moving'),
+    (20000, 4::double, 'moving'),
+    (30000, 4::double, 'moving'),
+    (40000, 2::double, 'moving'),
+    (60000, 3::double, 'moving');
+
+-- eval range from 20s to 100s min_over_time(moving_extrema[30s]); 90s and 100s are empty.
+-- 	{series="moving"} 1 1 2 2 2 3 3
+-- SQLNESS SORT_RESULT 2 1
+tql eval (20, 100, '10s') min_over_time(moving_extrema[30s]);
+
+-- eval range from 20s to 100s max_over_time(moving_extrema[30s]); 90s and 100s are empty.
+-- 	{series="moving"} 5 4 4 4 4 3 3
+-- SQLNESS SORT_RESULT 2 1
+tql eval (20, 100, '10s') max_over_time(moving_extrema[30s]);
+
+drop table moving_extrema;
