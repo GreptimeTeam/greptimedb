@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use api::v1::ExplainOptions;
 use api::v1::region::RegionRequestHeader;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use auth::UserInfoRef;
 pub use common_base::protocol::Channel;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -46,6 +46,12 @@ pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
 pub const FLIGHT_METRICS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+
+pub const ENABLE_DYNAMIC_FILTER_PUSHDOWN: &str = "enable_dynamic_filter_pushdown";
+pub const ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN: &str =
+    "enable_aggregate_dynamic_filter_pushdown";
+pub const ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN: &str = "enable_join_dynamic_filter_pushdown";
+pub const ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN: &str = "enable_topk_dynamic_filter_pushdown";
 
 const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 
@@ -628,12 +634,34 @@ pub fn dialect_for_channel(channel: Channel) -> Arc<dyn Dialect + Send + Sync> {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
     allow_query_fallback: ArcSwap<bool>,
+    enable_dynamic_filter_pushdown: ArcSwapOption<bool>,
+    enable_aggregate_dynamic_filter_pushdown: ArcSwapOption<bool>,
+    enable_join_dynamic_filter_pushdown: ArcSwapOption<bool>,
+    enable_topk_dynamic_filter_pushdown: ArcSwapOption<bool>,
+}
+
+impl Default for ConfigurationVariables {
+    fn default() -> Self {
+        Self {
+            postgres_bytea_output: ArcSwap::from_pointee(PGByteaOutputValue::default()),
+            pg_datestyle_format: ArcSwap::from_pointee((
+                PGDateTimeStyle::default(),
+                PGDateOrder::default(),
+            )),
+            pg_intervalstyle_format: ArcSwap::from_pointee(PGIntervalStyle::default()),
+            allow_query_fallback: ArcSwap::from_pointee(false),
+            enable_dynamic_filter_pushdown: ArcSwapOption::empty(),
+            enable_aggregate_dynamic_filter_pushdown: ArcSwapOption::empty(),
+            enable_join_dynamic_filter_pushdown: ArcSwapOption::empty(),
+            enable_topk_dynamic_filter_pushdown: ArcSwapOption::empty(),
+        }
+    }
 }
 
 impl Clone for ConfigurationVariables {
@@ -643,6 +671,18 @@ impl Clone for ConfigurationVariables {
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
             allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+            enable_dynamic_filter_pushdown: ArcSwapOption::new(
+                self.enable_dynamic_filter_pushdown.load_full(),
+            ),
+            enable_aggregate_dynamic_filter_pushdown: ArcSwapOption::new(
+                self.enable_aggregate_dynamic_filter_pushdown.load_full(),
+            ),
+            enable_join_dynamic_filter_pushdown: ArcSwapOption::new(
+                self.enable_join_dynamic_filter_pushdown.load_full(),
+            ),
+            enable_topk_dynamic_filter_pushdown: ArcSwapOption::new(
+                self.enable_topk_dynamic_filter_pushdown.load_full(),
+            ),
         }
     }
 }
@@ -683,6 +723,49 @@ impl ConfigurationVariables {
     pub fn set_allow_query_fallback(&self, allow: bool) {
         self.allow_query_fallback.swap(Arc::new(allow));
     }
+
+    pub fn dynamic_filter_pushdown(&self) -> DynamicFilterPushdownOptions {
+        DynamicFilterPushdownOptions {
+            enable_dynamic_filter_pushdown: self
+                .enable_dynamic_filter_pushdown
+                .load_full()
+                .map(|value| *value),
+            enable_aggregate_dynamic_filter_pushdown: self
+                .enable_aggregate_dynamic_filter_pushdown
+                .load_full()
+                .map(|value| *value),
+            enable_join_dynamic_filter_pushdown: self
+                .enable_join_dynamic_filter_pushdown
+                .load_full()
+                .map(|value| *value),
+            enable_topk_dynamic_filter_pushdown: self
+                .enable_topk_dynamic_filter_pushdown
+                .load_full()
+                .map(|value| *value),
+        }
+    }
+
+    pub fn set_dynamic_filter_pushdown(&self, name: &str, value: bool) -> bool {
+        let option = match name {
+            ENABLE_DYNAMIC_FILTER_PUSHDOWN => &self.enable_dynamic_filter_pushdown,
+            ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN => {
+                &self.enable_aggregate_dynamic_filter_pushdown
+            }
+            ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN => &self.enable_join_dynamic_filter_pushdown,
+            ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN => &self.enable_topk_dynamic_filter_pushdown,
+            _ => return false,
+        };
+        option.store(Some(Arc::new(value)));
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamicFilterPushdownOptions {
+    pub enable_dynamic_filter_pushdown: Option<bool>,
+    pub enable_aggregate_dynamic_filter_pushdown: Option<bool>,
+    pub enable_join_dynamic_filter_pushdown: Option<bool>,
+    pub enable_topk_dynamic_filter_pushdown: Option<bool>,
 }
 
 #[cfg(test)]
@@ -726,6 +809,35 @@ mod test {
 
         let context = QueryContext::with(DEFAULT_CATALOG_NAME, "test");
         assert_eq!("test", context.get_db_string());
+    }
+
+    #[test]
+    fn test_dynamic_filter_pushdown_options_are_isolated_by_session() {
+        let first = Session::new(None, Channel::Mysql, Default::default(), 1);
+        let second = Session::new(None, Channel::Mysql, Default::default(), 2);
+
+        assert!(
+            first
+                .new_query_context()
+                .configuration_parameter()
+                .set_dynamic_filter_pushdown(ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN, false)
+        );
+        assert_eq!(
+            first
+                .new_query_context()
+                .configuration_parameter()
+                .dynamic_filter_pushdown()
+                .enable_topk_dynamic_filter_pushdown,
+            Some(false)
+        );
+        assert_eq!(
+            second
+                .new_query_context()
+                .configuration_parameter()
+                .dynamic_filter_pushdown()
+                .enable_topk_dynamic_filter_pushdown,
+            None
+        );
     }
 
     #[test]

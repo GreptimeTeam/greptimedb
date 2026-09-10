@@ -20,7 +20,10 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use session::ReadPreference;
 use session::context::Channel::Postgres;
-use session::context::QueryContextRef;
+use session::context::{
+    ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN, ENABLE_DYNAMIC_FILTER_PUSHDOWN,
+    ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN, ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN, QueryContextRef,
+};
 use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, Ident, Value};
@@ -249,6 +252,38 @@ pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Resul
     }
 }
 
+pub fn set_dynamic_filter_pushdown(
+    name: &str,
+    exprs: Vec<Expr>,
+    ctx: QueryContextRef,
+) -> Result<()> {
+    let Some((Expr::Value(value), [])) = exprs.split_first() else {
+        return NotSupportedSnafu {
+            feat: format!("Set variable value must be one boolean for {name}"),
+        }
+        .fail();
+    };
+    let value = match &value.value {
+        Value::Boolean(value) => *value,
+        _ => {
+            return NotSupportedSnafu {
+                feat: format!("Set variable value must be a boolean for {name}"),
+            }
+            .fail();
+        }
+    };
+    debug_assert!(matches!(
+        name,
+        ENABLE_DYNAMIC_FILTER_PUSHDOWN
+            | ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN
+            | ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN
+            | ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN
+    ));
+    ctx.configuration_parameter()
+        .set_dynamic_filter_pushdown(name, value);
+    Ok(())
+}
+
 pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let Some((var_value, [])) = exprs.split_first() else {
         return NotSupportedSnafu {
@@ -381,7 +416,46 @@ fn parse_pg_query_timeout_input(input: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod test {
-    use crate::statement::set::parse_pg_query_timeout_input;
+    use std::sync::Arc;
+
+    use session::context::{ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN, QueryContextBuilder};
+    use sql::ast::{Expr, Value};
+
+    use super::{parse_pg_query_timeout_input, set_dynamic_filter_pushdown};
+
+    #[test]
+    fn test_set_dynamic_filter_pushdown_requires_boolean() {
+        let ctx = Arc::new(QueryContextBuilder::default().build());
+        set_dynamic_filter_pushdown(
+            ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN,
+            vec![Expr::Value(Value::Boolean(false).into())],
+            ctx.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.configuration_parameter()
+                .dynamic_filter_pushdown()
+                .enable_topk_dynamic_filter_pushdown,
+            Some(false)
+        );
+
+        assert!(
+            set_dynamic_filter_pushdown(
+                ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN,
+                vec![Expr::Value(
+                    Value::SingleQuotedString("false".to_string()).into()
+                )],
+                ctx.clone(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            ctx.configuration_parameter()
+                .dynamic_filter_pushdown()
+                .enable_topk_dynamic_filter_pushdown,
+            Some(false)
+        );
+    }
 
     #[test]
     fn test_parse_pg_query_timeout_input() {

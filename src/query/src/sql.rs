@@ -71,6 +71,7 @@ use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 
 use crate::QueryEngineRef;
 use crate::error::{self, Result, UnsupportedVariableSnafu};
+use crate::options::dynamic_filter_pushdown_options;
 use crate::planner::DfLogicalPlanner;
 
 const SCHEMAS_COLUMN: &str = "Database";
@@ -845,10 +846,28 @@ pub async fn show_charsets_dataframe(
 
 pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<Output> {
     let variable = stmt.variable.to_string().to_uppercase();
+    let dynamic_filter_pushdown = dynamic_filter_pushdown_options(
+        query_ctx
+            .configuration_parameter()
+            .dynamic_filter_pushdown(),
+        &query_ctx.extensions(),
+    )?;
     let value = match variable.as_str() {
         "SYSTEM_TIME_ZONE" | "SYSTEM_TIMEZONE" => get_timezone(None).to_string(),
         "TIME_ZONE" | "TIMEZONE" => query_ctx.timezone().to_string(),
         "READ_PREFERENCE" => query_ctx.read_preference().to_string(),
+        "ENABLE_DYNAMIC_FILTER_PUSHDOWN" => dynamic_filter_pushdown
+            .enable_dynamic_filter_pushdown
+            .to_string(),
+        "ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN" => dynamic_filter_pushdown
+            .enable_aggregate_dynamic_filter_pushdown
+            .to_string(),
+        "ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN" => dynamic_filter_pushdown
+            .enable_join_dynamic_filter_pushdown
+            .to_string(),
+        "ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN" => dynamic_filter_pushdown
+            .enable_topk_dynamic_filter_pushdown
+            .to_string(),
         "DATESTYLE" => {
             let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
             format!("{}, {}", style, order)
@@ -1667,6 +1686,10 @@ mod test {
         assert_eq!(
             exec_show_variable("TIMEZONE", "Asia/Shanghai").unwrap(),
             "Asia/Shanghai"
+        );
+        assert_eq!(
+            exec_show_variable("ENABLE_DYNAMIC_FILTER_PUSHDOWN", "Asia/Shanghai").unwrap(),
+            "true"
         );
         assert!(exec_show_variable("TIME ZONE", "Asia/Shanghai").is_err());
         assert!(exec_show_variable("SYSTEM TIME ZONE", "Asia/Shanghai").is_err());

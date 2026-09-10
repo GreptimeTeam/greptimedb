@@ -68,7 +68,7 @@ use crate::metrics::{
     OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
     should_collect_region_watermark_from_query_ctx,
 };
-use crate::options::ScheduledTimeExtension;
+use crate::options::{ScheduledTimeExtension, apply_dynamic_filter_pushdown_options};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -457,9 +457,17 @@ impl DatafusionQueryEngine {
         };
 
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
-        let state = ctx.state();
+        let query_ctx = ctx.query_ctx();
+        let state = ctx.state_mut();
 
         common_telemetry::debug!("Create physical plan, input plan: {logical_plan}");
+
+        apply_dynamic_filter_pushdown_options(state.config_mut().options_mut(), &query_ctx)?;
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
 
         // special handle EXPLAIN plan
         if matches!(logical_plan, DfLogicalPlan::Explain(_)) {
@@ -1245,6 +1253,144 @@ mod tests {
             "Limit: skip=0, fetch=20\n  Projection: sum(numbers.number)\n    Aggregate: groupBy=[[]], aggr=[[sum(numbers.number)]]\n      TableScan: numbers",
             format!("{}", logical_plan.display_indent())
         );
+    }
+
+    fn assert_dynamic_filter_pushdown_disabled(state: &datafusion::execution::SessionState) {
+        let optimizer = &state.config_options().optimizer;
+        assert!(!optimizer.enable_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_aggregate_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_join_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_topk_dynamic_filter_pushdown);
+
+        let snapshot = state.execution_props().config_options.as_ref().unwrap();
+        let optimizer = &snapshot.optimizer;
+        assert!(!optimizer.enable_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_aggregate_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_join_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_topk_dynamic_filter_pushdown);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_filter_pushdown_hint_overrides_session_options() {
+        let engine = create_test_engine().await;
+        let engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let configuration_parameter = Arc::new(session::context::ConfigurationVariables::default());
+        configuration_parameter
+            .set_dynamic_filter_pushdown("enable_topk_dynamic_filter_pushdown", false);
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .configuration_parameter(configuration_parameter)
+                .set_extension(
+                    "enable_topk_dynamic_filter_pushdown".to_string(),
+                    "true".to_string(),
+                )
+                .build(),
+        );
+        let mut engine_ctx = engine.engine_context(query_ctx);
+        let plan = datafusion_expr::LogicalPlanBuilder::empty(true)
+            .build()
+            .unwrap();
+        let explain = datafusion_expr::LogicalPlanBuilder::from(plan)
+            .explain(false, false)
+            .unwrap()
+            .build()
+            .unwrap();
+        engine
+            .create_physical_plan(&mut engine_ctx, &explain)
+            .await
+            .unwrap();
+        let optimizer = &engine_ctx.state().config_options().optimizer;
+
+        assert!(optimizer.enable_dynamic_filter_pushdown);
+        assert!(optimizer.enable_aggregate_dynamic_filter_pushdown);
+        assert!(optimizer.enable_join_dynamic_filter_pushdown);
+        assert!(optimizer.enable_topk_dynamic_filter_pushdown);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_filter_pushdown_master_hint_applies_to_regular_and_explain_plans() {
+        let engine = create_test_engine().await;
+        let engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+
+        for explain in [false, true] {
+            let query_ctx = Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(
+                        "enable_dynamic_filter_pushdown".to_string(),
+                        "false".to_string(),
+                    )
+                    .set_extension(
+                        "enable_topk_dynamic_filter_pushdown".to_string(),
+                        "true".to_string(),
+                    )
+                    .build(),
+            );
+            let mut engine_ctx = engine.engine_context(query_ctx);
+            let plan = datafusion_expr::LogicalPlanBuilder::empty(true)
+                .build()
+                .unwrap();
+            let plan = if explain {
+                datafusion_expr::LogicalPlanBuilder::from(plan)
+                    .explain(false, false)
+                    .unwrap()
+                    .build()
+                    .unwrap()
+            } else {
+                plan
+            };
+
+            engine
+                .create_physical_plan(&mut engine_ctx, &plan)
+                .await
+                .unwrap();
+            assert_dynamic_filter_pushdown_disabled(engine_ctx.state());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_dynamic_filter_hint_rejects_regular_and_explain_plans() {
+        let engine = create_test_engine().await;
+        let engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+
+        for explain in [false, true] {
+            let query_ctx = Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(
+                        "enable_dynamic_filter_pushdown".to_string(),
+                        "invalid".to_string(),
+                    )
+                    .build(),
+            );
+            let mut engine_ctx = engine.engine_context(query_ctx);
+            let plan = datafusion_expr::LogicalPlanBuilder::empty(true)
+                .build()
+                .unwrap();
+            let plan = if explain {
+                datafusion_expr::LogicalPlanBuilder::from(plan)
+                    .explain(false, false)
+                    .unwrap()
+                    .build()
+                    .unwrap()
+            } else {
+                plan
+            };
+
+            assert!(
+                engine
+                    .create_physical_plan(&mut engine_ctx, &plan)
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

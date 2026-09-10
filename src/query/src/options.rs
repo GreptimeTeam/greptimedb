@@ -18,7 +18,11 @@ use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
 use datafusion::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use serde::{Deserialize, Serialize};
-use session::context::QueryContextRef;
+use session::context::{
+    DynamicFilterPushdownOptions, ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN,
+    ENABLE_DYNAMIC_FILTER_PUSHDOWN, ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN,
+    ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN, QueryContextRef,
+};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
@@ -37,6 +41,82 @@ pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
     "query.enable_remote_dynamic_filter_pushdown";
 
 pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
+
+/// Resolves dynamic-filter settings from a session and per-query extensions.
+/// Query extensions take precedence over session values; disabling the master
+/// switch disables all dynamic-filter variants.
+pub fn dynamic_filter_pushdown_options(
+    session_options: DynamicFilterPushdownOptions,
+    extensions: &HashMap<String, String>,
+) -> Result<ResolvedDynamicFilterPushdownOptions> {
+    let defaults = datafusion_common::config::ConfigOptions::default().optimizer;
+    let option = |name, session_value, default| {
+        extensions
+            .get(name)
+            .map(|value| parse_bool(name, value))
+            .transpose()
+            .map(|value| value.or(session_value).unwrap_or(default))
+    };
+    let enable_dynamic_filter_pushdown = option(
+        ENABLE_DYNAMIC_FILTER_PUSHDOWN,
+        session_options.enable_dynamic_filter_pushdown,
+        defaults.enable_dynamic_filter_pushdown,
+    )?;
+    let enable_aggregate_dynamic_filter_pushdown = option(
+        ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN,
+        session_options.enable_aggregate_dynamic_filter_pushdown,
+        defaults.enable_aggregate_dynamic_filter_pushdown,
+    )?;
+    let enable_join_dynamic_filter_pushdown = option(
+        ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN,
+        session_options.enable_join_dynamic_filter_pushdown,
+        defaults.enable_join_dynamic_filter_pushdown,
+    )?;
+    let enable_topk_dynamic_filter_pushdown = option(
+        ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN,
+        session_options.enable_topk_dynamic_filter_pushdown,
+        defaults.enable_topk_dynamic_filter_pushdown,
+    )?;
+
+    Ok(ResolvedDynamicFilterPushdownOptions {
+        enable_dynamic_filter_pushdown,
+        enable_aggregate_dynamic_filter_pushdown: enable_dynamic_filter_pushdown
+            && enable_aggregate_dynamic_filter_pushdown,
+        enable_join_dynamic_filter_pushdown: enable_dynamic_filter_pushdown
+            && enable_join_dynamic_filter_pushdown,
+        enable_topk_dynamic_filter_pushdown: enable_dynamic_filter_pushdown
+            && enable_topk_dynamic_filter_pushdown,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedDynamicFilterPushdownOptions {
+    pub enable_dynamic_filter_pushdown: bool,
+    pub enable_aggregate_dynamic_filter_pushdown: bool,
+    pub enable_join_dynamic_filter_pushdown: bool,
+    pub enable_topk_dynamic_filter_pushdown: bool,
+}
+
+/// Resolves and applies dynamic-filter settings to a DataFusion query state.
+pub fn apply_dynamic_filter_pushdown_options(
+    config: &mut datafusion_common::config::ConfigOptions,
+    query_ctx: &QueryContextRef,
+) -> Result<()> {
+    let options = dynamic_filter_pushdown_options(
+        query_ctx
+            .configuration_parameter()
+            .dynamic_filter_pushdown(),
+        &query_ctx.extensions(),
+    )?;
+    config.optimizer.enable_dynamic_filter_pushdown = options.enable_dynamic_filter_pushdown;
+    config.optimizer.enable_aggregate_dynamic_filter_pushdown =
+        options.enable_aggregate_dynamic_filter_pushdown;
+    config.optimizer.enable_join_dynamic_filter_pushdown =
+        options.enable_join_dynamic_filter_pushdown;
+    config.optimizer.enable_topk_dynamic_filter_pushdown =
+        options.enable_topk_dynamic_filter_pushdown;
+    Ok(())
+}
 
 /// Query engine config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -386,6 +466,99 @@ mod flow_extension_tests {
         let parsed = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap();
 
         assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn test_dynamic_filter_pushdown_options_defaults_and_overrides() {
+        let defaults = DynamicFilterPushdownOptions {
+            enable_dynamic_filter_pushdown: None,
+            enable_aggregate_dynamic_filter_pushdown: None,
+            enable_join_dynamic_filter_pushdown: None,
+            enable_topk_dynamic_filter_pushdown: None,
+        };
+        assert_eq!(
+            dynamic_filter_pushdown_options(defaults, &HashMap::new()).unwrap(),
+            ResolvedDynamicFilterPushdownOptions {
+                enable_dynamic_filter_pushdown: true,
+                enable_aggregate_dynamic_filter_pushdown: true,
+                enable_join_dynamic_filter_pushdown: true,
+                enable_topk_dynamic_filter_pushdown: true,
+            }
+        );
+
+        let extensions = HashMap::from([(
+            ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+            "false".to_string(),
+        )]);
+        let options = dynamic_filter_pushdown_options(defaults, &extensions).unwrap();
+        assert!(options.enable_dynamic_filter_pushdown);
+        assert!(!options.enable_join_dynamic_filter_pushdown);
+        assert!(options.enable_aggregate_dynamic_filter_pushdown);
+        assert!(options.enable_topk_dynamic_filter_pushdown);
+    }
+
+    #[test]
+    fn test_dynamic_filter_pushdown_master_switch_suppresses_variants() {
+        let extensions = HashMap::from([
+            (
+                ENABLE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+                "false".to_string(),
+            ),
+            (
+                ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+                "true".to_string(),
+            ),
+        ]);
+        let options = dynamic_filter_pushdown_options(
+            DynamicFilterPushdownOptions {
+                enable_dynamic_filter_pushdown: None,
+                enable_aggregate_dynamic_filter_pushdown: None,
+                enable_join_dynamic_filter_pushdown: None,
+                enable_topk_dynamic_filter_pushdown: None,
+            },
+            &extensions,
+        )
+        .unwrap();
+
+        assert!(!options.enable_dynamic_filter_pushdown);
+        assert!(!options.enable_aggregate_dynamic_filter_pushdown);
+        assert!(!options.enable_join_dynamic_filter_pushdown);
+        assert!(!options.enable_topk_dynamic_filter_pushdown);
+    }
+
+    #[test]
+    fn test_dynamic_filter_pushdown_options_session_master_switch_suppresses_variants() {
+        let session_options = DynamicFilterPushdownOptions {
+            enable_dynamic_filter_pushdown: Some(false),
+            enable_aggregate_dynamic_filter_pushdown: None,
+            enable_join_dynamic_filter_pushdown: None,
+            enable_topk_dynamic_filter_pushdown: None,
+        };
+        let options = dynamic_filter_pushdown_options(session_options, &HashMap::new()).unwrap();
+
+        assert!(!options.enable_dynamic_filter_pushdown);
+        assert!(!options.enable_aggregate_dynamic_filter_pushdown);
+        assert!(!options.enable_join_dynamic_filter_pushdown);
+        assert!(!options.enable_topk_dynamic_filter_pushdown);
+    }
+
+    #[test]
+    fn test_dynamic_filter_pushdown_options_reject_invalid_value() {
+        let extensions = HashMap::from([(
+            ENABLE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+            "not-a-bool".to_string(),
+        )]);
+        let err = dynamic_filter_pushdown_options(
+            DynamicFilterPushdownOptions {
+                enable_dynamic_filter_pushdown: None,
+                enable_aggregate_dynamic_filter_pushdown: None,
+                enable_join_dynamic_filter_pushdown: None,
+                enable_topk_dynamic_filter_pushdown: None,
+            },
+            &extensions,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains(ENABLE_DYNAMIC_FILTER_PUSHDOWN));
     }
 
     #[test]

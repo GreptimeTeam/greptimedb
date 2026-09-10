@@ -312,7 +312,7 @@ mod tests {
     use common_error::ext::BoxedError;
     use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
     use common_time::Timezone;
-    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
+    use query::options::{FLOW_SCHEDULED_TIME_MILLIS, dynamic_filter_pushdown_options};
     use session::hints::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
     };
@@ -347,6 +347,10 @@ mod tests {
                     FLOW_SCHEDULED_TIME_MILLIS.to_string(),
                     "1700000000000".to_string(),
                 ),
+                (
+                    "enable_dynamic_filter_pushdown".to_string(),
+                    "false".to_string(),
+                ),
             ],
             HashMap::from([(7, 88)]),
         )
@@ -372,6 +376,16 @@ mod tests {
         assert_eq!(
             query_context.extension(FLOW_SCHEDULED_TIME_MILLIS),
             Some("1700000000000")
+        );
+        assert!(
+            !dynamic_filter_pushdown_options(
+                query_context
+                    .configuration_parameter()
+                    .dynamic_filter_pushdown(),
+                &query_context.extensions(),
+            )
+            .unwrap()
+            .enable_dynamic_filter_pushdown
         );
     }
 
