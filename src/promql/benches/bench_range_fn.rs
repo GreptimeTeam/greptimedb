@@ -667,13 +667,9 @@ fn bench_extrema_functions(c: &mut Criterion) {
             ],
         ),
     ];
-    let functions: [(
-        &str,
-        &datafusion::logical_expr::ScalarUDF,
-        fn(f64, f64) -> bool,
-    ); 2] = [
-        ("min_over_time", &min_udf, |value, extrema| value < extrema),
-        ("max_over_time", &max_udf, |value, extrema| value > extrema),
+    let functions = [
+        ("min_over_time", &min_udf, true),
+        ("max_over_time", &max_udf, false),
     ];
 
     for (case_name, ranges) in cases {
@@ -681,8 +677,15 @@ fn bench_extrema_functions(c: &mut Criterion) {
             values.clone(),
             ranges.clone(),
         ));
-        for (function_name, udf, is_better) in functions {
-            assert_extrema_output(udf, &prepared, &extrema_oracle(&values, &ranges, is_better));
+        for (function_name, udf, is_min) in functions {
+            let expected = extrema_oracle(&values, &ranges, |value, extrema| {
+                if is_min {
+                    value < extrema
+                } else {
+                    value > extrema
+                }
+            });
+            assert_extrema_output(udf, &prepared, &expected);
             group.bench_with_input(
                 BenchmarkId::new(
                     format!("{function_name}_{case_name}"),
