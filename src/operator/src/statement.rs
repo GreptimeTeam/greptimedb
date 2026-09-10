@@ -63,7 +63,7 @@ use query::QueryEngineRef;
 use query::parser::QueryStatement;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
-use set::{set_query_timeout, set_read_preference, set_skip_wal};
+use set::{set_dynamic_filter_pushdown, set_query_timeout, set_read_preference, set_skip_wal};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
 use sql::statements::OptionMap;
@@ -550,6 +550,13 @@ impl StatementExecutor {
 
             // Allow query to fallback when failed to push down.
             "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,
+
+            "ENABLE_DYNAMIC_FILTER_PUSHDOWN"
+            | "ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN"
+            | "ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN"
+            | "ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN" => {
+                set_dynamic_filter_pushdown(&var_name.to_lowercase(), set_var.value, query_ctx)?
+            }
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {

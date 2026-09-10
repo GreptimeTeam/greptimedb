@@ -46,7 +46,7 @@ fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
 #[cfg(test)]
 mod tests {
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY as COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
-    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
+    use query::options::{FLOW_SCHEDULED_TIME_MILLIS, dynamic_filter_pushdown_options};
     use session::context::{QueryContextBuilder, generate_remote_query_id};
     use session::hints::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
@@ -79,6 +79,10 @@ mod tests {
                     FLOW_SCHEDULED_TIME_MILLIS.to_string(),
                     "1700000000000".to_string(),
                 ),
+                (
+                    "enable_dynamic_filter_pushdown".to_string(),
+                    "false".to_string(),
+                ),
                 ("ttl".to_string(), "7d".to_string()),
             ],
         );
@@ -97,6 +101,16 @@ mod tests {
             Some("1700000000000")
         );
         assert_eq!(query_ctx.extension("ttl"), Some("7d"));
+        assert!(
+            !dynamic_filter_pushdown_options(
+                query_ctx
+                    .configuration_parameter()
+                    .dynamic_filter_pushdown(),
+                &query_ctx.extensions(),
+            )
+            .unwrap()
+            .enable_dynamic_filter_pushdown
+        );
     }
 
     #[test]

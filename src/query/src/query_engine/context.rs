@@ -38,6 +38,11 @@ impl QueryEngineContext {
     }
 
     #[inline]
+    pub fn state_mut(&mut self) -> &mut SessionState {
+        &mut self.state
+    }
+
+    #[inline]
     pub fn query_ctx(&self) -> QueryContextRef {
         self.query_ctx.clone()
     }
