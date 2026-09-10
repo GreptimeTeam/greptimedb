@@ -132,8 +132,8 @@ pub(crate) fn collect_json2_rewrite_plans(
         );
 
         let logical_settings = extension.metadata().json_settings();
-        let rewrite_settings = generalized_json_settings(&logical_settings)?;
-        let hint_paths = rewrite_settings
+        let json_settings_for_compaction = json_settings_for_compaction(&logical_settings)?;
+        let hint_paths = json_settings_for_compaction
             .type_hints()
             .iter()
             .map(|hint| hint.path.iter().map(String::as_str).collect::<Vec<_>>())
@@ -146,8 +146,12 @@ pub(crate) fn collect_json2_rewrite_plans(
             collect_json2_path_stats(field, *rows, &hint_paths, &mut stats)?;
         }
 
-        let mut hints = rewrite_settings.type_hints().to_vec();
-        hints.extend(select_dynamic_hints(&rewrite_settings, &hint_paths, &stats));
+        let mut hints = json_settings_for_compaction.type_hints().to_vec();
+        hints.extend(select_dynamic_hints(
+            &json_settings_for_compaction,
+            &hint_paths,
+            &stats,
+        ));
         let target_layout = JsonSettings::try_new(hints, Some(0)).context(DataTypeMismatchSnafu)?;
         plans.insert(
             column.name.clone(),
@@ -250,7 +254,7 @@ fn select_dynamic_hints(
         .filter(|(path, stat)| {
             !stat.is_type_conflicted
                 // TODO(LFC): Instead of "primitive only", consider retaining stable compound types
-                // that are safe to write to Parquet, as flush does. Or better, unite the two 
+                // that are safe to write to Parquet, as flush does. Or better, unite the two
                 // selection process.
                 && stat.data_type.is_primitive()
                 && !has_ancestor_path(path)
@@ -277,12 +281,12 @@ fn select_dynamic_hints(
         .collect()
 }
 
-/// Generalizes JSON2 type hints before rewriting historical values.
+/// Derives JSON2 settings for compaction rewriting.
 ///
 /// Type hints retain their paths and data types for the physical layout, but
 /// defaults and non-null constraints must not be reapplied to values written
 /// before an ALTER.
-fn generalized_json_settings(settings: &JsonSettings) -> Result<JsonSettings> {
+fn json_settings_for_compaction(settings: &JsonSettings) -> Result<JsonSettings> {
     let type_hints = settings
         .type_hints()
         .iter()
@@ -338,7 +342,7 @@ pub(crate) fn rewrite_json2_batch(
             continue;
         };
 
-        let rewrite_settings = generalized_json_settings(&plan.logical_settings)?;
+        let rewrite_settings = json_settings_for_compaction(&plan.logical_settings)?;
         let array = JsonArray::from(array)
             .rewrite_to_v2(field, &rewrite_settings, &plan.target_layout)
             .context(ConvertValueSnafu)?;
@@ -447,7 +451,7 @@ mod tests {
             }],
             Some(0),
         )?;
-        let rewrite_settings = generalized_json_settings(&logical_settings)?;
+        let rewrite_settings = json_settings_for_compaction(&logical_settings)?;
         let target = json2_physical_data_type(&rewrite_settings);
         let plans = HashMap::from([(
             "j".to_string(),
@@ -456,10 +460,7 @@ mod tests {
                 target_layout: rewrite_settings,
             },
         )]);
-        let values = [
-            json!({"extra": {"x": 1}}),
-            json!({"extra": {"x": 2}}),
-        ];
+        let values = [json!({"extra": {"x": 1}}), json!({"extra": {"x": 2}})];
         let source_settings = JsonSettings::default();
         let source_extension =
             Json2ExtensionType::new(Arc::new(JsonMetadata::new_v1(source_settings.clone())));

@@ -80,8 +80,9 @@ impl<'de> Deserialize<'de> for JsonSettings {
 /// queries over those subpaths can get behavior and performance closer to
 /// ordinary columns.
 ///
-/// New writes strictly apply all hint properties. Compaction may ignore some
-/// properties, such as defaults and nullability, when rewriting historical values.
+/// New writes strictly apply all hint properties. During compaction, type hints
+/// guide physical layout rewriting and may ignore some constraint properties,
+/// such as defaults and nullability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonTypeHint {
     /// JSON2 subpath for a typed field.
