@@ -211,7 +211,6 @@ fn quantile_with_scratch(values: &[f64], quantile: f64, scratch: &mut Vec<f64>) 
 
     scratch.clear();
     scratch.extend_from_slice(values);
-    scratch.sort_unstable_by(f64::total_cmp);
 
     let length = scratch.len();
     let rank = quantile * (length - 1) as f64;
@@ -220,13 +219,64 @@ fn quantile_with_scratch(values: &[f64], quantile: f64, scratch: &mut Vec<f64>) 
     let upper_index = (length - 1).min(lower_index + 1);
     let weight = rank - rank.floor();
 
-    let result = scratch[lower_index] * (1.0 - weight) + scratch[upper_index] * weight;
+    let (_, lower, right) = scratch.select_nth_unstable_by(lower_index, f64::total_cmp);
+    let lower = *lower;
+    let upper = if upper_index == lower_index {
+        lower
+    } else {
+        right
+            .iter()
+            .copied()
+            .min_by(f64::total_cmp)
+            .unwrap_or(lower)
+    };
+
+    let result = lower * (1.0 - weight) + upper * weight;
     Some(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn full_sort_reference(values: &[f64], quantile: f64) -> Option<f64> {
+        if quantile.is_nan() || values.is_empty() {
+            return Some(f64::NAN);
+        }
+        if quantile < 0.0 {
+            return Some(f64::NEG_INFINITY);
+        }
+        if quantile > 1.0 {
+            return Some(f64::INFINITY);
+        }
+
+        let mut values = values.to_vec();
+        values.sort_unstable_by(f64::total_cmp);
+
+        let length = values.len();
+        let rank = quantile * (length - 1) as f64;
+
+        let lower_index = rank.floor() as usize;
+        let upper_index = (length - 1).min(lower_index + 1);
+        let weight = rank - rank.floor();
+
+        Some(values[lower_index] * (1.0 - weight) + values[upper_index] * weight)
+    }
+
+    fn assert_matches_full_sort_reference(values: &[f64], quantile: f64) {
+        let actual = quantile_impl(values, quantile).unwrap();
+        let expected = full_sort_reference(values, quantile).unwrap();
+
+        if expected.is_nan() {
+            assert!(actual.is_nan(), "values: {values:?}, quantile: {quantile}");
+        } else {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "values: {values:?}, quantile: {quantile}"
+            );
+        }
+    }
 
     #[test]
     fn test_quantile_impl_empty() {
@@ -275,5 +325,47 @@ mod tests {
         let values = &[4.0, 1.0, 3.0, 2.0, 5.0];
         let q = 0.25;
         assert_eq!(quantile_impl(values, q).unwrap(), 2.0);
+    }
+
+    #[test]
+    fn test_quantile_impl_matches_full_sort_reference() {
+        let cases: &[(&[f64], &[f64])] = &[
+            (&[], &[-1.0, 0.0, 0.5, 1.0, 2.0, f64::NAN]),
+            (&[f64::NEG_INFINITY], &[0.0, 0.5, 1.0]),
+            (&[1.0], &[0.0, 0.5, 1.0]),
+            (&[f64::INFINITY], &[0.0, 0.5, 1.0]),
+            (&[1.0, f64::INFINITY], &[0.0]),
+            (&[1.0, 2.0, 3.0], &[f64::NAN, -1.0, 2.0]),
+            (&[2.0, 2.0, 2.0, 2.0], &[0.0, 0.25, 0.5, 0.75, 1.0]),
+            (
+                &[3.0, 1.0, 5.0, 2.0],
+                &[-1.0, 0.0, 1.0 / 3.0, 0.5, 1.0, 2.0],
+            ),
+            (
+                &[f64::NEG_INFINITY, -1.0, 0.0, 1.0, f64::INFINITY],
+                &[0.0, 0.25, 0.5, 0.75, 1.0],
+            ),
+            (
+                &[
+                    f64::from_bits(0x7ff8_0000_0000_0001),
+                    f64::from_bits(0xfff8_0000_0000_0001),
+                    1.0,
+                    -1.0,
+                ],
+                &[0.0, 0.5, 1.0],
+            ),
+            (&[-0.0, 0.0], &[0.0, 0.5, 1.0]),
+        ];
+
+        for (values, quantiles) in cases {
+            for &quantile in *quantiles {
+                assert_matches_full_sort_reference(values, quantile);
+            }
+        }
+
+        let values: Vec<_> = (0..257).rev().map(|value| value as f64).collect();
+        for quantile in [0.0, 1.0 / 256.0, 0.1, 0.5, 0.9, 255.0 / 256.0, 1.0] {
+            assert_matches_full_sort_reference(&values, quantile);
+        }
     }
 }
