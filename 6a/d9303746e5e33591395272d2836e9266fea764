@@ -1,0 +1,69 @@
+Cargo.lock
+  s_c8f343c7af25c4::t_1db5ba4df04d0a 10019
+src/operator/Cargo.toml
+  s_c8f343c7af25c4::t_47bc7d0c3bc811 33
+src/operator/src/batcher.rs
+  s_c8f343c7af25c4::t_feebf276eece87 1-224
+src/operator/src/batcher/flow_notifier.rs
+  s_c8f343c7af25c4::t_294c0550a852ed 1-229
+src/operator/src/batcher/flush_batch.rs
+  s_c8f343c7af25c4::t_29df309698dfd2 1-153
+src/operator/src/batcher/metrics.rs
+  s_c8f343c7af25c4::t_547b904dde7049 1-63
+src/operator/src/batcher/pending_batch.rs
+  s_c8f343c7af25c4::t_be6dc944dd7277 1-97
+src/operator/src/batcher/pending_worker.rs
+  s_c8f343c7af25c4::t_d9fbabb3d59b46 1-166
+src/operator/src/batcher/row_convert.rs
+  s_c8f343c7af25c4::t_6af1a18230951c 1-379
+src/operator/src/batcher/tests.rs
+  s_c8f343c7af25c4::t_c38a6de086d7f4 1-500
+src/operator/src/error.rs
+  s_c8f343c7af25c4::t_e8a0ef715b77e1 16,96-102,1053,1156,1184
+src/operator/src/req_convert/insert.rs
+  s_c8f343c7af25c4::t_fa5646f76ffb26 23
+src/operator/src/req_convert/insert/stmt_to_region.rs
+  s_c8f343c7af25c4::t_53f19404f13694 67-101,191
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_c8f343c7af25c4::t_eabe5b9ded502a 15,40-47,52-55,57-62,64,90,94,96,101-112
+src/session/src/context.rs
+  s_c8f343c7af25c4::t_c93859a1a4bb99 82-84,436-445,610,727,876-889
+src/operator/src/bulk_insert.rs
+  s_29c61b17acb0a9::t_d29c106043bbd9 24,28,30,33-34,40,45-119,127,256,265,323,399
+src/operator/src/insert.rs
+  s_29c61b17acb0a9::t_531be8e8f5d24e 27,68,76-77,86-87,100,170,174-179,281-285,309-321,337-410,459-488,503-509,521-529,1703
+src/operator/src/lib.rs
+  s_18a6ebf5b4dd05::t_3e61260f7373af 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "6ad9303746e5e33591395272d2836e9266fea764",
+  "prompts": {},
+  "sessions": {
+    "s_18a6ebf5b4dd05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a2ac-7f62-a116-8695794c4d70",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_29c61b17acb0a9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08c3b-daf2-7751-a27f-d1dba5d99ab9",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
