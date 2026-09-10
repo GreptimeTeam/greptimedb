@@ -62,6 +62,8 @@ filtered `RecordBatch` stream.
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
   follower replay. Keep it backward compatible.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
+- **Series-index coverage** (`series_index/catalog.rs`): `SeriesIndexEntry` stores
+  compaction-window width and per-window sequences in both catalogs and Parquet footers.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.
 - **WAL/memtable encoding** (`wal/`, `memtable/`): breaks replay if changed incompatibly.
 

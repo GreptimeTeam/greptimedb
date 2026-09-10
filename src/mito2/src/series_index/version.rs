@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_time::Timestamp;
-use smallvec::smallvec;
 use store_api::storage::{FileId, RegionId};
 
 use crate::series_index::bucket::IndexBucket;
@@ -103,14 +102,7 @@ impl SeriesIndexVersion {
     ) -> Self {
         let mut index_buckets = BTreeMap::new();
         for handle in series_indexes.values() {
-            let entry = handle.entry();
-            IndexBucket {
-                start: entry.bucket_start,
-                end: entry.bucket_end,
-                index_ids: smallvec![entry.index_uuid],
-                max_file_sequence: entry.max_file_sequence,
-            }
-            .insert_into(&mut index_buckets);
+            IndexBucket::from_entry(handle.entry()).insert_into(&mut index_buckets);
         }
         Self {
             range_indexes,

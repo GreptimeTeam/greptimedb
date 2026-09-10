@@ -14,6 +14,8 @@
 
 //! Index catalog persistence, coverage metadata, and file paths.
 
+use std::collections::BTreeMap;
+
 use common_telemetry::warn;
 use common_time::Timestamp;
 use object_store::{ErrorKind, ObjectStore};
@@ -46,6 +48,13 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) source_file_ids: Vec<FileId>,
     pub(crate) min_file_sequence: u64,
     pub(crate) max_file_sequence: u64,
+    /// Width used to align the half-open compaction windows, in seconds.
+    pub(crate) compaction_window_secs: i64,
+    /// Maximum source SST sequence per compaction window, persisted for recovery.
+    /// Keys are window starts in epoch seconds; each window spans
+    /// `[start, start + compaction_window_secs)`. An SST contributes to every window
+    /// its time range intersects. Windows without source SSTs are omitted.
+    pub(crate) window_sequences: BTreeMap<i64, u64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -157,6 +166,7 @@ pub(crate) async fn load_version_control(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use common_time::Timestamp;
@@ -258,6 +268,8 @@ mod tests {
             source_file_ids: vec![FileId::random()],
             min_file_sequence: 1,
             max_file_sequence: 2,
+            compaction_window_secs: 10,
+            window_sequences: BTreeMap::from([(0, 1), (10, 2)]),
         };
         store_catalog(
             &store,
@@ -279,7 +291,8 @@ mod tests {
         assert_eq!(bucket.start, entry.bucket_start);
         assert_eq!(bucket.end, entry.bucket_end);
         assert_eq!(bucket.index_ids.as_slice(), &[entry.index_uuid]);
-        assert_eq!(bucket.max_file_sequence, entry.max_file_sequence);
+        assert_eq!(bucket.compaction_window_secs, entry.compaction_window_secs);
+        assert_eq!(bucket.window_sequences, entry.window_sequences);
 
         let metadata = series_metadata(&entry).unwrap();
         let decoded: SeriesIndexEntry =
