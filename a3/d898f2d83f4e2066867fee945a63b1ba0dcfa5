@@ -1,0 +1,19 @@
+src/metric-engine/src/engine/put.rs
+  s_cbf051d9e59a54::t_789afcd2df4e71 145-146,867,871,1226-1251
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "a3d898f2d83f4e2066867fee945a63b1ba0dcfa5",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
