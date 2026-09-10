@@ -90,11 +90,11 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::Field;
+    use datafusion_common::ScalarValue;
     use datafusion_common::arrow::array::{
         AsArray, Decimal128Array, Float64Array, Int32Array, StringViewArray, UInt32Array,
     };
     use datafusion_common::arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
-    use datafusion_expr::type_coercion::functions::data_types;
 
     use super::*;
     fn decimal_array(values: Vec<i128>) -> ColumnarValue {
@@ -129,8 +129,12 @@ mod tests {
                 .iter()
                 .map(ColumnarValue::data_type)
                 .collect::<Vec<_>>();
-            let planned_types =
-                data_types(function.name(), &input_types, function.signature()).unwrap();
+            let planned_types = datafusion_expr::type_coercion::functions::data_types(
+                function.name(),
+                &input_types,
+                function.signature(),
+            )
+            .unwrap();
             assert_eq!(vec![DataType::Float64; 2], planned_types);
             let args = args
                 .into_iter()

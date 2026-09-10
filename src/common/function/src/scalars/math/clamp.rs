@@ -338,7 +338,6 @@ mod test {
 
     use arrow_schema::Field;
     use datafusion_common::config::ConfigOptions;
-    use datafusion_expr::type_coercion::functions::data_types;
     use datatypes::arrow::array::{
         ArrayRef, Decimal128Array, Float64Array, Int64Array, UInt64Array,
     };
@@ -394,7 +393,11 @@ mod test {
             .iter()
             .map(ColumnarValue::data_type)
             .collect::<Vec<_>>();
-        let planned_types = data_types(function.name(), &input_types, function.signature())?;
+        let planned_types = datafusion_expr::type_coercion::functions::data_types(
+            function.name(),
+            &input_types,
+            function.signature(),
+        )?;
         let args = args
             .into_iter()
             .zip(planned_types)
