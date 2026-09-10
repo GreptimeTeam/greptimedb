@@ -25,6 +25,7 @@ pub mod primary_key;
 pub(crate) mod string;
 pub mod vector;
 
+pub(crate) mod avg_calc;
 pub(crate) mod hll_count;
 pub mod ip;
 #[cfg(test)]
