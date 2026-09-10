@@ -1,0 +1,21 @@
+src/metric-engine/src/engine/put.rs
+  s_ee5e15630afc9a::t_0e71e6a7f2e84d 852-866,868-878,880-902,904-905,907-917,919-926,928-929,935-955,957-965,967-970,972-999,1001-1008,1010-1057
+src/mito2/src/engine/basic_test.rs
+  s_ee5e15630afc9a::t_de013cce67fe0b 1327-1388,1393-1434,1437-1457,1459-1464,1468-1474,1489-1503,1509-1589,1591-1607,1609-1648
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "854fa5c2252a456af3ef1f68837581f9abc87fa0",
+  "prompts": {},
+  "sessions": {
+    "s_ee5e15630afc9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08741-8460-7082-b1e4-8cbcb2450830",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
