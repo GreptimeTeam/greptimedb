@@ -37,8 +37,8 @@ use datatypes::arrow::datatypes::{DataType, Field};
 use futures::StreamExt;
 use promql::extension_plan::RangeManipulate;
 use promql::functions::{
-    AbsentOverTime, Changes, CountOverTime, Delta, IDelta, Increase, LastOverTime, PredictLinear,
-    PresentOverTime, QuantileOverTime, Rate, Resets, SumOverTime,
+    AbsentOverTime, Changes, CountOverTime, Delta, DoubleExponentialSmoothing, IDelta, Increase,
+    LastOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, SumOverTime,
 };
 use promql::range_array::RangeArray;
 
@@ -268,6 +268,26 @@ fn make_predict_linear_input(num_points: usize, window_size: u32) -> Vec<Columna
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
         // predict 60s into the future
         ColumnarValue::Scalar(ScalarValue::Int64(Some(60))),
+    ]
+}
+
+fn make_double_exponential_smoothing_input(
+    num_points: usize,
+    window_size: u32,
+    window_step: usize,
+) -> Vec<ColumnarValue> {
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        window_step,
+        build_gauge_values(num_points),
+        0,
+    );
+    vec![
+        ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+        ColumnarValue::Array(Arc::new(val_range.into_dict())),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(0.5))),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(0.1))),
     ]
 }
 
@@ -532,6 +552,26 @@ fn bench_range_functions(c: &mut Criterion) {
             BenchmarkId::new("predict_linear", format!("n{n}_w{w}")),
             &(n, w),
             |b, _| b.iter(|| invoke_prepared(&predict_udf, &prepared)),
+        );
+    }
+
+    // --- double_exponential_smoothing ---
+    let smoothing_udf = DoubleExponentialSmoothing::scalar_udf();
+    for (window_size, window_step, case) in [
+        (4, 1, "N4096_w4_overlap"),
+        (20, 1, "N4096_w20_overlap"),
+        (240, 1, "N4096_w240_overlap"),
+        (240, 240, "N4096_w240_nonoverlap"),
+    ] {
+        let prepared = PreparedUdfCall::new(make_double_exponential_smoothing_input(
+            4_096,
+            window_size,
+            window_step,
+        ));
+        group.bench_with_input(
+            BenchmarkId::new("double_exponential_smoothing", case),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&smoothing_udf, &prepared)),
         );
     }
 
