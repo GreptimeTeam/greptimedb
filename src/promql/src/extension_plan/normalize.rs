@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_query::native_histogram::{START_TIMESTAMP_FIELD, native_histogram_arrow_type};
-use datafusion::arrow::array::{Array, BooleanArray, StructArray};
+use common_query::prometheus::is_prometheus_stale_nan;
+use datafusion::arrow::array::{Array, BooleanArray, BooleanBufferBuilder, StructArray};
 use datafusion::arrow::compute;
 use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::error::DataFusionError;
@@ -43,8 +44,8 @@ use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, prometheus_stale_sample_column,
-    resolve_column_name, serialize_column_index,
+    METRIC_NUM_SERIES, Millisecond, prometheus_stale_sample_column, resolve_column_name,
+    serialize_column_index,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
@@ -334,10 +335,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
 
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
-        let time_index = schema
-            .column_with_name(&self.time_index_column_name)
-            .expect("time index column not found")
-            .0;
+        let time_index = schema.index_of(&self.time_index_column_name)?;
         Ok(Box::pin(SeriesNormalizeStream {
             offset: self.offset,
             time_index,
@@ -464,22 +462,44 @@ impl SeriesNormalizeStream {
             return Ok(result_batch);
         }
 
-        // Filter out Prometheus stale markers.
-        let mut stale_marker_filter = vec![true; input.num_rows()];
+        // Filter out Prometheus stale markers. Batches without one are the common case,
+        // so the filter bitmap is only built once a stale sample actually shows up.
+        let num_rows = result_batch.num_rows();
+        let mut stale_marker_filter = None;
         for column in result_batch.columns() {
-            let Some(stale_sample_column) = prometheus_stale_sample_column(column.as_ref()) else {
+            let Some((column, values)) = prometheus_stale_sample_column(column.as_ref()) else {
                 continue;
             };
-            for (i, flag) in stale_marker_filter.iter_mut().enumerate() {
-                if is_prometheus_stale_sample(stale_sample_column, i) {
-                    *flag = false;
+            let column_nulls = column.nulls();
+            let value_nulls = values.nulls();
+            let mut stale_rows = values.values().iter().enumerate().filter_map(|(i, value)| {
+                // Null payloads may carry stale bits, including a histogram's sum child.
+                (is_prometheus_stale_nan(*value)
+                    && column_nulls.is_none_or(|nulls| nulls.is_valid(i))
+                    && value_nulls.is_none_or(|nulls| nulls.is_valid(i)))
+                .then_some(i)
+            });
+            if let Some(first_stale) = stale_rows.next() {
+                let filter = stale_marker_filter.get_or_insert_with(|| {
+                    let mut filter = BooleanBufferBuilder::new(num_rows);
+                    filter.append_n(num_rows, true);
+                    filter
+                });
+                filter.set_bit(first_stale, false);
+                for i in stale_rows {
+                    filter.set_bit(i, false);
                 }
             }
         }
 
-        let result =
-            compute::filter_record_batch(&result_batch, &BooleanArray::from(stale_marker_filter))
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        let Some(stale_marker_filter) = stale_marker_filter else {
+            return Ok(result_batch);
+        };
+        let result = compute::filter_record_batch(
+            &result_batch,
+            &BooleanArray::new(stale_marker_filter.build(), None),
+        )
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         Ok(result)
     }
 }
@@ -514,7 +534,7 @@ impl Stream for SeriesNormalizeStream {
 
 #[cfg(test)]
 mod test {
-    use common_query::native_histogram::{build_histogram_array, read_histogram};
+    use common_query::native_histogram::{SUM_FIELD, build_histogram_array, read_histogram};
     use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
     use datafusion::arrow::array::Float64Array;
     use datafusion::arrow::buffer::NullBuffer;
@@ -712,6 +732,187 @@ mod test {
         assert_eq!(value.value(0), 42.0);
         assert_eq!(auxiliary.value(0).to_bits(), 0x7ff8_0000_0000_0000);
         assert!(!value.is_valid(1));
+    }
+
+    #[tokio::test]
+    async fn filters_later_column_stale_markers_across_bitmap_boundaries() {
+        let stale = f64::from_bits(PROMETHEUS_STALE_NAN_BITS);
+        let mut first = (0..71).map(|row| row as f64).collect::<Vec<_>>();
+        // A stale payload under a null, and a plain NaN, must both be kept.
+        first[0] = stale;
+        first[2] = f64::from_bits(0x7ff8_0000_0000_0000);
+        let first = Float64Array::new(
+            first.into(),
+            Some(NullBuffer::from(
+                (0..71).map(|row| row != 0).collect::<Vec<_>>(),
+            )),
+        );
+        let mut second = vec![1.0; 71];
+        for row in [7, 8, 63, 64, 70] {
+            second[row] = stale;
+        }
+        let second = Float64Array::new(
+            second.into(),
+            Some(NullBuffer::from(
+                (0..71).map(|row| row != 8).collect::<Vec<_>>(),
+            )),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                TimestampMillisecondType::DATA_TYPE,
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("auxiliary", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    (0..71).map(|row| row * 1000),
+                )),
+                Arc::new(first),
+                Arc::new(second),
+            ],
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let exec = Arc::new(SeriesNormalizeExec {
+            offset: 0,
+            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+            filter_stale_markers: true,
+            tag_columns: Vec::new(),
+            input,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let context = SessionContext::new();
+        let output = datafusion::physical_plan::collect(exec, context.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(output.len(), 1);
+        let output = &output[0];
+        let timestamps = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let expected = (0..71)
+            .filter(|row| ![7, 63, 64, 70].contains(row))
+            .map(|row| row * 1000)
+            .collect::<Vec<_>>();
+        assert_eq!(timestamps.values(), expected.as_slice());
+        let first = output
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let second = output
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(first.is_null(0));
+        assert_eq!(first.value(2).to_bits(), 0x7ff8_0000_0000_0000);
+        assert!(second.is_null(7));
+        assert_eq!(first.value(7), 8.0);
+    }
+
+    #[tokio::test]
+    async fn sliced_histogram_stale_scan_preserves_parent_and_child_nulls() {
+        let stale = f64::from_bits(PROMETHEUS_STALE_NAN_BITS);
+        let sums = [
+            stale,
+            stale,
+            stale,
+            stale,
+            f64::NAN,
+            42.0,
+            stale,
+            43.0,
+            stale,
+        ];
+        let histograms = build_histogram_array(
+            &sums
+                .iter()
+                .map(|sum| Some(native_histogram(*sum)))
+                .collect::<Vec<_>>(),
+        );
+        let histograms = histograms.as_any().downcast_ref::<StructArray>().unwrap();
+        let sum_index = histograms.fields().find(SUM_FIELD).unwrap().0;
+        let mut children = histograms.columns().to_vec();
+        children[sum_index] = Arc::new(Float64Array::new(
+            sums.to_vec().into(),
+            Some(NullBuffer::from(
+                (0..sums.len()).map(|row| row != 3).collect::<Vec<_>>(),
+            )),
+        ));
+        let histograms = StructArray::new(
+            histograms.fields().clone(),
+            children,
+            Some(NullBuffer::from(
+                (0..sums.len()).map(|row| row != 2).collect::<Vec<_>>(),
+            )),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                TimestampMillisecondType::DATA_TYPE,
+                false,
+            ),
+            Field::new("value", histograms.data_type().clone(), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    (0..sums.len()).map(|row| row as i64 * 1000),
+                )),
+                Arc::new(histograms),
+            ],
+        )
+        .unwrap()
+        .slice(1, 7);
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let exec = Arc::new(SeriesNormalizeExec {
+            offset: 0,
+            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+            filter_stale_markers: true,
+            tag_columns: Vec::new(),
+            input,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let context = SessionContext::new();
+        let output = datafusion::physical_plan::collect(exec, context.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(output.len(), 1);
+        let timestamps = output[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(timestamps.values(), &[2000, 3000, 4000, 5000, 7000]);
+        let histograms = output[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let sums = histograms
+            .column(sum_index)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(histograms.is_null(0));
+        assert!(histograms.is_valid(1));
+        assert!(sums.is_null(1));
+        assert!(sums.value(2).is_nan());
+        assert_eq!(sums.value(3), 42.0);
+        assert_eq!(sums.value(4), 43.0);
     }
 
     #[tokio::test]
