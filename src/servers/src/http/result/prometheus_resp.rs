@@ -321,13 +321,12 @@ impl PrometheusJsonResponse {
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(&str, &str)>, PromSeriesSamples>::new();
 
-        // Query output is clustered by series (the range plan sorts by series
-        // key + timestamp), so consecutive rows usually belong to the same
-        // series. Remember the index of the previous row's entry in `buffer`,
-        // and reuse it directly when its tags are unchanged. This avoids
-        // building and hashing the label vector on every row; the worst case
-        // adds one `Vec` comparison per series transition before falling back
-        // to the map lookup.
+        // Consecutive rows often belong to the same series: instant query plans
+        // keep their output sort, and range query plans, which no longer do, still
+        // tend to emit a series' rows together. Remember the index of the previous
+        // row's entry in `buffer` and reuse it when the tags are unchanged, so the
+        // label vector is not rebuilt and rehashed per row. Unclustered rows only
+        // cost one `Vec` comparison before falling back to the map lookup.
         let mut last_entry_index = None;
 
         let schema = batches.schema();
