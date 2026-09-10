@@ -99,7 +99,7 @@ impl Function for AvgCalcFunction {
                 }
                 Ok(ColumnarValue::Array(Arc::new(builder.finish())))
             }
-            _ => Err(invalid_type(self.name(), arg.data_type())),
+            _ => Err(invalid_type(self.name(), &arg.data_type())),
         }
     }
 }
