@@ -28,7 +28,6 @@ use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use bytes::Bytes;
 use catalog::CatalogManagerRef;
 use common_batcher::flush_limiter::FlushLimiter;
 use common_batcher::flush_policy::FlushTrigger;
@@ -37,7 +36,8 @@ use common_batcher::notifier::{Notifier, run_notifier};
 use common_batcher::pending_worker::PendingWorker as PendingCore;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
-use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_grpc::error::Error as GrpcError;
+use common_grpc::flight::record_batch_to_ipc;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
@@ -1799,7 +1799,7 @@ fn encode_region_write_requests(
             let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_physical_encode_ipc"])
                 .start_timer();
-            record_batch_to_ipc(resolved.planned.batch)?
+            record_batch_to_ipc(resolved.planned.batch).map_err(map_ipc_error)?
         };
 
         let request = RegionRequest {
@@ -1841,28 +1841,14 @@ fn notify_waiters(waiters: Vec<FlushWaiter>, result: Result<()>) {
     }
 }
 
-fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes)> {
-    let mut encoder = FlightEncoder::default();
-    let schema = encoder.encode_schema(record_batch.schema().as_ref());
-    let mut iter = encoder
-        .encode(FlightMessage::RecordBatch(record_batch))
-        .into_iter();
-    let Some(flight_data) = iter.next() else {
-        return Err(Error::Internal {
-            err_msg: "Failed to encode empty flight data".to_string(),
-        });
-    };
-    if iter.next().is_some() {
-        return Err(Error::NotSupported {
-            feat: "bulk insert RecordBatch with dictionary arrays".to_string(),
-        });
+fn map_ipc_error(error: GrpcError) -> Error {
+    match error {
+        GrpcError::NotSupported { feat } => Error::NotSupported { feat },
+        GrpcError::InvalidFlightData { reason, .. } => Error::Internal { err_msg: reason },
+        error => Error::Internal {
+            err_msg: error.to_string(),
+        },
     }
-
-    Ok((
-        schema.data_header,
-        flight_data.data_header,
-        flight_data.data_body,
-    ))
 }
 
 #[cfg(test)]
