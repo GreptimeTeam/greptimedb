@@ -389,7 +389,7 @@ fn resolve_series_row_selector(
     scan_config: &ScanConfig,
 ) -> error::Result<Option<TimeSeriesRowSelector>> {
     match scan_config.series_row_selector.as_deref() {
-        Some("last_row") => Ok(Some(TimeSeriesRowSelector::LastRow)),
+        Some("last_row") => Ok(Some(TimeSeriesRowSelector::LastRow { after_merge: false })),
         Some(other) => Err(error::IllegalConfigSnafu {
             msg: format!("Unknown series_row_selector '{other}'"),
         }

@@ -32,6 +32,7 @@ use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortFi
 use mito2::access_layer::{FilePathProvider, Metrics, WriteType};
 use mito2::config::IndexConfig;
 use mito2::manifest::action::{RegionCheckpoint, RegionManifest, RemovedFilesRecord};
+use mito2::memtable::sort_primary_key_record_batch;
 use mito2::read::FlatSource;
 use mito2::sst::file::{FileMeta, RegionFileId};
 use mito2::sst::index::{Indexer, IndexerBuilder};
@@ -282,8 +283,10 @@ fn generate_record_batch(
     columns.push(Arc::new(pk_builder.finish()));
     columns.push(Arc::new(UInt64Array::from_value(sequence, rows)));
     columns.push(Arc::new(UInt8Array::from_value(OpType::Put as u8, rows)));
-    RecordBatch::try_new(flat_schema, columns)
-        .expect("generated fixture columns should match flat SST Arrow schema")
+    let batch = RecordBatch::try_new(flat_schema, columns)
+        .expect("generated fixture columns should match flat SST Arrow schema");
+    sort_primary_key_record_batch(&batch)
+        .expect("generated fixture batch should sort by primary key, timestamp, and sequence")
 }
 
 fn file_meta_from_sst_info(
@@ -531,4 +534,205 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
     jsonl.flush().expect("failed to flush fixture files.jsonl");
     fs::write(out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case_name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": scenario.layout.sst_count, "rows_per_sst": scenario.layout.rows_per_sst, "row_group_size": scenario.layout.row_group_size, "total_rows": scenario.layout.sst_count * scenario.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).expect("failed to serialize fixture summary")).expect("failed to write fixture summary.json");
     println!("Done. wrote {} SST file entries", manifest.files.len());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use datatypes::arrow::array::{BinaryArray, DictionaryArray, StringArray};
+
+    use super::*;
+
+    type LogicalRow = (Vec<u8>, i64, u64, String, String, f64);
+
+    fn string_values(batch: &RecordBatch, column: usize) -> Vec<String> {
+        let dictionary = batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .expect("fixture tag column should be a string dictionary");
+        let values = dictionary
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("fixture tag dictionary should contain strings");
+        dictionary
+            .keys()
+            .values()
+            .iter()
+            .map(|key| values.value(*key as usize).to_string())
+            .collect()
+    }
+
+    fn encoded_primary_keys(batch: &RecordBatch) -> Vec<Vec<u8>> {
+        let dictionary = batch
+            .column(batch.num_columns() - 3)
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .expect("fixture primary key should be a binary dictionary");
+        let values = dictionary
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("fixture primary key dictionary should contain binary keys");
+        dictionary
+            .keys()
+            .values()
+            .iter()
+            .map(|key| values.value(*key as usize).to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn direct_sst_generator_sorts_all_layouts_and_timestamp_units() {
+        for (series_layout, timestamp_type) in [
+            ("timestamp_major", "TIMESTAMP(9)"),
+            ("timestamp_major", "TIMESTAMP(3)"),
+            ("round_robin", "TIMESTAMP(9)"),
+            ("round_robin", "TIMESTAMP(3)"),
+            ("per_sst", "TIMESTAMP(9)"),
+            ("per_sst", "TIMESTAMP(3)"),
+        ] {
+            let mut case: CaseFile = toml::from_str(include_str!(
+                "../../../../../tests/perf/query_cases/promql_instant_last_row_9034/case.toml"
+            ))
+            .expect("existing query perf case should parse");
+            let scenario = match &mut case.scenario {
+                Scenario::DirectReadableSst(scenario) => scenario,
+                _ => unreachable!("included case is a direct SST case"),
+            };
+            scenario.layout.series_layout = series_layout.to_string();
+            scenario.layout.series_count = NonZeroUsize::new(12).expect("12 is nonzero");
+            scenario.layout.rows_per_sst = 36;
+            scenario.layout.sst_count = 1;
+            scenario.layout.row_group_size = 12;
+            let table = &mut scenario.tables[0];
+            let time_index = table.time_index.clone();
+            table
+                .columns
+                .iter_mut()
+                .find(|column| column.name == time_index)
+                .expect("fixture case has time index column")
+                .ty = timestamp_type.to_string();
+
+            let sst_idx = 10;
+            let sequence = 1010;
+            let metadata = Arc::new(build_region_metadata(table, RegionId::from(42)));
+            let batch =
+                generate_record_batch(table, &metadata, &scenario.layout, sst_idx, sequence);
+            assert_eq!(36, batch.num_rows(), "{series_layout}/{timestamp_type}");
+
+            let base_row = sst_idx * scenario.layout.rows_per_sst;
+            let host = table
+                .columns
+                .iter()
+                .find(|column| column.name == "host")
+                .expect("fixture case has host tag");
+            let instance = table
+                .columns
+                .iter()
+                .find(|column| column.name == "instance")
+                .expect("fixture case has instance tag");
+            let value = table
+                .columns
+                .iter()
+                .find(|column| column.name == "value")
+                .expect("fixture case has value field");
+            let (min, max) = match value.distribution.as_ref() {
+                Some(Distribution::DeterministicWave { min, max }) => (*min, *max),
+                _ => unreachable!("included case has deterministic wave values"),
+            };
+            let mut expected = (0..scenario.layout.rows_per_sst)
+                .map(|row| {
+                    let series = series_for_row(&scenario.layout, sst_idx, base_row, row);
+                    let mut tags = HashMap::new();
+                    tags.insert(host.name.clone(), tag_value(host, series));
+                    tags.insert(instance.name.clone(), tag_value(instance, series));
+                    let timestamp = timestamp_for_row(&scenario.layout, base_row, row);
+                    (
+                        encode_dense_primary_key(table, &tags),
+                        if timestamp_type == "TIMESTAMP(3)" {
+                            timestamp / 1_000_000
+                        } else {
+                            timestamp
+                        },
+                        sequence,
+                        tag_value(host, series),
+                        tag_value(instance, series),
+                        wave_value(min, max, base_row + row),
+                    )
+                })
+                .collect::<Vec<LogicalRow>>();
+            expected.sort_by(|left, right| {
+                left.0
+                    .cmp(&right.0)
+                    .then_with(|| left.1.cmp(&right.1))
+                    .then_with(|| right.2.cmp(&left.2))
+            });
+
+            let timestamps = if timestamp_type == "TIMESTAMP(9)" {
+                batch
+                    .column(batch.num_columns() - 4)
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .expect("nanosecond fixture timestamp")
+                    .values()
+                    .to_vec()
+            } else {
+                batch
+                    .column(batch.num_columns() - 4)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("millisecond fixture timestamp")
+                    .values()
+                    .to_vec()
+            };
+            let sequences = batch
+                .column(batch.num_columns() - 2)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("fixture sequence column")
+                .values()
+                .to_vec();
+            let hosts = string_values(&batch, 0);
+            let instances = string_values(&batch, 1);
+            let values = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("fixture value column")
+                .values()
+                .to_vec();
+            let actual = encoded_primary_keys(&batch)
+                .into_iter()
+                .zip(timestamps)
+                .zip(sequences)
+                .zip(hosts)
+                .zip(instances)
+                .zip(values)
+                .map(
+                    |(((((primary_key, timestamp), sequence), host), instance), value)| {
+                        (primary_key, timestamp, sequence, host, instance, value)
+                    },
+                )
+                .collect::<Vec<LogicalRow>>();
+
+            assert_eq!(expected, actual, "{series_layout}/{timestamp_type}");
+            for pair in actual.windows(2) {
+                assert!(
+                    pair[0].0 < pair[1].0
+                        || (pair[0].0 == pair[1].0 && pair[0].1 < pair[1].1)
+                        || (pair[0].0 == pair[1].0
+                            && pair[0].1 == pair[1].1
+                            && pair[0].2 >= pair[1].2),
+                    "rows must be encoded-PK ascending, timestamp ascending, sequence descending: {series_layout}/{timestamp_type}"
+                );
+            }
+            if series_layout != "per_sst" {
+                assert!(actual.iter().any(|row| row.3 == "host2"));
+                assert!(actual.iter().any(|row| row.3 == "host10"));
+            }
+        }
+    }
 }

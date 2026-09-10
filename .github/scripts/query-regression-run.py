@@ -38,6 +38,7 @@ DEFAULT_CASES = [
     "tests/perf/query_cases/prom_remote_write_mixed_every/case.toml",
     "tests/perf/query_cases/prom_remote_write_integer_counter/case.toml",
     "tests/perf/query_cases/promql_range_boundary/case.toml",
+    "tests/perf/query_cases/promql_instant_last_row_9034/case.toml",
 ]
 
 HEAVY_CASES = [

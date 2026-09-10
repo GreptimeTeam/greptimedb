@@ -32,6 +32,7 @@ use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
     MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY,
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -362,8 +363,22 @@ impl TableMeta {
                     new_options.ttl = *new_ttl;
                 }
                 SetRegionOption::Twsc(key, value) => {
+                    let persisted_key = if matches!(
+                        key.as_str(),
+                        TWCS_TRIGGER_FILE_NUM | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
+                    ) {
+                        new_options.extra_options.remove(TWCS_TRIGGER_FILE_NUM);
+                        new_options
+                            .extra_options
+                            .remove(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
+                        TWCS_TRIGGER_FILE_NUM
+                    } else {
+                        key
+                    };
                     if !value.is_empty() {
-                        new_options.extra_options.insert(key.clone(), value.clone());
+                        new_options
+                            .extra_options
+                            .insert(persisted_key.to_string(), value.clone());
                         // Ensure node restart correctly.
                         new_options.extra_options.insert(
                             COMPACTION_TYPE.to_string(),
@@ -371,7 +386,7 @@ impl TableMeta {
                         );
                     } else {
                         // Invalidate the previous change option if an empty value has been set.
-                        new_options.extra_options.remove(key.as_str());
+                        new_options.extra_options.remove(persisted_key);
                     }
                 }
                 SetRegionOption::Format(value) => {
@@ -2222,6 +2237,49 @@ mod tests {
                 .extra_options
                 .contains_key(AUTO_FLUSH_INTERVAL_KEY)
         );
+    }
+
+    #[test]
+    fn test_set_twcs_trigger_persists_legacy_key() {
+        for key in [TWCS_TRIGGER_FILE_NUM, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM] {
+            let mut table_options = TableOptions::default();
+            table_options.extra_options.insert(
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "4".to_string(),
+            );
+            let meta = TableMetaBuilder::empty()
+                .schema(Arc::new(new_test_schema()))
+                .primary_key_indices(vec![0])
+                .engine("engine")
+                .next_column_id(3)
+                .options(table_options)
+                .build()
+                .unwrap();
+            let alter_kind = AlterKind::SetTableOptions {
+                options: vec![SetRegionOption::Twsc(key.to_string(), "8".to_string())],
+            };
+
+            let new_meta = meta
+                .builder_with_alter_kind("my_table", &alter_kind)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            assert_eq!(
+                Some("8"),
+                new_meta
+                    .options
+                    .extra_options
+                    .get(TWCS_TRIGGER_FILE_NUM)
+                    .map(String::as_str)
+            );
+            assert!(
+                !new_meta
+                    .options
+                    .extra_options
+                    .contains_key(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM)
+            );
+        }
     }
 
     #[test]

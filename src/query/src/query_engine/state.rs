@@ -291,6 +291,7 @@ impl QueryEngineState {
             catalog_manager: catalog_list,
             dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
             function_state: Arc::new(FunctionState {
+                plugins: plugins.clone(),
                 table_mutation_handler,
                 procedure_service_handler,
                 flow_service_handler,

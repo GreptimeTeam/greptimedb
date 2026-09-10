@@ -2621,7 +2621,7 @@ mod tests {
         let key = SelectorResultKey {
             file_id,
             row_group_idx: 0,
-            selector: TimeSeriesRowSelector::LastRow,
+            selector: TimeSeriesRowSelector::LastRow { after_merge: false },
         };
         assert!(cache.get_selector_result(&key).is_none());
         let result = Arc::new(SelectorResultValue::new(
