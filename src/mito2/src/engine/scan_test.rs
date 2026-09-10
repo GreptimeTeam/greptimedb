@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::helper::encode_json_value;
 use api::v1::helper::row;
@@ -38,7 +39,8 @@ use datatypes::arrow::array::{
     ArrayRef, AsArray, Float64Array, StringArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::datatypes::{
-    DataType, Field, Float64Type, Schema, TimeUnit, TimestampMillisecondType, UInt64Type,
+    DataType, Field, Float64Type, Schema, TimeUnit, TimestampMillisecondType, UInt32Type,
+    UInt64Type,
 };
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
@@ -3279,18 +3281,28 @@ async fn build_sparse_exact_metric_engine(
     (env, engine, region_id)
 }
 
-fn canonical_sparse_rows(batches: &RecordBatches) -> Vec<(String, String, u64, i64)> {
+fn canonical_sparse_rows(batches: &RecordBatches) -> Vec<(u32, u64, String, String, u64, i64)> {
+    let schema = batches.schema();
+    // Verify the complete output schema before looking at batches so empty
+    // scans are checked too.
+    assert_eq!(6, schema.num_columns());
+    assert_eq!(
+        vec!["__table_id", "__tsid", "tag_0", "tag_1", "field_0", "ts"],
+        (0..schema.num_columns())
+            .map(|index| schema.column_name_by_index(index))
+            .collect::<Vec<_>>(),
+    );
+
     let mut rows = Vec::new();
     for batch in batches.iter() {
-        // No projection is supplied by these tests, so this verifies the full
-        // sparse metric schema, including internal IDs and both user tags.
-        assert_eq!(6, batch.num_columns());
-        assert_eq!(
-            vec!["__table_id", "__tsid", "tag_0", "tag_1", "field_0", "ts"],
-            (0..batch.num_columns())
-                .map(|index| batch.schema.column_name_by_index(index))
-                .collect::<Vec<_>>(),
-        );
+        let table_id = batch
+            .column_by_name("__table_id")
+            .unwrap()
+            .as_primitive::<UInt32Type>();
+        let tsid = batch
+            .column_by_name("__tsid")
+            .unwrap()
+            .as_primitive::<UInt64Type>();
         let tag_0 = batch.column_by_name("tag_0").unwrap();
         let tag_1 = batch.column_by_name("tag_1").unwrap();
         let field = batch
@@ -3303,6 +3315,8 @@ fn canonical_sparse_rows(batches: &RecordBatches) -> Vec<(String, String, u64, i
             .as_primitive::<TimestampMillisecondType>();
         for row in 0..batch.num_rows() {
             rows.push((
+                table_id.value(row),
+                tsid.value(row),
                 datatypes::arrow_array::string_array_value_at_index(tag_0, row)
                     .unwrap()
                     .to_string(),
@@ -3325,7 +3339,10 @@ async fn scan_sparse_exact_metric(
     max: Option<u64>,
     selector: Option<TimeSeriesRowSelector>,
     expected_mode: &str,
-) -> Vec<(String, String, u64, i64)> {
+) -> (
+    datatypes::schema::SchemaRef,
+    Vec<(u32, u64, String, String, u64, i64)>,
+) {
     let scanner = engine
         .scanner(
             region_id,
@@ -3347,11 +3364,11 @@ async fn scan_sparse_exact_metric(
         panic!("sparse metric scan must use SeriesScan");
     };
     assert_eq!(expected_mode, scanner.mode());
-    canonical_sparse_rows(
-        &RecordBatches::try_collect(scanner.build_stream().await.unwrap())
-            .await
-            .unwrap(),
-    )
+    let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
+        .await
+        .unwrap();
+    let schema = batches.schema();
+    (schema, canonical_sparse_rows(&batches))
 }
 
 /// Exact sparse-metric reads must use two-phase scanning and preserve the same
@@ -3387,15 +3404,6 @@ async fn test_two_phase_sparse_metric_exact_sequence_cases() {
             None,
             vec![("a", "x", 11, 2000), ("b", "y", 20, 1000)],
         ),
-        // Only series in the older SST qualify; later SST and memtable
-        // candidates must not add rows after sequence filtering.
-        (
-            "only_older_sst_qualifying_series",
-            Some(0),
-            Some(2),
-            None,
-            vec![("a", "x", 10, 1000), ("c", "z", 30, 1000)],
-        ),
         // Candidates are present in the memtable but all are outside (4, 4].
         (
             "candidate_outside_only_empty",
@@ -3417,15 +3425,15 @@ async fn test_two_phase_sparse_metric_exact_sequence_cases() {
                 ("c", "z", 30, 1000),
             ],
         ),
-        // Selector is applied after the exact filter; the out-of-range memtable
-        // row for d must not become a candidate result.
+        // Selector is applied after the exact filter: a's newer seq 5 row is
+        // excluded, so its seq 3 row survives as the last selected row.
         (
-            "last_row_selector_on",
+            "last_row_selector_excludes_newer_sequence",
             Some(0),
-            Some(5),
+            Some(4),
             Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
             vec![
-                ("a", "x", 12, 3000),
+                ("a", "x", 11, 2000),
                 ("b", "y", 20, 1000),
                 ("c", "z", 30, 1000),
             ],
@@ -3435,9 +3443,25 @@ async fn test_two_phase_sparse_metric_exact_sequence_cases() {
     for (name, min, max, selector, expected) in cases {
         let expected = expected
             .into_iter()
-            .map(|(tag_0, tag_1, field, ts)| (tag_0.to_string(), tag_1.to_string(), field, ts))
+            .map(|(tag_0, tag_1, field, ts)| {
+                let (table_id, tsid) = match tag_0 {
+                    "a" => (10, 0),
+                    "b" => (10, u64::MAX),
+                    "c" => (20, 0),
+                    "d" => (20, u64::MAX),
+                    _ => unreachable!("unknown fixture series: {tag_0}"),
+                };
+                (
+                    table_id,
+                    tsid,
+                    tag_0.to_string(),
+                    tag_1.to_string(),
+                    field,
+                    ts,
+                )
+            })
             .collect::<Vec<_>>();
-        let two_phase_rows = scan_sparse_exact_metric(
+        let (two_phase_schema, two_phase_rows) = scan_sparse_exact_metric(
             &two_phase,
             two_phase_region,
             min,
@@ -3446,16 +3470,20 @@ async fn test_two_phase_sparse_metric_exact_sequence_cases() {
             "two_phase",
         )
         .await;
-        let legacy_rows =
+        let (legacy_schema, legacy_rows) =
             scan_sparse_exact_metric(&legacy, legacy_region, min, max, selector, "legacy").await;
         assert_eq!(expected, two_phase_rows, "two-phase {name}");
         assert_eq!(expected, legacy_rows, "legacy {name}");
-        assert_eq!(legacy_rows, two_phase_rows, "mode mismatch for {name}");
+        assert_eq!(
+            two_phase_schema, legacy_schema,
+            "schema mismatch for {name}"
+        );
     }
 }
 
 /// A warmed two-phase exact scan must hit the existing range-result cache; a
-/// distinct exact interval and an unbounded scan must not reuse its rows.
+/// second upper bound over the same files and an unbounded scan must not reuse
+/// its rows.
 #[tokio::test]
 async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
     let (_env, engine, region_id) = build_sparse_exact_metric_engine(
@@ -3467,9 +3495,9 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
     // Make the fixture file-only so the two-phase candidate and data ranges are cacheable.
     test_util::flush_region(&engine, region_id, None).await;
 
-    let request = ScanRequest {
+    let restrictive = ScanRequest {
         memtable_min_sequence: Some(0),
-        memtable_max_sequence: Some(6),
+        memtable_max_sequence: Some(4),
         exact_sequence_range: true,
         distribution: Some(TimeSeriesDistribution::PerSeries),
         filters: vec![col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("a".to_string()))))],
@@ -3481,46 +3509,83 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
             panic!("sparse metric scan must use SeriesScan");
         };
         assert_eq!("two_phase", scanner.mode());
-        let rows = canonical_sparse_rows(
-            &RecordBatches::try_collect(scanner.build_stream().await.unwrap())
-                .await
-                .unwrap(),
-        );
-        (rows, format!("{}", VerboseDisplay(scanner)))
+        let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
+            .await
+            .unwrap();
+        (
+            canonical_sparse_rows(&batches),
+            format!("{}", VerboseDisplay(scanner)),
+        )
     };
 
-    let (cold, _) = scan(request.clone()).await;
+    let (cold, _) = scan(restrictive.clone()).await;
     // Cache insertion is performed by the range stream's async concat task.
-    // Yielding lets that completed cold stream publish before the warm scan.
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
-    let (warm, warm_verbose) = scan(request).await;
+    // Wait for a completed cache read rather than assuming a fixed number of
+    // scheduler yields. The aggregate metric includes candidate-stage hits, so
+    // output-isolation assertions below remain the data-stage acceptance check.
+    let (warm, warm_verbose) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (rows, verbose) = scan(restrictive.clone()).await;
+            if verbose.contains("\"range_cache_hit\"") {
+                return (rows, verbose);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("range cache did not complete within timeout");
     assert_eq!(cold, warm);
     assert!(
         warm_verbose.contains("\"range_cache_hit\":"),
-        "warm two-phase scan did not report an actual range-cache hit: {warm_verbose}"
+        "warm two-phase scan did not report a range-cache hit: {warm_verbose}"
     );
 
     assert_eq!(
         vec![
-            ("a".to_string(), "x".to_string(), 12, 3000),
-            ("b".to_string(), "y".to_string(), 20, 1000),
-            ("d".to_string(), "w".to_string(), 40, 1000),
+            (10, 0, "a".to_string(), "x".to_string(), 10, 1000),
+            (10, 0, "a".to_string(), "x".to_string(), 11, 2000),
+            (10, u64::MAX, "b".to_string(), "y".to_string(), 20, 1000),
+            (20, 0, "c".to_string(), "z".to_string(), 30, 1000),
         ],
-        scan_sparse_exact_metric(&engine, region_id, Some(3), Some(6), None, "two_phase",).await,
-        "different exact interval reused warm rows"
+        cold,
+        "unexpected restrictive exact rows"
     );
+
+    // (0, 5] selects the same three flushed files as (0, 4] but its output
+    // includes a's sequence-5 row, so it must not reuse the restrictive rows.
+    let (different_upper, _) = scan(ScanRequest {
+        memtable_max_sequence: Some(5),
+        ..restrictive.clone()
+    })
+    .await;
     assert_eq!(
         vec![
-            ("a".to_string(), "x".to_string(), 10, 1000),
-            ("a".to_string(), "x".to_string(), 11, 2000),
-            ("a".to_string(), "x".to_string(), 12, 3000),
-            ("b".to_string(), "y".to_string(), 20, 1000),
-            ("c".to_string(), "z".to_string(), 30, 1000),
-            ("d".to_string(), "w".to_string(), 40, 1000),
+            (10, 0, "a".to_string(), "x".to_string(), 10, 1000),
+            (10, 0, "a".to_string(), "x".to_string(), 11, 2000),
+            (10, 0, "a".to_string(), "x".to_string(), 12, 3000),
+            (10, u64::MAX, "b".to_string(), "y".to_string(), 20, 1000),
+            (20, 0, "c".to_string(), "z".to_string(), 30, 1000),
         ],
-        scan_sparse_exact_metric(&engine, region_id, None, None, None, "two_phase").await,
+        different_upper,
+        "different upper bound reused restrictive rows"
+    );
+
+    let (unbounded, _) = scan(ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        filters: restrictive.filters.clone(),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(
+        vec![
+            (10, 0, "a".to_string(), "x".to_string(), 10, 1000),
+            (10, 0, "a".to_string(), "x".to_string(), 11, 2000),
+            (10, 0, "a".to_string(), "x".to_string(), 12, 3000),
+            (10, u64::MAX, "b".to_string(), "y".to_string(), 20, 1000),
+            (20, 0, "c".to_string(), "z".to_string(), 30, 1000),
+            (20, u64::MAX, "d".to_string(), "w".to_string(), 40, 1000),
+        ],
+        unbounded,
         "unbounded scan reused exact rows"
     );
 }

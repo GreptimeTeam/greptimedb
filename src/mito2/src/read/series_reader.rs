@@ -598,11 +598,11 @@ mod tests {
     }
 
     #[test]
-    fn exact_sequence_filter_precedes_shared_dedup_for_tombstones_and_last_non_null() {
-        // Exact public scans require append mode, so delete/dedup behavior is
-        // covered at this reader boundary with trusted raw flat batches. The
-        // production data path applies this same filter before the shared
-        // SeqScan merge/dedup reader is built.
+    fn exact_sequence_filter_component_composition_covers_tombstones_and_last_non_null() {
+        // This component-composition test applies the row-level sequence filter
+        // before the shared dedup iterator; it does not construct production
+        // series-reader wiring. It complements integration coverage with
+        // tombstone and LastNonNull behavior.
         use api::v1::OpType;
         use datatypes::arrow::array::{
             ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, TimestampMillisecondArray,
