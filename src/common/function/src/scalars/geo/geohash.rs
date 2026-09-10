@@ -27,18 +27,8 @@ use geohash::Coord;
 use snafu::ResultExt;
 
 use crate::function::{Function, extract_args};
+use crate::helper::INTEGER_TYPES;
 use crate::scalars::geo::helpers;
-
-const INTEGER_TYPES: &[DataType] = &[
-    DataType::Int8,
-    DataType::Int16,
-    DataType::Int32,
-    DataType::Int64,
-    DataType::UInt8,
-    DataType::UInt16,
-    DataType::UInt32,
-    DataType::UInt64,
-];
 
 fn ensure_resolution_usize(v: u8) -> datafusion_common::Result<usize> {
     if v == 0 || v > 12 {

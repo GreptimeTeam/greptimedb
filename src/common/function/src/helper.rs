@@ -23,6 +23,18 @@ use datatypes::types::cast::cast;
 use datatypes::value::ValueRef;
 use snafu::{OptionExt, ResultExt};
 
+/// Integer types accepted by geospatial function signatures.
+pub(crate) const INTEGER_TYPES: &[DataType] = &[
+    DataType::Int8,
+    DataType::Int16,
+    DataType::Int32,
+    DataType::Int64,
+    DataType::UInt8,
+    DataType::UInt16,
+    DataType::UInt32,
+    DataType::UInt64,
+];
+
 /// Legacy primitive numeric signature types; Decimal values are coerced to `Float64`.
 pub(crate) const NUMERICS: &[DataType] = &[
     DataType::Int8,

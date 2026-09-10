@@ -25,6 +25,7 @@ use s2::latlng::LatLng;
 use snafu::ensure;
 
 use crate::function::{Function, extract_args};
+use crate::helper::INTEGER_TYPES;
 use crate::scalars::geo::helpers;
 use crate::scalars::geo::helpers::ensure_and_coerce;
 
@@ -33,17 +34,6 @@ static CELL_TYPES: LazyLock<Vec<DataType>> =
 
 static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
-
-const INTEGER_TYPES: &[DataType] = &[
-    DataType::Int8,
-    DataType::Int16,
-    DataType::Int32,
-    DataType::Int64,
-    DataType::UInt8,
-    DataType::UInt16,
-    DataType::UInt32,
-    DataType::UInt64,
-];
 
 static LEVEL_TYPES: &[DataType] = INTEGER_TYPES;
 

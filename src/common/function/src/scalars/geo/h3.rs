@@ -33,6 +33,7 @@ use h3o::{CellIndex, LatLng, Resolution};
 use snafu::prelude::*;
 
 use crate::function::{Function, extract_args};
+use crate::helper::INTEGER_TYPES;
 use crate::scalars::geo::helpers;
 
 static CELL_TYPES: LazyLock<Vec<DataType>> =
@@ -40,17 +41,6 @@ static CELL_TYPES: LazyLock<Vec<DataType>> =
 
 static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
-
-const INTEGER_TYPES: &[DataType] = &[
-    DataType::Int8,
-    DataType::Int16,
-    DataType::Int32,
-    DataType::Int64,
-    DataType::UInt8,
-    DataType::UInt16,
-    DataType::UInt32,
-    DataType::UInt64,
-];
 
 static RESOLUTION_TYPES: &[DataType] = INTEGER_TYPES;
 
