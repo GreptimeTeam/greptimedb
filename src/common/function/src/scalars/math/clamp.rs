@@ -416,9 +416,9 @@ mod test {
 
     #[test]
     fn clamp_decimal_coercion_executes_as_float64() {
-        let test_cases: [(Box<dyn Function>, Vec<ColumnarValue>, Vec<f64>); 3] = [
+        let test_cases = [
             (
-                Box::new(ClampFunction::default()),
+                Box::new(ClampFunction::default()) as Box<dyn Function>,
                 vec![
                     decimal_array(vec![100, 300, 500]),
                     decimal_scalar(200),
