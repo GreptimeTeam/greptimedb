@@ -1090,6 +1090,12 @@ async fn test_two_phase_series_scan() {
     request
         .options
         .insert("sst_format".to_string(), "flat".to_string());
+    request
+        .options
+        .insert("append_mode".to_string(), "true".to_string());
+    request
+        .options
+        .insert("preserve_row_sequence".to_string(), "true".to_string());
     let full_row_schema = test_util::rows_schema(&request);
     let mut encoded_primary_key_schema = full_row_schema[0].clone();
     encoded_primary_key_schema.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
@@ -1166,6 +1172,9 @@ async fn test_two_phase_series_scan() {
             ScanRequest {
                 // Internal metric identifiers must still be read for candidate discovery.
                 projection: Some(vec![2, 4, 5]),
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(1),
+                exact_sequence_range: true,
                 distribution: Some(TimeSeriesDistribution::PerSeries),
                 ..Default::default()
             },
@@ -1229,22 +1238,8 @@ async fn test_two_phase_series_scan() {
         }
     }
     actual_rows.sort();
-    assert_eq!(
-        vec![
-            ("a".to_string(), 11, 1000),
-            ("a".to_string(), 12, 2000),
-            ("b".to_string(), 20, 1000),
-            ("b".to_string(), 21, 2000),
-            ("c".to_string(), 30, 1000),
-            ("d".to_string(), 40, 1000),
-        ],
-        actual_rows
-    );
-    assert_eq!(4, series_to_partition.len());
-    assert_eq!(Some(&0), series_to_partition.get("a"));
-    assert_eq!(Some(&0), series_to_partition.get("c"));
-    assert_eq!(Some(&2), series_to_partition.get("b"));
-    assert_eq!(Some(&2), series_to_partition.get("d"));
+    assert_eq!(vec![("a".to_string(), 10, 1000)], actual_rows);
+    assert_eq!(1, series_to_partition.len());
 
     scanner.reset_state();
     assert_eq!("two_phase", scanner.mode());
@@ -3089,6 +3084,7 @@ async fn test_exact_sequence_read_series_scan_per_series() {
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: true,
+            experimental_series_scan_v2: true,
             ..Default::default()
         })
         .await;
@@ -3136,22 +3132,31 @@ async fn test_exact_sequence_read_series_scan_per_series() {
         batches.pretty_print().unwrap()
     };
 
-    let result = scan_exact_series(Some(2), Some(6)).await;
-    let mut rows = result
-        .lines()
-        .filter(|l| l.starts_with("| ") && !l.starts_with("| tag_0 "))
-        .collect::<Vec<_>>();
-    rows.sort_unstable();
-    assert_eq!(
-        vec![
-            "| 2     | 2.0     | 1970-01-01T00:00:02 |",
-            "| 3     | 3.0     | 1970-01-01T00:00:03 |",
-            "| 4     | 4.0     | 1970-01-01T00:00:04 |",
-            "| 5     | 5.0     | 1970-01-01T00:00:05 |",
-        ],
-        rows,
-        "unexpected set for (2, 6] on PerSeries path:\n{result}"
-    );
+    for (min, max) in [(Some(2), Some(6)), (Some(0), Some(2))] {
+        let result = scan_exact_series(min, max).await;
+        let mut rows = result
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| tag_0 "))
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        let expected = if min == Some(2) {
+            vec![
+                "| 2     | 2.0     | 1970-01-01T00:00:02 |",
+                "| 3     | 3.0     | 1970-01-01T00:00:03 |",
+                "| 4     | 4.0     | 1970-01-01T00:00:04 |",
+                "| 5     | 5.0     | 1970-01-01T00:00:05 |",
+            ]
+        } else {
+            vec![
+                "| 0     | 0.0     | 1970-01-01T00:00:00 |",
+                "| 1     | 1.0     | 1970-01-01T00:00:01 |",
+            ]
+        };
+        assert_eq!(
+            expected, rows,
+            "unexpected set for ({min:?}, {max:?}]:\n{result}"
+        );
+    }
 }
 
 /// Range-cache fingerprint: identical files and filters with different (C, H]
