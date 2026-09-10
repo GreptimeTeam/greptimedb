@@ -20,12 +20,14 @@ use async_stream::try_stream;
 use common_telemetry::warn;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
-use snafu::OptionExt;
+use snafu::{OptionExt, ensure};
 use store_api::storage::FileId;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
+use crate::read::compat::FlatCompatBatch;
 use crate::read::flat_merge::FlatMergeReader;
+use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
 use crate::region::MitoRegionRef;
@@ -71,6 +73,8 @@ pub(crate) async fn build_range_index(
     let Some((context, mut selection)) = reader_input(region, file).await? else {
         return Ok(None);
     };
+    let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
+    let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
     let path = range_index_path(region.region_id, file_id);
     let mut writer = SstRangeIndexWriter::try_new(
         version.metadata.clone(),
@@ -96,6 +100,10 @@ pub(crate) async fn build_range_index(
                 context.pre_filter_mode().skip_fields(),
             );
             while let Some(batch) = reader.next_batch().await? {
+                let batch = match &compat {
+                    Some(compat) => compat.compat(batch)?,
+                    None => batch,
+                };
                 writer.write(row_group_id as u32, &batch).await?;
             }
         }
@@ -123,12 +131,13 @@ pub(crate) async fn build_series_index(
     purger: &IndexFilePurger,
 ) -> Result<SeriesIndexFileHandle> {
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
-    let mut schema = None;
+    let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
+    let schema = mapper.input_arrow_schema(false);
     for file in &bucket.files {
         let Some((context, mut selection)) = reader_input(region, file.clone()).await? else {
             continue;
         };
-        schema.get_or_insert(context.read_format().output_arrow_schema()?);
+        let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
         sources.push(Box::pin(try_stream! {
             let fetch_metrics = ParquetFetchMetrics::default();
             while let Some((row_group_id, row_selection)) = selection.pop_first() {
@@ -143,14 +152,20 @@ pub(crate) async fn build_series_index(
                     context.pre_filter_mode().skip_fields(),
                 );
                 while let Some(batch) = reader.next_batch().await? {
-                    yield batch;
+                    yield match &compat {
+                        Some(compat) => compat.compat(batch)?,
+                        None => batch,
+                    };
                 }
             }
         }));
     }
-    let schema = schema.context(UnexpectedSnafu {
-        reason: "series-index bucket has no readable SST",
-    })?;
+    ensure!(
+        !sources.is_empty(),
+        UnexpectedSnafu {
+            reason: "series-index bucket has no readable SST",
+        }
+    );
     let mut visible: BoxedRecordBatchStream = if sources.len() == 1 {
         sources.pop().context(UnexpectedSnafu {
             reason: "series-index source disappeared",
@@ -340,6 +355,130 @@ mod tests {
         assert!(region.series_index_version().range_indexes.is_empty());
         assert!(region.series_index_version().series_indexes.is_empty());
         assert!(receiver.try_recv().is_err());
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_build_indexes_after_time_index_widening() {
+        use api::v1::helper::row;
+        use api::v1::value::ValueData;
+        use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
+        use datatypes::arrow::array::{TimestampMicrosecondArray, UInt64Array};
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use store_api::region_request::{
+            AlterKind, ModifyColumnType, RegionAlterRequest, RegionPutRequest, RegionRequest,
+        };
+        use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+
+        use crate::test_util::sst_util::new_sparse_primary_key;
+        use crate::test_util::{CreateRequestBuilder, flush_region, rows_schema};
+
+        let mut env = TestEnv::with_prefix("series-builder-widen").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let metadata = region.version().metadata.clone();
+        engine
+            .handle_request(
+                region.region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::ModifyColumnTypes {
+                        columns: vec![ModifyColumnType {
+                            column_name: metadata.time_index_column().column_schema.name.clone(),
+                            target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+                        }],
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+
+        let mut request = CreateRequestBuilder::new().build();
+        request.column_metadatas = metadata.column_metadatas.clone();
+        request.primary_key = metadata.primary_key.clone();
+        let full_schema = rows_schema(&request);
+        let mut pk = full_schema[0].clone();
+        pk.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+        pk.datatype = ColumnDataType::Binary.into();
+        pk.semantic_type = SemanticType::Tag.into();
+        let mut ts = full_schema[5].clone();
+        ts.datatype = ColumnDataType::TimestampMicrosecond.into();
+        engine
+            .handle_request(
+                region.region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: vec![pk, ts, full_schema[4].clone()],
+                        rows: [500_500, 2_500_500, 3_500_500]
+                            .into_iter()
+                            .map(|ts| {
+                                row(vec![
+                                    ValueData::BinaryValue(new_sparse_primary_key(
+                                        &["a", "x"],
+                                        &metadata,
+                                        10,
+                                        0,
+                                    )),
+                                    ValueData::TimestampMicrosecondValue(ts),
+                                    ValueData::U64Value(1),
+                                ])
+                            })
+                            .collect(),
+                    },
+                    hint: Some(WriteHint {
+                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                    }),
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        flush_region(&engine, region.region_id, None).await;
+        let version = region.version();
+        let (bucket, entry) = build_input(&version);
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let (purger, _receiver) = series_index_channel(store.clone());
+        for file in &bucket.files {
+            build_range_index(&store, &region, &version, file.clone())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let _handle = build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+            .await
+            .unwrap();
+        let bytes = store
+            .read(&series_index_path(region.region_id, entry.index_uuid))
+            .await
+            .unwrap()
+            .to_bytes();
+        let batches = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .unwrap()
+            .build()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(1, batches.len());
+        let batch = &batches[0];
+        assert_eq!(1, batch.num_rows());
+        for (column, expected) in [(0, 500_500), (1, 4_000_000)] {
+            assert_eq!(
+                expected,
+                batch
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap()
+                    .value(0)
+            );
+        }
+        assert_eq!(
+            7,
+            batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0)
+        );
         engine.stop().await.unwrap();
     }
 
@@ -596,48 +735,6 @@ mod tests {
             }
         }
         assert!(store.list("/").await.unwrap().is_empty());
-        assert!(region.series_index_version().series_indexes.is_empty());
-        engine.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_series_batch_error_aborts_writer() {
-        let mut env = TestEnv::with_prefix("series-builder-batch-failure").await;
-        let (engine, region) = prepare_region(&mut env).await;
-        let version = region.version();
-        let (bucket, entry) = build_input(&version);
-        let files = &bucket.files;
-        // Give the series writer a different timestamp unit from the SST batches.
-        let mut bad_version = (*version).clone();
-        bad_version.metadata = metadata_with_seconds(&version);
-        let bad_version = Arc::new(bad_version);
-        let states = WriterStates::default();
-        let layer = writer_layer(&states, |_| WriterFailure::None);
-        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
-        let (purger, _receiver) = series_index_channel(store.clone());
-        for file in files {
-            build_range_index(&store, &region, &version, file.clone())
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        let error = build_series_index(&store, &region, &bad_version, &bucket, &entry, &purger)
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{error:?}").contains("does not match the index unit"),
-            "{error:?}"
-        );
-        let path = series_index_path(region.region_id, entry.index_uuid);
-        {
-            let states = states.lock().unwrap();
-            assert_eq!(1, states[&path].aborted);
-            assert_eq!(0, states[&path].closed);
-            for state in states.values() {
-                assert_eq!(1, state.aborted + state.closed);
-            }
-        }
-        assert!(!store.exists(&path).await.unwrap());
         assert!(region.series_index_version().series_indexes.is_empty());
         engine.stop().await.unwrap();
     }

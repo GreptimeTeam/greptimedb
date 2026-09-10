@@ -45,6 +45,8 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) bucket_start: Timestamp,
     /// Exclusive bucket end.
     pub(crate) bucket_end: Timestamp,
+    /// Source SST IDs retained for debugging only. Compaction can replace these
+    /// files without changing indexed data, so IDs must not determine index reuse.
     pub(crate) source_file_ids: Vec<FileId>,
     pub(crate) min_file_sequence: u64,
     pub(crate) max_file_sequence: u64,
@@ -54,6 +56,9 @@ pub(crate) struct SeriesIndexEntry {
     /// Keys are window starts in epoch seconds; each window spans
     /// `[start, start + compaction_window_secs)`. An SST contributes to every window
     /// its time range intersects. Windows without source SSTs are omitted.
+    /// An empty map means a source SST exceeded the per-file tracking limit and
+    /// cannot establish whether source data is already indexed. Merged coverage
+    /// has no entry limit.
     pub(crate) window_sequences: BTreeMap<i64, u64>,
 }
 

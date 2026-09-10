@@ -25,6 +25,9 @@ use crate::series_index::catalog::SeriesIndexEntry;
 use crate::sst::file::FileHandle;
 
 const SERIES_INDEX_TRIGGER_FILES: usize = 4;
+/// Bound expansion of a single SST range when compaction windows become smaller.
+/// Merged buckets may contain more entries.
+const MAX_FILE_WINDOW_SEQUENCES: usize = 32;
 
 /// Index files sharing a non-overlapping, half-open time bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +116,7 @@ pub(crate) struct SeriesBucket {
     pub(crate) compaction_window_secs: i64,
     /// Current SST sequence maxima per window, compared with indexed coverage.
     /// Unknown sequences contribute zero and prevent building an index.
+    /// Empty when a source SST exceeds the per-file limit; reuse cannot be established.
     pub(crate) window_sequences: BTreeMap<i64, u64>,
 }
 
@@ -166,6 +170,8 @@ pub(crate) fn plan_series_indexes(
         if index_buckets.get(&bucket.start).is_some_and(|indexed| {
             indexed.end == bucket.end
                 && indexed.compaction_window_secs == bucket.compaction_window_secs
+                // Missing coverage cannot establish reuse, even when both maps are empty.
+                && !bucket.window_sequences.is_empty()
                 && indexed.window_sequences == bucket.window_sequences
         }) {
             continue;
@@ -226,10 +232,16 @@ pub(crate) fn group_files_into_series_buckets(
                 .meta_ref()
                 .sequence
                 .map_or(0, |sequence| sequence.get());
-            let window_sequences = (start.div_euclid(compaction_window_secs)
-                ..=end.div_euclid(compaction_window_secs))
-                .map(|window| (window.saturating_mul(compaction_window_secs), sequence))
-                .collect();
+            let first_window = start.div_euclid(compaction_window_secs);
+            let last_window = end.div_euclid(compaction_window_secs);
+            let window_count = i128::from(last_window) - i128::from(first_window) + 1;
+            let window_sequences = if window_count > MAX_FILE_WINDOW_SEQUENCES as i128 {
+                BTreeMap::new()
+            } else {
+                (first_window..=last_window)
+                    .map(|window| (window.saturating_mul(compaction_window_secs), sequence))
+                    .collect()
+            };
             SeriesBucket {
                 start: Timestamp::new_second(
                     start.div_euclid(width_secs).saturating_mul(width_secs),
@@ -288,6 +300,11 @@ fn group_series_buckets(spans: Vec<SeriesBucket>) -> Vec<SeriesBucket> {
 }
 
 fn merge_window_sequences(target: &mut BTreeMap<i64, u64>, source: BTreeMap<i64, u64>) {
+    // An empty map denotes omitted coverage, including after merging oversized spans.
+    if target.is_empty() || source.is_empty() {
+        target.clear();
+        return;
+    }
     for (window, sequence) in source {
         target
             .entry(window)
@@ -298,7 +315,7 @@ fn merge_window_sequences(target: &mut BTreeMap<i64, u64>, source: BTreeMap<i64,
 
 impl SeriesBucket {
     /// Creates entry metadata with a fresh UUID and sorted source file IDs.
-    /// Returns `None` if a source sequence is unknown or too few files remain to build.
+    /// Returns `None` for unknown sequences or too few files.
     fn to_series_entry(&self) -> Option<SeriesIndexEntry> {
         if self.has_unknown_sequence || self.files.len() < SERIES_INDEX_TRIGGER_FILES {
             return None;
