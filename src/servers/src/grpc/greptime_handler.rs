@@ -202,7 +202,7 @@ pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
 pub(crate) fn create_query_context(
     channel: Channel,
     header: Option<&RequestHeader>,
-    mut extensions: Vec<(String, String)>,
+    extensions: Vec<(String, String)>,
     snapshot_seqs: HashMap<u64, u64>,
 ) -> Result<QueryContextRef> {
     let (catalog, schema) = header
@@ -240,39 +240,36 @@ pub(crate) fn create_query_context(
         .channel(channel)
         .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs)));
 
-    if let Some(x) = extensions
-        .iter()
-        .position(|(k, _)| k == READ_PREFERENCE_HINT)
-    {
-        let (k, v) = extensions.swap_remove(x);
-        let Ok(read_preference) = ReadPreference::from_str(&v) else {
-            return UnknownHintSnafu {
-                hint: format!("{k}={v}"),
-            }
-            .fail();
-        };
-        ctx_builder = ctx_builder.read_preference(read_preference);
-    }
-
     for (key, value) in extensions {
-        if key == INSERT_SKIP_WAL_HINT {
-            let skip_wal = value.parse::<bool>().map_err(|_| {
-                UnknownHintSnafu {
-                    hint: format!("{key}={value}"),
-                }
-                .build()
-            })?;
-            ctx_builder = ctx_builder.skip_wal(skip_wal);
-            continue;
+        match key.as_str() {
+            READ_PREFERENCE_HINT => {
+                let Ok(read_preference) = ReadPreference::from_str(&value) else {
+                    return UnknownHintSnafu {
+                        hint: format!("{key}={value}"),
+                    }
+                    .fail();
+                };
+                ctx_builder = ctx_builder.read_preference(read_preference);
+            }
+            INSERT_SKIP_WAL_HINT => {
+                let skip_wal = value.parse::<bool>().map_err(|_| {
+                    UnknownHintSnafu {
+                        hint: format!("{key}={value}"),
+                    }
+                    .build()
+                })?;
+                ctx_builder = ctx_builder.skip_wal(skip_wal);
+            }
+            _ if is_reserved_extension_key(&key) => {
+                debug!(
+                    key = key.as_str(),
+                    "Ignoring reserved external query context extension key"
+                );
+            }
+            _ => {
+                ctx_builder = ctx_builder.set_extension(key, value);
+            }
         }
-        if is_reserved_extension_key(&key) {
-            debug!(
-                key = key.as_str(),
-                "Ignoring reserved external query context extension key"
-            );
-            continue;
-        }
-        ctx_builder = ctx_builder.set_extension(key, value);
     }
     Ok(ctx_builder.build().into())
 }
@@ -379,6 +376,32 @@ mod tests {
         .unwrap();
         assert!(!ctx.skip_wal());
         assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
+    }
+
+    #[test]
+    fn test_create_query_context_read_preference_duplicates() {
+        for (values, valid) in [
+            (["leader", "LEADER"], true),
+            (["invalid", "leader"], false),
+            (["leader", "invalid"], false),
+        ] {
+            let result = create_query_context(
+                Channel::Grpc,
+                None,
+                values
+                    .into_iter()
+                    .map(|value| (READ_PREFERENCE_HINT.to_string(), value.to_string()))
+                    .collect(),
+                HashMap::new(),
+            );
+            if valid {
+                let ctx = result.unwrap();
+                assert!(matches!(ctx.read_preference(), ReadPreference::Leader));
+                assert_eq!(ctx.extension(READ_PREFERENCE_HINT), None);
+            } else {
+                assert!(result.is_err());
+            }
+        }
     }
 
     #[test]

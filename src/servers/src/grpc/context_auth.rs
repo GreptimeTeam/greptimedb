@@ -54,16 +54,17 @@ pub fn create_query_context_from_grpc_metadata(
         .build();
     // OTEL Arrow uses ordinary inserts. Accept only its request-level WAL hint,
     // leaving unrelated hints and reserved internal extensions unchanged.
-    for (key, value) in hint_headers::extract_hints(headers) {
-        if key == INSERT_SKIP_WAL_HINT {
-            let skip_wal = value.parse::<bool>().map_err(|_| {
-                InvalidParameterSnafu {
-                    reason: format!("Invalid {key} hint: expected true or false, got {value:?}"),
-                }
-                .build()
-            })?;
-            ctx.set_skip_wal(skip_wal);
-        }
+    if let Some((key, value)) = hint_headers::extract_hints(headers)
+        .into_iter()
+        .find(|(key, _)| key == INSERT_SKIP_WAL_HINT)
+    {
+        let skip_wal = value.parse::<bool>().map_err(|_| {
+            InvalidParameterSnafu {
+                reason: format!("Invalid {key} hint: expected true or false, got {value:?}"),
+            }
+            .build()
+        })?;
+        ctx.set_skip_wal(skip_wal);
     }
     Ok(Arc::new(ctx))
 }
@@ -210,6 +211,16 @@ mod tests {
                     assert_eq!(ctx.extension(key), None);
                 }
             }
+        }
+        // Only the first matching hint is parsed and applied.
+        for (hints, expected) in [
+            ("insert_skip_wal=true,insert_skip_wal=false", true),
+            ("insert_skip_wal=false,insert_skip_wal=true", false),
+            ("insert_skip_wal=true,insert_skip_wal=invalid", true),
+        ] {
+            headers.insert(HINTS_KEY, hints.parse().unwrap());
+            let ctx = create_query_context_from_grpc_metadata(&headers).unwrap();
+            assert_eq!(ctx.skip_wal(), expected);
         }
         for value in ["", "TRUE", "1", "invalid"] {
             headers.insert(
