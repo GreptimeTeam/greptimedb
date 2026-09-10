@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use crate::query_regression_runner::model::{PromStore, RemoteWrite};
+use crate::query_regression_runner::model::{InputProtocol, RemoteWrite};
 use crate::query_regression_runner::plan::normalized_remote_write;
 use crate::query_regression_runner::sql::{
     extract_count_value, http_post_sql, sql_ident, sql_string, value_f64, value_u64,
@@ -29,13 +29,15 @@ use crate::query_regression_runner::{PrepareRemoteArgs, RenderRemoteConfigArgs, 
 
 pub(super) async fn run_render_remote_config(args: RenderRemoteConfigArgs) -> Result<()> {
     let (_, remote) = normalized_remote_write(&args.fixture_generator, &args.case)?;
-    fs::write(args.output, frontend_prom_config(&remote.prom_store)?)?;
+    fs::write(args.output, frontend_remote_config(&remote)?)?;
     Ok(())
 }
 
-fn frontend_prom_config(prom: &PromStore) -> Result<String> {
+fn frontend_remote_config(remote: &RemoteWrite) -> Result<String> {
+    let prom = &remote.prom_store;
+    let with_metric_engine = remote.input_protocol == InputProtocol::RemoteWrite;
     Ok(format!(
-        "[prom_store]\nenable = true\nwith_metric_engine = true\npending_rows_flush_interval = {}\nmax_batch_rows = {}\nmax_concurrent_flushes = {}\nworker_channel_capacity = {}\nmax_inflight_requests = {}\n",
+        "[prom_store]\nenable = true\nwith_metric_engine = {with_metric_engine}\npending_rows_flush_interval = {}\nmax_batch_rows = {}\nmax_concurrent_flushes = {}\nworker_channel_capacity = {}\nmax_inflight_requests = {}\n",
         serde_json::to_string(&prom.pending_rows_flush_interval)?,
         prom.max_batch_rows,
         prom.max_concurrent_flushes,
@@ -71,6 +73,7 @@ pub(super) async fn run_prepare_remote(args: PrepareRemoteArgs) -> Result<()> {
     let report = json!({
         "case_path": case_path,
         "scenario": "prom_remote_write_then_query",
+        "input_protocol": remote.input_protocol,
         "base": base,
         "candidate": candidate,
         "status": "ok",
@@ -107,6 +110,14 @@ async fn prepare_remote_target(
         )
         .into());
     }
+    if remote.input_protocol == InputProtocol::OtlpMetrics {
+        let create = create_otlp_metric_table(client, port, remote).await;
+        if !create["ok"].as_bool().unwrap_or(false) {
+            return Err(
+                format!("CREATE TABLE {} failed for {name}: {create}", remote.metric).into(),
+            );
+        }
+    }
     let (remote_write, flushes) = ingest_remote_write(generator, port, remote, client).await?;
     let expected_rows = remote
         .series_count
@@ -121,14 +132,64 @@ async fn prepare_remote_target(
         remote.visibility_timeout_seconds,
     )
     .await?;
+    let timestamp_precision = if remote.input_protocol == InputProtocol::OtlpMetrics {
+        verify_otlp_timestamp_precision(client, port, remote).await?
+    } else {
+        json!({"status": "skipped", "reason": "input_protocol is remote_write"})
+    };
     Ok(json!({
         "name": name,
         "create_database": create_database,
+        "input_protocol": remote.input_protocol,
+        "otlp_metric_compat": if remote.input_protocol == InputProtocol::OtlpMetrics { Value::String("absent (frontend legacy-data compatibility)".to_string()) } else { Value::Null },
         "remote_write": remote_write,
         "flushes": flushes,
         "visibility": visibility,
+        "timestamp_precision": timestamp_precision,
         "status": "ok",
     }))
+}
+
+async fn create_otlp_metric_table(client: &Client, port: u16, remote: &RemoteWrite) -> Value {
+    http_post_sql(
+        client,
+        port,
+        &format!(
+            "CREATE TABLE {} (host STRING, instance STRING, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE, PRIMARY KEY(host, instance)) ENGINE=mito",
+            sql_ident(&remote.metric),
+        ),
+        &remote.database,
+    )
+    .await
+}
+
+async fn verify_otlp_timestamp_precision(
+    client: &Client,
+    port: u16,
+    remote: &RemoteWrite,
+) -> Result<Value> {
+    let result = http_post_sql(
+        client,
+        port,
+        &format!(
+            "SELECT greptime_timestamp FROM {} ORDER BY greptime_timestamp LIMIT 1",
+            sql_ident(&remote.metric),
+        ),
+        &remote.database,
+    )
+    .await;
+    let stored = crate::query_regression_runner::sql::extract_rows(
+        result.get("response").unwrap_or(&Value::Null),
+    )
+    .first()
+    .and_then(|row| crate::query_regression_runner::sql::row_value(row, 0, "greptime_timestamp"))
+    .map(crate::query_regression_runner::sql::value_text)
+    .unwrap_or_default();
+    let exact_remainder = stored.contains("000000123");
+    if !result["ok"].as_bool().unwrap_or(false) || !exact_remainder {
+        return Err(format!("OTLP timestamp precision check failed: {result}").into());
+    }
+    Ok(json!({"status": "ok", "stored_timestamp": stored, "expected_nanosecond_remainder": 123}))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,23 +363,42 @@ fn remote_write_command(
         ));
     let mut command = vec![
         generator.to_string_lossy().to_string(),
-        "prom-remote-write".to_string(),
+        match remote.input_protocol {
+            InputProtocol::RemoteWrite => "prom-remote-write",
+            InputProtocol::OtlpMetrics => "otlp-metrics",
+        }
+        .to_string(),
         "--endpoint".to_string(),
-        format!("http://127.0.0.1:{port}/v1/prometheus/write"),
+        match remote.input_protocol {
+            InputProtocol::RemoteWrite => format!("http://127.0.0.1:{port}/v1/prometheus/write"),
+            InputProtocol::OtlpMetrics => format!("http://127.0.0.1:{port}/v1/otlp/v1/metrics"),
+        },
         "--database".to_string(),
         remote.database.clone(),
         "--metric".to_string(),
         remote.metric.clone(),
-        "--physical-table".to_string(),
-        remote.physical_table.clone(),
         "--series-count".to_string(),
         remote.series_count.to_string(),
         "--samples-per-series".to_string(),
         samples_per_series.to_string(),
-        "--start-unix-millis".to_string(),
-        start_unix_millis.to_string(),
-        "--step-millis".to_string(),
-        remote.step_millis.to_string(),
+        match remote.input_protocol {
+            InputProtocol::RemoteWrite => "--start-unix-millis",
+            InputProtocol::OtlpMetrics => "--start-unix-nanos",
+        }
+        .to_string(),
+        match remote.input_protocol {
+            InputProtocol::RemoteWrite => start_unix_millis.to_string(),
+            InputProtocol::OtlpMetrics => (start_unix_millis as u64 * 1_000_000 + 123).to_string(),
+        },
+        match remote.input_protocol {
+            InputProtocol::RemoteWrite => "--step-millis",
+            InputProtocol::OtlpMetrics => "--step-nanos",
+        }
+        .to_string(),
+        match remote.input_protocol {
+            InputProtocol::RemoteWrite => remote.step_millis.to_string(),
+            InputProtocol::OtlpMetrics => (remote.step_millis as u64 * 1_000_000).to_string(),
+        },
         "--chunk-series-count".to_string(),
         remote.chunk_series_count.to_string(),
         "--timeout-seconds".to_string(),
@@ -342,13 +422,23 @@ fn remote_write_command(
         "--value-mixed-every".to_string(),
         remote.value.mixed_every.to_string(),
     ];
-    if let Some(sample_offset) = sample_offset {
+    if remote.input_protocol == InputProtocol::RemoteWrite {
+        command.extend([
+            "--physical-table".to_string(),
+            remote.physical_table.clone(),
+        ]);
+    }
+    if remote.input_protocol == InputProtocol::RemoteWrite
+        && let Some(sample_offset) = sample_offset
+    {
         command.extend([
             "--value-sample-offset".to_string(),
             sample_offset.to_string(),
         ]);
     }
-    if let Some(total_samples_per_series) = total_samples_per_series {
+    if remote.input_protocol == InputProtocol::RemoteWrite
+        && let Some(total_samples_per_series) = total_samples_per_series
+    {
         command.extend([
             "--value-total-samples-per-series".to_string(),
             total_samples_per_series.to_string(),
@@ -364,25 +454,26 @@ async fn flush_remote_table(
     reason: &str,
     chunk_index: Option<u64>,
 ) -> Result<Value> {
+    let table = match remote.input_protocol {
+        InputProtocol::RemoteWrite => &remote.physical_table,
+        InputProtocol::OtlpMetrics => &remote.metric,
+    };
     let mut result = http_post_sql(
         client,
         port,
-        &format!("ADMIN FLUSH_TABLE({})", sql_string(&remote.physical_table)),
+        &format!("ADMIN FLUSH_TABLE({})", sql_string(table)),
         &remote.database,
     )
     .await;
     if !result["ok"].as_bool().unwrap_or(false) {
-        return Err(format!(
-            "ADMIN FLUSH_TABLE {} failed: {result}",
-            remote.physical_table
-        )
-        .into());
+        return Err(format!("ADMIN FLUSH_TABLE {} failed: {result}", table).into());
     }
     result
         .as_object_mut()
         .ok_or("flush result must be an object")?
         .extend([
             ("physical_table".to_string(), json!(remote.physical_table)),
+            ("flush_table".to_string(), json!(table)),
             ("reason".to_string(), json!(reason)),
             ("chunk_index".to_string(), json!(chunk_index)),
         ]);
@@ -440,6 +531,7 @@ mod tests {
     #[test]
     fn schedules_remote_sample_chunks_and_flushes() {
         let remote = RemoteWrite {
+            input_protocol: InputProtocol::RemoteWrite,
             database: "public".to_string(),
             metric: "metric".to_string(),
             physical_table: "physical".to_string(),

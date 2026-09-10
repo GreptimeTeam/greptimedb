@@ -15,6 +15,7 @@
 mod case;
 mod direct_sst;
 mod inspect_footer;
+mod otlp_metrics;
 mod prom_remote_write;
 mod util;
 
@@ -25,6 +26,7 @@ use case::*;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use direct_sst::run_direct_sst;
 use inspect_footer::{InspectFooterArgs, run_inspect_footer};
+use otlp_metrics::{OtlpMetricsArgs, run_otlp_metrics};
 use prom_remote_write::{PromRemoteWriteArgs, run_prom_remote_write};
 use serde_json::json;
 
@@ -43,6 +45,7 @@ struct Args {
 enum Command {
     DirectSst(DirectArgs),
     PromRemoteWrite(PromRemoteWriteArgs),
+    OtlpMetrics(OtlpMetricsArgs),
     InspectFooter(InspectFooterArgs),
     Plan(PlanArgs),
 }
@@ -95,6 +98,9 @@ pub async fn run() {
         Some(Command::PromRemoteWrite(rw)) => run_prom_remote_write(rw)
             .await
             .expect("prom remote write failed"),
+        Some(Command::OtlpMetrics(otlp)) => run_otlp_metrics(otlp)
+            .await
+            .expect("OTLP metrics export failed"),
         Some(Command::InspectFooter(inspect)) => run_inspect_footer(inspect)
             .await
             .expect("inspect footer failed"),

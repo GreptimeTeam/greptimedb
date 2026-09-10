@@ -147,58 +147,74 @@ fn prom_label(name: &str, value: &str) -> api::prom_store::remote::Label {
     }
 }
 fn deterministic_prom_value(args: &PromRemoteWriteArgs, series_idx: u64, sample_idx: u64) -> f64 {
-    let ordinal = series_idx
-        * args
-            .value_total_samples_per_series
-            .unwrap_or(args.samples_per_series)
-        + args.value_sample_offset
-        + sample_idx;
-    let local = args.value_sample_offset + sample_idx;
-    match args.value_pattern {
-        ValuePattern::Linear => {
-            args.value_base + (series_idx % 97) as f64 + local as f64 * args.value_step
-        }
-        ValuePattern::Constant => args.value_base,
-        ValuePattern::Modulo => {
-            args.value_base + (ordinal % args.value_cardinality.max(1)) as f64 * args.value_step
-        }
-        ValuePattern::Unique => args.value_base + ordinal as f64 * args.value_step,
+    deterministic_value(
+        args.value_pattern,
+        args.value_base,
+        args.value_step,
+        args.value_cardinality,
+        args.value_seed,
+        args.value_run_length,
+        args.value_stall_every,
+        args.value_stall_length,
+        args.value_mixed_every,
+        series_idx,
+        args.value_sample_offset + sample_idx,
+        args.value_total_samples_per_series
+            .unwrap_or(args.samples_per_series),
+    )
+}
+
+pub(super) fn deterministic_value(
+    pattern: ValuePattern,
+    base: f64,
+    step: f64,
+    cardinality: u64,
+    seed: u64,
+    run_length: u64,
+    stall_every: u64,
+    stall_length: u64,
+    mixed_every: u64,
+    series_idx: u64,
+    sample_idx: u64,
+    total_samples_per_series: u64,
+) -> f64 {
+    let ordinal = series_idx * total_samples_per_series + sample_idx;
+    match pattern {
+        ValuePattern::Linear => base + (series_idx % 97) as f64 + sample_idx as f64 * step,
+        ValuePattern::Constant => base,
+        ValuePattern::Modulo => base + (ordinal % cardinality.max(1)) as f64 * step,
+        ValuePattern::Unique => base + ordinal as f64 * step,
         ValuePattern::SeededRandom => {
-            args.value_base
-                + (splitmix64(ordinal ^ args.value_seed) % args.value_cardinality.max(1)) as f64
-                    * args.value_step
+            base + (splitmix64(ordinal ^ seed) % cardinality.max(1)) as f64 * step
         }
         ValuePattern::RunLength => {
-            args.value_base
-                + ((ordinal / args.value_run_length.max(1)) % args.value_cardinality.max(1)) as f64
-                    * args.value_step
+            base + ((ordinal / run_length.max(1)) % cardinality.max(1)) as f64 * step
         }
         ValuePattern::QuantizedSignal => {
-            args.value_base
-                + (((series_idx % args.value_cardinality.max(1))
-                    + (local / args.value_run_length.max(1)))
-                    % args.value_cardinality.max(1)) as f64
-                    * args.value_step
+            base + (((series_idx % cardinality.max(1)) + (sample_idx / run_length.max(1)))
+                % cardinality.max(1)) as f64
+                * step
         }
         ValuePattern::SignalWithSporadicStalls => {
-            let every = args.value_stall_every.max(1);
-            let phase = local % every;
-            let effective = if phase < args.value_stall_length.min(every) {
-                local - phase
+            let every = stall_every.max(1);
+            let phase = sample_idx % every;
+            let effective = if phase < stall_length.min(every) {
+                sample_idx - phase
             } else {
-                local
+                sample_idx
             };
-            args.value_base + (series_idx % 97) as f64 + effective as f64 * args.value_step
+            base + (series_idx % 97) as f64 + effective as f64 * step
         }
         ValuePattern::MixedSignalRepeated => {
-            if local.is_multiple_of(args.value_mixed_every.max(1)) {
-                args.value_base
+            if sample_idx.is_multiple_of(mixed_every.max(1)) {
+                base
             } else {
-                args.value_base + (series_idx % 97) as f64 + local as f64 * args.value_step
+                base + (series_idx % 97) as f64 + sample_idx as f64 * step
             }
         }
     }
 }
+
 fn splitmix64(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9e3779b97f4a7c15);
     let mut mixed = value;

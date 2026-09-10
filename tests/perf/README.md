@@ -163,9 +163,9 @@ frontend path. Treat all performance conclusions as release-only; debug builds
 are suitable only for command wiring and correctness checks.
 
 `prepare-remote` creates the configured database if needed. The outer driver writes a per-target
-frontend config enabling `[prom_store]` with metric engine storage and a non-zero
-`pending_rows_flush_interval`, and validates that the logical metric table reaches
-`series_count * samples_per_series` rows before trusting the query measurements.
+frontend config enabling `[prom_store]` with a non-zero `pending_rows_flush_interval`; the default
+`input_protocol = "remote_write"` also enables metric-engine storage. It validates that the logical
+metric table reaches `series_count * samples_per_series` rows before trusting the query measurements.
 Use `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper
 to the outer driver.
 
@@ -448,3 +448,29 @@ Additional SQL optimizer cases:
   `LIMIT`.
 - `sql_join_filter_order`: two direct-SST tables joined on a shared tag with
   time filters, aggregate ordering, and `LIMIT`.
+
+### Native OTLP nanosecond LastRow case
+
+`otlp_ns_last_row_9070` reuses the remote-write-then-query lifecycle with
+`input_protocol = "otlp_metrics"`. Before each fresh target is loaded,
+`prepare-remote` creates its lowercase `ENGINE=mito` metric table with
+`greptime_timestamp TIMESTAMP(9)`, then sends binary OTLP gauge protobufs to
+`/v1/otlp/v1/metrics`. The load report records `input_protocol`, HTTP statuses,
+and decoded OTLP `partial_success.rejected_data_points`; a nonzero rejection
+fails preparation. It flushes the logical metric table, checks all 262144 rows,
+and verifies the stored timestamp retains the `+123ns` remainder.
+
+The measured requests are ordinary `TQL EVAL` instant and range selectors (3
+warmups, 9 iterations). Untimed `TQL EXPLAIN VERBOSE` evidence is retained in
+the report, and every measured response is row-normalized and compared with
+the base target, ignoring only timing metadata. This is explicitly
+legacy-data query coverage; it does not assert the new default OTLP
+millisecond table behavior. Use the usual remote-case dispatch:
+
+```bash
+uv run --no-project python .github/scripts/query-regression-run.py \
+  --cases tests/perf/query_cases/otlp_ns_last_row_9070/case.toml \
+  --base-bin /path/to/base/greptime --candidate-bin /path/to/candidate/greptime \
+  --fixture-generator /path/to/query_perf_fixture \
+  --runner /path/to/query_regression_runner --work-dir /path/to/work
+```
