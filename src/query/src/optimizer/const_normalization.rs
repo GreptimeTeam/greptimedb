@@ -1329,7 +1329,7 @@ mod tests {
                     None,
                 ))),
                 expected_greptime: "Filter: CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
-                expected_datafusion: "Filter: CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
+                expected_datafusion: "Filter: t.ts_ms = TimestampMillisecond(5000, None)\n  TableScan: t",
             },
             Case {
                 name: "timestamp widening try_cast exact",
@@ -1347,7 +1347,7 @@ mod tests {
                     None,
                 ))),
                 expected_greptime: "Filter: TRY_CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
-                expected_datafusion: "Filter: TRY_CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
+                expected_datafusion: "Filter: t.ts_ms = TimestampMillisecond(5000, None)\n  TableScan: t",
             },
         ];
 

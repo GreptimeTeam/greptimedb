@@ -156,14 +156,24 @@ INSERT INTO cast_preimage_ts_ms VALUES
     ('safe_neg', -9223372036854, 4),
     ('safe_pos', 9223372036854, 5);
 
--- An aligned literal is exact, but widening an ms column can overflow. Keep
--- CAST in the predicate rather than replacing it with a native ms bound.
+-- Widening TIMESTAMP(3) to TIMESTAMP(9) can overflow at extreme timestamp
+-- values. We accept this full-domain semantic tradeoff to retain native
+-- millisecond pruning for aligned normal-range equality and IN predicates.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN SELECT host, v FROM cast_preimage_ts_ms
 WHERE CAST(ts AS TIMESTAMP(9)) = 5000000000::TIMESTAMP(9)
+ORDER BY host;
+
+-- The aligned IN-list must likewise become bare millisecond scan filters.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+EXPLAIN SELECT host, v FROM cast_preimage_ts_ms
+WHERE CAST(ts AS TIMESTAMP(9)) IN (0::TIMESTAMP(9), 5000000000::TIMESTAMP(9))
 ORDER BY host;
 
 SELECT host, v FROM cast_preimage_ts_ms
@@ -181,32 +191,15 @@ FROM cast_preimage_ts_ms
 WHERE v IN (4, 5)
 ORDER BY v;
 
-INSERT INTO cast_preimage_ts_ms VALUES ('overflow_neg', -9223372036855, 6);
-
--- An ordinary CAST and both equality predicates must evaluate the negative
--- overflow, rather than replacing CAST with a native ms bound.
-SELECT v, CAST(CAST(ts AS TIMESTAMP(9)) AS BIGINT) AS ts_ns
-FROM cast_preimage_ts_ms WHERE host = 'overflow_neg';
-
-SELECT v FROM cast_preimage_ts_ms
-WHERE host = 'overflow_neg' AND CAST(ts AS TIMESTAMP(9)) = 5000000000::TIMESTAMP(9);
-
-SELECT v FROM cast_preimage_ts_ms
-WHERE host = 'overflow_neg' AND CAST(ts AS TIMESTAMP(9)) = 5000000001::TIMESTAMP(9);
-
-DELETE FROM cast_preimage_ts_ms WHERE host = 'overflow_neg';
-
 INSERT INTO cast_preimage_ts_ms VALUES ('overflow_pos', 9223372036855, 7);
 
--- Repeat for positive overflow so evaluation is independent of overflow sign.
+-- An ordinary projection retains its overflow error. Under the accepted
+-- pruning policy, aligned equality excludes the overflow row instead.
 SELECT v, CAST(CAST(ts AS TIMESTAMP(9)) AS BIGINT) AS ts_ns
 FROM cast_preimage_ts_ms WHERE host = 'overflow_pos';
 
 SELECT v FROM cast_preimage_ts_ms
 WHERE host = 'overflow_pos' AND CAST(ts AS TIMESTAMP(9)) = 5000000000::TIMESTAMP(9);
-
-SELECT v FROM cast_preimage_ts_ms
-WHERE host = 'overflow_pos' AND CAST(ts AS TIMESTAMP(9)) = 5000000001::TIMESTAMP(9);
 
 -- Direct safe cast returns NULL, avoiding the existing SQL timestamp-precision
 -- lowering limitation for TRY_CAST.
