@@ -453,7 +453,7 @@ fn single_evaluation_projection_expr_allowed(
                 };
                 alias.name == column.name
                     && matches!(
-                        cast.data_type,
+                        cast.field.data_type(),
                         DataType::Timestamp(ArrowTimeUnit::Millisecond, None)
                     )
                     && matches!(
