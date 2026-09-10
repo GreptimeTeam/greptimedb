@@ -1,0 +1,361 @@
+-- Regression coverage for instant and range selection on native microsecond and
+-- nanosecond time indexes.
+CREATE TABLE native_time_us (
+    ts TIMESTAMP(6) TIME INDEX,
+    series STRING PRIMARY KEY,
+    val DOUBLE,
+);
+
+Affected Rows: 0
+
+INSERT INTO native_time_us VALUES
+    (1000001, 'future', 101),
+    (1000000, 'exact', 201),
+    (1000001, 'exact', 202),
+    (-299000000, 'lowerbound', 301),
+    (-298999999, 'lowerplus', 302),
+    (1000000, 'positive_lowerbound', 701),
+    (1000001, 'positive_lowerplus', 702),
+    (1000001, 'multi', 401),
+    (-1000000, 'offset', 501),
+    (0, 'offset', 502),
+    (1000000, 'offset', 503),
+    (999999, 'past', 602),
+    (999001, 'past', 601),
+    (0, 'window', 1),
+    (1, 'window', 2),
+    (2, 'window', 5),
+    (1000000, 'window', 3),
+    (1000001, 'window', 4);
+
+Affected Rows: 18
+
+-- Future-only selection is empty before flushing, exercising the memtable path.
+TQL EVAL (1, 1, '1s', '300s') native_time_us{series="future"};
+
+++
+++
+
+ADMIN FLUSH_TABLE('native_time_us');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('native_time_us') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+-- At 1s, selection keeps an exact native timestamp.
+TQL EVAL (1, 1, '1s', '300s') native_time_us{series="exact"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 201.0 | exact  | 1970-01-01T00:00:01 |
++-------+--------+---------------------+
+
+TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_us{series="future"});
+
+++
+++
+
+TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_us{series="exact"});
+
++---------------------+-------+--------+
+| ts                  | value | series |
++---------------------+-------+--------+
+| 1970-01-01T00:00:01 | 1.0   | exact  |
++---------------------+-------+--------+
+
+-- Instant lookback bounds are exclusive: these return only 302 and 702.
+TQL EVAL (1, 1, '1s', '300s') native_time_us{series=~"lower.*"};
+
++-------+-----------+---------------------+
+| val   | series    | ts                  |
++-------+-----------+---------------------+
+| 302.0 | lowerplus | 1970-01-01T00:00:01 |
++-------+-----------+---------------------+
+
+TQL EVAL (301, 301, '1s', '300s') native_time_us{series=~"positive_lower.*"};
+
++-------+--------------------+---------------------+
+| val   | series             | ts                  |
++-------+--------------------+---------------------+
+| 702.0 | positive_lowerplus | 1970-01-01T00:05:01 |
++-------+--------------------+---------------------+
+
+-- The sub-millisecond point belongs only to the 2s evaluation step.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (1, 2, '1s', '300s') native_time_us{series="multi"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 401.0 | multi  | 1970-01-01T00:00:02 |
++-------+--------+---------------------+
+
+-- The latest native timestamp below 1s is retained even when inserts are unordered.
+TQL EVAL (1, 1, '1s', '300s') native_time_us{series="past"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 602.0 | past   | 1970-01-01T00:00:01 |
++-------+--------+---------------------+
+
+-- Offsets select native timestamps, including stored negative time.
+TQL EVAL (0, 0, '1s', '300s') native_time_us{series="offset"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 502.0 | offset | 1970-01-01T00:00:00 |
++-------+--------+---------------------+
+
+TQL EVAL (0, 0, '1s', '300s') native_time_us{series="offset"} offset 1s;
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 501.0 | offset | 1970-01-01T00:00:00 |
++-------+--------+---------------------+
+
+TQL EVAL (0, 0, '1s', '300s') native_time_us{series="offset"} offset -1s;
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 503.0 | offset | 1970-01-01T00:00:00 |
++-------+--------+---------------------+
+
+-- [1s] at 1s excludes 0 and 1s+tick, retaining 0+tick, 0+2ticks, and 1s.
+TQL EVAL (1, 1, '1s', '300s') count_over_time(native_time_us{series="window"}[1s]);
+
++---------------------+------------------------------------+--------+
+| ts                  | prom_count_over_time(ts_range,val) | series |
++---------------------+------------------------------------+--------+
+| 1970-01-01T00:00:01 | 3.0                                | window |
++---------------------+------------------------------------+--------+
+
+TQL EVAL (1, 1, '1s', '300s') sum_over_time(native_time_us{series="window"}[1s]);
+
++---------------------+----------------------------------+--------+
+| ts                  | prom_sum_over_time(ts_range,val) | series |
++---------------------+----------------------------------+--------+
+| 1970-01-01T00:00:01 | 10.0                             | window |
++---------------------+----------------------------------+--------+
+
+TQL EVAL (1, 1, '1s', '300s') last_over_time(native_time_us{series="window"}[1s]);
+
++---------------------+-----------------------------------+--------+
+| ts                  | prom_last_over_time(ts_range,val) | series |
++---------------------+-----------------------------------+--------+
+| 1970-01-01T00:00:01 | 3.0                               | window |
++---------------------+-----------------------------------+--------+
+
+-- The inner selector consumes native time; the subquery consumes ms evaluations.
+TQL EVAL (1, 1, '1s') last_over_time((native_time_us{series="exact"})[1s:1s]);
+
++---------------------+-----------------------------------+--------+
+| ts                  | prom_last_over_time(ts_range,val) | series |
++---------------------+-----------------------------------+--------+
+| 1970-01-01T00:00:01 | 201.0                             | exact  |
++---------------------+-----------------------------------+--------+
+
+DROP TABLE native_time_us;
+
+Affected Rows: 0
+
+CREATE TABLE native_time_ns (
+    ts TIMESTAMP(9) TIME INDEX,
+    series STRING PRIMARY KEY,
+    val DOUBLE,
+);
+
+Affected Rows: 0
+
+INSERT INTO native_time_ns VALUES
+    (1000000001, 'future', 101),
+    (1000000000, 'exact', 201),
+    (1000000001, 'exact', 202),
+    (-299000000000, 'lowerbound', 301),
+    (-298999999999, 'lowerplus', 302),
+    (1000000000, 'positive_lowerbound', 701),
+    (1000000001, 'positive_lowerplus', 702),
+    (1000000001, 'multi', 401),
+    (-1000000000, 'offset', 501),
+    (0, 'offset', 502),
+    (1000000000, 'offset', 503),
+    (999999000, 'past', 602),
+    (999001000, 'past', 601),
+    (0, 'window', 1),
+    (1, 'window', 2),
+    (2, 'window', 5),
+    (1000000000, 'window', 3),
+    (1000000001, 'window', 4);
+
+Affected Rows: 18
+
+-- Future-only selection is empty before flushing, exercising the memtable path.
+TQL EVAL (1, 1, '1s', '300s') native_time_ns{series="future"};
+
+++
+++
+
+ADMIN FLUSH_TABLE('native_time_ns');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('native_time_ns') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+-- At 1s, selection keeps an exact native timestamp.
+TQL EVAL (1, 1, '1s', '300s') native_time_ns{series="exact"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 201.0 | exact  | 1970-01-01T00:00:01 |
++-------+--------+---------------------+
+
+TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_ns{series="future"});
+
+++
+++
+
+TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_ns{series="exact"});
+
++---------------------+-------+--------+
+| ts                  | value | series |
++---------------------+-------+--------+
+| 1970-01-01T00:00:01 | 1.0   | exact  |
++---------------------+-------+--------+
+
+-- Instant lookback bounds are exclusive: these return only 302 and 702.
+TQL EVAL (1, 1, '1s', '300s') native_time_ns{series=~"lower.*"};
+
++-------+-----------+---------------------+
+| val   | series    | ts                  |
++-------+-----------+---------------------+
+| 302.0 | lowerplus | 1970-01-01T00:00:01 |
++-------+-----------+---------------------+
+
+TQL EVAL (301, 301, '1s', '300s') native_time_ns{series=~"positive_lower.*"};
+
++-------+--------------------+---------------------+
+| val   | series             | ts                  |
++-------+--------------------+---------------------+
+| 702.0 | positive_lowerplus | 1970-01-01T00:05:01 |
++-------+--------------------+---------------------+
+
+-- The sub-millisecond point belongs only to the 2s evaluation step.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (1, 2, '1s', '300s') native_time_ns{series="multi"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 401.0 | multi  | 1970-01-01T00:00:02 |
++-------+--------+---------------------+
+
+-- The latest native timestamp below 1s is retained even when inserts are unordered.
+TQL EVAL (1, 1, '1s', '300s') native_time_ns{series="past"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 602.0 | past   | 1970-01-01T00:00:01 |
++-------+--------+---------------------+
+
+-- Offsets select native timestamps, including stored negative time.
+TQL EVAL (0, 0, '1s', '300s') native_time_ns{series="offset"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 502.0 | offset | 1970-01-01T00:00:00 |
++-------+--------+---------------------+
+
+TQL EVAL (0, 0, '1s', '300s') native_time_ns{series="offset"} offset 1s;
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 501.0 | offset | 1970-01-01T00:00:00 |
++-------+--------+---------------------+
+
+TQL EVAL (0, 0, '1s', '300s') native_time_ns{series="offset"} offset -1s;
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 503.0 | offset | 1970-01-01T00:00:00 |
++-------+--------+---------------------+
+
+-- [1s] at 1s excludes 0 and 1s+tick, retaining 0+tick, 0+2ticks, and 1s.
+TQL EVAL (1, 1, '1s', '300s') count_over_time(native_time_ns{series="window"}[1s]);
+
++---------------------+------------------------------------+--------+
+| ts                  | prom_count_over_time(ts_range,val) | series |
++---------------------+------------------------------------+--------+
+| 1970-01-01T00:00:01 | 3.0                                | window |
++---------------------+------------------------------------+--------+
+
+TQL EVAL (1, 1, '1s', '300s') sum_over_time(native_time_ns{series="window"}[1s]);
+
++---------------------+----------------------------------+--------+
+| ts                  | prom_sum_over_time(ts_range,val) | series |
++---------------------+----------------------------------+--------+
+| 1970-01-01T00:00:01 | 10.0                             | window |
++---------------------+----------------------------------+--------+
+
+TQL EVAL (1, 1, '1s', '300s') last_over_time(native_time_ns{series="window"}[1s]);
+
++---------------------+-----------------------------------+--------+
+| ts                  | prom_last_over_time(ts_range,val) | series |
++---------------------+-----------------------------------+--------+
+| 1970-01-01T00:00:01 | 3.0                               | window |
++---------------------+-----------------------------------+--------+
+
+-- The inner selector consumes native time; the subquery consumes ms evaluations.
+TQL EVAL (1, 1, '1s') last_over_time((native_time_ns{series="exact"})[1s:1s]);
+
++---------------------+-----------------------------------+--------+
+| ts                  | prom_last_over_time(ts_range,val) | series |
++---------------------+-----------------------------------+--------+
+| 1970-01-01T00:00:01 | 201.0                             | exact  |
++---------------------+-----------------------------------+--------+
+
+DROP TABLE native_time_ns;
+
+Affected Rows: 0
+
+-- Second precision is promoted before applying fractional-second offsets.
+CREATE TABLE native_time_sec (ts TIMESTAMP(0) TIME INDEX, val DOUBLE);
+
+Affected Rows: 0
+
+INSERT INTO native_time_sec VALUES (0, 10), (1, 11), (2, 12);
+
+Affected Rows: 3
+
+TQL EVAL (1, 1, '1s', '1s') native_time_sec offset 500ms;
+
++------+---------------------+
+| val  | ts                  |
++------+---------------------+
+| 10.0 | 1970-01-01T00:00:01 |
++------+---------------------+
+
+TQL EVAL (1, 1, '1s', '1s') native_time_sec offset -500ms;
+
++------+---------------------+
+| val  | ts                  |
++------+---------------------+
+| 11.0 | 1970-01-01T00:00:01 |
++------+---------------------+
+
+DROP TABLE native_time_sec;
+
+Affected Rows: 0
+
