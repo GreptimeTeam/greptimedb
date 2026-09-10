@@ -21,7 +21,7 @@ use std::task::{Context, Poll};
 use common_telemetry::{debug, warn};
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::{Field, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -424,6 +424,70 @@ pub struct RangeManipulateExec {
     properties: Arc<PlanProperties>,
 }
 
+/// The range-fold parameters and the pre-fold input a fused consumer needs to
+/// recompute a range function directly from the raw samples.
+pub(super) struct FusedRateSource {
+    pub input: Arc<dyn ExecutionPlan>,
+    pub range: Millisecond,
+    pub time_index: usize,
+    pub value_index: usize,
+}
+
+impl RangeManipulateExec {
+    /// Returns the evaluation grid when every requested column is a series label
+    /// carried through unchanged, or the evaluation time index itself.
+    pub fn series_group_grid(
+        &self,
+        columns: &[usize],
+    ) -> Option<(Millisecond, Millisecond, Millisecond)> {
+        for index in columns {
+            let field = self.output_schema.fields().get(*index)?;
+            // Field and range columns vary within a series, and another timestamp
+            // column is not proven to sit on this grid.
+            if self.field_columns.contains(field.name()) || field.name() == &self.time_range_column
+            {
+                return None;
+            }
+            if matches!(field.data_type(), DataType::Timestamp(_, _))
+                && field.name() != &self.time_index_column
+            {
+                return None;
+            }
+        }
+        Some((self.start, self.end, self.interval))
+    }
+
+    /// Accepts a `prom_rate`-shaped argument list when it reads exactly the columns this
+    /// node folds, over the same window and grid, so the fold can be skipped entirely.
+    pub(super) fn fused_rate_source(
+        &self,
+        timestamp_range: usize,
+        value: usize,
+        evaluation_time: usize,
+        range_length: i64,
+        grid: (i64, i64, i64),
+    ) -> Option<FusedRateSource> {
+        let input_schema = self.input.schema();
+        let time_index = input_schema.column_with_name(&self.time_index_column)?.0;
+        let value_field = self.output_schema.fields().get(value)?;
+        if timestamp_range + 1 != self.output_schema.fields().len()
+            || self.output_schema.field(timestamp_range).name() != &self.time_range_column
+            || evaluation_time != time_index
+            || !self.field_columns.contains(value_field.name())
+            || range_length != self.range
+            || grid != (self.start, self.end, self.interval)
+        {
+            return None;
+        }
+        Some(FusedRateSource {
+            input: self.input.clone(),
+            range: self.range,
+            time_index,
+            value_index: value,
+        })
+    }
+}
+
 impl ExecutionPlan for RangeManipulateExec {
     fn as_any(&self) -> &dyn Any {
         self
@@ -704,54 +768,68 @@ impl RangeManipulateStream {
                 )
             })?;
 
-        let len = ts_column.len();
-        if len == 0 {
-            return Ok((vec![], (self.start, self.end)));
-        }
-
-        // shorten the range to calculate
-        let first_ts = ts_column.value(0);
-        // Preserve the query's alignment pattern when optimizing start time
-        let remainder = (first_ts - self.start).rem_euclid(self.interval);
-        let first_ts_aligned = if remainder == 0 {
-            first_ts
-        } else {
-            first_ts + (self.interval - remainder)
-        };
-        let last_ts = ts_column.value(ts_column.len() - 1);
-        let last_ts_with_range = last_ts + self.range;
-        let remainder = (last_ts_with_range - self.start).rem_euclid(self.interval);
-        let last_ts_aligned = last_ts_with_range - remainder;
-        let start = self.start.max(first_ts_aligned);
-        let end = self.end.min(last_ts_aligned);
-        if start > end {
-            return Ok((vec![], (start, end)));
-        }
-        let mut ranges = Vec::with_capacity(((self.end - self.start) / self.interval + 1) as usize);
-
-        // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
-        let mut left = 0usize;
-        let mut right = 0usize;
-        for curr_ts in (start..=end).step_by(self.interval as _) {
-            let start_ts = curr_ts - self.range;
-
-            while left < len && ts_column.value(left) <= start_ts {
-                left += 1;
-            }
-            right = right.max(left);
-            while right < len && ts_column.value(right) <= curr_ts {
-                right += 1;
-            }
-
-            if left == right {
-                ranges.push((0, 0));
-            } else {
-                ranges.push((left as _, (right - left) as _));
-            }
-        }
-
-        Ok((ranges, (start, end)))
+        calculate_ranges(ts_column, self.start, self.end, self.interval, self.range)
     }
+}
+
+/// Folds an ordered timestamp column into one `(offset, length)` window per aligned
+/// evaluation timestamp, together with the bounds those windows actually cover.
+#[allow(clippy::type_complexity)]
+pub(super) fn calculate_ranges(
+    timestamps: &TimestampMillisecondArray,
+    requested_start: i64,
+    requested_end: i64,
+    interval: i64,
+    range: i64,
+) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
+    let len = timestamps.len();
+    if len == 0 {
+        return Ok((vec![], (requested_start, requested_end)));
+    }
+
+    // shorten the range to calculate
+    let first_ts = timestamps.value(0);
+    // Preserve the query's alignment pattern when optimizing start time
+    let remainder = (first_ts - requested_start).rem_euclid(interval);
+    let first_ts_aligned = if remainder == 0 {
+        first_ts
+    } else {
+        first_ts + (interval - remainder)
+    };
+    let last_ts = timestamps.value(len - 1);
+    let last_ts_with_range = last_ts + range;
+    let remainder = (last_ts_with_range - requested_start).rem_euclid(interval);
+    let last_ts_aligned = last_ts_with_range - remainder;
+    let start = requested_start.max(first_ts_aligned);
+    let end = requested_end.min(last_ts_aligned);
+    if start > end {
+        return Ok((vec![], (start, end)));
+    }
+    let mut ranges =
+        Vec::with_capacity(((requested_end - requested_start) / interval + 1) as usize);
+
+    // calculate for every aligned timestamp (`current`), assume the ts column is ordered.
+    let mut left = 0usize;
+    let mut right = 0usize;
+    for current in (start..=end).step_by(interval as _) {
+        let range_start = current - range;
+
+        while left < len && timestamps.value(left) <= range_start {
+            left += 1;
+        }
+        right = right.max(left);
+        while right < len && timestamps.value(right) <= current {
+            right += 1;
+        }
+
+        if left == right {
+            ranges.push((0, 0));
+        } else {
+            ranges.push((left as _, (right - left) as _));
+        }
+    }
+
+    Ok((ranges, (start, end)))
 }
 
 #[cfg(test)]

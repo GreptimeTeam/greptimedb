@@ -189,97 +189,154 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             .values();
         let eval_ts = eval_ts_array.values();
 
-        let mut result_builder = Float64Builder::with_capacity(num_windows);
-        let range_length = self.range_length;
-        let range_length_secs = range_length as f64 / 1000.0;
+        let result = calculate_extrapolated_rate::<IS_COUNTER, IS_RATE, _>(
+            all_timestamps,
+            all_values,
+            keys.iter().map(|&key| unpack(key)),
+            num_windows,
+            eval_ts,
+            self.range_length,
+        );
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+}
 
-        // Range windows normally overlap heavily, so scanning every one for resets costs far
-        // more than a single pass over the values. Index the reset positions once that is the
-        // cheaper side, and stop counting as soon as the requested pairs pass that budget,
-        // which heavy overlap does within the first few windows. A short lookback with a long
-        // step is the shape that never reaches it, and there the per-window scans do win.
-        let mut reset_index = if IS_COUNTER {
-            let budget = all_values.len().saturating_sub(1);
-            let mut scanned_pairs = 0usize;
-            keys.iter()
-                .any(|&key| {
-                    scanned_pairs =
-                        scanned_pairs.saturating_add(unpack(key).1.saturating_sub(1) as usize);
-                    scanned_pairs > budget
-                })
-                .then(|| CounterResetIndex::new(all_values))
-        } else {
-            None
-        };
+/// `prom_rate` over windows already folded as `(offset, length)` pairs, for a caller that
+/// holds the raw samples and does not need the intermediate range vectors.
+///
+/// `ranges` must index into `timestamps` and `values`, as [`calculate_ranges`] produces.
+///
+/// [`calculate_ranges`]: crate::extension_plan::calculate_ranges
+pub(crate) fn calculate_rate(
+    timestamps: &TimestampMillisecondArray,
+    values: &Float64Array,
+    ranges: &[(u32, u32)],
+    eval_timestamps: &[i64],
+    range_length: i64,
+) -> DfResult<Float64Array> {
+    if timestamps.len() != values.len() {
+        return Err(DataFusionError::Execution(format!(
+            "{}: timestamp and value vectors should have the same number of rows, found {} and {}",
+            Rate::name(),
+            timestamps.len(),
+            values.len()
+        )));
+    }
+    if eval_timestamps.len() != ranges.len() {
+        return Err(DataFusionError::Execution(format!(
+            "{}: evaluation timestamp vector should have the same number of rows as range inputs, found {} and {}",
+            Rate::name(),
+            eval_timestamps.len(),
+            ranges.len()
+        )));
+    }
+    Ok(calculate_extrapolated_rate::<true, true, _>(
+        timestamps.values(),
+        values.values(),
+        ranges.iter().copied(),
+        ranges.len(),
+        eval_timestamps,
+        range_length,
+    ))
+}
 
-        for index in 0..num_windows {
-            let (raw_offset, raw_length) = unpack(keys[index]);
-            let offset = raw_offset as usize;
-            let length = raw_length as usize;
+fn calculate_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool, I>(
+    all_timestamps: &[i64],
+    all_values: &[f64],
+    ranges: I,
+    num_windows: usize,
+    eval_timestamps: &[i64],
+    range_length: i64,
+) -> Float64Array
+where
+    I: Iterator<Item = (u32, u32)> + Clone,
+{
+    let mut result_builder = Float64Builder::with_capacity(num_windows);
+    let range_length_secs = range_length as f64 / 1000.0;
 
-            if length < 2 {
-                result_builder.append_null();
-                continue;
-            }
+    // Range windows normally overlap heavily, so scanning every one for resets costs far
+    // more than a single pass over the values. Index the reset positions once that is the
+    // cheaper side, and stop counting as soon as the requested pairs pass that budget,
+    // which heavy overlap does within the first few windows. A short lookback with a long
+    // step is the shape that never reaches it, and there the per-window scans do win.
+    let mut reset_index = if IS_COUNTER {
+        let budget = all_values.len().saturating_sub(1);
+        let mut scanned_pairs = 0usize;
+        ranges
+            .clone()
+            .any(|(_, length)| {
+                scanned_pairs = scanned_pairs.saturating_add(length.saturating_sub(1) as usize);
+                scanned_pairs > budget
+            })
+            .then(|| CounterResetIndex::new(all_values))
+    } else {
+        None
+    };
 
-            let end = offset + length;
-            let first_value = all_values[offset];
-            let last_value = all_values[end - 1];
+    for ((raw_offset, raw_length), &range_end) in ranges.zip(eval_timestamps) {
+        let offset = raw_offset as usize;
+        let length = raw_length as usize;
 
-            let mut result_value = last_value - first_value;
-            if IS_COUNTER {
-                result_value = match &mut reset_index {
-                    Some(reset_index) => reset_index.add_resets(result_value, offset, end),
-                    None => add_counter_resets(result_value, &all_values[offset..end]),
-                };
-            }
-
-            let first_ts = all_timestamps[offset];
-            let last_ts = all_timestamps[end - 1];
-            let range_end = eval_ts[index];
-            let range_start = range_end - range_length;
-            let sampled_interval_ms = (last_ts - first_ts) as f64;
-            let average_interval_ms = sampled_interval_ms / (length - 1) as f64;
-            let mut duration_to_start_ms = (first_ts - range_start) as f64;
-            let duration_to_end_ms = (range_end - last_ts) as f64;
-
-            // Counters cannot be negative, so Prometheus allows the extrapolation window to snap
-            // back to the inferred zero point instead of extending into negative values.
-            if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
-                let duration_to_zero = sampled_interval_ms * (first_value / result_value);
-                if duration_to_zero < duration_to_start_ms {
-                    duration_to_start_ms = duration_to_zero;
-                }
-            }
-
-            let extrapolation_threshold = average_interval_ms * 1.1;
-            let mut extrapolated_interval_ms = sampled_interval_ms;
-
-            // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
-            // close enough, otherwise add half an average sampling interval on that side.
-            if duration_to_start_ms < extrapolation_threshold {
-                extrapolated_interval_ms += duration_to_start_ms;
-            } else {
-                extrapolated_interval_ms += average_interval_ms / 2.0;
-            }
-            if duration_to_end_ms < extrapolation_threshold {
-                extrapolated_interval_ms += duration_to_end_ms;
-            } else {
-                extrapolated_interval_ms += average_interval_ms / 2.0;
-            }
-
-            let mut factor = extrapolated_interval_ms / sampled_interval_ms;
-
-            if IS_RATE {
-                factor /= range_length_secs;
-            }
-
-            result_builder.append_value(result_value * factor);
+        if length < 2 {
+            result_builder.append_null();
+            continue;
         }
 
-        let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
-        Ok(result)
+        let end = offset + length;
+        let first_value = all_values[offset];
+        let last_value = all_values[end - 1];
+
+        let mut result_value = last_value - first_value;
+        if IS_COUNTER {
+            result_value = match &mut reset_index {
+                Some(reset_index) => reset_index.add_resets(result_value, offset, end),
+                None => add_counter_resets(result_value, &all_values[offset..end]),
+            };
+        }
+
+        let first_ts = all_timestamps[offset];
+        let last_ts = all_timestamps[end - 1];
+        let range_start = range_end - range_length;
+        let sampled_interval_ms = (last_ts - first_ts) as f64;
+        let average_interval_ms = sampled_interval_ms / (length - 1) as f64;
+        let mut duration_to_start_ms = (first_ts - range_start) as f64;
+        let duration_to_end_ms = (range_end - last_ts) as f64;
+
+        // Counters cannot be negative, so Prometheus allows the extrapolation window to snap
+        // back to the inferred zero point instead of extending into negative values.
+        if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
+            let duration_to_zero = sampled_interval_ms * (first_value / result_value);
+            if duration_to_zero < duration_to_start_ms {
+                duration_to_start_ms = duration_to_zero;
+            }
+        }
+
+        let extrapolation_threshold = average_interval_ms * 1.1;
+        let mut extrapolated_interval_ms = sampled_interval_ms;
+
+        // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
+        // close enough, otherwise add half an average sampling interval on that side.
+        if duration_to_start_ms < extrapolation_threshold {
+            extrapolated_interval_ms += duration_to_start_ms;
+        } else {
+            extrapolated_interval_ms += average_interval_ms / 2.0;
+        }
+        if duration_to_end_ms < extrapolation_threshold {
+            extrapolated_interval_ms += duration_to_end_ms;
+        } else {
+            extrapolated_interval_ms += average_interval_ms / 2.0;
+        }
+
+        let mut factor = extrapolated_interval_ms / sampled_interval_ms;
+
+        if IS_RATE {
+            factor /= range_length_secs;
+        }
+
+        result_builder.append_value(result_value * factor);
     }
+
+    result_builder.finish()
 }
 
 /// Adds the value preceding every counter reset in `values` to `result`, in sample order.
