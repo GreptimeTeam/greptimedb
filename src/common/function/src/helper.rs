@@ -23,6 +23,21 @@ use datatypes::types::cast::cast;
 use datatypes::value::ValueRef;
 use snafu::{OptionExt, ResultExt};
 
+/// Legacy primitive numeric signature types; Decimal values are coerced to `Float64`.
+pub(crate) const NUMERICS: &[DataType] = &[
+    DataType::Int8,
+    DataType::Int16,
+    DataType::Int32,
+    DataType::Int64,
+    DataType::UInt8,
+    DataType::UInt16,
+    DataType::UInt32,
+    DataType::UInt64,
+    DataType::Float16,
+    DataType::Float32,
+    DataType::Float64,
+];
+
 /// Create a function signature with oneof signatures of interleaving two arguments.
 pub(crate) fn one_of_sigs2(args1: Vec<DataType>, args2: Vec<DataType>) -> Signature {
     let mut sigs = Vec::with_capacity(args1.len() * args2.len());

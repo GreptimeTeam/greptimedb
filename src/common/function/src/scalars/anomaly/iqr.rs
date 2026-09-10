@@ -35,6 +35,7 @@ use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
+use crate::helper::NUMERICS;
 use crate::scalars::anomaly::utils::{cast_to_f64, collect_window_values, percentile_sorted};
 
 /// Minimum valid samples for IQR (linear-interpolated Q1 != Q3 is possible at n >= 3).
@@ -48,7 +49,7 @@ pub struct AnomalyScoreIqr {
 impl AnomalyScoreIqr {
     pub fn new() -> Self {
         Self {
-            signature: Signature::numeric(2, Volatility::Immutable),
+            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
         }
     }
 }

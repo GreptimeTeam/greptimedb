@@ -31,6 +31,7 @@ use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
+use crate::helper::NUMERICS;
 use crate::scalars::anomaly::utils::{
     anomaly_ratio, cast_to_f64, collect_window_values, median_f64,
 };
@@ -49,7 +50,7 @@ pub struct AnomalyScoreMad {
 impl AnomalyScoreMad {
     pub fn new() -> Self {
         Self {
-            signature: Signature::numeric(1, Volatility::Immutable),
+            signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
         }
     }
 }

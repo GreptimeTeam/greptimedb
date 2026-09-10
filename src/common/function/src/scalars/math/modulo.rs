@@ -21,6 +21,7 @@ use datafusion_common::arrow::datatypes::DataType;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
 use crate::function::{Function, extract_args};
+use crate::helper::NUMERICS;
 
 const NAME: &str = "mod";
 
@@ -33,7 +34,7 @@ pub(crate) struct ModuloFunction {
 impl Default for ModuloFunction {
     fn default() -> Self {
         Self {
-            signature: Signature::numeric(2, Volatility::Immutable),
+            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
         }
     }
 }
@@ -90,11 +91,69 @@ mod tests {
 
     use arrow_schema::Field;
     use datafusion_common::arrow::array::{
-        AsArray, Float64Array, Int32Array, StringViewArray, UInt32Array,
+        AsArray, Decimal128Array, Float64Array, Int32Array, StringViewArray, UInt32Array,
     };
     use datafusion_common::arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
+    use datafusion_expr::type_coercion::functions::data_types;
 
     use super::*;
+    fn decimal_array(values: Vec<i128>) -> ColumnarValue {
+        ColumnarValue::Array(Arc::new(
+            Decimal128Array::from(values)
+                .with_precision_and_scale(10, 2)
+                .unwrap(),
+        ))
+    }
+
+    fn decimal_scalar(value: i128) -> ColumnarValue {
+        ColumnarValue::Scalar(ScalarValue::Decimal128(Some(value), 10, 2))
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn modulo_decimal_coercion_executes_as_float64() {
+        let function = ModuloFunction::default();
+        let test_cases = [
+            (
+                vec![decimal_array(vec![500, 600]), decimal_scalar(200)],
+                vec![1.0, 0.0],
+            ),
+            (
+                vec![decimal_scalar(500), decimal_array(vec![200, 300])],
+                vec![1.0, 2.0],
+            ),
+        ];
+
+        for (args, expected) in test_cases {
+            let input_types = args
+                .iter()
+                .map(ColumnarValue::data_type)
+                .collect::<Vec<_>>();
+            let planned_types =
+                data_types(function.name(), &input_types, function.signature()).unwrap();
+            assert_eq!(vec![DataType::Float64; 2], planned_types);
+            let args = args
+                .into_iter()
+                .zip(planned_types)
+                .map(|(arg, planned_type)| arg.cast_to(&planned_type, None))
+                .collect::<datafusion_common::Result<Vec<_>>>()
+                .unwrap();
+            let result = function
+                .invoke_with_args(ScalarFunctionArgs {
+                    args,
+                    arg_fields: vec![],
+                    number_rows: 2,
+                    return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+                    config_options: Arc::new(Default::default()),
+                })
+                .unwrap()
+                .to_array(2)
+                .unwrap();
+            let result = result.as_primitive::<Float64Type>();
+            assert_eq!(&Float64Array::from(expected), result);
+        }
+    }
+
     #[test]
     fn test_mod_function_signed() {
         let function = ModuloFunction::default();
