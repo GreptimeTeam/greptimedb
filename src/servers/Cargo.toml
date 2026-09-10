@@ -146,7 +146,7 @@ vrl.workspace = true
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
-tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
+tikv-jemalloc-ctl = { version = "0.7", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
@@ -175,7 +175,7 @@ tokio-postgres-rustls = "0.14"
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
 
 [target.'cfg(not(windows))'.dev-dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 
 [build-dependencies]
 common-version.workspace = true

@@ -370,6 +370,13 @@ datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev =
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "bb531e754b3b36d7a4d3222f35ebc88204dafd2b" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
 
+# Temporary: use the GreptimeTeam fork of tikv-jemalloc-sys embedding
+# jemalloc 5.3.1 + backport of 54f22c83 ("Initialize TSD tcache before
+# enabling it"), fixing the TSD/tcache enable-before-init reentrancy
+# window. Remove once tikv/jemallocator ships a jemalloc snapshot that
+# includes the fix. See GreptimeTeam/jemalloc#1.
+tikv-jemalloc-sys = { git = "https://github.com/GreptimeTeam/jemallocator", rev = "e1846d8c12bbb65c39dcd224a86b24586478e264" }
+
 [profile.release]
 debug = 1
 
