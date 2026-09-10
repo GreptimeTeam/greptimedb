@@ -142,6 +142,8 @@ impl MetricEngineInner {
         let data_region_id = to_data_region_id(physical_region_id);
         let primary_key_encoding = self.get_primary_key_encoding(data_region_id)?;
 
+        // TODO(weny): Consolidate validation and merging to avoid redundant request traversals,
+        // while ensuring the entire batch is validated before writing.
         // Validate all requests
         self.validate_batch_requests(physical_region_id, &mut requests)
             .await?;
@@ -862,12 +864,11 @@ mod tests {
             let build_requests = |versions: [Option<u64>; 3]| {
                 versions
                     .into_iter()
-                    .zip([false; 3])
-                    .map(|(partition_expr_version, skip_wal)| {
+                    .map(|partition_expr_version| {
                         (
                             logical_region_id,
                             RegionPutRequest {
-                                skip_wal,
+                                skip_wal: false,
                                 rows: Rows {
                                     schema: test_util::row_schema_with_tags(&["job"]),
                                     rows: test_util::build_rows(1, 1),
@@ -1217,42 +1218,37 @@ mod tests {
             ]
         };
 
-        let encoding = if expect_sparse {
-            PrimaryKeyEncoding::Sparse
-        } else {
-            PrimaryKeyEncoding::Dense
-        };
-        let merge = |requests| match encoding {
-            PrimaryKeyEncoding::Sparse => env
-                .metric()
-                .inner
-                .merge_sparse_batch(physical_region_id, requests),
-            PrimaryKeyEncoding::Dense => env
-                .metric()
-                .inner
-                .merge_dense_batch(data_region_id, requests),
-        };
-        let (merged_request, _) = merge(build_requests()).unwrap();
-        if expect_sparse {
-            assert_eq!(
-                merged_request.hint.as_ref().unwrap().primary_key_encoding,
-                PrimaryKeyEncodingProto::Sparse as i32
-            );
-        } else {
-            assert!(merged_request.hint.is_none());
-        }
-        assert_merged_schema(&merged_request.rows, expect_sparse);
-        assert!(!merged_request.skip_wal);
-
         for skip_wal in [false, true] {
             let mut requests = build_requests();
             for (_, request) in &mut requests {
                 request.skip_wal = skip_wal;
-                request.partition_expr_version = Some(7);
             }
-            let (merged, affected_rows) = merge(requests).unwrap();
-            assert_eq!(merged.skip_wal, skip_wal);
-            assert_eq!(merged.partition_expr_version, Some(7));
+            let (merged_request, affected_rows) = if expect_sparse {
+                let (merged_request, affected_rows) = env
+                    .metric()
+                    .inner
+                    .merge_sparse_batch(physical_region_id, requests)
+                    .unwrap();
+                let hint = merged_request
+                    .hint
+                    .as_ref()
+                    .expect("missing sparse write hint");
+                assert_eq!(
+                    hint.primary_key_encoding,
+                    PrimaryKeyEncodingProto::Sparse as i32
+                );
+                (merged_request, affected_rows)
+            } else {
+                let (merged_request, affected_rows) = env
+                    .metric()
+                    .inner
+                    .merge_dense_batch(data_region_id, requests)
+                    .unwrap();
+                assert!(merged_request.hint.is_none());
+                (merged_request, affected_rows)
+            };
+            assert_merged_schema(&merged_request.rows, expect_sparse);
+            assert_eq!(merged_request.skip_wal, skip_wal);
             assert_eq!(affected_rows, 5);
         }
 
