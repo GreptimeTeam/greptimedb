@@ -152,9 +152,7 @@ impl InstructionHandler for PackedGcRegionsHandler {
             Ok(manifest) => manifest,
             Err(err) => {
                 return Some(InstructionReply::GcRegions(GcRegionsReply {
-                    result: Err(
-                        common_meta::instruction::InstructionError::legacy_internal_retryable(err),
-                    ),
+                    result: Err(common_meta::instruction::InstructionError::from_error(&err)),
                 }));
             }
         };

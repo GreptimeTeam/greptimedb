@@ -269,6 +269,20 @@ pub enum Error {
         error: prost::DecodeError,
     },
 
+    #[snafu(display("Failed to decode packed file references"))]
+    DecodePackedFileRefs {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: base64::DecodeError,
+    },
+
+    #[snafu(display("Invalid packed file references framing"))]
+    InvalidPackedFileRefs {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to encode object into json"))]
     EncodeJson {
         #[snafu(implicit)]
@@ -1212,6 +1226,8 @@ impl ErrorExt for Error {
             | PayloadNotExist { .. }
             | ConvertRawKey { .. }
             | DecodeProto { .. }
+            | DecodePackedFileRefs { .. }
+            | InvalidPackedFileRefs { .. }
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
             | TableRepartNotFound { .. }

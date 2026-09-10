@@ -20,6 +20,7 @@ use base64::Engine;
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use snafu::ResultExt as _;
 use store_api::region_engine::SyncRegionFromRequest;
 use store_api::region_request::{RegionFlushReason, RegionRequirements};
 use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, RegionId, RegionNumber};
@@ -27,6 +28,7 @@ use strum::Display;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
+use crate::error::{DecodePackedFileRefsSnafu, InvalidPackedFileRefsSnafu};
 use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
 use crate::key::{FlowId, FlowPartitionId};
@@ -631,10 +633,10 @@ impl Display for PackedGcRegions {
     }
 }
 
-/// A packed, JSON-compatible encoding of a file reference manifest. UUIDs are
-/// packed as 16-byte records; indexed records append an 8-byte big-endian u64.
+/// A packed, JSON-compatible encoding of a file reference manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PackedFileRefsManifest {
+    /// Required packed file references for each region.
     pub file_refs: HashMap<RegionId, PackedRegionFileRefs>,
     #[serde(default)]
     pub manifest_version: HashMap<RegionId, u64>,
@@ -642,85 +644,111 @@ pub struct PackedFileRefsManifest {
     pub cross_region_refs: HashMap<RegionId, HashSet<RegionId>>,
 }
 
+/// Packed file references for one region, encoded with STANDARD Base64.
+///
+/// `files` is required and contains 16-byte UUID records for references whose
+/// `index_version` is `None`. `indexed` is required and contains 24-byte records
+/// for references whose `index_version` is `Some`: a 16-byte UUID followed by
+/// an 8-byte big-endian `u64` version. Decoding fails when either field is not
+/// valid STANDARD Base64 or its decoded bytes do not align to the corresponding
+/// record width.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PackedRegionFileRefs {
+    /// Required STANDARD Base64-encoded 16-byte UUID records.
     pub files: String,
+    /// Required STANDARD Base64-encoded 16-byte UUID and 8-byte version records.
     pub indexed: String,
 }
 
 impl PackedFileRefsManifest {
+    /// Packs a file reference manifest using required [`PackedRegionFileRefs`]
+    /// STANDARD Base64 fields.
+    ///
+    /// References whose `index_version` is `None` are encoded as 16-byte UUID
+    /// `files` records; references whose `index_version` is `Some` are encoded
+    /// as 24-byte `indexed` records: a 16-byte UUID followed by an 8-byte
+    /// big-endian `u64` version.
     pub fn from_manifest(manifest: &FileRefsManifest) -> Self {
-        let engine = base64::engine::general_purpose::STANDARD;
-        let file_refs = manifest
-            .file_refs
-            .iter()
-            .map(|(region, refs)| {
-                let mut files = Vec::new();
-                let mut indexed = Vec::new();
-                for file_ref in refs {
-                    match file_ref.index_version {
-                        None => files.extend_from_slice(file_ref.file_id.as_bytes()),
-                        Some(version) => {
-                            indexed.extend_from_slice(file_ref.file_id.as_bytes());
-                            indexed.extend_from_slice(&version.to_be_bytes());
-                        }
-                    }
-                }
-                (
-                    *region,
-                    PackedRegionFileRefs {
-                        files: engine.encode(files),
-                        indexed: engine.encode(indexed),
-                    },
-                )
-            })
-            .collect();
         Self {
-            file_refs,
+            file_refs: manifest
+                .file_refs
+                .iter()
+                .map(|(region, refs)| (*region, PackedRegionFileRefs::from_refs(refs)))
+                .collect(),
             manifest_version: manifest.manifest_version.clone(),
             cross_region_refs: manifest.cross_region_refs.clone(),
         }
     }
 
-    pub fn into_manifest(self) -> std::result::Result<FileRefsManifest, String> {
-        let engine = base64::engine::general_purpose::STANDARD;
+    /// Decodes this packed representation into a file reference manifest.
+    ///
+    /// Returns a typed error for invalid STANDARD Base64 or malformed record
+    /// framing without retaining encoded payloads.
+    pub fn into_manifest(self) -> crate::error::Result<FileRefsManifest> {
         let mut file_refs = HashMap::new();
         for (region, encoded) in self.file_refs {
-            let files = engine
-                .decode(encoded.files)
-                .map_err(|e| format!("invalid packed file refs base64: {e}"))?;
-            let indexed = engine
-                .decode(encoded.indexed)
-                .map_err(|e| format!("invalid packed indexed refs base64: {e}"))?;
-            if files.len() % 16 != 0 || indexed.len() % 24 != 0 {
-                return Err(format!(
-                    "invalid packed file refs length for region {region}"
-                ));
-            }
-            let mut refs = HashSet::new();
-            for bytes in files.chunks_exact(16) {
-                let mut id = [0; 16];
-                id.copy_from_slice(bytes);
-                refs.insert(FileRef::new(region, FileId::from_bytes(id), None));
-            }
-            for bytes in indexed.chunks_exact(24) {
-                let mut id = [0; 16];
-                id.copy_from_slice(&bytes[..16]);
-                let mut version = [0; 8];
-                version.copy_from_slice(&bytes[16..]);
-                refs.insert(FileRef::new(
-                    region,
-                    FileId::from_bytes(id),
-                    Some(u64::from_be_bytes(version)),
-                ));
-            }
-            file_refs.insert(region, refs);
+            file_refs.insert(region, encoded.into_refs(region)?);
         }
         Ok(FileRefsManifest {
             file_refs,
             manifest_version: self.manifest_version,
             cross_region_refs: self.cross_region_refs,
         })
+    }
+}
+
+impl PackedRegionFileRefs {
+    /// Packs file references as the documented STANDARD Base64 record streams.
+    pub fn from_refs(refs: &HashSet<FileRef>) -> Self {
+        let engine = base64::engine::general_purpose::STANDARD;
+        let mut files = Vec::new();
+        let mut indexed = Vec::new();
+        for file_ref in refs {
+            match file_ref.index_version {
+                None => files.extend_from_slice(file_ref.file_id.as_bytes()),
+                Some(version) => {
+                    indexed.extend_from_slice(file_ref.file_id.as_bytes());
+                    indexed.extend_from_slice(&version.to_be_bytes());
+                }
+            }
+        }
+        Self {
+            files: engine.encode(files),
+            indexed: engine.encode(indexed),
+        }
+    }
+
+    /// Decodes the documented STANDARD Base64 record streams for `region`.
+    fn into_refs(self, region: RegionId) -> crate::error::Result<HashSet<FileRef>> {
+        let engine = base64::engine::general_purpose::STANDARD;
+        let files = engine
+            .decode(self.files)
+            .context(DecodePackedFileRefsSnafu)?;
+        let indexed = engine
+            .decode(self.indexed)
+            .context(DecodePackedFileRefsSnafu)?;
+        if files.len() % 16 != 0 || indexed.len() % 24 != 0 {
+            return InvalidPackedFileRefsSnafu.fail();
+        }
+
+        let mut refs = HashSet::new();
+        for bytes in files.chunks_exact(16) {
+            let mut id = [0; 16];
+            id.copy_from_slice(bytes);
+            refs.insert(FileRef::new(region, FileId::from_bytes(id), None));
+        }
+        for bytes in indexed.chunks_exact(24) {
+            let mut id = [0; 16];
+            id.copy_from_slice(&bytes[..16]);
+            let mut version = [0; 8];
+            version.copy_from_slice(&bytes[16..]);
+            refs.insert(FileRef::new(
+                region,
+                FileId::from_bytes(id),
+                Some(u64::from_be_bytes(version)),
+            ));
+        }
+        Ok(refs)
     }
 }
 
@@ -1383,6 +1411,7 @@ impl InstructionReply {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::error::Error as _;
 
     use common_error::mock::MockError;
     use common_wal::options::WalOptions;
@@ -2067,10 +2096,29 @@ mod tests {
 
         let mut malformed = packed.clone();
         malformed.file_refs.get_mut(&region).unwrap().indexed = "!".to_string();
-        assert!(malformed.clone().into_manifest().is_err());
+        let err = malformed.into_manifest().unwrap_err();
+        assert!(matches!(
+            &err,
+            crate::error::Error::DecodePackedFileRefs { .. }
+        ));
+        assert!(
+            err.source()
+                .is_some_and(|source| source.is::<base64::DecodeError>())
+        );
+        assert_eq!(err.status_code(), StatusCode::Unexpected);
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+
+        let mut malformed = packed;
         malformed.file_refs.get_mut(&region).unwrap().indexed =
             base64::engine::general_purpose::STANDARD.encode([0; 1]);
-        assert!(malformed.into_manifest().is_err());
+        let err = malformed.into_manifest().unwrap_err();
+        assert!(matches!(
+            &err,
+            crate::error::Error::InvalidPackedFileRefs { .. }
+        ));
+        assert!(err.source().is_none());
+        assert_eq!(err.status_code(), StatusCode::Unexpected);
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 
     #[test]

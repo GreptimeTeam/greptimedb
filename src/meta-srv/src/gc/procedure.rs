@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{
-    self, GetPackedFileRefs, GetPackedFileRefsReply, InstructionReply, PackedGcRegions,
+    self, GetPackedFileRefs, GetPackedFileRefsReply, InstructionReply, PackedFileRefsManifest,
+    PackedGcRegions, PackedRegionFileRefs,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
@@ -136,14 +137,14 @@ fn scoped_gc_instruction(
     full_manifest: &FileRefsManifest,
     full_file_listing: bool,
 ) -> instruction::Instruction {
-    let scoped = FileRefsManifest {
+    let packed_file_refs_manifest = PackedFileRefsManifest {
         file_refs: regions
             .iter()
             .filter_map(|region| {
                 full_manifest
                     .file_refs
                     .get(region)
-                    .map(|refs| (*region, refs.clone()))
+                    .map(|refs| (*region, PackedRegionFileRefs::from_refs(refs)))
             })
             .collect(),
         manifest_version: regions
@@ -160,9 +161,7 @@ fn scoped_gc_instruction(
 
     instruction::Instruction::PackedGcRegions(PackedGcRegions {
         regions,
-        packed_file_refs_manifest: common_meta::instruction::PackedFileRefsManifest::from_manifest(
-            &scoped,
-        ),
+        packed_file_refs_manifest,
         full_file_listing,
     })
 }
@@ -785,7 +784,10 @@ impl BatchGcProcedure {
             let manifest = match reply.packed_file_refs_manifest.into_manifest() {
                 Ok(manifest) => manifest,
                 Err(err) => {
-                    record_get_file_refs_error(error::UnexpectedSnafu { violated: err }.build());
+                    record_get_file_refs_error(error::Error::Other {
+                        source: common_error::ext::BoxedError::new(err),
+                        location: snafu::Location::new(file!(), line!(), 0),
+                    });
                     continue;
                 }
             };
