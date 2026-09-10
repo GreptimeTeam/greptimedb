@@ -204,7 +204,7 @@ insert into moving_extrema values
 tql eval (20, 100, '10s') min_over_time(moving_extrema[30s]);
 
 -- eval range from 20s to 100s max_over_time(moving_extrema[30s]); 90s and 100s are empty.
--- 	{series="moving"} 5 4 4 4 4 3 3
+-- 	{series="moving"} 5 4 4 4 3 3 3
 -- SQLNESS SORT_RESULT 2 1
 tql eval (20, 100, '10s') max_over_time(moving_extrema[30s]);
 
