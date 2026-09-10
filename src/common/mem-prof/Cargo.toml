@@ -16,7 +16,7 @@ tempfile = "3.4"
 tokio.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
-tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
+tikv-jemalloc-ctl = { version = "0.7", features = ["use_std", "stats"] }
 jemalloc-pprof-utils = { version = "0.8", package = "pprof_util", features = [
     "flamegraph",
     "symbolize",
@@ -25,4 +25,4 @@ jemalloc-pprof-mappings = { version = "0.7", package = "mappings" } # for get th
 
 [target.'cfg(not(windows))'.dependencies.tikv-jemalloc-sys]
 features = ["stats", "profiling", "unprefixed_malloc_on_supported_platforms"]
-version = "0.6"
+version = "0.7"
