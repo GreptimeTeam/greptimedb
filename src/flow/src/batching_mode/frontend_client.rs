@@ -191,10 +191,11 @@ impl DatabaseWithPeer {
                 context: format!("Failed to handle `SELECT 1` request at {:?}", self.peer),
             })?;
 
-        if let OutputData::Stream(mut stream) = output.data {
-            while let Some(item) = stream.next().await {
-                item.map_err(BoxedError::new).context(ExternalSnafu)?;
-            }
+        if let OutputData::Stream(stream) = output.data {
+            common_recordbatch::util::collect(stream)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
         }
 
         Ok(())
