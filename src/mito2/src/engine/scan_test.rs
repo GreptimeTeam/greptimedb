@@ -27,6 +27,7 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, RecordBatches};
 use common_test_util::flight::encode_to_flight_data;
 use common_time::Timestamp;
+use datafusion::physical_plan::VerboseDisplay;
 use datafusion::physical_plan::expressions::{
     BinaryExpr, Column, DynamicFilterPhysicalExpr, lit as physical_lit,
 };
@@ -1090,12 +1091,6 @@ async fn test_two_phase_series_scan() {
     request
         .options
         .insert("sst_format".to_string(), "flat".to_string());
-    request
-        .options
-        .insert("append_mode".to_string(), "true".to_string());
-    request
-        .options
-        .insert("preserve_row_sequence".to_string(), "true".to_string());
     let full_row_schema = test_util::rows_schema(&request);
     let mut encoded_primary_key_schema = full_row_schema[0].clone();
     encoded_primary_key_schema.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
@@ -1172,9 +1167,6 @@ async fn test_two_phase_series_scan() {
             ScanRequest {
                 // Internal metric identifiers must still be read for candidate discovery.
                 projection: Some(vec![2, 4, 5]),
-                memtable_min_sequence: Some(0),
-                memtable_max_sequence: Some(1),
-                exact_sequence_range: true,
                 distribution: Some(TimeSeriesDistribution::PerSeries),
                 ..Default::default()
             },
@@ -1238,8 +1230,22 @@ async fn test_two_phase_series_scan() {
         }
     }
     actual_rows.sort();
-    assert_eq!(vec![("a".to_string(), 10, 1000)], actual_rows);
-    assert_eq!(1, series_to_partition.len());
+    assert_eq!(
+        vec![
+            ("a".to_string(), 11, 1000),
+            ("a".to_string(), 12, 2000),
+            ("b".to_string(), 20, 1000),
+            ("b".to_string(), 21, 2000),
+            ("c".to_string(), 30, 1000),
+            ("d".to_string(), 40, 1000),
+        ],
+        actual_rows
+    );
+    assert_eq!(4, series_to_partition.len());
+    assert_eq!(Some(&0), series_to_partition.get("a"));
+    assert_eq!(Some(&0), series_to_partition.get("c"));
+    assert_eq!(Some(&2), series_to_partition.get("b"));
+    assert_eq!(Some(&2), series_to_partition.get("d"));
 
     scanner.reset_state();
     assert_eq!("two_phase", scanner.mode());
@@ -3075,16 +3081,14 @@ async fn test_exact_sequence_read_pk_format_compaction_multiple_inputs() {
     );
 }
 
-/// Exact sequence-range reads through the active production `PerSeries` series
-/// scan path: row-level filtering must hold across the flushed SST and the
-/// memtable regardless of the requested time-series distribution.
+/// Exact sequence-range reads through the legacy `PerSeries` path: row-level
+/// filtering must hold across the flushed SST and the memtable.
 #[tokio::test]
 async fn test_exact_sequence_read_series_scan_per_series() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_read_series_scan_per_series").await;
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: true,
-            experimental_series_scan_v2: true,
             ..Default::default()
         })
         .await;
@@ -3157,6 +3161,368 @@ async fn test_exact_sequence_read_series_scan_per_series() {
             "unexpected set for ({min:?}, {max:?}]:\n{result}"
         );
     }
+}
+
+async fn build_sparse_exact_metric_engine(
+    prefix: &str,
+    experimental_series_scan_v2: bool,
+    range_result_cache_size: ReadableSize,
+) -> (TestEnv, crate::engine::MitoEngine, RegionId) {
+    let mut env = TestEnv::with_prefix(prefix).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_series_scan_v2,
+            range_result_cache_size,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let mut request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    request.column_metadatas = metadata.column_metadatas.clone();
+    request.primary_key = metadata.primary_key.clone();
+    request
+        .options
+        .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
+    request
+        .options
+        .insert("memtable.type".to_string(), "bulk".to_string());
+    request
+        .options
+        .insert("sst_format".to_string(), "flat".to_string());
+    let full_row_schema = test_util::rows_schema(&request);
+    let mut encoded_primary_key_schema = full_row_schema[0].clone();
+    encoded_primary_key_schema.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    encoded_primary_key_schema.datatype = ColumnDataType::Binary.into();
+    encoded_primary_key_schema.semantic_type = SemanticType::Tag.into();
+    let row_schema = vec![
+        encoded_primary_key_schema,
+        full_row_schema[5].clone(),
+        full_row_schema[4].clone(),
+    ];
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = |values: &[(u32, u64, &str, &str, u64, i64)]| Rows {
+        schema: row_schema.clone(),
+        rows: values
+            .iter()
+            .map(|(table_id, tsid, tag_0, tag_1, field, ts)| {
+                row(vec![
+                    ValueData::BinaryValue(new_sparse_primary_key(
+                        &[*tag_0, *tag_1],
+                        &metadata,
+                        *table_id,
+                        *tsid,
+                    )),
+                    ValueData::TimestampMillisecondValue(*ts),
+                    ValueData::U64Value(*field),
+                ])
+            })
+            .collect(),
+    };
+    let put = |rows| {
+        RegionRequest::Put(RegionPutRequest {
+            rows,
+            hint: Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            }),
+            partition_expr_version: None,
+        })
+    };
+
+    // Older SST: sequences 1 and 2.
+    engine
+        .handle_request(
+            region_id,
+            put(rows(&[
+                (10, 0, "a", "x", 10, 1000),
+                (20, 0, "c", "z", 30, 1000),
+            ])),
+        )
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
+    // Newer SST: sequences 3 and 4.
+    engine
+        .handle_request(
+            region_id,
+            put(rows(&[
+                (10, 0, "a", "x", 11, 2000),
+                (10, u64::MAX, "b", "y", 20, 1000),
+            ])),
+        )
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
+    // Memtable: sequences 5 and 6.
+    engine
+        .handle_request(
+            region_id,
+            put(rows(&[
+                (10, 0, "a", "x", 12, 3000),
+                (20, u64::MAX, "d", "w", 40, 1000),
+            ])),
+        )
+        .await
+        .unwrap();
+
+    (env, engine, region_id)
+}
+
+fn canonical_sparse_rows(batches: &RecordBatches) -> Vec<(String, String, u64, i64)> {
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        // No projection is supplied by these tests, so this verifies the full
+        // sparse metric schema, including internal IDs and both user tags.
+        assert_eq!(6, batch.num_columns());
+        assert_eq!(
+            vec!["__table_id", "__tsid", "tag_0", "tag_1", "field_0", "ts"],
+            (0..batch.num_columns())
+                .map(|index| batch.schema.column_name_by_index(index))
+                .collect::<Vec<_>>(),
+        );
+        let tag_0 = batch.column_by_name("tag_0").unwrap();
+        let tag_1 = batch.column_by_name("tag_1").unwrap();
+        let field = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_primitive::<UInt64Type>();
+        let ts = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_primitive::<TimestampMillisecondType>();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                datatypes::arrow_array::string_array_value_at_index(tag_0, row)
+                    .unwrap()
+                    .to_string(),
+                datatypes::arrow_array::string_array_value_at_index(tag_1, row)
+                    .unwrap()
+                    .to_string(),
+                field.value(row),
+                ts.value(row),
+            ));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+async fn scan_sparse_exact_metric(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    min: Option<u64>,
+    max: Option<u64>,
+    selector: Option<TimeSeriesRowSelector>,
+    expected_mode: &str,
+) -> Vec<(String, String, u64, i64)> {
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: min,
+                memtable_max_sequence: max,
+                exact_sequence_range: min.is_some(),
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                // A tag predicate is required for range-result-cache eligibility.
+                // It selects every fixture row while keeping cache keys comparable.
+                filters: vec![col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("a".to_string()))))],
+                series_row_selector: selector,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let Scanner::Series(scanner) = scanner else {
+        panic!("sparse metric scan must use SeriesScan");
+    };
+    assert_eq!(expected_mode, scanner.mode());
+    canonical_sparse_rows(
+        &RecordBatches::try_collect(scanner.build_stream().await.unwrap())
+            .await
+            .unwrap(),
+    )
+}
+
+/// Exact sparse-metric reads must use two-phase scanning and preserve the same
+/// complete rows as the legacy series scanner at every sequence boundary.
+#[tokio::test]
+async fn test_two_phase_sparse_metric_exact_sequence_cases() {
+    let (_two_phase_env, two_phase, two_phase_region) = build_sparse_exact_metric_engine(
+        "test_two_phase_sparse_metric_exact_sequence_cases_two_phase",
+        true,
+        ReadableSize::mb(0),
+    )
+    .await;
+    let (_legacy_env, legacy, legacy_region) = build_sparse_exact_metric_engine(
+        "test_two_phase_sparse_metric_exact_sequence_cases_legacy",
+        false,
+        ReadableSize::mb(0),
+    )
+    .await;
+
+    let cases = [
+        // (min, max], selector, expected canonical rows.
+        (
+            "boundaries_and_newer_sst_outside",
+            Some(0),
+            Some(2),
+            None,
+            vec![("a", "x", 10, 1000), ("c", "z", 30, 1000)],
+        ),
+        (
+            "lower_boundary_excluded_upper_boundary_included",
+            Some(2),
+            Some(4),
+            None,
+            vec![("a", "x", 11, 2000), ("b", "y", 20, 1000)],
+        ),
+        // Only series in the older SST qualify; later SST and memtable
+        // candidates must not add rows after sequence filtering.
+        (
+            "only_older_sst_qualifying_series",
+            Some(0),
+            Some(2),
+            None,
+            vec![("a", "x", 10, 1000), ("c", "z", 30, 1000)],
+        ),
+        // Candidates are present in the memtable but all are outside (4, 4].
+        (
+            "candidate_outside_only_empty",
+            Some(4),
+            Some(4),
+            None,
+            vec![],
+        ),
+        // One delta spans the older SST, newer SST, and memtable.
+        (
+            "mixed_sst_mem_no_dropped_rows",
+            Some(1),
+            Some(5),
+            None,
+            vec![
+                ("a", "x", 11, 2000),
+                ("a", "x", 12, 3000),
+                ("b", "y", 20, 1000),
+                ("c", "z", 30, 1000),
+            ],
+        ),
+        // Selector is applied after the exact filter; the out-of-range memtable
+        // row for d must not become a candidate result.
+        (
+            "last_row_selector_on",
+            Some(0),
+            Some(5),
+            Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+            vec![
+                ("a", "x", 12, 3000),
+                ("b", "y", 20, 1000),
+                ("c", "z", 30, 1000),
+            ],
+        ),
+    ];
+
+    for (name, min, max, selector, expected) in cases {
+        let expected = expected
+            .into_iter()
+            .map(|(tag_0, tag_1, field, ts)| (tag_0.to_string(), tag_1.to_string(), field, ts))
+            .collect::<Vec<_>>();
+        let two_phase_rows = scan_sparse_exact_metric(
+            &two_phase,
+            two_phase_region,
+            min,
+            max,
+            selector,
+            "two_phase",
+        )
+        .await;
+        let legacy_rows =
+            scan_sparse_exact_metric(&legacy, legacy_region, min, max, selector, "legacy").await;
+        assert_eq!(expected, two_phase_rows, "two-phase {name}");
+        assert_eq!(expected, legacy_rows, "legacy {name}");
+        assert_eq!(legacy_rows, two_phase_rows, "mode mismatch for {name}");
+    }
+}
+
+/// A warmed two-phase exact scan must hit the existing range-result cache; a
+/// distinct exact interval and an unbounded scan must not reuse its rows.
+#[tokio::test]
+async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
+    let (_env, engine, region_id) = build_sparse_exact_metric_engine(
+        "test_two_phase_sparse_metric_exact_sequence_cache_isolation",
+        true,
+        ReadableSize::mb(64),
+    )
+    .await;
+    // Make the fixture file-only so the two-phase candidate and data ranges are cacheable.
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let request = ScanRequest {
+        memtable_min_sequence: Some(0),
+        memtable_max_sequence: Some(6),
+        exact_sequence_range: true,
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        filters: vec![col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("a".to_string()))))],
+        ..Default::default()
+    };
+    let scan = |request| async {
+        let scanner = engine.scanner(region_id, request).await.unwrap();
+        let Scanner::Series(scanner) = scanner else {
+            panic!("sparse metric scan must use SeriesScan");
+        };
+        assert_eq!("two_phase", scanner.mode());
+        let rows = canonical_sparse_rows(
+            &RecordBatches::try_collect(scanner.build_stream().await.unwrap())
+                .await
+                .unwrap(),
+        );
+        (rows, format!("{}", VerboseDisplay(scanner)))
+    };
+
+    let (cold, _) = scan(request.clone()).await;
+    // Cache insertion is performed by the range stream's async concat task.
+    // Yielding lets that completed cold stream publish before the warm scan.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let (warm, warm_verbose) = scan(request).await;
+    assert_eq!(cold, warm);
+    assert!(
+        warm_verbose.contains("\"range_cache_hit\":"),
+        "warm two-phase scan did not report an actual range-cache hit: {warm_verbose}"
+    );
+
+    assert_eq!(
+        vec![
+            ("a".to_string(), "x".to_string(), 12, 3000),
+            ("b".to_string(), "y".to_string(), 20, 1000),
+            ("d".to_string(), "w".to_string(), 40, 1000),
+        ],
+        scan_sparse_exact_metric(&engine, region_id, Some(3), Some(6), None, "two_phase",).await,
+        "different exact interval reused warm rows"
+    );
+    assert_eq!(
+        vec![
+            ("a".to_string(), "x".to_string(), 10, 1000),
+            ("a".to_string(), "x".to_string(), 11, 2000),
+            ("a".to_string(), "x".to_string(), 12, 3000),
+            ("b".to_string(), "y".to_string(), 20, 1000),
+            ("c".to_string(), "z".to_string(), 30, 1000),
+            ("d".to_string(), "w".to_string(), 40, 1000),
+        ],
+        scan_sparse_exact_metric(&engine, region_id, None, None, None, "two_phase").await,
+        "unbounded scan reused exact rows"
+    );
 }
 
 /// Range-cache fingerprint: identical files and filters with different (C, H]
