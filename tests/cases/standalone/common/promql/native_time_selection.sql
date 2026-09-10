@@ -171,6 +171,36 @@ TQL EVAL (1, 1, '1s') last_over_time((native_time_ns{series="exact"})[1s:1s]);
 
 DROP TABLE native_time_ns;
 
+-- An unrepresentable native lower bound must not discard its representable upper bound.
+-- The upper filter must reach LastRow so the 1ms-future row cannot hide the eligible row.
+CREATE TABLE native_time_ns_lower_overflow (
+    ts TIMESTAMP(9) TIME INDEX,
+    series STRING PRIMARY KEY,
+    val DOUBLE,
+);
+INSERT INTO native_time_ns_lower_overflow VALUES
+    (-9223372036854000000, 'exact', 1),
+    (-9223372036853000000, 'exact', 2);
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE native_time_ns_lower_overflow.__table_id\s*=\s*UInt32\(\d+\) native_time_ns_lower_overflow.__table_id=UInt32(REDACTED)
+TQL EXPLAIN (0, 0, '1s', '300s') native_time_ns_lower_overflow{series="exact"} offset 9223372036854ms;
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
+TQL ANALYZE VERBOSE (0, 0, '1s', '300s') native_time_ns_lower_overflow{series="exact"} offset 9223372036854ms;
+
+-- The representable upper bound selects only the exact row.
+TQL EVAL (0, 0, '1s', '300s') native_time_ns_lower_overflow{series="exact"} offset 9223372036854ms;
+DROP TABLE native_time_ns_lower_overflow;
+
 -- Second precision is promoted before applying fractional-second offsets.
 CREATE TABLE native_time_sec (ts TIMESTAMP(0) TIME INDEX, val DOUBLE);
 INSERT INTO native_time_sec VALUES (0, 10), (1, 11), (2, 12);

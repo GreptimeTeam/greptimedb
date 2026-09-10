@@ -672,24 +672,47 @@ mod test {
     }
 
     fn last_value_aggregate(input: LogicalPlan) -> LogicalPlan {
-        LogicalPlanBuilder::from(input)
+        let aggregate = LogicalPlanBuilder::from(input)
             .aggregate(
                 vec![col("k0")],
-                vec![Expr::AggregateFunction(AggregateFunction {
-                    func: last_value_udaf(),
-                    params: AggregateFunctionParams {
-                        args: vec![col("v0")],
-                        distinct: false,
-                        filter: None,
-                        order_by: vec![Sort {
-                            expr: col("ts"),
-                            asc: true,
-                            nulls_first: true,
-                        }],
-                        null_treatment: None,
-                    },
-                })],
+                vec![
+                    Expr::AggregateFunction(AggregateFunction {
+                        func: last_value_udaf(),
+                        params: AggregateFunctionParams {
+                            args: vec![col("v0")],
+                            distinct: false,
+                            filter: None,
+                            order_by: vec![Sort {
+                                expr: col("ts"),
+                                asc: true,
+                                nulls_first: true,
+                            }],
+                            null_treatment: None,
+                        },
+                    }),
+                    Expr::AggregateFunction(AggregateFunction {
+                        func: last_value_udaf(),
+                        params: AggregateFunctionParams {
+                            args: vec![col("ts")],
+                            distinct: false,
+                            filter: None,
+                            order_by: vec![Sort {
+                                expr: col("ts"),
+                                asc: true,
+                                nulls_first: true,
+                            }],
+                            null_treatment: None,
+                        },
+                    }),
+                ],
             )
+            .unwrap()
+            .build()
+            .unwrap();
+        let timestamp = aggregate.schema().field(2).name().clone();
+
+        LogicalPlanBuilder::from(aggregate)
+            .project(vec![col("k0"), col(timestamp).alias("ts")])
             .unwrap()
             .build()
             .unwrap()
@@ -918,21 +941,39 @@ mod test {
                 None,
             )
             .unwrap()
+            .project(vec![
+                Expr::Column(Column::new(Some("left"), "ts")),
+                Expr::Column(Column::new(Some("left"), "v0")),
+            ])
+            .unwrap()
             .build()
             .unwrap();
         let nonlast_aggregate = LogicalPlanBuilder::from(scan_plan(provider(), "aggregate"))
             .aggregate(
                 vec![col("k0")],
-                vec![Expr::AggregateFunction(AggregateFunction {
-                    func: max_udaf(),
-                    params: AggregateFunctionParams {
-                        args: vec![col("v0")],
-                        distinct: false,
-                        filter: None,
-                        order_by: vec![],
-                        null_treatment: None,
-                    },
-                })],
+                vec![
+                    Expr::AggregateFunction(AggregateFunction {
+                        func: max_udaf(),
+                        params: AggregateFunctionParams {
+                            args: vec![col("v0")],
+                            distinct: false,
+                            filter: None,
+                            order_by: vec![],
+                            null_treatment: None,
+                        },
+                    }),
+                    Expr::AggregateFunction(AggregateFunction {
+                        func: max_udaf(),
+                        params: AggregateFunctionParams {
+                            args: vec![col("ts")],
+                            distinct: false,
+                            filter: None,
+                            order_by: vec![],
+                            null_treatment: None,
+                        },
+                    })
+                    .alias("ts"),
+                ],
             )
             .unwrap()
             .build()
@@ -1113,7 +1154,7 @@ mod test {
     #[test]
     fn single_evaluation_rejects_projection_expressions_that_change_rows() {
         let invalid_projections = [
-            vec![col("ts").alias("renamed")],
+            vec![col("ts").alias("renamed"), col("ts")],
             vec![
                 Expr::BinaryExpr(datafusion_expr::expr::BinaryExpr::new(
                     Box::new(col("v0")),
@@ -1121,6 +1162,7 @@ mod test {
                     Box::new(lit(1.0_f64)),
                 ))
                 .alias("v0"),
+                col("ts"),
             ],
             vec![
                 Expr::Cast(Cast::new(
@@ -1129,7 +1171,10 @@ mod test {
                 ))
                 .alias("ts"),
             ],
-            vec![Expr::Cast(Cast::new(Box::new(col("v0")), DataType::Int64)).alias("v0")],
+            vec![
+                Expr::Cast(Cast::new(Box::new(col("v0")), DataType::Int64)).alias("v0"),
+                col("ts"),
+            ],
             vec![
                 Expr::Cast(Cast::new(
                     Box::new(col("ts")),
