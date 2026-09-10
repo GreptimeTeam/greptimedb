@@ -37,6 +37,22 @@ const RANGE_CATALOG: &str = "range-index.json";
 const SERIES_CATALOG: &str = "series-index.json";
 const SERIES_METADATA_KEY: &str = "greptime.series_index";
 
+/// Summary of SSTs sharing a compaction-window-aligned start.
+///
+/// New data changes must have sequences greater than those already indexed. A new
+/// start adds a map entry; new data at an existing start raises its maximum sequence.
+/// The maximum end and sequence may come from different files, so this summary
+/// does not establish uniform sequence coverage throughout the interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WindowSequence {
+    /// Inclusive start in epoch seconds, equal to the key in `window_sequences`.
+    pub(crate) start: i64,
+    /// Exclusive interval end in epoch seconds.
+    pub(crate) end: i64,
+    /// Maximum sequence among the SSTs sharing this aligned start.
+    pub(crate) max_sequence: u64,
+}
+
 /// Self-describing coverage stored in a series-index Parquet footer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SeriesIndexEntry {
@@ -52,14 +68,12 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) max_file_sequence: u64,
     /// Width used to align the half-open compaction windows, in seconds.
     pub(crate) compaction_window_secs: i64,
-    /// Maximum source SST sequence per compaction window, persisted for recovery.
-    /// Keys are window starts in epoch seconds; each window spans
-    /// `[start, start + compaction_window_secs)`. An SST contributes to every window
-    /// its time range intersects. Windows without source SSTs are omitted.
-    /// An empty map means a source SST exceeded the per-file tracking limit and
-    /// cannot establish whether source data is already indexed. Merged coverage
-    /// has no entry limit.
-    pub(crate) window_sequences: BTreeMap<i64, u64>,
+    /// Source SST summaries keyed by aligned start; intervals may overlap.
+    /// Each file contributes one summary regardless of its span. Equal starts merge
+    /// by taking the maximum end and sequence. See [`WindowSequence`] for the
+    /// sequence assumption used to detect new data. Compaction changing summary
+    /// boundaries may conservatively trigger a rebuild.
+    pub(crate) window_sequences: BTreeMap<i64, WindowSequence>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -181,7 +195,7 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use crate::series_index::catalog::{
-        RangeIndexCatalog, SeriesIndexCatalog, SeriesIndexEntry, load_catalog,
+        RangeIndexCatalog, SeriesIndexCatalog, SeriesIndexEntry, WindowSequence, load_catalog,
         load_version_control, range_catalog_path, series_catalog_path, series_metadata,
         store_catalog,
     };
@@ -274,7 +288,24 @@ mod tests {
             min_file_sequence: 1,
             max_file_sequence: 2,
             compaction_window_secs: 10,
-            window_sequences: BTreeMap::from([(0, 1), (10, 2)]),
+            window_sequences: BTreeMap::from([
+                (
+                    0,
+                    WindowSequence {
+                        start: 0,
+                        end: 20,
+                        max_sequence: 1,
+                    },
+                ),
+                (
+                    20,
+                    WindowSequence {
+                        start: 20,
+                        end: 100,
+                        max_sequence: 2,
+                    },
+                ),
+            ]),
         };
         store_catalog(
             &store,

@@ -21,13 +21,10 @@ use common_time::{TimeToLive, Timestamp};
 use smallvec::{SmallVec, smallvec};
 use store_api::storage::FileId;
 
-use crate::series_index::catalog::SeriesIndexEntry;
+use crate::series_index::catalog::{SeriesIndexEntry, WindowSequence};
 use crate::sst::file::FileHandle;
 
 const SERIES_INDEX_TRIGGER_FILES: usize = 4;
-/// Bound expansion of a single SST range when compaction windows become smaller.
-/// Merged buckets may contain more entries.
-const MAX_FILE_WINDOW_SEQUENCES: usize = 32;
 
 /// Index files sharing a non-overlapping, half-open time bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,22 +34,12 @@ pub(crate) struct IndexBucket {
     pub(crate) index_ids: SmallVec<[FileId; 2]>,
     /// Zero means that merged indexes use incompatible window widths.
     pub(crate) compaction_window_secs: i64,
-    /// Indexed SST sequence maxima per compaction window. Merging takes maxima only
-    /// for matching windows. See [`SeriesIndexEntry::window_sequences`] for the layout.
-    pub(crate) window_sequences: BTreeMap<i64, u64>,
+    /// Indexed SST summaries keyed by aligned start.
+    /// See [`SeriesIndexEntry::window_sequences`] for the layout and sequence assumption.
+    pub(crate) window_sequences: BTreeMap<i64, WindowSequence>,
 }
 
 impl IndexBucket {
-    pub(crate) fn new(start: Timestamp, end: Timestamp) -> Self {
-        Self {
-            start,
-            end,
-            index_ids: SmallVec::new(),
-            compaction_window_secs: 0,
-            window_sequences: BTreeMap::new(),
-        }
-    }
-
     pub(crate) fn from_entry(entry: &SeriesIndexEntry) -> Self {
         Self {
             start: entry.bucket_start,
@@ -114,10 +101,12 @@ pub(crate) struct SeriesBucket {
     /// Maximum known source sequence, or zero when all sequences are unknown.
     pub(crate) max_file_sequence: u64,
     pub(crate) compaction_window_secs: i64,
-    /// Current SST sequence maxima per window, compared with indexed coverage.
-    /// Unknown sequences contribute zero and prevent building an index.
-    /// Empty when a source SST exceeds the per-file limit; reuse cannot be established.
-    pub(crate) window_sequences: BTreeMap<i64, u64>,
+    /// SST summaries keyed by compaction-window-aligned start.
+    /// Each SST contributes one entry; equal starts merge by maximum end and sequence.
+    /// Ranges may overlap. See [`WindowSequence`] for the sequence assumption.
+    /// Missing SST sequences use zero as a placeholder and set `has_unknown_sequence`,
+    /// preventing index builds and reuse.
+    pub(crate) window_sequences: BTreeMap<i64, WindowSequence>,
 }
 
 /// Next bucket coverage and the work required to publish it, computed without I/O.
@@ -131,7 +120,7 @@ pub(crate) struct SeriesIndexPlan {
     pub(crate) skipped_buckets: usize,
 }
 
-/// Plans whole-bucket replacements when per-window coverage changes. The returned bucket
+/// Plans whole-bucket replacements when source SST summaries change. The returned bucket
 /// map is publishable only after every planned build and the catalog writes succeed.
 pub(crate) fn plan_series_indexes(
     buckets: Vec<SeriesBucket>,
@@ -141,7 +130,7 @@ pub(crate) fn plan_series_indexes(
 ) -> SeriesIndexPlan {
     // Reconciliation changes geometry, not established coverage. In particular,
     // a deferred bridge must not change the indexed snapshot.
-    let buckets = reconcile_series_buckets(buckets, &mut index_buckets.clone());
+    let buckets = reconcile_series_buckets(buckets, &index_buckets);
     let computed_buckets = buckets.len();
     let expired = |end| {
         ttl.is_some_and(|ttl| {
@@ -170,8 +159,6 @@ pub(crate) fn plan_series_indexes(
         if index_buckets.get(&bucket.start).is_some_and(|indexed| {
             indexed.end == bucket.end
                 && indexed.compaction_window_secs == bucket.compaction_window_secs
-                // Missing coverage cannot establish reuse, even when both maps are empty.
-                && !bucket.window_sequences.is_empty()
                 && indexed.window_sequences == bucket.window_sequences
         }) {
             continue;
@@ -234,14 +221,16 @@ pub(crate) fn group_files_into_series_buckets(
                 .map_or(0, |sequence| sequence.get());
             let first_window = start.div_euclid(compaction_window_secs);
             let last_window = end.div_euclid(compaction_window_secs);
-            let window_count = i128::from(last_window) - i128::from(first_window) + 1;
-            let window_sequences = if window_count > MAX_FILE_WINDOW_SEQUENCES as i128 {
-                BTreeMap::new()
-            } else {
-                (first_window..=last_window)
-                    .map(|window| (window.saturating_mul(compaction_window_secs), sequence))
-                    .collect()
-            };
+            let window_sequences = BTreeMap::from([(
+                first_window.saturating_mul(compaction_window_secs),
+                WindowSequence {
+                    start: first_window.saturating_mul(compaction_window_secs),
+                    end: last_window
+                        .saturating_add(1)
+                        .saturating_mul(compaction_window_secs),
+                    max_sequence: sequence,
+                },
+            )]);
             SeriesBucket {
                 start: Timestamp::new_second(
                     start.div_euclid(width_secs).saturating_mul(width_secs),
@@ -264,23 +253,34 @@ pub(crate) fn group_files_into_series_buckets(
 }
 
 /// Expands SST buckets through existing index coverage before grouping build inputs.
+///
+/// `buckets` must be sorted by start and disjoint. `index_buckets` must contain
+/// disjoint intervals keyed by their starts. Expansion preserves start ordering,
+/// but may introduce overlaps, which are merged in the returned disjoint buckets.
+/// Established index coverage is borrowed so deferred builds cannot modify it.
 fn reconcile_series_buckets(
     mut buckets: Vec<SeriesBucket>,
-    index_buckets: &mut BTreeMap<Timestamp, IndexBucket>,
+    index_buckets: &BTreeMap<Timestamp, IndexBucket>,
 ) -> Vec<SeriesBucket> {
-    for bucket in &buckets {
-        IndexBucket::new(bucket.start, bucket.end).insert_into(index_buckets);
-    }
     for bucket in &mut buckets {
-        if let Some((&start, index_bucket)) = index_buckets.range(..=bucket.start).next_back() {
+        if let Some((&start, previous)) = index_buckets.range(..=bucket.start).next_back()
+            && previous.end > bucket.start
+        {
             bucket.start = start;
-            bucket.end = index_bucket.end;
+            bucket.end = bucket.end.max(previous.end);
+        }
+        // Disjoint index intervals make the last overlapping interval's end the
+        // furthest boundary. Expanding to it cannot expose another index interval.
+        if let Some((_, last)) = index_buckets.range(bucket.start..bucket.end).next_back() {
+            bucket.end = bucket.end.max(last.end);
         }
     }
-    // Expanding sorted, disjoint spans preserves their order, but may join several of them.
     group_series_buckets(buckets)
 }
 
+/// Merges overlapping spans sorted by nondecreasing start; equal starts are allowed.
+/// Returns sorted, disjoint buckets. Adjacent half-open intervals remain separate.
+/// All spans must use the same compaction-window width for their SST summaries.
 fn group_series_buckets(spans: Vec<SeriesBucket>) -> Vec<SeriesBucket> {
     let mut buckets: Vec<SeriesBucket> = Vec::new();
     for mut span in spans {
@@ -299,17 +299,19 @@ fn group_series_buckets(spans: Vec<SeriesBucket>) -> Vec<SeriesBucket> {
     buckets
 }
 
-fn merge_window_sequences(target: &mut BTreeMap<i64, u64>, source: BTreeMap<i64, u64>) {
-    // An empty map denotes omitted coverage, including after merging oversized spans.
-    if target.is_empty() || source.is_empty() {
-        target.clear();
-        return;
-    }
-    for (window, sequence) in source {
+/// Merges summaries sharing a start, relying on [`WindowSequence`]'s sequence assumption.
+fn merge_window_sequences(
+    target: &mut BTreeMap<i64, WindowSequence>,
+    source: BTreeMap<i64, WindowSequence>,
+) {
+    for (start, summary) in source {
         target
-            .entry(window)
-            .and_modify(|max| *max = (*max).max(sequence))
-            .or_insert(sequence);
+            .entry(start)
+            .and_modify(|current| {
+                current.end = current.end.max(summary.end);
+                current.max_sequence = current.max_sequence.max(summary.max_sequence);
+            })
+            .or_insert(summary);
     }
 }
 
@@ -354,6 +356,22 @@ mod tests {
     use super::*;
     use crate::sst::file::FileMeta;
     use crate::test_util::new_noop_file_purger;
+
+    fn coverage(intervals: &[(i64, i64, u64)]) -> BTreeMap<i64, WindowSequence> {
+        intervals
+            .iter()
+            .map(|&(start, end, max_sequence)| {
+                (
+                    start,
+                    WindowSequence {
+                        start,
+                        end,
+                        max_sequence,
+                    },
+                )
+            })
+            .collect()
+    }
 
     fn file(sequence: Option<u64>, level: u8, start: Timestamp, end: Timestamp) -> FileHandle {
         FileHandle::new(
@@ -467,10 +485,7 @@ mod tests {
                 end: ts(end),
                 index_ids: smallvec![id],
                 compaction_window_secs: 10,
-                window_sequences: (start..end)
-                    .step_by(10)
-                    .map(|w| (w, max_sequence))
-                    .collect(),
+                window_sequences: coverage(&[(start, end, max_sequence)]),
             }
             .insert_into(&mut indexes);
         }
@@ -594,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn test_window_coverage_includes_every_intersected_window() {
+    fn test_sst_summaries_round_ranges_outward() {
         let ts = Timestamp::new_millisecond;
         let files = [
             file(Some(10), 0, ts(-1), ts(19_999)),
@@ -603,28 +618,94 @@ mod tests {
         let buckets = group_files_into_series_buckets(&files, 100, 10);
         assert_eq!(1, buckets.len());
         assert_eq!(
-            BTreeMap::from([(-10, 10), (0, 10), (10, 30), (20, 30)]),
+            coverage(&[(-10, 20, 10), (10, 30, 30)]),
             buckets[0].window_sequences
         );
     }
 
-    #[test]
-    fn test_lower_window_changes_with_unchanged_bucket_maximum() {
+    #[rstest::rstest]
+    #[case(32)]
+    #[case(33)]
+    #[case(100_000)]
+    fn test_wide_sst_reuses_unchanged_inputs_and_rebuilds_after_splitting(#[case] windows: i64) {
         let ts = Timestamp::new_second;
-        let mut files = [
-            file(Some(1), 0, ts(1), ts(2)),
-            file(Some(10), 0, ts(1), ts(2)),
-            file(Some(20), 0, ts(11), ts(12)),
-            file(Some(30), 0, ts(11), ts(12)),
-        ]
-        .to_vec();
+        let end = windows * 10;
+        let files = (1..=4)
+            .map(|seq| file(Some(seq), 0, ts(0), ts(end - 1)))
+            .collect::<Vec<_>>();
+        let initial = plan_series_indexes(
+            group_files_into_series_buckets(&files, end, 10),
+            BTreeMap::new(),
+            None,
+            0,
+        );
+        assert_eq!(1, initial.builds.len());
+        assert_eq!(
+            coverage(&[(0, end, 4)]),
+            initial.builds[0].1.window_sequences
+        );
+        let repeated = plan_series_indexes(
+            group_files_into_series_buckets(&files, end, 10),
+            initial.index_buckets.clone(),
+            None,
+            0,
+        );
+        assert!(repeated.builds.is_empty());
+        assert_eq!(initial.index_buckets, repeated.index_buckets);
+
+        // Splitting changes the summaries and conservatively triggers one rebuild.
+        let split = (1..=4)
+            .rev()
+            .flat_map(|seq| {
+                [
+                    file(Some(seq), 1, ts(end / 2), ts(end - 1)),
+                    file(Some(seq), 1, ts(0), ts(end / 2 - 1)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let replaced = plan_series_indexes(
+            group_files_into_series_buckets(&split, end, 10),
+            repeated.index_buckets,
+            None,
+            0,
+        );
+        assert_eq!(1, replaced.builds.len());
+        assert_eq!(1, replaced.superseded_index_ids.len());
+        let repeated = plan_series_indexes(
+            group_files_into_series_buckets(&split, end, 10),
+            replaced.index_buckets.clone(),
+            None,
+            0,
+        );
+        assert!(repeated.builds.is_empty());
+        assert_eq!(replaced.index_buckets, repeated.index_buckets);
+    }
+
+    #[rstest::rstest]
+    #[case::existing_start(0)]
+    #[case::new_start(20)]
+    fn test_new_data_changes_sst_summary(#[case] start: i64) {
+        let ts = Timestamp::new_second;
+        let mut files = vec![
+            file(Some(1), 0, ts(1), ts(29)),
+            file(Some(10), 0, ts(1), ts(29)),
+            file(Some(30), 0, ts(1), ts(9)),
+            file(Some(20), 0, ts(41), ts(49)),
+        ];
         let initial = plan_series_indexes(
             group_files_into_series_buckets(&files, 100, 10),
             BTreeMap::new(),
             None,
             0,
         );
-        files.extend((11..=13).map(|seq| file(Some(seq), 0, ts(1), ts(2))));
+        assert_eq!(1, initial.builds.len());
+        // The maximum end survives even when the highest sequence is in a shorter SST.
+        assert_eq!(
+            coverage(&[(0, 30, 30), (40, 50, 20)]),
+            initial.builds[0].1.window_sequences
+        );
+        // New data has a sequence greater than those in the indexed snapshot.
+        files.push(file(Some(31), 0, ts(start + 1), ts(start + 2)));
         let plan = plan_series_indexes(
             group_files_into_series_buckets(&files, 100, 10),
             initial.index_buckets,
@@ -632,11 +713,23 @@ mod tests {
             0,
         );
         let [(bucket, entry)] = plan.builds.as_slice() else {
-            panic!("a changed lower watermark must rebuild the bucket");
+            panic!("new data must rebuild the bucket");
         };
         assert_eq!(files.len(), bucket.files.len());
-        assert_eq!(30, entry.max_file_sequence);
-        assert_eq!(BTreeMap::from([(0, 13), (10, 30)]), entry.window_sequences);
+        assert_eq!(31, entry.max_file_sequence);
+        let expected = if start == 0 {
+            coverage(&[(0, 30, 31), (40, 50, 20)])
+        } else {
+            coverage(&[(0, 30, 30), (20, 30, 31), (40, 50, 20)])
+        };
+        assert_eq!(expected, entry.window_sequences);
+        let repeated = plan_series_indexes(
+            group_files_into_series_buckets(&files, 100, 10),
+            plan.index_buckets,
+            None,
+            0,
+        );
+        assert!(repeated.builds.is_empty());
     }
 
     #[test]
@@ -649,7 +742,7 @@ mod tests {
                 end: ts(start + 10),
                 index_ids: smallvec![FileId::random()],
                 compaction_window_secs: 10,
-                window_sequences: BTreeMap::from([(start, seq)]),
+                window_sequences: coverage(&[(start, start + 10, seq)]),
             }
             .insert_into(&mut indexes);
         }
@@ -677,7 +770,7 @@ mod tests {
         assert_eq!(4, plan.builds[0].0.files.len());
         assert_eq!(2, plan.superseded_index_ids.len());
         assert_eq!(
-            BTreeMap::from([(0, 13), (10, 13), (20, 30)]),
+            coverage(&[(0, 30, 13), (20, 30, 30)]),
             plan.builds[0].1.window_sequences
         );
 
@@ -745,7 +838,19 @@ mod tests {
             end: ts(end),
             index_ids: smallvec![FileId::random()],
             compaction_window_secs: width,
-            window_sequences: windows.iter().copied().collect(),
+            window_sequences: windows
+                .iter()
+                .map(|&(start, max_sequence)| {
+                    (
+                        start,
+                        WindowSequence {
+                            start,
+                            end: start + width,
+                            max_sequence,
+                        },
+                    )
+                })
+                .collect(),
         };
         let indexes = [
             make_index(0, 20, 10, &[(0, 10), (10, 20)]),
@@ -760,7 +865,7 @@ mod tests {
             assert_eq!(1, map.len());
             assert_eq!(10, map[&ts(0)].compaction_window_secs);
             assert_eq!(
-                BTreeMap::from([(0, 10), (10, 30), (20, 25), (30, 5)]),
+                coverage(&[(0, 10, 10), (10, 20, 30), (20, 30, 25), (30, 40, 5)]),
                 map[&ts(0)].window_sequences
             );
             make_index(10, 30, 20, &[(0, 30)]).insert_into(&mut map);
