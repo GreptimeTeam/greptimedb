@@ -1,0 +1,19 @@
+src/mito2/src/region_write_ctx.rs
+  s_cbf051d9e59a54::t_f3f9db4a8d139a 99,140,179,228,260,275,590-600
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "afecc517b09eb1cc25df48bd34f395ee191cd463",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
