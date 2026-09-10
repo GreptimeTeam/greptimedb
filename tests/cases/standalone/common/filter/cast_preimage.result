@@ -345,17 +345,20 @@ Affected Rows: 0
 INSERT INTO cast_preimage_ts_ms VALUES
     ('host1', 0, 1),
     ('host2', 5000, 2),
-    ('host3', 5001, 3);
+    ('host3', 5001, 3),
+    ('safe_neg', -9223372036854, 4),
+    ('safe_pos', 9223372036854, 5);
 
-Affected Rows: 3
+Affected Rows: 5
 
--- Timestamp widening equality is exact at millisecond precision.
+-- An aligned literal is exact, but widening an ms column can overflow. Keep
+-- CAST in the predicate rather than replacing it with a native ms bound.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN SELECT host, v FROM cast_preimage_ts_ms
-WHERE CAST(ts AS TIMESTAMP(9)) = '1970-01-01 00:00:05'::TIMESTAMP(9)
+WHERE CAST(ts AS TIMESTAMP(9)) = 5000000000::TIMESTAMP(9)
 ORDER BY host;
 
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------+
@@ -372,15 +375,94 @@ ORDER BY host;
 |               |                                                                                                                                               |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------+
 
--- Non-exact nanosecond literal should remain semantically correct.
 SELECT host, v FROM cast_preimage_ts_ms
-WHERE CAST(ts AS TIMESTAMP(9)) = '1970-01-01 00:00:05.000000001'::TIMESTAMP(9)
+WHERE CAST(ts AS TIMESTAMP(9)) = 5000000000::TIMESTAMP(9)
+ORDER BY host;
+
++-------+---+
+| host  | v |
++-------+---+
+| host2 | 2 |
++-------+---+
+
+SELECT host, v FROM cast_preimage_ts_ms
+WHERE CAST(ts AS TIMESTAMP(9)) = 5000000001::TIMESTAMP(9)
 ORDER BY host;
 
 +------+---+
 | host | v |
 +------+---+
 +------+---+
+
+-- The safe millisecond values widen to -9223372036854000000 and
+-- 9223372036854000000 nanoseconds without rendering extreme dates.
+SELECT v, CAST(CAST(ts AS TIMESTAMP(9)) AS BIGINT) AS ts_ns
+FROM cast_preimage_ts_ms
+WHERE v IN (4, 5)
+ORDER BY v;
+
++---+----------------------+
+| v | ts_ns                |
++---+----------------------+
+| 4 | -9223372036854000000 |
+| 5 | 9223372036854000000  |
++---+----------------------+
+
+INSERT INTO cast_preimage_ts_ms VALUES ('overflow_neg', -9223372036855, 6);
+
+Affected Rows: 1
+
+-- An ordinary CAST and both equality predicates must evaluate the negative
+-- overflow, rather than replacing CAST with a native ms bound.
+SELECT v, CAST(CAST(ts AS TIMESTAMP(9)) AS BIGINT) AS ts_ns
+FROM cast_preimage_ts_ms WHERE host = 'overflow_neg';
+
+Error: 3001(EngineExecuteQuery), Execution error: Cannot cast Timestamp(ms) value -9223372036855 to Timestamp(ns): converted value exceeds the representable i64 range
+
+SELECT v FROM cast_preimage_ts_ms
+WHERE host = 'overflow_neg' AND CAST(ts AS TIMESTAMP(9)) = 5000000000::TIMESTAMP(9);
+
+Error: 3001(EngineExecuteQuery), Execution error: Cannot cast Timestamp(ms) value -9223372036855 to Timestamp(ns): converted value exceeds the representable i64 range
+
+SELECT v FROM cast_preimage_ts_ms
+WHERE host = 'overflow_neg' AND CAST(ts AS TIMESTAMP(9)) = 5000000001::TIMESTAMP(9);
+
+Error: 3001(EngineExecuteQuery), Execution error: Cannot cast Timestamp(ms) value -9223372036855 to Timestamp(ns): converted value exceeds the representable i64 range
+
+DELETE FROM cast_preimage_ts_ms WHERE host = 'overflow_neg';
+
+Affected Rows: 1
+
+INSERT INTO cast_preimage_ts_ms VALUES ('overflow_pos', 9223372036855, 7);
+
+Affected Rows: 1
+
+-- Repeat for positive overflow so evaluation is independent of overflow sign.
+SELECT v, CAST(CAST(ts AS TIMESTAMP(9)) AS BIGINT) AS ts_ns
+FROM cast_preimage_ts_ms WHERE host = 'overflow_pos';
+
+Error: 3001(EngineExecuteQuery), Execution error: Cannot cast Timestamp(ms) value 9223372036855 to Timestamp(ns): converted value exceeds the representable i64 range
+
+SELECT v FROM cast_preimage_ts_ms
+WHERE host = 'overflow_pos' AND CAST(ts AS TIMESTAMP(9)) = 5000000000::TIMESTAMP(9);
+
+Error: 3001(EngineExecuteQuery), Execution error: Cannot cast Timestamp(ms) value 9223372036855 to Timestamp(ns): converted value exceeds the representable i64 range
+
+SELECT v FROM cast_preimage_ts_ms
+WHERE host = 'overflow_pos' AND CAST(ts AS TIMESTAMP(9)) = 5000000001::TIMESTAMP(9);
+
+Error: 3001(EngineExecuteQuery), Execution error: Cannot cast Timestamp(ms) value 9223372036855 to Timestamp(ns): converted value exceeds the representable i64 range
+
+-- Direct safe cast returns NULL, avoiding the existing SQL timestamp-precision
+-- lowering limitation for TRY_CAST.
+SELECT v, CAST(arrow_try_cast(ts, 'Timestamp(Nanosecond, None)') AS BIGINT) AS ts_ns
+FROM cast_preimage_ts_ms WHERE host = 'overflow_pos';
+
++---+-------+
+| v | ts_ns |
++---+-------+
+| 7 |       |
++---+-------+
 
 DROP TABLE cast_preimage_ts;
 
