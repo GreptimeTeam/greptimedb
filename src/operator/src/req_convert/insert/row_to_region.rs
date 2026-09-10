@@ -98,60 +98,63 @@ mod tests {
 
     #[tokio::test]
     async fn test_partitioned_insert_skip_wal_normal_and_instant() {
+        check_partitioned_insert_skip_wal(false, false).await;
+        check_partitioned_insert_skip_wal(false, true).await;
+        check_partitioned_insert_skip_wal(true, false).await;
+        check_partitioned_insert_skip_wal(true, true).await;
+    }
+
+    async fn check_partitioned_insert_skip_wal(instant: bool, skip_wal: bool) {
         let backend = prepare_mocked_backend().await;
         let partition_manager = create_partition_rule_manager(backend).await;
         let table_info = Arc::new(new_test_table_info(1, "table_1", [1, 2, 3].into_iter()));
-        for instant in [false, true] {
-            let instant_table_ids = if instant {
-                HashSet::from_iter([1])
-            } else {
-                HashSet::default()
-            };
-            let converter = RowToRegion::new(
-                HashMap::from_iter([("table_1".to_string(), table_info.clone())]),
-                instant_table_ids,
-                &partition_manager,
-            );
-            for skip_wal in [false, true] {
-                let requests = RowInsertRequests {
-                    inserts: vec![RowInsertRequest {
-                        table_name: "table_1".to_string(),
-                        rows: Some(Rows {
-                            schema: vec![tag_column_schema("a", ColumnDataType::Int32)],
-                            rows: [1, 11, 101]
-                                .into_iter()
-                                .map(|value| Row {
-                                    values: vec![Value {
-                                        value_data: Some(ValueData::I32Value(value)),
-                                    }],
-                                })
-                                .collect(),
-                        }),
-                    }],
-                };
-                let result = converter.convert(requests, skip_wal).await.unwrap();
-                let (selected, other) = if instant {
-                    (result.instant_requests, result.normal_requests)
-                } else {
-                    (result.normal_requests, result.instant_requests)
-                };
-                assert!(other.requests.is_empty());
-                assert_eq!(selected.requests.len(), 3);
-                assert!(
-                    selected
-                        .requests
-                        .iter()
-                        .all(|request| request.skip_wal == skip_wal)
-                );
-                assert_eq!(
-                    selected
-                        .requests
-                        .iter()
-                        .map(|request| request.rows.as_ref().unwrap().rows.len())
-                        .sum::<usize>(),
-                    3
-                );
-            }
-        }
+        let instant_table_ids = if instant {
+            HashSet::from_iter([1])
+        } else {
+            HashSet::default()
+        };
+        let converter = RowToRegion::new(
+            HashMap::from_iter([("table_1".to_string(), table_info)]),
+            instant_table_ids,
+            &partition_manager,
+        );
+        let requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "table_1".to_string(),
+                rows: Some(Rows {
+                    schema: vec![tag_column_schema("a", ColumnDataType::Int32)],
+                    rows: [1, 11, 101]
+                        .into_iter()
+                        .map(|value| Row {
+                            values: vec![Value {
+                                value_data: Some(ValueData::I32Value(value)),
+                            }],
+                        })
+                        .collect(),
+                }),
+            }],
+        };
+        let result = converter.convert(requests, skip_wal).await.unwrap();
+        let (selected, other) = if instant {
+            (result.instant_requests, result.normal_requests)
+        } else {
+            (result.normal_requests, result.instant_requests)
+        };
+        assert!(other.requests.is_empty());
+        assert_eq!(selected.requests.len(), 3);
+        assert!(
+            selected
+                .requests
+                .iter()
+                .all(|request| request.skip_wal == skip_wal)
+        );
+        assert_eq!(
+            selected
+                .requests
+                .iter()
+                .map(|request| request.rows.as_ref().unwrap().rows.len())
+                .sum::<usize>(),
+            3
+        );
     }
 }

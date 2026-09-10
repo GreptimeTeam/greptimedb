@@ -926,27 +926,30 @@ mod tests {
     async fn test_request_skip_wal_does_not_append_empty_batch() {
         // Only change the request flag. A failing log store demonstrates that
         // the all-skipped path never invokes append_batch, including empty appends.
-        for skip_wal in [false, true] {
-            let region_id = RegionId::new(1, 1);
-            let wal = Wal::new(Arc::new(MockLogStore {
-                fail_append: true,
-                ..Default::default()
-            }));
-            let (ctx, rx) = new_region_ctx(region_id, skip_wal);
-            let version_control = ctx.version_control().clone();
-            let mut contexts = HashMap::from([(region_id, ctx)]);
-            assert_eq!(write_wal(&wal, &mut contexts).await, skip_wal);
-            if skip_wal {
-                let ctx = contexts.get_mut(&region_id).unwrap();
-                assert_eq!(ctx.next_entry_id(), 1);
-                ctx.write_memtable().await;
-                ctx.publish_sequence_and_entry_id();
-                assert_eq!(version_control.committed_sequence(), 1);
-                assert_eq!(version_control.current().last_entry_id, 0);
-            }
-            drop(contexts);
-            assert_eq!(rx.await.unwrap().is_ok(), skip_wal);
+        check_request_skip_wal_does_not_append_empty_batch(false).await;
+        check_request_skip_wal_does_not_append_empty_batch(true).await;
+    }
+
+    async fn check_request_skip_wal_does_not_append_empty_batch(skip_wal: bool) {
+        let region_id = RegionId::new(1, 1);
+        let wal = Wal::new(Arc::new(MockLogStore {
+            fail_append: true,
+            ..Default::default()
+        }));
+        let (ctx, rx) = new_region_ctx(region_id, skip_wal);
+        let version_control = ctx.version_control().clone();
+        let mut contexts = HashMap::from([(region_id, ctx)]);
+        assert_eq!(write_wal(&wal, &mut contexts).await, skip_wal);
+        if skip_wal {
+            let ctx = contexts.get_mut(&region_id).unwrap();
+            assert_eq!(ctx.next_entry_id(), 1);
+            ctx.write_memtable().await;
+            ctx.publish_sequence_and_entry_id();
+            assert_eq!(version_control.committed_sequence(), 1);
+            assert_eq!(version_control.current().last_entry_id, 0);
         }
+        drop(contexts);
+        assert_eq!(rx.await.unwrap().is_ok(), skip_wal);
     }
 
     #[tokio::test]

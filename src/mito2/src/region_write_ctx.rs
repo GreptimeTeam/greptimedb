@@ -555,107 +555,113 @@ mod tests {
     #[test]
     fn test_request_skip_wal_preserves_sequences_and_other_writes() {
         // Ablate only the request flag: the workload and sequence allocation stay identical.
-        for skip_wal in [false, true] {
-            let builder = VersionControlBuilder::new();
-            let region_id = builder.region_id();
-            let version_control = Arc::new(builder.build());
-            let mut ctx = RegionWriteCtx::new(
-                region_id,
-                &version_control,
-                Provider::raft_engine_provider(region_id.as_u64()),
-                None,
-            );
-            for (op_type, skip, num_rows) in [
-                (OpType::Put, skip_wal, 2),
-                (OpType::Put, false, 3),
-                (OpType::Delete, false, 1),
-            ] {
-                ctx.push_mutation(
-                    op_type as i32,
-                    Some(Rows {
-                        schema: vec![],
-                        rows: vec![api::v1::Row::default(); num_rows],
-                    }),
-                    None,
-                    OptionOutputTx::none(),
-                    None,
-                    skip,
-                );
-            }
-            // Unequal row counts make a notifier/mutation pairing mismatch visible.
-            for (mutation, notify) in ctx.wal_entry.mutations.iter().zip(&ctx.notifiers).chain(
-                ctx.memtable_mutations
-                    .iter()
-                    .map(|(mutation, notify)| (mutation, notify)),
-            ) {
-                assert_eq!(mutation.rows.as_ref().unwrap().rows.len(), notify.num_rows);
-            }
-            assert!(ctx.push_bulk(OptionOutputTx::none(), new_bulk_part(), None));
-            assert!(!ctx.skip_wal());
-            assert_eq!(ctx.next_sequence, 9);
-            assert_eq!(ctx.wal_entry.bulk_entries.len(), 1);
-            assert_eq!(ctx.bulk_parts[0].sequence, 7);
-            let sequences: Vec<_> = ctx.wal_entry.mutations.iter().map(|m| m.sequence).collect();
-            assert_eq!(sequences, if skip_wal { vec![3, 6] } else { vec![1, 3, 6] });
-            // Check the actual WAL bytes after routing the mutations.
-            let encoded = crate::wal::encoder::WalEntryEncoder::new().encode_to_vec(&ctx.wal_entry);
-            let decoded = WalEntry::decode(encoded.as_slice()).unwrap();
-            assert_eq!(
-                decoded
-                    .mutations
-                    .iter()
-                    .map(|m| m.sequence)
-                    .collect::<Vec<_>>(),
-                sequences
-            );
-            assert_eq!(decoded.bulk_entries, ctx.wal_entry.bulk_entries);
-            assert_eq!(ctx.wal_entry.mutations.len(), if skip_wal { 2 } else { 3 });
-            assert_eq!(ctx.memtable_mutations.len(), usize::from(skip_wal));
-            if skip_wal {
-                assert_eq!(ctx.memtable_mutations[0].0.sequence, 1);
-            }
-            assert_eq!(
-                ctx.wal_entry.mutations.last().unwrap().op_type,
-                OpType::Delete as i32
-            );
-        }
+        check_request_skip_wal_preserves_sequences_and_other_writes(false);
+        check_request_skip_wal_preserves_sequences_and_other_writes(true);
     }
 
-    #[test]
-    fn test_internal_delete_respects_skip_wal_flag() {
-        for skip_wal in [false, true] {
-            let builder = VersionControlBuilder::new();
-            let region_id = builder.region_id();
-            let version_control = Arc::new(builder.build());
-            let mut ctx = RegionWriteCtx::new(
-                region_id,
-                &version_control,
-                Provider::raft_engine_provider(region_id.as_u64()),
-                None,
-            );
+    fn check_request_skip_wal_preserves_sequences_and_other_writes(skip_wal: bool) {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        for (op_type, skip, num_rows) in [
+            (OpType::Put, skip_wal, 2),
+            (OpType::Put, false, 3),
+            (OpType::Delete, false, 1),
+        ] {
             ctx.push_mutation(
-                OpType::Delete as i32,
+                op_type as i32,
                 Some(Rows {
                     schema: vec![],
-                    rows: vec![api::v1::Row::default(); 2],
+                    rows: vec![api::v1::Row::default(); num_rows],
                 }),
                 None,
                 OptionOutputTx::none(),
                 None,
-                skip_wal,
+                skip,
             );
-            assert_eq!(ctx.skip_wal(), skip_wal);
-            assert_eq!(ctx.next_sequence, 3);
-            assert_eq!(ctx.delete_num, 2);
-            assert_eq!(ctx.wal_entry.mutations.len(), usize::from(!skip_wal));
-            assert_eq!(ctx.memtable_mutations.len(), usize::from(skip_wal));
-            let encoded = crate::wal::encoder::WalEntryEncoder::new().encode_to_vec(&ctx.wal_entry);
-            let decoded = WalEntry::decode(encoded.as_slice()).unwrap();
-            if skip_wal {
-                assert!(decoded.mutations.is_empty());
-            } else {
-                assert_eq!(decoded, ctx.wal_entry);
-            }
+        }
+        // Unequal row counts make a notifier/mutation pairing mismatch visible.
+        for (mutation, notify) in ctx.wal_entry.mutations.iter().zip(&ctx.notifiers).chain(
+            ctx.memtable_mutations
+                .iter()
+                .map(|(mutation, notify)| (mutation, notify)),
+        ) {
+            assert_eq!(mutation.rows.as_ref().unwrap().rows.len(), notify.num_rows);
+        }
+        assert!(ctx.push_bulk(OptionOutputTx::none(), new_bulk_part(), None));
+        assert!(!ctx.skip_wal());
+        assert_eq!(ctx.next_sequence, 9);
+        assert_eq!(ctx.wal_entry.bulk_entries.len(), 1);
+        assert_eq!(ctx.bulk_parts[0].sequence, 7);
+        let sequences: Vec<_> = ctx.wal_entry.mutations.iter().map(|m| m.sequence).collect();
+        assert_eq!(sequences, if skip_wal { vec![3, 6] } else { vec![1, 3, 6] });
+        // Check the actual WAL bytes after routing the mutations.
+        let encoded = crate::wal::encoder::WalEntryEncoder::new().encode_to_vec(&ctx.wal_entry);
+        let decoded = WalEntry::decode(encoded.as_slice()).unwrap();
+        assert_eq!(
+            decoded
+                .mutations
+                .iter()
+                .map(|m| m.sequence)
+                .collect::<Vec<_>>(),
+            sequences
+        );
+        assert_eq!(decoded.bulk_entries, ctx.wal_entry.bulk_entries);
+        assert_eq!(ctx.wal_entry.mutations.len(), if skip_wal { 2 } else { 3 });
+        assert_eq!(ctx.memtable_mutations.len(), usize::from(skip_wal));
+        if skip_wal {
+            assert_eq!(ctx.memtable_mutations[0].0.sequence, 1);
+        }
+        assert_eq!(
+            ctx.wal_entry.mutations.last().unwrap().op_type,
+            OpType::Delete as i32
+        );
+    }
+
+    #[test]
+    fn test_internal_delete_respects_skip_wal_flag() {
+        check_internal_delete_respects_skip_wal_flag(false);
+        check_internal_delete_respects_skip_wal_flag(true);
+    }
+
+    fn check_internal_delete_respects_skip_wal_flag(skip_wal: bool) {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        ctx.push_mutation(
+            OpType::Delete as i32,
+            Some(Rows {
+                schema: vec![],
+                rows: vec![api::v1::Row::default(); 2],
+            }),
+            None,
+            OptionOutputTx::none(),
+            None,
+            skip_wal,
+        );
+        assert_eq!(ctx.skip_wal(), skip_wal);
+        assert_eq!(ctx.next_sequence, 3);
+        assert_eq!(ctx.delete_num, 2);
+        assert_eq!(ctx.wal_entry.mutations.len(), usize::from(!skip_wal));
+        assert_eq!(ctx.memtable_mutations.len(), usize::from(skip_wal));
+        let encoded = crate::wal::encoder::WalEntryEncoder::new().encode_to_vec(&ctx.wal_entry);
+        let decoded = WalEntry::decode(encoded.as_slice()).unwrap();
+        if skip_wal {
+            assert!(decoded.mutations.is_empty());
+        } else {
+            assert_eq!(decoded, ctx.wal_entry);
         }
     }
 

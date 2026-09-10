@@ -1749,17 +1749,20 @@ mod tests {
 
     #[test]
     fn test_skip_wal_does_not_change_table_options() {
-        for skip_wal in [false, true] {
-            let ctx = Arc::new(QueryContext::with(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-            ));
-            ctx.set_skip_wal(skip_wal);
-            let mut options = Default::default();
-            fill_table_options_for_create(&mut options, &AutoCreateTableType::Physical, &ctx);
-            assert!(!options.contains_key(session::hints::INSERT_SKIP_WAL_HINT));
-            assert!(!options.contains_key("skip_wal"));
-        }
+        check_skip_wal_does_not_change_table_options(false);
+        check_skip_wal_does_not_change_table_options(true);
+    }
+
+    fn check_skip_wal_does_not_change_table_options(skip_wal: bool) {
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+        ctx.set_skip_wal(skip_wal);
+        let mut options = Default::default();
+        fill_table_options_for_create(&mut options, &AutoCreateTableType::Physical, &ctx);
+        assert!(!options.contains_key(session::hints::INSERT_SKIP_WAL_HINT));
+        assert!(!options.contains_key("skip_wal"));
     }
 
     #[test]

@@ -1143,6 +1143,45 @@ mod tests {
             .unwrap()
     }
 
+    fn check_batch_merge_wal_policy(
+        env: &TestEnv,
+        physical_region_id: RegionId,
+        mut requests: Vec<(RegionId, RegionPutRequest)>,
+        expect_sparse: bool,
+        skip_wal: bool,
+    ) {
+        for (_, request) in &mut requests {
+            request.skip_wal = skip_wal;
+        }
+        let (merged_request, affected_rows) = if expect_sparse {
+            let (merged_request, affected_rows) = env
+                .metric()
+                .inner
+                .merge_sparse_batch(physical_region_id, requests)
+                .unwrap();
+            let hint = merged_request
+                .hint
+                .as_ref()
+                .expect("missing sparse write hint");
+            assert_eq!(
+                hint.primary_key_encoding,
+                PrimaryKeyEncodingProto::Sparse as i32
+            );
+            (merged_request, affected_rows)
+        } else {
+            let (merged_request, affected_rows) = env
+                .metric()
+                .inner
+                .merge_dense_batch(to_data_region_id(physical_region_id), requests)
+                .unwrap();
+            assert!(merged_request.hint.is_none());
+            (merged_request, affected_rows)
+        };
+        assert_merged_schema(&merged_request.rows, expect_sparse);
+        assert_eq!(merged_request.skip_wal, skip_wal);
+        assert_eq!(affected_rows, 5);
+    }
+
     async fn run_batch_write_with_schema_variants(
         env: &TestEnv,
         physical_region_id: RegionId,
@@ -1214,39 +1253,20 @@ mod tests {
             ]
         };
 
-        for skip_wal in [false, true] {
-            let mut requests = build_requests();
-            for (_, request) in &mut requests {
-                request.skip_wal = skip_wal;
-            }
-            let (merged_request, affected_rows) = if expect_sparse {
-                let (merged_request, affected_rows) = env
-                    .metric()
-                    .inner
-                    .merge_sparse_batch(physical_region_id, requests)
-                    .unwrap();
-                let hint = merged_request
-                    .hint
-                    .as_ref()
-                    .expect("missing sparse write hint");
-                assert_eq!(
-                    hint.primary_key_encoding,
-                    PrimaryKeyEncodingProto::Sparse as i32
-                );
-                (merged_request, affected_rows)
-            } else {
-                let (merged_request, affected_rows) = env
-                    .metric()
-                    .inner
-                    .merge_dense_batch(data_region_id, requests)
-                    .unwrap();
-                assert!(merged_request.hint.is_none());
-                (merged_request, affected_rows)
-            };
-            assert_merged_schema(&merged_request.rows, expect_sparse);
-            assert_eq!(merged_request.skip_wal, skip_wal);
-            assert_eq!(affected_rows, 5);
-        }
+        check_batch_merge_wal_policy(
+            env,
+            physical_region_id,
+            build_requests(),
+            expect_sparse,
+            false,
+        );
+        check_batch_merge_wal_policy(
+            env,
+            physical_region_id,
+            build_requests(),
+            expect_sparse,
+            true,
+        );
 
         for policies in [[false, true], [true, false]] {
             let mut mixed_requests = build_requests();
