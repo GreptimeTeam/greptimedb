@@ -30,6 +30,67 @@ INSERT INTO native_time_us VALUES
 
 Affected Rows: 18
 
+-- The native projection and exact 1ms-lookback bounds must reach the scan;
+-- the 1s+tick row must not displace 201.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+-- SQLNESS REPLACE native_time_us.__table_id\s*=\s*UInt32\(\d+\) native_time_us.__table_id=UInt32(REDACTED)
+TQL EXPLAIN (1, 1, '1s', '1ms') native_time_us{series="exact"};
+
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                           |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                |
+|               | PromInstantManipulate: range=[1000..1000], lookback=[1], interval=[1000], time index=[ts]                                                                                                                      |
+|               |   PromSeriesDivide: tags=["series"]                                                                                                                                                                            |
+|               |     Sort: native_time_us.series ASC NULLS FIRST, native_time_us.ts ASC NULLS FIRST                                                                                                                             |
+|               |       Projection: native_time_us.val, native_time_us.series, native_time_us.ts                                                                                                                                 |
+|               |         Filter: native_time_us.series = Utf8("exact") AND native_time_us.ts > TimestampMicrosecond(999000, None) AND native_time_us.ts <= TimestampMicrosecond(1000000, None)                                  |
+|               |           TableScan: native_time_us, partial_filters=[native_time_us.series = Utf8("exact"), native_time_us.ts > TimestampMicrosecond(999000, None), native_time_us.ts <= TimestampMicrosecond(1000000, None)] |
+|               | ]]                                                                                                                                                                                                             |
+| physical_plan | CooperativeExec                                                                                                                                                                                                |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- The actual memtable scan must use LastRow { after_merge: true } with native
+-- 1ms-lookback bounds; it must select exact 1s rather than the future tick.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+TQL ANALYZE VERBOSE (1, 1, '1s', '1ms') native_time_us{series="exact"};
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=[]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[1000..1000], lookback=[1], interval=[1000], time index=[ts] metrics=[output_rows: 1, REDACTED
+|_|_|_PromSeriesDivideExec: tags=["series"] metrics=[output_rows: 1, REDACTED
+|_|_|_ProjectionExec: expr=[val@2 as val, series@1 as series, ts@0 as ts] metrics=[output_rows: 1, REDACTED
+|_|_|_CooperativeExec metrics=[]_|
+|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "series", "val"], "filters": ["series = Dictionary(UInt32, Utf8(\"exact\"))", "ts > TimestampMicrosecond(999000, None)", "ts <= TimestampMicrosecond(1000000, None)"], "REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- The same-series future tick is in the memtable, while exact 1s remains selected.
+TQL EVAL (1, 1, '1s', '1ms') native_time_us{series="exact"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 201.0 | exact  | 1970-01-01T00:00:01 |
++-------+--------+---------------------+
+
 -- Future-only selection is empty before flushing, exercising the memtable path.
 TQL EVAL (1, 1, '1s', '300s') native_time_us{series="future"};
 
@@ -44,8 +105,8 @@ ADMIN FLUSH_TABLE('native_time_us');
 | 0                                   |
 +-------------------------------------+
 
--- At 1s, selection keeps an exact native timestamp.
-TQL EVAL (1, 1, '1s', '300s') native_time_us{series="exact"};
+-- The exact native sample remains selected from the flushed SST.
+TQL EVAL (1, 1, '1s', '1ms') native_time_us{series="exact"};
 
 +-------+--------+---------------------+
 | val   | series | ts                  |
@@ -195,6 +256,67 @@ INSERT INTO native_time_ns VALUES
 
 Affected Rows: 18
 
+-- The native projection and exact 1ms-lookback bounds must reach the scan;
+-- the 1s+tick row must not displace 201.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+-- SQLNESS REPLACE native_time_ns.__table_id\s*=\s*UInt32\(\d+\) native_time_ns.__table_id=UInt32(REDACTED)
+TQL EXPLAIN (1, 1, '1s', '1ms') native_time_ns{series="exact"};
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                               |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                    |
+|               | PromInstantManipulate: range=[1000..1000], lookback=[1], interval=[1000], time index=[ts]                                                                                                                          |
+|               |   PromSeriesDivide: tags=["series"]                                                                                                                                                                                |
+|               |     Sort: native_time_ns.series ASC NULLS FIRST, native_time_ns.ts ASC NULLS FIRST                                                                                                                                 |
+|               |       Projection: native_time_ns.val, native_time_ns.series, native_time_ns.ts                                                                                                                                     |
+|               |         Filter: native_time_ns.series = Utf8("exact") AND native_time_ns.ts > TimestampNanosecond(999000000, None) AND native_time_ns.ts <= TimestampNanosecond(1000000000, None)                                  |
+|               |           TableScan: native_time_ns, partial_filters=[native_time_ns.series = Utf8("exact"), native_time_ns.ts > TimestampNanosecond(999000000, None), native_time_ns.ts <= TimestampNanosecond(1000000000, None)] |
+|               | ]]                                                                                                                                                                                                                 |
+| physical_plan | CooperativeExec                                                                                                                                                                                                    |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                    |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- The actual memtable scan must use LastRow { after_merge: true } with native
+-- 1ms-lookback bounds; it must select exact 1s rather than the future tick.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+TQL ANALYZE VERBOSE (1, 1, '1s', '1ms') native_time_ns{series="exact"};
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=[]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[1000..1000], lookback=[1], interval=[1000], time index=[ts] metrics=[output_rows: 1, REDACTED
+|_|_|_PromSeriesDivideExec: tags=["series"] metrics=[output_rows: 1, REDACTED
+|_|_|_ProjectionExec: expr=[val@2 as val, series@1 as series, ts@0 as ts] metrics=[output_rows: 1, REDACTED
+|_|_|_CooperativeExec metrics=[]_|
+|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "series", "val"], "filters": ["series = Dictionary(UInt32, Utf8(\"exact\"))", "ts > TimestampNanosecond(999000000, None)", "ts <= TimestampNanosecond(1000000000, None)"], "REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- The same-series future tick is in the memtable, while exact 1s remains selected.
+TQL EVAL (1, 1, '1s', '1ms') native_time_ns{series="exact"};
+
++-------+--------+---------------------+
+| val   | series | ts                  |
++-------+--------+---------------------+
+| 201.0 | exact  | 1970-01-01T00:00:01 |
++-------+--------+---------------------+
+
 -- Future-only selection is empty before flushing, exercising the memtable path.
 TQL EVAL (1, 1, '1s', '300s') native_time_ns{series="future"};
 
@@ -209,8 +331,8 @@ ADMIN FLUSH_TABLE('native_time_ns');
 | 0                                   |
 +-------------------------------------+
 
--- At 1s, selection keeps an exact native timestamp.
-TQL EVAL (1, 1, '1s', '300s') native_time_ns{series="exact"};
+-- The exact native sample remains selected from the flushed SST.
+TQL EVAL (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 
 +-------+--------+---------------------+
 | val   | series | ts                  |
@@ -327,6 +449,100 @@ TQL EVAL (1, 1, '1s') last_over_time((native_time_ns{series="exact"})[1s:1s]);
 +---------------------+-----------------------------------+--------+
 
 DROP TABLE native_time_ns;
+
+Affected Rows: 0
+
+-- An unrepresentable native lower bound must not discard its representable upper bound.
+-- The upper filter must reach LastRow so the 1ms-future row cannot hide the eligible row.
+CREATE TABLE native_time_ns_lower_overflow (
+    ts TIMESTAMP(9) TIME INDEX,
+    series STRING PRIMARY KEY,
+    val DOUBLE,
+);
+
+Affected Rows: 0
+
+INSERT INTO native_time_ns_lower_overflow VALUES
+    (-9223200000000000000, 'exact', 1),
+    (-9223199999999000000, 'exact', 2);
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE native_time_ns_lower_overflow.__table_id\s*=\s*UInt32\(\d+\) native_time_ns_lower_overflow.__table_id=UInt32(REDACTED)
+TQL EXPLAIN (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                              |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                   |
+|               | PromInstantManipulate: range=[0..0], lookback=[172800000], interval=[1000], time index=[ts]                                                                                                                       |
+|               |   PromSeriesNormalize: offset=[9223200000000], time index=[ts], filter NaN: [false]                                                                                                                               |
+|               |     PromSeriesDivide: tags=["series"]                                                                                                                                                                             |
+|               |       Sort: native_time_ns_lower_overflow.series ASC NULLS FIRST, native_time_ns_lower_overflow.ts ASC NULLS FIRST                                                                                                |
+|               |         Projection: native_time_ns_lower_overflow.val, native_time_ns_lower_overflow.series, native_time_ns_lower_overflow.ts                                                                                     |
+|               |           Filter: native_time_ns_lower_overflow.series = Utf8("exact") AND native_time_ns_lower_overflow.ts <= TimestampNanosecond(-9223200000000000000, None)                                                    |
+|               |             TableScan: native_time_ns_lower_overflow, partial_filters=[native_time_ns_lower_overflow.series = Utf8("exact"), native_time_ns_lower_overflow.ts <= TimestampNanosecond(-9223200000000000000, None)] |
+|               | ]]                                                                                                                                                                                                                |
+| physical_plan | CooperativeExec                                                                                                                                                                                                   |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                   |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+TQL ANALYZE VERBOSE (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=[]_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[172800000], interval=[1000], time index=[ts] metrics=[output_rows: 1, REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[9223200000000], time index=[ts], filter NaN: [false] metrics=[output_rows: 1, REDACTED
+|_|_|_PromSeriesDivideExec: tags=["series"] metrics=[output_rows: 1, REDACTED
+|_|_|_ProjectionExec: expr=[val@2 as val, series@1 as series, ts@0 as ts] metrics=[output_rows: 1, REDACTED
+|_|_|_CooperativeExec metrics=[]_|
+|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "series", "val"], "filters": ["series = Dictionary(UInt32, Utf8(\"exact\"))", "ts <= TimestampNanosecond(-9223200000000000000, None)"], "REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- The representable upper bound selects only the exact row.
+TQL EVAL (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
+
++-----+--------+---------------------+
+| val | series | ts                  |
++-----+--------+---------------------+
+| 1.0 | exact  | 1970-01-01T00:00:00 |
++-----+--------+---------------------+
+
+ADMIN FLUSH_TABLE('native_time_ns_lower_overflow');
+
++----------------------------------------------------+
+| ADMIN FLUSH_TABLE('native_time_ns_lower_overflow') |
++----------------------------------------------------+
+| 0                                                  |
++----------------------------------------------------+
+
+TQL EVAL (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
+
++-----+--------+---------------------+
+| val | series | ts                  |
++-----+--------+---------------------+
+| 1.0 | exact  | 1970-01-01T00:00:00 |
++-----+--------+---------------------+
+
+DROP TABLE native_time_ns_lower_overflow;
 
 Affected Rows: 0
 

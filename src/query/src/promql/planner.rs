@@ -2786,13 +2786,14 @@ impl PromPlanner {
                 _ => None,
             })
             .unwrap_or(ArrowTimeUnit::Millisecond);
-        let scalar = |milliseconds: i64| -> Option<ScalarValue> {
-            let value = match unit {
-                ArrowTimeUnit::Second => milliseconds.div_euclid(1_000),
-                ArrowTimeUnit::Millisecond => milliseconds,
-                ArrowTimeUnit::Microsecond => milliseconds.checked_mul(1_000)?,
-                ArrowTimeUnit::Nanosecond => milliseconds.checked_mul(1_000_000)?,
-            };
+        let native_value = |milliseconds: i128| match unit {
+            ArrowTimeUnit::Second => milliseconds.div_euclid(1_000),
+            ArrowTimeUnit::Millisecond => milliseconds,
+            ArrowTimeUnit::Microsecond => milliseconds * 1_000,
+            ArrowTimeUnit::Nanosecond => milliseconds * 1_000_000,
+        };
+        let scalar = |milliseconds: i128| -> Option<ScalarValue> {
+            let value = i64::try_from(native_value(milliseconds)).ok()?;
             Some(match unit {
                 ArrowTimeUnit::Second => ScalarValue::TimestampSecond(Some(value), None),
                 ArrowTimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), None),
@@ -2801,45 +2802,57 @@ impl PromPlanner {
             })
         };
         let window = self.ctx.range.unwrap_or(self.ctx.lookback_delta);
-        let filter = |lower_ms: i64, upper_ms: i64| -> Option<DfExpr> {
-            let lower = DfExpr::Literal(scalar(lower_ms)?, None);
-            let lower_filter = if window == 0 {
-                time_index_expr.clone().gt_eq(lower)
-            } else if unit == ArrowTimeUnit::Millisecond
-                && let Some(inclusive_lower) = lower_ms.checked_add(1)
-            {
-                time_index_expr
-                    .clone()
-                    .gt_eq(DfExpr::Literal(scalar(inclusive_lower)?, None))
-            } else {
-                time_index_expr.clone().gt(lower)
-            };
-            Some(
-                lower_filter.and(
+        let filter = |lower_ms: i128, upper_ms: i128| {
+            let lower_value = native_value(lower_ms);
+            let upper_value = native_value(upper_ms);
+            if lower_value > i128::from(i64::MAX) || upper_value < i128::from(i64::MIN) {
+                return Some(lit(false));
+            }
+            let lower_filter = (lower_value >= i128::from(i64::MIN)).then(|| {
+                let lower = DfExpr::Literal(scalar(lower_ms).unwrap(), None);
+                if window == 0 {
+                    time_index_expr.clone().gt_eq(lower)
+                } else if unit == ArrowTimeUnit::Millisecond
+                    && let Some(inclusive_lower) = lower_ms
+                        .checked_add(1)
+                        .and_then(|lower| i64::try_from(lower).ok())
+                        .and_then(|lower| scalar(i128::from(lower)))
+                {
                     time_index_expr
                         .clone()
-                        .lt_eq(DfExpr::Literal(scalar(upper_ms)?, None)),
-                ),
-            )
+                        .gt_eq(DfExpr::Literal(inclusive_lower, None))
+                } else {
+                    time_index_expr.clone().gt(lower)
+                }
+            });
+            let upper_filter = (upper_value <= i128::from(i64::MAX)).then(|| {
+                time_index_expr
+                    .clone()
+                    .lt_eq(DfExpr::Literal(scalar(upper_ms).unwrap(), None))
+            });
+
+            match (lower_filter, upper_filter) {
+                (Some(lower), Some(upper)) => Some(lower.and(upper)),
+                (Some(filter), None) | (None, Some(filter)) => Some(filter),
+                (None, None) => None,
+            }
         };
         let bounds = |timestamp: i64| {
-            timestamp
-                .checked_sub(offset_duration)
-                .and_then(|upper| upper.checked_sub(window).map(|lower| (lower, upper)))
+            let upper = i128::from(timestamp) - i128::from(offset_duration);
+            (upper - i128::from(window), upper)
         };
         let num_points = (end as i128 - start as i128) / self.ctx.interval as i128;
         if num_points > MAX_SCATTER_POINTS as i128 || self.ctx.interval <= INTERVAL_1H {
-            return Ok(bounds(start)
-                .zip(bounds(end))
-                .and_then(|((lower, _), (_, upper))| filter(lower, upper)));
+            let (lower, _) = bounds(start);
+            let (_, upper) = bounds(end);
+            return Ok(filter(lower, upper));
         }
         let mut filters = Vec::new();
         for timestamp in (start..=end).step_by(self.ctx.interval as usize) {
-            let Some((lower, upper)) = bounds(timestamp) else {
-                // An unrepresentable envelope must not discard samples.
-                return Ok(None);
-            };
+            let (lower, upper) = bounds(timestamp);
             let Some(filter) = filter(lower, upper) else {
+                // A point whose native bounds cannot be represented may cover the whole native
+                // time domain, so its disjunct cannot be omitted.
                 return Ok(None);
             };
             filters.push(filter);
@@ -12254,11 +12267,55 @@ mod test {
             );
         }
         planner.ctx.end = i64::MAX;
+        let filter = planner
+            .build_time_index_filter(0, &schema)
+            .unwrap()
+            .unwrap()
+            .to_string();
         assert!(
-            planner
-                .build_time_index_filter(0, &schema)
-                .unwrap()
-                .is_none()
+            filter.contains("timestamp >= TimestampNanosecond(1000000000, None)"),
+            "{filter}"
+        );
+
+        // A lookback subtraction can underflow milliseconds while the upper bound remains
+        // representable. Keep that upper bound so LastRow cannot select a future sample.
+        let ms_schema = Arc::new(
+            DFSchema::try_from(ArrowSchema::new(vec![Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            )]))
+            .unwrap(),
+        );
+        planner.ctx.start = i64::MIN + 100;
+        planner.ctx.end = planner.ctx.start;
+        planner.ctx.lookback_delta = 200;
+        let filter = planner
+            .build_time_index_filter(0, &ms_schema)
+            .unwrap()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            filter,
+            format!(
+                "timestamp <= TimestampMillisecond({}, None)",
+                i64::MIN + 100
+            )
+        );
+
+        // The lower bound can also overflow while converting milliseconds to native nanoseconds.
+        // Its representable upper bound still has to reach the scan.
+        planner.ctx.start = 0;
+        planner.ctx.end = 0;
+        planner.ctx.lookback_delta = 300_000;
+        let filter = planner
+            .build_time_index_filter(9_223_372_036_854, &schema)
+            .unwrap()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            filter,
+            "timestamp <= TimestampNanosecond(-9223372036854000000, None)"
         );
     }
 

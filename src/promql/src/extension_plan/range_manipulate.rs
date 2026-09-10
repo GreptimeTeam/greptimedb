@@ -761,16 +761,7 @@ impl RangeManipulateStream {
         let start = query_start.max(first_ts_aligned);
         let end = query_end.min(last_ts_aligned);
         if start > end {
-            let bounds = if start >= i64::MIN as i128
-                && start <= i64::MAX as i128
-                && end >= i64::MIN as i128
-                && end <= i64::MAX as i128
-            {
-                (start as i64, end as i64)
-            } else {
-                (self.start, self.end)
-            };
-            return Ok((vec![], bounds));
+            return Ok((vec![], (self.start, self.end)));
         }
         // The intersection is within the declared i64 query bounds.
         let start = start as i64;
@@ -1508,6 +1499,68 @@ mod test {
         }
     }
 
+    #[tokio::test]
+    async fn no_intersection_batch_is_skipped_and_stream_continues() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                TimestampMillisecondType::DATA_TYPE,
+                false,
+            ),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: schema.clone().to_dfschema_ref().unwrap(),
+        });
+        let plan = RangeManipulate::new(
+            0,
+            50,
+            10,
+            1,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            input,
+        )
+        .unwrap();
+        let no_intersection = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![100])),
+                Arc::new(Float64Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        let intersection = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![20])),
+                Arc::new(Float64Array::from(vec![2.0])),
+            ],
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![no_intersection, intersection]], schema, None)
+                .unwrap(),
+        )));
+
+        let batches = datafusion::physical_plan::collect(
+            plan.to_execution_plan(input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        let timestamps = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(timestamps.value(0), 20);
+    }
+
     fn calculate_range_for_test(
         query_start: i64,
         query_end: i64,
@@ -1634,7 +1687,7 @@ mod test {
                 10,
                 0,
                 vec![100],
-                (100, 50),
+                (0, 50),
             ),
         ];
 
@@ -1772,6 +1825,17 @@ mod test {
             let (actual, (start, end)) =
                 calculate_range_for_test(query_start, query_end, interval, range, &timestamps);
             let expected = calculate_range_oracle(&timestamps, start, end, interval, range);
+            let expected = if actual.is_empty() && !expected.is_empty() {
+                assert!(
+                    expected.iter().all(|(_, len)| *len == 0),
+                    "case={case}, timestamps={timestamps:?}, query=({query_start}, {query_end}), \
+                     interval={interval}, range={range}, bounds=({start}, {end}): \
+                     no-intersection output must have no selected samples"
+                );
+                vec![]
+            } else {
+                expected
+            };
             assert_eq!(
                 actual, expected,
                 "case={case}, timestamps={timestamps:?}, query=({query_start}, {query_end}), \
