@@ -55,13 +55,13 @@ max_candidate_latency_regression_pct = 25
 [[scenario.queries]]
 name = "instant_last_row_plan"
 kind = "tql"
-query = "TQL EXPLAIN VERBOSE (1704067303, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
+query = "TQL ANALYZE VERBOSE (1704067303, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
 measure = false
-plan_contains = "LastRow"
+plan_contains = "LastRow { after_merge: true }"
 
 [[scenario.queries]]
 name = "range_no_last_row_plan"
 kind = "tql"
-query = "TQL EXPLAIN VERBOSE (1704067293, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
+query = "TQL ANALYZE VERBOSE (1704067293, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
 measure = false
 plan_absent = "LastRow"

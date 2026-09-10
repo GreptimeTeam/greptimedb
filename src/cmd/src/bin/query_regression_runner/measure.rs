@@ -21,7 +21,9 @@ use serde_json::{Map, Value, json};
 
 use crate::query_regression_runner::model::{Measurement, Query, QueryResult, Scenario, Table};
 use crate::query_regression_runner::plan::{load_plan, normalize_scenario};
-use crate::query_regression_runner::sql::{http_post_prom_range_query, http_post_sql, sql_ident};
+use crate::query_regression_runner::sql::{
+    http_post_prom_range_query, http_post_sql, http_post_sql_with_schema, sql_ident,
+};
 use crate::query_regression_runner::{MeasureArgs, Result};
 
 pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
@@ -131,6 +133,8 @@ async fn post_query(client: &Client, port: u16, query: &Query, db: &str) -> Valu
             db,
         )
         .await
+    } else if query.compare_results || query.expected_cardinality.is_some() {
+        http_post_sql_with_schema(client, port, &query.query, db).await
     } else {
         http_post_sql(client, port, &query.query, db).await
     }
@@ -272,15 +276,28 @@ fn compare_measured_results(
     base: &mut QueryResult,
     candidate: &mut QueryResult,
 ) {
+    let mut errors = Vec::new();
     for query in queries {
         if !query.measure || (!query.compare_results && query.expected_cardinality.is_none()) {
             continue;
         }
+        if query.compare_results && !matches!(query.kind.as_deref(), Some("sql" | "tql")) {
+            errors.push(json!({
+                "query": query.name,
+                "error": "result comparison only supports sql and tql queries",
+            }));
+            continue;
+        }
+
         let Some(base_measurement) = base
             .measurements
             .iter()
             .find(|measurement| measurement.name == query.name)
         else {
+            errors.push(json!({
+                "query": query.name,
+                "error": "missing base measurement",
+            }));
             continue;
         };
         let Some(candidate_measurement) = candidate
@@ -288,69 +305,160 @@ fn compare_measured_results(
             .iter()
             .find(|measurement| measurement.name == query.name)
         else {
+            errors.push(json!({
+                "query": query.name,
+                "error": "missing candidate measurement",
+            }));
             continue;
         };
-        for (iteration, (base_sample, candidate_sample)) in base_measurement
-            .samples
-            .iter()
-            .zip(&candidate_measurement.samples)
-            .enumerate()
-        {
-            let base_rows = crate::query_regression_runner::sql::extract_rows(
-                base_sample.get("response").unwrap_or(&Value::Null),
+
+        if let Some(expected) = query.expected_cardinality {
+            validate_cardinality(
+                query,
+                "base",
+                &base_measurement.samples,
+                expected,
+                &mut errors,
             );
-            let candidate_rows = crate::query_regression_runner::sql::extract_rows(
-                candidate_sample.get("response").unwrap_or(&Value::Null),
+            validate_cardinality(
+                query,
+                "candidate",
+                &candidate_measurement.samples,
+                expected,
+                &mut errors,
             );
-            if let Some(expected) = query.expected_cardinality
-                && (base_rows.len() as u64 != expected || candidate_rows.len() as u64 != expected)
-            {
-                candidate.validation_errors.push(json!({"query": query.name, "iteration": iteration, "error": format!("expected cardinality {expected}, got base={} candidate={}", base_rows.len(), candidate_rows.len())}));
-            }
-            if query.compare_results
-                && normalized_rows(base_rows) != normalized_rows(candidate_rows)
-            {
-                candidate.validation_errors.push(json!({"query": query.name, "iteration": iteration, "error": "base/candidate response rows differ"}));
+        }
+
+        if !query.compare_results {
+            continue;
+        }
+        if base_measurement.samples.len() != candidate_measurement.samples.len() {
+            errors.push(json!({
+                "query": query.name,
+                "error": format!(
+                    "sample count differs: base={} candidate={}",
+                    base_measurement.samples.len(),
+                    candidate_measurement.samples.len(),
+                ),
+            }));
+            continue;
+        }
+
+        for iteration in 0..base_measurement.samples.len() {
+            let base_records = extract_records(
+                base_measurement.samples[iteration]
+                    .get("response")
+                    .unwrap_or(&Value::Null),
+            );
+            let candidate_records = extract_records(
+                candidate_measurement.samples[iteration]
+                    .get("response")
+                    .unwrap_or(&Value::Null),
+            );
+            match (base_records, candidate_records) {
+                (Ok(base_records), Ok(candidate_records)) => {
+                    if !records_match(base_records, candidate_records) {
+                        errors.push(json!({
+                            "query": query.name,
+                            "iteration": iteration,
+                            "error": "base/candidate response records differ",
+                        }));
+                    }
+                }
+                (Err(error), _) => errors.push(json!({
+                    "query": query.name,
+                    "iteration": iteration,
+                    "error": format!("malformed base records response: {error}"),
+                })),
+                (_, Err(error)) => errors.push(json!({
+                    "query": query.name,
+                    "iteration": iteration,
+                    "error": format!("malformed candidate records response: {error}"),
+                })),
             }
         }
     }
+    candidate.validation_errors.extend(errors);
     if !candidate.validation_errors.is_empty() {
         candidate.status = "failed".to_string();
     }
 }
 
-fn normalized_rows(rows: Vec<Value>) -> Vec<String> {
+struct Records<'a> {
+    schema: &'a Value,
+    rows: &'a [Value],
+}
+
+fn extract_records(response: &Value) -> std::result::Result<Records<'_>, &'static str> {
+    let output = response
+        .as_object()
+        .and_then(|response| response.get("output"))
+        .and_then(Value::as_array)
+        .ok_or("response has no output array")?;
+    let [output] = output.as_slice() else {
+        return Err("response output must contain exactly one records result");
+    };
+    let records = output
+        .as_object()
+        .and_then(|output| output.get("records"))
+        .and_then(Value::as_object)
+        .ok_or("output has no records object")?;
+    let schema = records
+        .get("schema")
+        .filter(|schema| schema.is_object())
+        .ok_or("records has no schema object")?;
+    if schema
+        .get("column_schemas")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        return Err("schema has no column_schemas array");
+    }
+    let rows = records
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or("records has no rows array")?;
+    Ok(Records { schema, rows })
+}
+
+fn validate_cardinality(
+    query: &Query,
+    target: &str,
+    samples: &[Value],
+    expected: u64,
+    errors: &mut Vec<Value>,
+) {
+    for (iteration, sample) in samples.iter().enumerate() {
+        match extract_records(sample.get("response").unwrap_or(&Value::Null)) {
+            Ok(records) if records.rows.len() as u64 == expected => {}
+            Ok(records) => errors.push(json!({
+                "query": query.name,
+                "iteration": iteration,
+                "error": format!(
+                    "expected cardinality {expected}, got {target}={}",
+                    records.rows.len(),
+                ),
+            })),
+            Err(error) => errors.push(json!({
+                "query": query.name,
+                "iteration": iteration,
+                "error": format!("malformed {target} records response: {error}"),
+            })),
+        }
+    }
+}
+
+fn records_match(base: Records<'_>, candidate: Records<'_>) -> bool {
+    base.schema == candidate.schema && row_multiset(base.rows) == row_multiset(candidate.rows)
+}
+
+fn row_multiset(rows: &[Value]) -> Vec<String> {
     let mut rows = rows
-        .into_iter()
-        .map(|mut row| {
-            strip_timing_metadata(&mut row);
-            serde_json::to_string(&row).unwrap_or_default()
-        })
+        .iter()
+        .map(|row| serde_json::to_string(row).expect("JSON values are serializable"))
         .collect::<Vec<_>>();
     rows.sort_unstable();
     rows
-}
-
-fn strip_timing_metadata(value: &mut Value) {
-    match value {
-        Value::Object(values) => {
-            values.retain(|key, _| {
-                !matches!(
-                    key.as_str(),
-                    "execution_time" | "execution_time_ms" | "elapsed" | "elapsed_ms" | "cost"
-                )
-            });
-            for value in values.values_mut() {
-                strip_timing_metadata(value);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                strip_timing_metadata(value);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn validate_show_create(result: &Value, table: &Table) -> Vec<&'static str> {
@@ -550,6 +658,195 @@ mod tests {
         assert_eq!(
             extract_execution_time_for_kind(Some("sql"), &response),
             Some(&json!(42))
+        );
+    }
+
+    fn compared_query(iterations: usize, expected_cardinality: Option<u64>) -> Query {
+        Query {
+            name: Some("q".to_string()),
+            kind: Some("tql".to_string()),
+            query: "TQL EVAL (0, 1, '1s') 1".to_string(),
+            start: None,
+            end: None,
+            step: None,
+            warmup: 0,
+            iterations,
+            expected_cardinality,
+            compare_results: true,
+            measure: true,
+            plan_contains: None,
+            plan_absent: None,
+            thresholds: Map::new(),
+        }
+    }
+
+    fn records_sample(column: &str, data_type: &str, rows: Value) -> Value {
+        json!({
+            "response": {
+                "output": [{
+                    "records": {
+                        "schema": {"column_schemas": [{"name": column, "data_type": data_type}]},
+                        "rows": rows,
+                    }
+                }],
+                "execution_time_ms": 10,
+                "elapsed": 20,
+                "cost": 30,
+            }
+        })
+    }
+
+    fn compared_results(samples: Vec<Value>) -> QueryResult {
+        QueryResult {
+            validation: vec![],
+            validation_errors: vec![],
+            measurements: vec![Measurement {
+                name: Some("q".to_string()),
+                kind: Some("tql".to_string()),
+                iterations: samples.len(),
+                samples,
+                latency_ms_median: None,
+                latency_ms_p95: None,
+                status: "ok".to_string(),
+            }],
+            status: "ok".to_string(),
+        }
+    }
+
+    fn compare_samples(
+        expected_cardinality: Option<u64>,
+        base_samples: Vec<Value>,
+        candidate_samples: Vec<Value>,
+    ) -> QueryResult {
+        let query = compared_query(base_samples.len(), expected_cardinality);
+        let mut base = compared_results(base_samples);
+        let mut candidate = compared_results(candidate_samples);
+        compare_measured_results(&[query], &mut base, &mut candidate);
+        candidate
+    }
+
+    #[test]
+    fn comparison_rejects_changed_column_name() {
+        let candidate = compare_samples(
+            None,
+            vec![records_sample("value", "Int64", json!([[1]]))],
+            vec![records_sample("other", "Int64", json!([[1]]))],
+        );
+        assert_eq!(candidate.validation_errors.len(), 1);
+        assert_eq!(candidate.validation_errors[0]["iteration"], 0);
+    }
+
+    #[test]
+    fn comparison_rejects_changed_column_type() {
+        let candidate = compare_samples(
+            None,
+            vec![records_sample("value", "Int64", json!([[1]]))],
+            vec![records_sample("value", "String", json!([[1]]))],
+        );
+        assert_eq!(candidate.validation_errors.len(), 1);
+    }
+
+    #[test]
+    fn comparison_preserves_cost_and_elapsed_in_row_json() {
+        let base = records_sample("value", "Json", json!([{"cost": 1, "elapsed": 2}]));
+        let candidate = records_sample("value", "Json", json!([{"cost": 3, "elapsed": 4}]));
+        let candidate = compare_samples(None, vec![base], vec![candidate]);
+        assert_eq!(candidate.validation_errors.len(), 1);
+    }
+
+    #[test]
+    fn comparison_ignores_response_execution_timing() {
+        let base = records_sample("value", "Int64", json!([[1]]));
+        let mut candidate = records_sample("value", "Int64", json!([[1]]));
+        candidate["response"]["execution_time_ms"] = json!(99);
+        candidate["response"]["elapsed"] = json!(88);
+        candidate["response"]["cost"] = json!(77);
+        let candidate = compare_samples(None, vec![base], vec![candidate]);
+        assert!(candidate.validation_errors.is_empty());
+    }
+
+    #[test]
+    fn comparison_accepts_unordered_equal_rows() {
+        let candidate = compare_samples(
+            None,
+            vec![records_sample("value", "Int64", json!([[1], [2]]))],
+            vec![records_sample("value", "Int64", json!([[2], [1]]))],
+        );
+        assert!(candidate.validation_errors.is_empty());
+    }
+
+    #[test]
+    fn comparison_rejects_duplicate_row_mismatch() {
+        let candidate = compare_samples(
+            None,
+            vec![records_sample("value", "Int64", json!([[1], [1]]))],
+            vec![records_sample("value", "Int64", json!([[1], [2]]))],
+        );
+        assert_eq!(candidate.validation_errors.len(), 1);
+    }
+
+    #[test]
+    fn comparison_rejects_cardinality_mismatch() {
+        let sample = records_sample("value", "Int64", json!([[1]]));
+        let candidate = compare_samples(Some(2), vec![sample.clone()], vec![sample]);
+        assert_eq!(candidate.validation_errors.len(), 2);
+        assert!(candidate.validation_errors.iter().all(|error| {
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("expected cardinality 2")
+        }));
+    }
+
+    #[test]
+    fn comparison_rejects_later_iteration_mismatch() {
+        let candidate = compare_samples(
+            None,
+            vec![
+                records_sample("value", "Int64", json!([[1]])),
+                records_sample("value", "Int64", json!([[2]])),
+            ],
+            vec![
+                records_sample("value", "Int64", json!([[1]])),
+                records_sample("value", "Int64", json!([[3]])),
+            ],
+        );
+        assert_eq!(candidate.validation_errors.len(), 1);
+        assert_eq!(candidate.validation_errors[0]["iteration"], 1);
+    }
+
+    #[test]
+    fn comparison_rejects_missing_iteration() {
+        let candidate = compare_samples(
+            None,
+            vec![
+                records_sample("value", "Int64", json!([[1]])),
+                records_sample("value", "Int64", json!([[2]])),
+            ],
+            vec![records_sample("value", "Int64", json!([[1]]))],
+        );
+        assert_eq!(candidate.validation_errors.len(), 1);
+        assert!(
+            candidate.validation_errors[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("sample count differs: base=2 candidate=1")
+        );
+    }
+
+    #[test]
+    fn comparison_rejects_malformed_records_response() {
+        let candidate = compare_samples(
+            None,
+            vec![json!({"response": {"output": []}})],
+            vec![json!({"response": {"output": []}})],
+        );
+        assert_eq!(candidate.validation_errors.len(), 1);
+        assert!(
+            candidate.validation_errors[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("malformed base records response")
         );
     }
 

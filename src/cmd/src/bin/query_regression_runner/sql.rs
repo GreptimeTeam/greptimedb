@@ -117,17 +117,36 @@ pub(super) fn value_f64(value: Option<&Value>) -> Option<f64> {
 }
 
 pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &str) -> Value {
-    let mut sample = post_form(
-        client,
-        format!("http://127.0.0.1:{port}/v1/sql"),
-        &[("sql", sql), ("db", db), ("format", "json")],
-    )
-    .await;
+    http_post_sql_with_format(client, port, sql, db, "json").await
+}
+
+pub(super) async fn http_post_sql_with_schema(
+    client: &Client,
+    port: u16,
+    sql: &str,
+    db: &str,
+) -> Value {
+    http_post_sql_with_format(client, port, sql, db, "greptimedb_v1").await
+}
+
+async fn http_post_sql_with_format(
+    client: &Client,
+    port: u16,
+    sql: &str,
+    db: &str,
+    format: &str,
+) -> Value {
+    let form = sql_form(sql, db, format);
+    let mut sample = post_form(client, format!("http://127.0.0.1:{port}/v1/sql"), &form).await;
     sample
         .as_object_mut()
         .expect("HTTP samples are objects")
         .insert("sql".to_string(), Value::String(sql.to_string()));
     sample
+}
+
+fn sql_form<'a>(sql: &'a str, db: &'a str, format: &'a str) -> [(&'static str, &'a str); 3] {
+    [("sql", sql), ("db", db), ("format", format)]
 }
 
 /// Posts a Prometheus HTTP API range query (`/v1/prometheus/api/v1/query_range`)
@@ -265,6 +284,18 @@ mod tests {
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
             vec![("db".into(), "catalog-schema name".into())]
+        );
+    }
+
+    #[test]
+    fn sql_form_uses_requested_response_format() {
+        assert_eq!(
+            sql_form("SELECT 1", "public", "greptimedb_v1"),
+            [
+                ("sql", "SELECT 1"),
+                ("db", "public"),
+                ("format", "greptimedb_v1"),
+            ]
         );
     }
 
