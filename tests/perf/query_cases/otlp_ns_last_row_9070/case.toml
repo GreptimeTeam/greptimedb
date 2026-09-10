@@ -39,9 +39,12 @@ expected_cardinality = 256
 max_candidate_latency_regression_pct = 25
 
 [[scenario.queries]]
+# Keep the performance control off the 100ms sample grid: the baseline
+# truncates +123ns samples and would otherwise select a future sample.
+# Native boundary correctness is covered separately by SQL regressions.
 name = "range_selector_last_row_control"
 kind = "tql"
-query = "TQL EVAL (1704067293, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
+query = "TQL EVAL (1704067293.05, 1704067303.05, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
 warmup = 3
 iterations = 9
 compare_results = true
@@ -62,6 +65,6 @@ plan_contains = "LastRow { after_merge: true }"
 [[scenario.queries]]
 name = "range_no_last_row_plan"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067293, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
+query = "TQL ANALYZE VERBOSE (1704067293.05, 1704067303.05, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
 measure = false
 plan_absent = "LastRow"
