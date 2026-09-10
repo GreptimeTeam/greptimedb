@@ -54,7 +54,7 @@ SELECT avg_calc(avg_merge(state)) FROM states;
 -- Empty, null-only, and null binary states calculate to NULL.
 SELECT avg_calc(avg_state(CAST(i AS DOUBLE))) FROM integers WHERE i > 100;
 SELECT avg_calc(avg_state(NULL::DOUBLE));
-SELECT avg_calc(NULL::BINARY);
+SELECT avg_calc(NULL::BYTEA);
 
 -- Invalid AVG1 state propagates an error.
 SELECT avg_calc(X'00');
