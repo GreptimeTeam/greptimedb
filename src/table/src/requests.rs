@@ -714,6 +714,8 @@ pub struct InsertRequest {
     pub schema_name: String,
     pub table_name: String,
     pub columns_values: HashMap<String, VectorRef>,
+    /// Whether this insert should skip WAL.
+    pub skip_wal: bool,
 }
 
 /// Delete (by primary key) request

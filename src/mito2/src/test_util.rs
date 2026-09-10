@@ -1351,6 +1351,7 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows,
                 hint: None,
                 partition_expr_version: None,

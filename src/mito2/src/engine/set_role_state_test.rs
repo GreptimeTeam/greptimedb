@@ -114,6 +114,7 @@ async fn test_set_role_state_gracefully_with_format(flat_format: bool) {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: rows.clone(),
                     hint: None,
                     partition_expr_version: None,
@@ -208,6 +209,7 @@ async fn test_write_downgrading_region_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: rows.clone(),
                 hint: None,
                 partition_expr_version: None,

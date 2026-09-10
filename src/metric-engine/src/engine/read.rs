@@ -500,6 +500,7 @@ mod test {
         let schema = test_util::row_schema_with_tags(&["job"]);
         let put = |rows| {
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: Rows {
                     schema: schema.clone(),
                     rows: test_util::build_rows(1, rows),

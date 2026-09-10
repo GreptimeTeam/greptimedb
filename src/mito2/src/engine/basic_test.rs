@@ -732,6 +732,7 @@ async fn test_absent_and_invalid_columns_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows,
                 hint: None,
                 partition_expr_version: None,
@@ -1319,4 +1320,389 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
         .collect::<String>();
 
     assert_eq!(expect_format, debug_format);
+}
+
+#[tokio::test]
+async fn test_request_skip_wal_recovery() {
+    check_request_skip_wal_recovery(false, false).await;
+    check_request_skip_wal_recovery(false, true).await;
+    check_request_skip_wal_recovery(true, false).await;
+    check_request_skip_wal_recovery(true, true).await;
+}
+
+async fn check_request_skip_wal_recovery(flat_format: bool, skip_wal: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let affected = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema,
+                    rows: build_rows_for_key("a", 0, 4, 0),
+                },
+                hint: None,
+                partition_expr_version: None,
+                skip_wal,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(affected.affected_rows, 4);
+    let current = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current();
+    assert_eq!(current.committed_sequence, 4);
+    assert_eq!(current.last_entry_id, u64::from(!skip_wal));
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let before = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(before.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
+
+    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let after = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        after.iter().map(|b| b.num_rows()).sum::<usize>(),
+        if skip_wal { 0 } else { 4 }
+    );
+}
+
+#[tokio::test]
+async fn test_request_skip_wal_flush_watermarks() {
+    check_request_skip_wal_flush_watermarks(false).await;
+    check_request_skip_wal_flush_watermarks(true).await;
+}
+
+async fn check_request_skip_wal_flush_watermarks(flat_format: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Establish a nonzero flushed baseline, skip one write, then resume WAL.
+    for (round, skip_wal) in [false, true, false].into_iter().enumerate() {
+        let region = engine.get_region(region_id).unwrap();
+        let before = region.version_control.current();
+        let flushed_entry_id = engine
+            .region_statistic(region_id)
+            .unwrap()
+            .manifest
+            .data_flushed_entry_id();
+        let affected = engine
+            .handle_request(
+                region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: schema.clone(),
+                        rows: build_rows_for_key("a", 0, 4, 0),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                    skip_wal,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected.affected_rows, 4);
+        let after_write = region.version_control.current();
+        let expected_entry_id = before.last_entry_id + u64::from(!skip_wal);
+        assert_eq!(after_write.last_entry_id, expected_entry_id);
+        assert_eq!(
+            after_write.committed_sequence,
+            before.committed_sequence + 4
+        );
+        assert_eq!(after_write.version.flushed_entry_id, flushed_entry_id);
+        assert_eq!(
+            engine
+                .region_statistic(region_id)
+                .unwrap()
+                .manifest
+                .data_flushed_entry_id(),
+            flushed_entry_id
+        );
+        assert_eq!(
+            after_write.version.flushed_sequence,
+            before.version.flushed_sequence
+        );
+
+        flush_region(&engine, region_id, None).await;
+        let after_flush = region.version_control.current();
+        assert_eq!(after_flush.last_entry_id, expected_entry_id);
+        assert_eq!(after_flush.version.flushed_sequence, (round as u64 + 1) * 4);
+        assert_eq!(
+            engine
+                .region_statistic(region_id)
+                .unwrap()
+                .manifest
+                .data_flushed_entry_id(),
+            expected_entry_id
+        );
+        if skip_wal {
+            assert_eq!(expected_entry_id, flushed_entry_id);
+        } else {
+            assert!(expected_entry_id > flushed_entry_id);
+        }
+    }
+}
+
+/// Returns `(committed_sequence, last_entry_id)` from one region version snapshot.
+/// Returns `None` if the region is not open.
+fn region_write_watermarks(engine: &MitoEngine, region_id: RegionId) -> Option<(u64, u64)> {
+    let region = engine.find_region(region_id)?;
+    let current = region.version_control.current();
+    Some((current.committed_sequence, current.last_entry_id))
+}
+
+#[tokio::test]
+async fn test_request_skip_wal_mixed_batch_recovery() {
+    check_request_skip_wal_mixed_batch_recovery(false, false, false).await;
+    check_request_skip_wal_mixed_batch_recovery(false, false, true).await;
+    check_request_skip_wal_mixed_batch_recovery(false, true, false).await;
+    check_request_skip_wal_mixed_batch_recovery(false, true, true).await;
+    check_request_skip_wal_mixed_batch_recovery(true, false, false).await;
+    check_request_skip_wal_mixed_batch_recovery(true, false, true).await;
+    check_request_skip_wal_mixed_batch_recovery(true, true, false).await;
+    check_request_skip_wal_mixed_batch_recovery(true, true, true).await;
+}
+
+async fn check_request_skip_wal_mixed_batch_recovery(
+    flat_format: bool,
+    skip_wal: bool,
+    flush_before_reopen: bool,
+) {
+    use crate::region_write_ctx::RegionWriteCtx;
+    use crate::request::OptionOutputTx;
+    use crate::test_util::LogStoreImpl;
+    use crate::wal::Wal;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let LogStoreImpl::RaftEngine(store) = env.get_log_store().unwrap() else {
+        panic!("expected the default local WAL");
+    };
+    let wal = Wal::new(store);
+    // Assemble one real worker write context deterministically, instead
+    // of relying on concurrently submitted requests landing in one batch.
+    let mut ctx = RegionWriteCtx::new(
+        region_id,
+        &region.version_control,
+        region.provider.clone(),
+        None,
+    );
+    let mut receivers = Vec::with_capacity(4);
+    for (index, (skip, timestamp)) in [(false, 0), (skip_wal, 0), (false, 0), (skip_wal, 1)]
+        .into_iter()
+        .enumerate()
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        receivers.push(rx);
+        ctx.push_mutation(
+            api::v1::OpType::Put as i32,
+            Some(Rows {
+                schema: schema.clone(),
+                // Timestamp zero ends with a WAL-backed update; timestamp one
+                // ends with a skipped update. Grouping mutations must not
+                // change either winner chosen by the original sequences.
+                rows: build_rows_for_key("a", timestamp, timestamp + 1, index * 10)
+                    .into_iter()
+                    .chain(build_rows_for_key(
+                        "a",
+                        index + 1,
+                        index + 2,
+                        index * 10 + 1,
+                    ))
+                    .collect(),
+            }),
+            None,
+            OptionOutputTx::from(tx),
+            None,
+            skip,
+        );
+    }
+    let mut writer = wal.writer();
+    ctx.add_wal_entry(&mut writer).unwrap();
+    let response = writer.write_to_wal().await.unwrap();
+    assert_eq!(response.last_entry_ids.get(&region_id), Some(&1));
+    ctx.write_memtable().await;
+    ctx.publish_sequence_and_entry_id();
+    drop(ctx);
+    for rx in receivers {
+        assert_eq!(rx.await.unwrap().unwrap(), 2);
+    }
+    assert_eq!(region_write_watermarks(&engine, region_id), Some((8, 1)));
+    assert_eq!(
+        request_skip_wal_values(&engine, region_id).await,
+        vec![
+            (0, 20.0),
+            (1000, 30.0),
+            (2000, 11.0),
+            (3000, 21.0),
+            (4000, 31.0)
+        ]
+    );
+
+    // Inspect persisted WAL mutations, not just an encoder or counter.
+    let mut reader = wal.wal_entry_reader(&region.provider, region_id, None);
+    let entries = reader
+        .read(&region.provider, 1)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, 1);
+    assert_eq!(
+        entries[0]
+            .1
+            .mutations
+            .iter()
+            .map(|m| m.sequence)
+            .collect::<Vec<_>>(),
+        if skip_wal {
+            vec![1, 5]
+        } else {
+            vec![1, 3, 5, 7]
+        }
+    );
+    assert!(entries[0].1.bulk_entries.is_empty());
+    drop(region);
+    if flush_before_reopen {
+        flush_region(&engine, region_id, None).await;
+        let current = engine
+            .get_region(region_id)
+            .unwrap()
+            .version_control
+            .current();
+        assert_eq!(
+            (
+                current.version.flushed_sequence,
+                current.version.flushed_entry_id
+            ),
+            (8, 1)
+        );
+    }
+
+    // A no-flush close discards memtables. Only WAL-backed rows recover
+    // unless an explicit flush has already persisted all requests.
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let loses_skipped_rows = skip_wal && !flush_before_reopen;
+    let mut expected_values = if loses_skipped_rows {
+        vec![(0, 20.0), (1000, 1.0), (3000, 21.0)]
+    } else {
+        vec![
+            (0, 20.0),
+            (1000, 30.0),
+            (2000, 11.0),
+            (3000, 21.0),
+            (4000, 31.0),
+        ]
+    };
+    assert_eq!(
+        request_skip_wal_values(&engine, region_id).await,
+        expected_values
+    );
+    let recovered_sequence = if loses_skipped_rows { 6 } else { 8 };
+    assert_eq!(
+        region_write_watermarks(&engine, region_id),
+        Some((recovered_sequence, 1))
+    );
+
+    // A subsequent default request still writes WAL, even after a
+    // trailing skipped request or a flush with sequence/entry-id gaps.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows_for_key("a", 8, 9, 8),
+        },
+    )
+    .await;
+    assert_eq!(
+        region_write_watermarks(&engine, region_id),
+        Some((recovered_sequence + 1, 2))
+    );
+    expected_values.push((8000, 8.0));
+    assert_eq!(
+        request_skip_wal_values(&engine, region_id).await,
+        expected_values
+    );
+}
+
+async fn request_skip_wal_values(engine: &MitoEngine, region_id: RegionId) -> Vec<(i64, f64)> {
+    use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
+
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let mut values = batches
+        .iter()
+        .flat_map(|batch| {
+            let batch = batch.df_record_batch();
+            let timestamps = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let values = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            timestamps
+                .values()
+                .iter()
+                .copied()
+                .zip(values.values().iter().copied())
+        })
+        .collect::<Vec<_>>();
+    values.sort_unstable_by_key(|(timestamp, _)| *timestamp);
+    values
 }

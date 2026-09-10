@@ -3411,6 +3411,7 @@ async fn test_alter_time_index_widen_sparse_compaction() {
     };
     let put_sparse = |rows| {
         RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows,
             hint: Some(WriteHint {
                 primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),

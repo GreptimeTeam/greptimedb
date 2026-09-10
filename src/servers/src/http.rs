@@ -117,6 +117,7 @@ mod client_ip;
 use crate::prom_remote_write::validation::PromValidationMode;
 mod hints;
 mod read_preference;
+mod skip_wal;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
@@ -1059,7 +1060,8 @@ impl HttpServer {
                     .layer(middleware::from_fn(client_ip::log_error_with_client_ip))
                     .layer(middleware::from_fn(
                         read_preference::extract_read_preference,
-                    )),
+                    ))
+                    .layer(middleware::from_fn(skip_wal::extract_skip_wal)),
             );
 
         // Debug handlers are part of the complete router; the API listener hides
