@@ -175,7 +175,7 @@ tokio-postgres-rustls = "0.14"
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
 
 [target.'cfg(not(windows))'.dev-dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 
 [build-dependencies]
 common-version.workspace = true
