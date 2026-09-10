@@ -1,0 +1,23 @@
+tests-integration/tests/grpc.rs
+  s_cbf051d9e59a54::t_ee183f30301bde 58,77-78,787-788,1252-1253
+tests-integration/tests/http.rs
+  s_cbf051d9e59a54::t_6a02b7b9906321 61,91,450-451,466-472,474,1661-1662,1677,2701-2702,2735,4224-4225,4240,5451-5452,5467,6650-6651,6662,7460-7461,7493,8566-8567,8579,8872-8873,8900,9311-9312,9319,11025-11026,11033,11147-11148,11165-11166,11197-11200,11240,11248-11250
+tests-integration/tests/main.rs
+  s_cbf051d9e59a54::t_13f2aa853aa552 44-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "060429f8446b1735fe566572a9579310813d2d45",
+  "prompts": {},
+  "sessions": {
+    "s_cbf051d9e59a54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0864c-1d9c-7932-be89-8b66f62d14b3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
