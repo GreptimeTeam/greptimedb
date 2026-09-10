@@ -274,10 +274,10 @@ CREATE table foo
 );
 
 -- SQLNESS PROTOCOL POSTGRES
-SELECT attname, atttypid FROM pg_catalog.pg_class AS cls INNER JOIN
+SELECT attr.attnum, attname, atttypid FROM pg_catalog.pg_class AS cls INNER JOIN
 pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid INNER JOIN
 pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid WHERE attr.attnum >= 0 AND
-cls.oid = 'foo'::regclass::oid ORDER BY attname;
+cls.oid = 'foo'::regclass::oid ORDER BY attr.attnum;
 
 -- SQLNESS PROTOCOL POSTGRES
 DROP TABLE foo;
