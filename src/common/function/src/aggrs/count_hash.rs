@@ -419,16 +419,8 @@ impl Accumulator for CountHashAccumulator {
             &self.random_state,
             &mut self.batch_hashes,
         )?;
-        if let Some(nulls) = arr.logical_nulls() {
-            for (hash, is_valid) in hashes.iter().zip(nulls.iter()) {
-                if is_valid {
-                    self.values.insert(*hash);
-                }
-            }
-        } else {
-            for hash in hashes {
-                self.values.insert(*hash);
-            }
+        for hash in hashes {
+            self.values.insert(*hash);
         }
         Ok(())
     }
@@ -502,7 +494,7 @@ mod tests {
         ])) as ArrayRef;
         acc.update_batch(&[array])?;
         let result = acc.evaluate()?;
-        assert_eq!(result, ScalarValue::Int64(Some(3)));
+        assert_eq!(result, ScalarValue::Int64(Some(4)));
 
         // Test with empty data
         let mut acc = create_test_accumulator();
@@ -516,7 +508,29 @@ mod tests {
         let array = Arc::new(Int32Array::from(vec![None, None, None])) as ArrayRef;
         acc.update_batch(&[array])?;
         let result = acc.evaluate()?;
-        assert_eq!(result, ScalarValue::Int64(Some(0)));
+        assert_eq!(result, ScalarValue::Int64(Some(1)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_count_hash_accumulator_typed_null_state_merge() -> Result<()> {
+        let typed_nulls = Arc::new(Int32Array::from(vec![None, None])) as ArrayRef;
+
+        let mut fresh = create_test_accumulator();
+        fresh.update_batch(&[typed_nulls])?;
+        let fresh_state = fresh.state()?;
+        assert_eq!(fresh.evaluate()?, ScalarValue::Int64(Some(1)));
+
+        let persisted_state = Arc::new(
+            SingleRowListArrayBuilder::new(Arc::new(UInt64Array::from(vec![0])) as ArrayRef)
+                .build_list_array(),
+        ) as ArrayRef;
+        let mut restored = create_test_accumulator();
+        restored.merge_batch(&[persisted_state])?;
+
+        assert_eq!(restored.evaluate()?, fresh.evaluate()?);
+        assert_eq!(restored.state()?, fresh_state);
 
         Ok(())
     }
