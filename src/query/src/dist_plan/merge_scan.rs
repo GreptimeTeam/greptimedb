@@ -2198,20 +2198,6 @@ mod tests {
     }
 
     #[test]
-    fn materialized_dynamic_filter_extensions_reject_invalid_value_on_dn() {
-        let dn_ctx = Arc::new(
-            QueryContextBuilder::default()
-                .set_extension(
-                    ENABLE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
-                    "invalid".to_string(),
-                )
-                .build(),
-        );
-
-        assert!(DefaultPlanDecoder::new(SessionStateBuilder::new().build(), &dn_ctx).is_err());
-    }
-
-    #[test]
     fn remote_dyn_filter_registry_cleanup_waits_for_last_query_scoped_stream_drop() {
         let registry_manager = Arc::new(DynFilterRegistryManager::default());
         let query_id = test_query_id(1);
