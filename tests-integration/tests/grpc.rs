@@ -1276,17 +1276,21 @@ async fn test_skip_wal_grpc_unary_stream_and_flight_sql(distributed: bool) {
                     request: Some(skip_wal_insert_body(columnar)),
                 };
                 let response = if streaming {
-                    grpc.handle_requests(with_skip_wal_hint(futures::stream::iter([request]), hint))
-                        .await
-                        .unwrap()
+                    grpc.handle_requests(with_skip_wal_hint(
+                        futures::stream::iter([request.clone(), request]),
+                        hint,
+                    ))
+                    .await
+                    .unwrap()
                 } else {
                     grpc.handle(with_skip_wal_hint(request, hint))
                         .await
                         .unwrap()
                 }
                 .into_inner();
+                let expected_rows = if streaming { 2 } else { 1 };
                 assert!(
-                    matches!(response.response, Some(ResponseBody::AffectedRows(rows)) if rows.value == 1)
+                    matches!(response.response, Some(ResponseBody::AffectedRows(rows)) if rows.value == expected_rows)
                 );
                 assert_wal_delta(
                     &before,
