@@ -2,8 +2,8 @@
 #
 # 128 series × 780 timestamps at 15s cadence = 99,840 rows. Data starts one
 # hour before evaluation; 481 evaluations span two hours. `count_over_time` is
-# boundary-sensitive, while `sum_over_time` intentionally includes kernel scan
-# work and the plain selector controls unrelated path variance.
+# boundary-sensitive. Min/max cover sliding extrema, while `sum_over_time`
+# intentionally includes kernel scan work and the plain selector controls unrelated path variance.
 
 [case]
 name = "promql_range_boundary"
@@ -93,6 +93,88 @@ max_candidate_latency_regression_pct = 20
 name = "count_over_time_1h"
 kind = "tql"
 query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') count_over_time(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Sliding extrema cover small, representative, and wide overlapping windows.
+[[scenario.queries]]
+name = "min_over_time_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') min_over_time(promql_range_boundary{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "max_over_time_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') max_over_time(promql_range_boundary{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "min_over_time_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') min_over_time(promql_range_boundary{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "max_over_time_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') max_over_time(promql_range_boundary{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "min_over_time_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') min_over_time(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "max_over_time_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') max_over_time(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# A bounded control with a one-hour evaluation step avoids overlapping windows.
+[[scenario.queries]]
+name = "min_over_time_1h_nonoverlap_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '1h') min_over_time(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "max_over_time_1h_nonoverlap_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '1h') max_over_time(promql_range_boundary{host=~'host.*'}[1h])"
 warmup = 3
 iterations = 9
 
