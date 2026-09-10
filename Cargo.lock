@@ -13584,6 +13584,7 @@ dependencies = [
  "table",
  "tempfile",
  "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
