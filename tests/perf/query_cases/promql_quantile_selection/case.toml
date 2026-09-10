@@ -1,7 +1,7 @@
 # PromQL quantile-over-time latency regression coverage.
 #
-# This is wave-only end-to-end coverage. Ascending- and descending-value
-# microbenchmark controls remain separately required.
+# This is wave-only end-to-end coverage. The strictly monotonic remote-write
+# controls are promql_quantile_ascending and promql_quantile_descending.
 
 [case]
 name = "promql_quantile_selection"

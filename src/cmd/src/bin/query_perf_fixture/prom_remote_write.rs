@@ -45,7 +45,7 @@ pub(super) struct PromRemoteWriteArgs {
     value_pattern: ValuePattern,
     #[arg(long, default_value_t = 0.0)]
     value_base: f64,
-    #[arg(long, default_value_t = 0.125)]
+    #[arg(long, default_value_t = 0.125, allow_negative_numbers = true)]
     value_step: f64,
     #[arg(long, default_value_t = 97)]
     value_cardinality: u64,
@@ -211,7 +211,15 @@ fn splitmix64(mut value: u64) -> u64 {
 mod tests {
     use std::collections::HashSet;
 
+    use clap::Parser;
+
     use super::*;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        prom_remote_write: PromRemoteWriteArgs,
+    }
 
     fn args(pattern: ValuePattern) -> PromRemoteWriteArgs {
         PromRemoteWriteArgs {
@@ -237,6 +245,20 @@ mod tests {
             value_sample_offset: 0,
             value_total_samples_per_series: None,
         }
+    }
+
+    #[test]
+    fn value_step_accepts_a_separate_negative_argument() {
+        let cli = Cli::try_parse_from([
+            "query_perf_fixture",
+            "--metric",
+            "fixture_metric",
+            "--value-step",
+            "-1",
+        ])
+        .expect("negative value step should parse");
+
+        assert_eq!(cli.prom_remote_write.value_step, -1.0);
     }
 
     #[test]

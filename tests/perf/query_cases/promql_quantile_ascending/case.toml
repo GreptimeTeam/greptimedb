@@ -1,0 +1,83 @@
+# PromQL quantile-over-time ascending-value negative control.
+#
+# Values are strictly increasing by global sample ordinal. This uses the
+# Prometheus remote-write/metric-engine ingestion and storage path, whereas
+# promql_quantile_selection uses direct readable SSTs. Both use 128 series,
+# 780 samples per series, 15s cadence, and the same evaluation queries.
+
+[case]
+name = "promql_quantile_ascending"
+description = "PromQL quantile_over_time q=0.9 ascending-value remote-write negative control"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "promql_quantile_ascending"
+series_count = 128
+samples_per_series = 780
+sample_chunk_size = 780
+flush_every_sample_chunks = 1
+start_unix_millis = 1704067200000
+step_millis = 15000
+chunk_series_count = 128
+
+[scenario.remote_write.value]
+pattern = "unique"
+base = 0
+step = 1
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+# Selector and response-path control; it does not cover quantile behavior.
+[[scenario.queries]]
+name = "plain_selector_control_2h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') promql_quantile_ascending{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "quantile_over_time_q90_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') quantile_over_time(0.9, promql_quantile_ascending{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "quantile_over_time_q90_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') quantile_over_time(0.9, promql_quantile_ascending{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "quantile_over_time_q90_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') quantile_over_time(0.9, promql_quantile_ascending{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+# host0000 is series ordinal 0. The 1h range at 1704070800 excludes the left
+# bound, spanning ordinals 1..240; q=0.9 rank 0.9 * (240 - 1) = 215.1 yields 216.1.
+[[scenario.queries]]
+name = "quantile_over_time_q90_1h_host0000_eval"
+kind = "tql"
+query = "TQL EVAL (1704070800, 1704070800, '15s') quantile_over_time(0.9, promql_quantile_ascending{host='host0000'}[1h])"
+warmup = 0
+iterations = 1
