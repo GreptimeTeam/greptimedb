@@ -1,0 +1,35 @@
+Cargo.lock
+  s_c8f343c7af25c4::t_3c52b3ecd328b5 2319-2328
+Cargo.toml
+  s_c8f343c7af25c4::t_e2ebc6c3892f24 11,291
+src/common/batcher/Cargo.toml
+  s_c8f343c7af25c4::t_0fea30beb05a26 1-20
+src/common/batcher/README.md
+  s_c8f343c7af25c4::t_3a862abaf10991 1-24
+src/common/batcher/src/flush_limiter.rs
+  s_c8f343c7af25c4::t_e94695aa2b404d 1-69
+src/common/batcher/src/lib.rs
+  s_c8f343c7af25c4::t_104ead08e18890 1-24
+src/common/batcher/src/pending_batch.rs
+  s_c8f343c7af25c4::t_c2509230bc761f 1-115
+src/common/batcher/src/pending_worker.rs
+  s_c8f343c7af25c4::t_fac09a50b7cffd 1-407
+src/common/batcher/src/timing_flush_policy.rs
+  s_c8f343c7af25c4::t_dfb74e1d457af1 1-111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "5a493b12f07479b0a36d53e6d261fdf9389c2709",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
