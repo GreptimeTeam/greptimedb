@@ -1535,14 +1535,28 @@ async fn check_request_skip_wal_mixed_batch_recovery(
         None,
     );
     let mut receivers = Vec::with_capacity(4);
-    for (index, skip) in [false, skip_wal, false, skip_wal].into_iter().enumerate() {
+    for (index, (skip, timestamp)) in [(false, 0), (skip_wal, 0), (false, 0), (skip_wal, 1)]
+        .into_iter()
+        .enumerate()
+    {
         let (tx, rx) = tokio::sync::oneshot::channel();
         receivers.push(rx);
         ctx.push_mutation(
             api::v1::OpType::Put as i32,
             Some(Rows {
                 schema: schema.clone(),
-                rows: build_rows_for_key("a", index * 2, index * 2 + 2, index * 2),
+                // Timestamp zero ends with a WAL-backed update; timestamp one
+                // ends with a skipped update. Grouping mutations must not
+                // change either winner chosen by the original sequences.
+                rows: build_rows_for_key("a", timestamp, timestamp + 1, index * 10)
+                    .into_iter()
+                    .chain(build_rows_for_key(
+                        "a",
+                        index + 1,
+                        index + 2,
+                        index * 10 + 1,
+                    ))
+                    .collect(),
             }),
             None,
             OptionOutputTx::from(tx),
@@ -1562,8 +1576,14 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     }
     assert_eq!(region_write_watermarks(&engine, region_id), Some((8, 1)));
     assert_eq!(
-        request_skip_wal_timestamps(&engine, region_id).await,
-        (0..8).map(|i| i * 1000).collect::<Vec<_>>()
+        request_skip_wal_values(&engine, region_id).await,
+        vec![
+            (0, 20.0),
+            (1000, 30.0),
+            (2000, 11.0),
+            (3000, 21.0),
+            (4000, 31.0)
+        ]
     );
 
     // Inspect persisted WAL mutations, not just an encoder or counter.
@@ -1611,14 +1631,20 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     // unless an explicit flush has already persisted all requests.
     reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
     let loses_skipped_rows = skip_wal && !flush_before_reopen;
-    let mut expected_timestamps = if loses_skipped_rows {
-        vec![0, 1000, 4000, 5000]
+    let mut expected_values = if loses_skipped_rows {
+        vec![(0, 20.0), (1000, 1.0), (3000, 21.0)]
     } else {
-        (0..8).map(|i| i * 1000).collect::<Vec<_>>()
+        vec![
+            (0, 20.0),
+            (1000, 30.0),
+            (2000, 11.0),
+            (3000, 21.0),
+            (4000, 31.0),
+        ]
     };
     assert_eq!(
-        request_skip_wal_timestamps(&engine, region_id).await,
-        expected_timestamps
+        request_skip_wal_values(&engine, region_id).await,
+        expected_values
     );
     let recovered_sequence = if loses_skipped_rows { 6 } else { 8 };
     assert_eq!(
@@ -1641,35 +1667,42 @@ async fn check_request_skip_wal_mixed_batch_recovery(
         region_write_watermarks(&engine, region_id),
         Some((recovered_sequence + 1, 2))
     );
-    expected_timestamps.push(8000);
+    expected_values.push((8000, 8.0));
     assert_eq!(
-        request_skip_wal_timestamps(&engine, region_id).await,
-        expected_timestamps
+        request_skip_wal_values(&engine, region_id).await,
+        expected_values
     );
 }
 
-async fn request_skip_wal_timestamps(engine: &MitoEngine, region_id: RegionId) -> Vec<i64> {
-    use datatypes::arrow::array::TimestampMillisecondArray;
+async fn request_skip_wal_values(engine: &MitoEngine, region_id: RegionId) -> Vec<(i64, f64)> {
+    use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
 
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let mut timestamps = batches
+    let mut values = batches
         .iter()
         .flat_map(|batch| {
-            batch
-                .df_record_batch()
+            let batch = batch.df_record_batch();
+            let timestamps = batch
                 .column(2)
                 .as_any()
                 .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
+                .unwrap();
+            let values = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            timestamps
                 .values()
                 .iter()
                 .copied()
+                .zip(values.values().iter().copied())
         })
         .collect::<Vec<_>>();
-    timestamps.sort_unstable();
-    timestamps
+    values.sort_unstable_by_key(|(timestamp, _)| *timestamp);
+    values
 }
