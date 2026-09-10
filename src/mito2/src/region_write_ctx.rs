@@ -318,24 +318,26 @@ impl RegionWriteCtx {
         sender: OptionOutputTx,
         mut bulk: BulkPart,
         sequence: Option<SequenceNumber>,
+        skip_wal: bool,
     ) -> bool {
         if let Some(sequence) = sequence {
             self.next_sequence = sequence;
         }
         bulk.sequence = self.next_sequence;
-        let entry = match BulkWalEntry::try_from(&bulk) {
-            Ok(entry) => entry,
-            Err(e) => {
-                sender.send(Err(e));
-                return false;
-            }
-        };
+        if !skip_wal {
+            let entry = match BulkWalEntry::try_from(&bulk) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    sender.send(Err(e));
+                    return false;
+                }
+            };
+            self.wal_entry.bulk_entries.push(entry);
+        }
 
         self.bulk_notifiers
             .push(WriteNotify::new(sender, bulk.num_rows()));
 
-        // Add bulk wal entry
-        self.wal_entry.bulk_entries.push(entry);
         self.next_sequence += bulk.num_rows() as u64;
         self.bulk_parts.push(bulk);
         true
@@ -555,11 +557,16 @@ mod tests {
     #[test]
     fn test_request_skip_wal_preserves_sequences_and_other_writes() {
         // Ablate only the request flag: the workload and sequence allocation stay identical.
-        check_request_skip_wal_preserves_sequences_and_other_writes(false);
-        check_request_skip_wal_preserves_sequences_and_other_writes(true);
+        check_request_skip_wal_preserves_sequences_and_other_writes(false, false);
+        check_request_skip_wal_preserves_sequences_and_other_writes(false, true);
+        check_request_skip_wal_preserves_sequences_and_other_writes(true, false);
+        check_request_skip_wal_preserves_sequences_and_other_writes(true, true);
     }
 
-    fn check_request_skip_wal_preserves_sequences_and_other_writes(skip_wal: bool) {
+    fn check_request_skip_wal_preserves_sequences_and_other_writes(
+        skip_wal: bool,
+        bulk_skip_wal: bool,
+    ) {
         let builder = VersionControlBuilder::new();
         let region_id = builder.region_id();
         let version_control = Arc::new(builder.build());
@@ -600,10 +607,13 @@ mod tests {
         {
             assert_eq!(mutation.rows.as_ref().unwrap().rows.len(), notify.num_rows);
         }
-        assert!(ctx.push_bulk(OptionOutputTx::none(), new_bulk_part(), None));
+        assert!(ctx.push_bulk(OptionOutputTx::none(), new_bulk_part(), None, bulk_skip_wal));
         assert!(!ctx.skip_wal());
         assert_eq!(ctx.next_sequence, 9);
-        assert_eq!(ctx.wal_entry.bulk_entries.len(), 1);
+        assert_eq!(
+            ctx.wal_entry.bulk_entries.len(),
+            usize::from(!bulk_skip_wal)
+        );
         assert_eq!(ctx.bulk_parts[0].sequence, 7);
         let sequences: Vec<_> = ctx.wal_entry.mutations.iter().map(|m| m.sequence).collect();
         assert_eq!(sequences, if skip_wal { vec![3, 6] } else { vec![1, 3, 6] });
@@ -710,7 +720,53 @@ mod tests {
     }
 
     #[test]
+    fn test_bulk_skip_wal_preserves_sequences() {
+        check_bulk_skip_wal_preserves_sequences(false);
+        check_bulk_skip_wal_preserves_sequences(true);
+    }
+
+    fn check_bulk_skip_wal_preserves_sequences(skip_wal: bool) {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        // Alternate policies in one context, retaining all parts for the memtable.
+        for skip in [skip_wal, false, skip_wal] {
+            assert!(ctx.push_bulk(OptionOutputTx::none(), new_bulk_part(), None, skip));
+        }
+        assert_eq!(ctx.next_sequence, 7);
+        assert_eq!(ctx.bulk_notifiers.len(), 3);
+        assert_eq!(
+            ctx.bulk_parts
+                .iter()
+                .map(|p| p.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 5]
+        );
+        let encoded = crate::wal::encoder::WalEntryEncoder::new().encode_to_vec(&ctx.wal_entry);
+        let decoded = WalEntry::decode(encoded.as_slice()).unwrap();
+        assert_eq!(
+            decoded
+                .bulk_entries
+                .iter()
+                .map(|e| e.sequence)
+                .collect::<Vec<_>>(),
+            if skip_wal { vec![3] } else { vec![1, 3, 5] }
+        );
+    }
+
+    #[test]
     fn test_set_error_marks_bulk_notifiers_failed() {
+        check_set_error_marks_bulk_notifiers_failed(false);
+        check_set_error_marks_bulk_notifiers_failed(true);
+    }
+
+    fn check_set_error_marks_bulk_notifiers_failed(skip_wal: bool) {
         let builder = VersionControlBuilder::new();
         let region_id = builder.region_id();
         let version_control = Arc::new(builder.build());
@@ -718,7 +774,9 @@ mod tests {
             RegionWriteCtx::new(region_id, &version_control, Provider::noop_provider(), None);
         let (tx, rx) = oneshot::channel();
 
-        assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(), None));
+        assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(), None, skip_wal));
+        assert_eq!(ctx.wal_entry.bulk_entries.len(), usize::from(!skip_wal));
+        assert_eq!(ctx.bulk_parts.len(), 1);
         ctx.set_error(Arc::new(
             UnexpectedSnafu {
                 reason: "wal failed".to_string(),
