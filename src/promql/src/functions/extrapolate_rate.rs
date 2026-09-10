@@ -596,6 +596,9 @@ mod test {
         values[220] = 1e300;
         values[221] = 1e-200;
 
+        // A stride of one walks both bounds across the reset positions, which sit every 37
+        // samples: `start` reaches one when that reset has to leave the window, `end` when the
+        // next one has to stay out of it, both while the cached bounds are live.
         let mut ranges: Vec<(u32, u32)> = (0..390).map(|i| (i, 120)).collect();
         // Empty, too-short, backward and disjoint windows all break a forward-only slide.
         ranges.extend([(400, 0), (400, 1), (2, 20), (450, 30), (0, 120)]);
