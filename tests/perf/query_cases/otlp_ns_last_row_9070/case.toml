@@ -1,0 +1,67 @@
+# Native OTLP metrics regression coverage for #9070. The table is explicitly
+# pre-created so the native OTLP path preserves nanosecond timestamps rather
+# than selecting a legacy compatibility schema.
+
+[case]
+name = "otlp_ns_last_row_9070"
+description = "Native OTLP gauge ingestion with nanosecond timestamps and ordinary PromQL LastRow queries"
+issue = "https://github.com/GreptimeTeam/greptimedb/issues/9070"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+input_protocol = "otlp_metrics"
+database = "public"
+metric = "otlp_ns_last_row_9070"
+physical_table = "greptime_physical_table"
+series_count = 256
+samples_per_series = 1024
+start_unix_millis = 1_704_067_200_000
+step_millis = 100
+chunk_series_count = 256
+timeout_seconds = 300
+visibility_timeout_seconds = 120
+
+# Legacy-data query coverage only: this case intentionally does not test the
+# new default OTLP millisecond table behavior.
+
+[[scenario.queries]]
+name = "instant_selector_last_row_candidate"
+kind = "tql"
+query = "TQL EVAL (1704067303, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
+warmup = 3
+iterations = 9
+compare_results = true
+expected_cardinality = 256
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 25
+
+[[scenario.queries]]
+name = "range_selector_last_row_control"
+kind = "tql"
+query = "TQL EVAL (1704067293, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
+warmup = 3
+iterations = 9
+compare_results = true
+expected_cardinality = 2816
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 25
+
+# Keep plan evidence untimed. It is reported with validation and never enters
+# the latency sample set.
+[[scenario.queries]]
+name = "instant_last_row_plan"
+kind = "tql"
+query = "TQL EXPLAIN VERBOSE (1704067303, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
+measure = false
+plan_contains = "LastRow"
+
+[[scenario.queries]]
+name = "range_no_last_row_plan"
+kind = "tql"
+query = "TQL EXPLAIN VERBOSE (1704067293, 1704067303, '1s') otlp_ns_last_row_9070{host=~'host.*'}"
+measure = false
+plan_absent = "LastRow"

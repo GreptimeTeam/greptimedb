@@ -83,6 +83,8 @@ pub(super) struct Table {
     pub(super) sst_format: Option<String>,
     #[serde(default = "default_show_create_engine")]
     pub(super) validate_show_create_engine: bool,
+    #[serde(default)]
+    pub(super) validate_timestamp_nanos: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -104,6 +106,8 @@ const fn default_show_create_engine() -> bool {
 
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct RemoteWrite {
+    #[serde(default)]
+    pub(super) input_protocol: InputProtocol,
     pub(super) database: String,
     pub(super) metric: String,
     pub(super) physical_table: String,
@@ -120,6 +124,14 @@ pub(super) struct RemoteWrite {
     pub(super) value: RemoteValue,
     pub(super) storage: Option<StorageConfig>,
     pub(super) read_bench: Option<ReadBenchConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum InputProtocol {
+    #[default]
+    RemoteWrite,
+    OtlpMetrics,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -222,10 +234,24 @@ pub(super) struct Query {
     pub(super) iterations: usize,
     #[serde(default)]
     pub(super) thresholds: Map<String, Value>,
+    #[serde(default)]
+    pub(super) expected_cardinality: Option<u64>,
+    #[serde(default)]
+    pub(super) compare_results: bool,
+    #[serde(default = "default_measure")]
+    pub(super) measure: bool,
+    #[serde(default)]
+    pub(super) plan_contains: Option<String>,
+    #[serde(default)]
+    pub(super) plan_absent: Option<String>,
 }
 
 const fn one() -> usize {
     1
+}
+
+const fn default_measure() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]

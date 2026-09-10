@@ -80,6 +80,8 @@ pub(super) struct OtlpTraceLoadThresholds {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(super) struct PromRemoteWritePlan {
+    #[serde(default)]
+    pub(super) input_protocol: InputProtocol,
     #[serde(default = "default_database")]
     pub(super) database: String,
     #[serde(alias = "metric_name")]
@@ -112,6 +114,14 @@ pub(super) struct PromRemoteWritePlan {
     pub(super) storage: Option<StorageConfig>,
     #[serde(default)]
     pub(super) read_bench: Option<ReadBenchConfig>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum InputProtocol {
+    #[default]
+    RemoteWrite,
+    OtlpMetrics,
 }
 
 pub(super) fn default_database() -> String {

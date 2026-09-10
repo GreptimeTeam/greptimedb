@@ -489,6 +489,7 @@ mod tests {
             append_mode: Some(true),
             sst_format: Some("flat".to_string()),
             validate_show_create_engine: true,
+            validate_timestamp_nanos: None,
         };
         assert_eq!(
             create_table_sql(&table).unwrap(),
@@ -536,6 +537,7 @@ mod tests {
             append_mode: Some(true),
             sst_format: Some("flat".to_string()),
             validate_show_create_engine: true,
+            validate_timestamp_nanos: None,
         };
         assert_eq!(
             create_table_sql(&table).unwrap(),
@@ -568,6 +570,7 @@ mod tests {
             append_mode: None,
             sst_format: None,
             validate_show_create_engine: true,
+            validate_timestamp_nanos: None,
         };
         assert_eq!(
             create_table_sql(&table).unwrap(),

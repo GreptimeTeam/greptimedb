@@ -49,14 +49,23 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     let client = Client::builder()
         .timeout(Duration::from_secs_f64(args.http_timeout))
         .build()?;
-    let base = run_target(args.base_http_port, &tables, &configured_queries, &client).await;
-    let candidate = run_target(
+    let mut base = run_target(
+        args.base_http_port,
+        &tables,
+        &configured_queries,
+        &client,
+        false,
+    )
+    .await;
+    let mut candidate = run_target(
         args.candidate_http_port,
         &tables,
         &configured_queries,
         &client,
+        true,
     )
     .await;
+    compare_measured_results(&configured_queries, &mut base, &mut candidate);
     let thresholds = enforce_thresholds(&configured_queries, &base, &candidate)?;
     let status = if base.status == "failed"
         || candidate.status == "failed"
@@ -74,6 +83,7 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
         "scenario": scenario_value,
         "queries": configured_queries,
         "query_mode": "endpoint",
+        "input_protocol": scenario_value.pointer("/remote_write/input_protocol").cloned().unwrap_or(Value::String("direct_sst".to_string())),
         "http_timeout": args.http_timeout,
         "targets": [target_report("base", args.base_http_port, base), target_report("candidate", args.candidate_http_port, candidate)],
         "thresholds": thresholds,
@@ -131,6 +141,7 @@ async fn run_target(
     tables: &[Table],
     configured_queries: &[Query],
     client: &Client,
+    validate_candidate_plan: bool,
 ) -> QueryResult {
     let mut queries = configured_queries.to_vec();
     if queries.is_empty() {
@@ -144,6 +155,11 @@ async fn run_target(
             warmup: 0,
             iterations: 1,
             thresholds: Map::new(),
+            expected_cardinality: None,
+            compare_results: false,
+            measure: true,
+            plan_contains: None,
+            plan_absent: None,
         });
     }
 
@@ -170,18 +186,30 @@ async fn run_target(
         }
         validation.push(sample);
     }
-    let first = post_query(client, port, &queries[0], db).await;
-    if !first["ok"].as_bool().unwrap_or(false) {
-        validation_errors.push(json!({
-            "sql": queries[0].query,
-            "error": first.get("error"),
-            "response": first.get("response"),
-        }));
-    }
-    validation.push(first);
-
     let mut measurements = Vec::with_capacity(queries.len());
     for query in &queries {
+        if !query.measure {
+            let sample = post_query(client, port, query, db).await;
+            if !sample["ok"].as_bool().unwrap_or(false) {
+                validation_errors.push(json!({"sql": query.query, "error": sample.get("error"), "response": sample.get("response")}));
+            }
+            if validate_candidate_plan
+                && let Some(plan_contains) = &query.plan_contains
+                && !response_text(sample.get("response").unwrap_or(&Value::Null))
+                    .contains(plan_contains)
+            {
+                validation_errors.push(json!({"sql": query.query, "error": format!("plan evidence does not contain {plan_contains}"), "response": sample.get("response")}));
+            }
+            if validate_candidate_plan
+                && let Some(plan_absent) = &query.plan_absent
+                && response_text(sample.get("response").unwrap_or(&Value::Null))
+                    .contains(plan_absent)
+            {
+                validation_errors.push(json!({"sql": query.query, "error": format!("plan evidence unexpectedly contains {plan_absent}"), "response": sample.get("response")}));
+            }
+            validation.push(sample);
+            continue;
+        }
         for _ in 0..query.warmup {
             let warmup = post_query(client, port, query, db).await;
             if !warmup["ok"].as_bool().unwrap_or(false) {
@@ -239,6 +267,92 @@ async fn run_target(
     }
 }
 
+fn compare_measured_results(
+    queries: &[Query],
+    base: &mut QueryResult,
+    candidate: &mut QueryResult,
+) {
+    for query in queries {
+        if !query.measure || (!query.compare_results && query.expected_cardinality.is_none()) {
+            continue;
+        }
+        let Some(base_measurement) = base
+            .measurements
+            .iter()
+            .find(|measurement| measurement.name == query.name)
+        else {
+            continue;
+        };
+        let Some(candidate_measurement) = candidate
+            .measurements
+            .iter()
+            .find(|measurement| measurement.name == query.name)
+        else {
+            continue;
+        };
+        for (iteration, (base_sample, candidate_sample)) in base_measurement
+            .samples
+            .iter()
+            .zip(&candidate_measurement.samples)
+            .enumerate()
+        {
+            let base_rows = crate::query_regression_runner::sql::extract_rows(
+                base_sample.get("response").unwrap_or(&Value::Null),
+            );
+            let candidate_rows = crate::query_regression_runner::sql::extract_rows(
+                candidate_sample.get("response").unwrap_or(&Value::Null),
+            );
+            if let Some(expected) = query.expected_cardinality
+                && (base_rows.len() as u64 != expected || candidate_rows.len() as u64 != expected)
+            {
+                candidate.validation_errors.push(json!({"query": query.name, "iteration": iteration, "error": format!("expected cardinality {expected}, got base={} candidate={}", base_rows.len(), candidate_rows.len())}));
+            }
+            if query.compare_results
+                && normalized_rows(base_rows) != normalized_rows(candidate_rows)
+            {
+                candidate.validation_errors.push(json!({"query": query.name, "iteration": iteration, "error": "base/candidate response rows differ"}));
+            }
+        }
+    }
+    if !candidate.validation_errors.is_empty() {
+        candidate.status = "failed".to_string();
+    }
+}
+
+fn normalized_rows(rows: Vec<Value>) -> Vec<String> {
+    let mut rows = rows
+        .into_iter()
+        .map(|mut row| {
+            strip_timing_metadata(&mut row);
+            serde_json::to_string(&row).unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    rows
+}
+
+fn strip_timing_metadata(value: &mut Value) {
+    match value {
+        Value::Object(values) => {
+            values.retain(|key, _| {
+                !matches!(
+                    key.as_str(),
+                    "execution_time" | "execution_time_ms" | "elapsed" | "elapsed_ms" | "cost"
+                )
+            });
+            for value in values.values_mut() {
+                strip_timing_metadata(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                strip_timing_metadata(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn validate_show_create(result: &Value, table: &Table) -> Vec<&'static str> {
     let text = result
         .get("response")
@@ -257,6 +371,15 @@ fn validate_show_create(result: &Value, table: &Table) -> Vec<&'static str> {
     }
     if table.sst_format.is_some() && !text.contains("sst_format") {
         errors.push("SHOW CREATE output does not mention sst_format");
+    }
+    if table.validate_timestamp_nanos.is_some()
+        && (!text.contains("greptime_timestamp")
+            || !text.contains("timestamp(9)")
+            || !text.contains("primary key")
+            || !text.contains("host")
+            || !text.contains("instance"))
+    {
+        errors.push("SHOW CREATE output does not contain the expected native OTLP Mito schema");
     }
     errors
 }
@@ -441,6 +564,11 @@ mod tests {
             step: None,
             warmup: 0,
             iterations: 1,
+            expected_cardinality: None,
+            compare_results: false,
+            measure: true,
+            plan_contains: None,
+            plan_absent: None,
             thresholds: Map::from_iter([
                 ("max_candidate_latency_regression_pct".to_string(), json!(0)),
                 ("other".to_string(), json!(1)),

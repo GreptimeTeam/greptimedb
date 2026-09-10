@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use crate::query_regression_runner::Result;
 use crate::query_regression_runner::model::{
-    Layout, OtlpLoad, Query, RemoteWrite, Scenario, Table,
+    InputProtocol, Layout, OtlpLoad, Query, RemoteWrite, Scenario, Table,
 };
 
 pub(super) fn load_plan(generator: &PathBuf, case_path: &PathBuf) -> Result<Value> {
@@ -46,17 +46,35 @@ pub(super) fn normalize_scenario(scenario: Scenario) -> Result<(Vec<Table>, Vec<
             remote_write,
             queries,
         } => Ok((
-            vec![Table {
-                database: remote_write.database,
-                name: remote_write.metric,
-                engine: "metric".to_string(),
-                columns: vec![],
-                primary_key: vec![],
-                time_index: None,
-                append_mode: None,
-                sst_format: None,
-                validate_show_create_engine: false,
-            }],
+            vec![
+                if remote_write.input_protocol == InputProtocol::OtlpMetrics {
+                    Table {
+                        database: remote_write.database,
+                        name: remote_write.metric,
+                        engine: "mito".to_string(),
+                        columns: vec![],
+                        primary_key: vec!["host".to_string(), "instance".to_string()],
+                        time_index: Some("greptime_timestamp".to_string()),
+                        append_mode: None,
+                        sst_format: None,
+                        validate_show_create_engine: true,
+                        validate_timestamp_nanos: Some(123),
+                    }
+                } else {
+                    Table {
+                        database: remote_write.database,
+                        name: remote_write.metric,
+                        engine: "metric".to_string(),
+                        columns: vec![],
+                        primary_key: vec![],
+                        time_index: None,
+                        append_mode: None,
+                        sst_format: None,
+                        validate_show_create_engine: false,
+                        validate_timestamp_nanos: None,
+                    }
+                },
+            ],
             queries,
         )),
         Scenario::OtlpTraceLoad { .. } => {
