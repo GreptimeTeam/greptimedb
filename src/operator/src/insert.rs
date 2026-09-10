@@ -358,7 +358,6 @@ impl Inserter {
         request: TableInsertRequest,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let skip_wal = ctx.skip_wal();
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table_name = request.table_name.as_str();
@@ -369,7 +368,7 @@ impl Inserter {
         let table_info = table.table_info();
 
         let inserts = TableToRegion::new(&table_info, &self.partition_manager)
-            .convert(request, skip_wal)
+            .convert(request)
             .await?;
 
         let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);

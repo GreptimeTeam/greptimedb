@@ -39,7 +39,6 @@ impl<'a> TableToRegion<'a> {
     pub async fn convert(
         &self,
         request: TableInsertRequest,
-        skip_wal: bool,
     ) -> Result<InstantAndNormalInsertRequests> {
         let row_count = row_count(&request.columns_values)?;
         let schema = column_schema(self.table_info, &request.columns_values)?;
@@ -47,7 +46,7 @@ impl<'a> TableToRegion<'a> {
 
         let rows = Rows { schema, rows };
         let requests = Partitioner::new(self.partition_manager)
-            .partition_insert_requests(self.table_info, rows, skip_wal)
+            .partition_insert_requests(self.table_info, rows, request.skip_wal)
             .await?;
 
         let requests = RegionInsertRequests { requests };
@@ -102,12 +101,13 @@ mod tests {
         let converter = TableToRegion::new(&table_info, &partition_manager);
 
         for skip_wal in [false, true] {
-            let table_request = build_table_request(Arc::new(Int32Vector::from(vec![
+            let mut table_request = build_table_request(Arc::new(Int32Vector::from(vec![
                 Some(1),
                 None,
                 Some(11),
                 Some(101),
             ])));
+            table_request.skip_wal = skip_wal;
             let versions = partition_manager
                 .find_physical_partition_info(1)
                 .await
@@ -117,7 +117,7 @@ mod tests {
                 .map(|p| (p.id.as_u64(), p.partition_expr_version))
                 .collect::<HashMap<_, _>>();
 
-            let region_requests = converter.convert(table_request, skip_wal).await.unwrap();
+            let region_requests = converter.convert(table_request).await.unwrap();
             let mut region_id_to_region_requests = region_requests
                 .normal_requests
                 .requests
@@ -159,6 +159,7 @@ mod tests {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "table_1".to_string(),
             columns_values: HashMap::from([("a".to_string(), vector)]),
+            skip_wal: false,
         }
     }
 
