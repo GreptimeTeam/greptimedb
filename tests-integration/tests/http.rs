@@ -58,6 +58,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
 };
 use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
+use rstest_reuse::apply;
 use serde_json::{Value, json};
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::{
@@ -87,6 +88,7 @@ use tests_integration::test_util::{
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
 
+use crate::both_deployment_cases;
 use crate::event_recorder_test_util::assert_procedure_actor_by_table;
 
 #[macro_export]
@@ -445,8 +447,8 @@ pub async fn test_cors() {
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_sql_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_sql_skip_wal(distributed: bool) {
     let mut cases = vec![HttpWalCase::new(
         "SQL",
         "/v1/sql",
@@ -461,9 +463,15 @@ async fn test_sql_skip_wal() {
     );
     sql_get.get = true;
     cases.push(sql_get);
-    for distributed in [false, true] {
-        check_http_skip_wal("sql", &cases, distributed).await;
+    for case in &mut cases {
+        case.create_table = Some(if distributed {
+            "CREATE TABLE IF NOT EXISTS wal_sql (ts TIMESTAMP TIME INDEX, v INT) PARTITION ON COLUMNS (v) (v < 0, v >= 0)"
+        } else {
+            "CREATE TABLE IF NOT EXISTS wal_sql (ts TIMESTAMP TIME INDEX, v INT)"
+        });
+        case.expected_written_nodes = distributed.then_some(2);
     }
+    check_http_skip_wal("sql", &cases, distributed).await;
 }
 
 pub async fn test_sql_api(store_type: StorageType) {
@@ -1650,8 +1658,8 @@ pub async fn test_splunk_health_is_public(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_splunk_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_splunk_skip_wal(distributed: bool) {
     let cases = vec![
         HttpWalCase::new(
             "Splunk event",
@@ -1666,9 +1674,7 @@ async fn test_splunk_skip_wal() {
             "wal test",
         ),
     ];
-    for distributed in [false, true] {
-        check_http_skip_wal("splunk", &cases, distributed).await;
-    }
+    check_http_skip_wal("splunk", &cases, distributed).await;
 }
 
 pub async fn test_splunk_logs(store_type: StorageType) {
@@ -2692,8 +2698,8 @@ pub async fn test_dashboard_api(store_type: StorageType) {
 #[cfg(not(feature = "dashboard"))]
 pub async fn test_dashboard_api(_: StorageType) {}
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_prometheus_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_prometheus_skip_wal(distributed: bool) {
     let mut cases = Vec::new();
     let prom = api::prom_store::remote::WriteRequest {
         timeseries: prom_store::mock_timeseries(),
@@ -2726,9 +2732,7 @@ async fn test_prometheus_skip_wal() {
     );
     prom_v2_case.headers.push(("content-encoding", "snappy"));
     cases.push(prom_v2_case);
-    for distributed in [false, true] {
-        check_http_skip_wal("prometheus", &cases, distributed).await;
-    }
+    check_http_skip_wal("prometheus", &cases, distributed).await;
 }
 
 pub async fn test_prometheus_remote_write(store_type: StorageType) {
@@ -4217,8 +4221,8 @@ transform:
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_json_logs_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_json_logs_skip_wal(distributed: bool) {
     let cases = vec![
         HttpWalCase::new(
             "JSON logs",
@@ -4233,9 +4237,7 @@ async fn test_json_logs_skip_wal() {
             r#"[{"message":"wal test"}]"#,
         ),
     ];
-    for distributed in [false, true] {
-        check_http_skip_wal("json_logs", &cases, distributed).await;
-    }
+    check_http_skip_wal("json_logs", &cases, distributed).await;
 }
 
 pub async fn test_identity_pipeline(store_type: StorageType) {
@@ -5446,8 +5448,8 @@ transform:
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_influxdb_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_influxdb_skip_wal(distributed: bool) {
     let cases = vec![
         HttpWalCase::new(
             "InfluxDB v1",
@@ -5462,9 +5464,7 @@ async fn test_influxdb_skip_wal() {
             "wal_influx_v2,host=a value=1 1700000000000000000",
         ),
     ];
-    for distributed in [false, true] {
-        check_http_skip_wal("influxdb", &cases, distributed).await;
-    }
+    check_http_skip_wal("influxdb", &cases, distributed).await;
 }
 
 pub async fn test_influxdb_write_with_hints(storage_type: StorageType) {
@@ -6647,8 +6647,8 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_otlp_metrics_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_otlp_metrics_skip_wal(distributed: bool) {
     let mut cases = Vec::new();
     let metrics: ExportMetricsServiceRequest = serde_json::from_value(json!({
         "resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"wal_otlp", "gauge":{"dataPoints":[{"timeUnixNano":"1700000000000000000","asDouble":1.0}]}}]}]}]
@@ -6659,9 +6659,7 @@ async fn test_otlp_metrics_skip_wal() {
         "application/x-protobuf",
         metrics.encode_to_vec(),
     ));
-    for distributed in [false, true] {
-        check_http_skip_wal("otlp_metrics", &cases, distributed).await;
-    }
+    check_http_skip_wal("otlp_metrics", &cases, distributed).await;
 }
 
 pub async fn test_otlp_metrics_new(store_type: StorageType) {
@@ -7459,8 +7457,8 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_otlp_traces_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_otlp_traces_skip_wal(distributed: bool) {
     let mut cases = Vec::new();
     let traces = make_trace_v1_request(
         "wal-test",
@@ -7492,9 +7490,7 @@ async fn test_otlp_traces_skip_wal() {
         ("x-greptime-trace-table-name", "wal_traces_v1"),
     ];
     cases.push(traces_v1);
-    for distributed in [false, true] {
-        check_http_skip_wal("otlp_traces", &cases, distributed).await;
-    }
+    check_http_skip_wal("otlp_traces", &cases, distributed).await;
 }
 
 pub async fn test_otlp_traces_v0(store_type: StorageType) {
@@ -8567,8 +8563,8 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_otlp_logs_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_otlp_logs_skip_wal(distributed: bool) {
     let mut cases = Vec::new();
     let logs = make_log_request(vec![json!({
         "timeUnixNano": "1700000000000000000",
@@ -8580,9 +8576,7 @@ async fn test_otlp_logs_skip_wal() {
         "application/x-protobuf",
         logs.encode_to_vec(),
     ));
-    for distributed in [false, true] {
-        check_http_skip_wal("otlp_logs", &cases, distributed).await;
-    }
+    check_http_skip_wal("otlp_logs", &cases, distributed).await;
 }
 
 pub async fn test_otlp_logs(store_type: StorageType) {
@@ -8875,8 +8869,8 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_loki_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_loki_skip_wal(distributed: bool) {
     let mut cases = vec![HttpWalCase::new(
         "Loki JSON",
         "/v1/loki/api/v1/push",
@@ -8903,9 +8897,7 @@ async fn test_loki_skip_wal() {
         "application/x-protobuf",
         prom_store::snappy_compress(&loki.encode_to_vec()).unwrap(),
     ));
-    for distributed in [false, true] {
-        check_http_skip_wal("loki", &cases, distributed).await;
-    }
+    check_http_skip_wal("loki", &cases, distributed).await;
 }
 
 pub async fn test_loki_pb_logs(store_type: StorageType) {
@@ -9316,17 +9308,15 @@ processors:
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_elasticsearch_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_elasticsearch_skip_wal(distributed: bool) {
     let cases = vec![HttpWalCase::new(
         "Elasticsearch",
         "/v1/elasticsearch/_bulk",
         "application/json",
         "{\"create\":{\"_index\":\"wal_elastic\"}}\n{\"message\":\"wal test\"}\n",
     )];
-    for distributed in [false, true] {
-        check_http_skip_wal("elasticsearch", &cases, distributed).await;
-    }
+    check_http_skip_wal("elasticsearch", &cases, distributed).await;
 }
 
 pub async fn test_elasticsearch_logs(store_type: StorageType) {
@@ -11032,17 +11022,15 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_opentsdb_skip_wal() {
+#[apply(both_deployment_cases)]
+async fn test_opentsdb_skip_wal(distributed: bool) {
     let cases = vec![HttpWalCase::new(
         "OpenTSDB",
         "/v1/opentsdb/api/put",
         "application/json",
         r#"{"metric":"wal_tsdb","timestamp":1700000000,"value":1,"tags":{"host":"a"}}"#,
     )];
-    for distributed in [false, true] {
-        check_http_skip_wal("opentsdb", &cases, distributed).await;
-    }
+    check_http_skip_wal("opentsdb", &cases, distributed).await;
 }
 
 pub async fn test_influxdb_write(store_type: StorageType) {
@@ -11156,6 +11144,8 @@ async fn execute_sql(client: &TestClient, sql: &str) -> TestResponse {
 struct HttpWalCase {
     name: &'static str,
     get: bool,
+    create_table: Option<&'static str>,
+    expected_written_nodes: Option<usize>,
     path: &'static str,
     content_type: &'static str,
     body: Vec<u8>,
@@ -11172,6 +11162,8 @@ impl HttpWalCase {
         Self {
             name,
             get: false,
+            create_table: None,
+            expected_written_nodes: None,
             path,
             content_type,
             body: body.into(),
@@ -11201,21 +11193,11 @@ async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: boo
         )
         .build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
-    if cases.iter().any(|case| case.name == "SQL") {
-        let create_table = if distributed {
-            "CREATE TABLE wal_sql (ts TIMESTAMP TIME INDEX, v INT) PARTITION ON COLUMNS (v) (v < 0, v >= 0)"
-        } else {
-            "CREATE TABLE wal_sql (ts TIMESTAMP TIME INDEX, v INT)"
-        };
-        let response = client
-            .post("/v1/sql")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(format!("sql={}", urlencoding::encode(create_table)))
-            .send()
-            .await;
-        assert!(response.status().is_success(), "{}", response.text().await);
-    }
     for case in cases {
+        if let Some(create_table) = case.create_table {
+            let response = execute_sql(&client, create_table).await;
+            assert!(response.status().is_success(), "{}", response.text().await);
+        }
         // Warm up schema-on-write, then change only the request hint. Reusing
         // the same payload also verifies policy is not persisted on the table.
         for (round, hint) in [None, Some("true"), Some("false"), None]
@@ -11255,7 +11237,7 @@ async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: boo
             let after = instance.flush_and_snapshot_wal().await;
             if before.keys().eq(after.keys()) {
                 assert_wal_delta(&before, &after, hint == Some("true"));
-                if distributed && matches!(case.name, "SQL" | "SQL GET") {
+                if let Some(expected_written_nodes) = case.expected_written_nodes {
                     let written_nodes = after
                         .iter()
                         .filter(|(key, (written_bytes, _))| *written_bytes > before[*key].0)
@@ -11263,8 +11245,9 @@ async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: boo
                         .collect::<std::collections::BTreeSet<_>>();
                     assert_eq!(
                         written_nodes.len(),
-                        2,
-                        "SQL insert must fan out to two datanodes"
+                        expected_written_nodes,
+                        "{}: unexpected number of written datanodes",
+                        case.name
                     );
                 }
             } else {

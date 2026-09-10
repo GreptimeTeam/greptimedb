@@ -55,6 +55,7 @@ use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
 };
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::AggregationTemporality;
 use otel_arrow_rust::schema::consts as arrow_consts;
+use rstest_reuse::apply;
 use servers::grpc::GrpcServerConfig;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::http::prometheus::{
@@ -72,6 +73,8 @@ use tests_integration::test_util::{
 };
 use tonic::Request;
 use tonic::metadata::MetadataValue;
+
+use crate::both_deployment_cases;
 
 #[macro_export]
 macro_rules! grpc_test {
@@ -781,17 +784,8 @@ fn gauge_arrow_batch(batch_id: i64, reserved_attr: bool) -> BatchArrowRecords {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_skip_wal_otel_arrow_metrics() {
-    check_otel_arrow_metrics(false).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_skip_wal_otel_arrow_metrics_distributed() {
-    check_otel_arrow_metrics(true).await;
-}
-
-async fn check_otel_arrow_metrics(distributed: bool) {
+#[apply(both_deployment_cases)]
+async fn test_skip_wal_otel_arrow_metrics(distributed: bool) {
     // OTEL Arrow metrics decode into ordinary metric inserts, unlike Flight DoPut bulk inserts.
     let mut env = MockInstanceImpl::new("skip_wal_otel_arrow", distributed).await;
     let server = setup_grpc_server_for_frontend_instance(env.frontend(), None).await;
@@ -1255,17 +1249,8 @@ fn skip_wal_insert_body(columnar: bool) -> RequestBody {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_skip_wal_grpc_unary_stream_and_flight_sql() {
-    check_grpc_unary_stream_and_flight_sql(false).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_skip_wal_grpc_unary_stream_and_flight_sql_distributed() {
-    check_grpc_unary_stream_and_flight_sql(true).await;
-}
-
-async fn check_grpc_unary_stream_and_flight_sql(distributed: bool) {
+#[apply(both_deployment_cases)]
+async fn test_skip_wal_grpc_unary_stream_and_flight_sql(distributed: bool) {
     let mut env = MockInstanceImpl::new("skip_wal_grpc_protocols", distributed).await;
     let server = setup_grpc_server_for_frontend_instance(env.frontend(), None).await;
     let addr = server.bind_addr().unwrap().to_string();
