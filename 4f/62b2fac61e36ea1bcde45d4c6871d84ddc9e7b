@@ -1,0 +1,49 @@
+src/servers/src/batcher/logical_table.rs
+  s_2432582dedaf5f::t_f65fb341bb72ae 348,365,889,1912,1914-1919,1926-1927,2152,2359-2360,2631
+src/frontend/src/server.rs
+  s_2432582dedaf5f::t_511eed60d405f5 134,568
+  s_c8f343c7af25c4::t_0a6d88340024d0 27-29
+src/servers/src/http.rs
+  s_2432582dedaf5f::t_096ad6e4cd6479 686
+  s_c8f343c7af25c4::t_6f9819d03ec251 55
+src/servers/src/batcher.rs
+  s_2432582dedaf5f::t_4b16eef765179b 1-15
+src/servers/benches/flush_batch_physical.rs
+  s_2432582dedaf5f::t_724736af143441 31
+  s_c8f343c7af25c4::t_7a5911f6d419ba 35
+src/servers/src/http/prom_store.rs
+  s_2432582dedaf5f::t_af847832cd42a4 78,361,363,390,456
+  s_c8f343c7af25c4::t_6a9935f43b661c 43
+src/frontend/src/instance/prom_store.rs
+  s_c8f343c7af25c4::t_d52f69797e8d69 45
+src/servers/src/lib.rs
+  s_c8f343c7af25c4::t_0c6cfe8de51fd1 30
+src/servers/src/prom_row_builder.rs
+  s_c8f343c7af25c4::t_2fcc3c6bb364b8 38
+tests-integration/src/test_util.rs
+  s_2432582dedaf5f::t_862221b0446551 50,674
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "4f62b2fac61e36ea1bcde45d4c6871d84ddc9e7b",
+  "prompts": {},
+  "sessions": {
+    "s_2432582dedaf5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e51-436e-7e22-8f81-250159664969",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
