@@ -41,10 +41,10 @@ use crate::vectors::{
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, Float32Vector, Float64Vector, Int8Vector, Int16Vector, Int32Vector,
     Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
-    ListVector, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
-    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
-    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt8Vector,
-    UInt16Vector, UInt32Vector, UInt64Vector, Vector, VectorRef,
+    ListVector, NullVector, StringVector, TimeMicrosecondVector, TimeMillisecondVector,
+    TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector,
+    UInt64Vector, Vector, VectorRef,
 };
 
 /// Helper functions for `Vector`.
@@ -82,22 +82,6 @@ impl Helper {
                 msg: format!(
                     "downcast vector error, vector type: {:?}, expected vector: {:?}",
                     vector.vector_type_name(),
-                    std::any::type_name::<T>(),
-                ),
-            })
-    }
-
-    pub fn check_get_mutable_vector<T: 'static + MutableVector>(
-        vector: &mut dyn MutableVector,
-    ) -> Result<&mut T> {
-        let ty = vector.data_type();
-        vector
-            .as_mut_any()
-            .downcast_mut()
-            .with_context(|| error::UnknownVectorSnafu {
-                msg: format!(
-                    "downcast vector error, vector type: {:?}, expected vector: {:?}",
-                    ty,
                     std::any::type_name::<T>(),
                 ),
             })
