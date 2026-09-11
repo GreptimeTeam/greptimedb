@@ -944,6 +944,11 @@ impl Inserter {
         create_table_expr
             .table_options
             .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+        fill_table_options_for_create(
+            &mut create_table_expr.table_options,
+            &AutoCreateTableType::Physical,
+            ctx,
+        );
 
         // create physical table
         let res = statement_executor
@@ -1299,6 +1304,7 @@ pub fn fill_table_options_for_create(
 
     match create_type {
         AutoCreateTableType::Logical(physical_table) => {
+            table_options.remove(TTL_KEY);
             table_options.insert(
                 LOGICAL_TABLE_METADATA_KEY.to_string(),
                 physical_table.clone(),
@@ -1817,6 +1823,22 @@ mod tests {
         );
         assert!(!table_options.contains_key(SEMANTIC_METRIC_TYPE));
         assert!(!table_options.contains_key(SEMANTIC_PER_TABLE_INDEX_KEY));
+    }
+
+    #[test]
+    fn test_logical_create_options_do_not_copy_ttl() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(TTL_KEY, "1s");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(
+            &mut table_options,
+            &AutoCreateTableType::Logical("physical".to_string()),
+            &ctx,
+        );
+
+        assert!(!table_options.contains_key(TTL_KEY));
     }
 
     #[test]
