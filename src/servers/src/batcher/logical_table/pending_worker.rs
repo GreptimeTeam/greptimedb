@@ -20,7 +20,6 @@ use catalog::CatalogManagerRef;
 use common_batcher::flush_limiter::FlushLimiter;
 use common_batcher::flush_policy::FlushTrigger;
 use common_batcher::flush_policy::timing::TimingFlushPolicy;
-use common_batcher::notifier::Notifier;
 use common_batcher::pending_worker::PendingWorker as PendingCore;
 use common_batcher::worker_registry::WorkerRegistry;
 use common_meta::node_manager::NodeManagerRef;
@@ -30,10 +29,10 @@ use session::context::QueryContextRef;
 use table::metadata::TableId;
 use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc, oneshot};
 
+use crate::batcher::flow_notifier::FlowNotifier;
 use crate::batcher::logical_table::BatchKey;
 use crate::batcher::logical_table::batch::{Batch, flush_batch_with_managers, spawn_flush};
 use crate::batcher::logical_table::batch_convert::{RecordBatchWithTsIdx, TableBatch};
-use crate::batcher::logical_table::flow_notifier::FlowNotification;
 use crate::error::Error;
 use crate::metrics::{PENDING_BATCHES, PENDING_ROWS, PENDING_WORKERS};
 
@@ -103,7 +102,7 @@ pub(in crate::batcher::logical_table) fn start_worker(
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    flow_notification_tx: Notifier<FlowNotification>,
+    flow_notification_tx: FlowNotifier,
     worker_idle_timeout: Duration,
     flush_policy: TimingFlushPolicy,
     flush_limiter: FlushLimiter,
@@ -281,7 +280,6 @@ mod tests {
     use common_batcher::flush_limiter::FlushLimiter;
     use common_batcher::flush_policy::FlushTrigger;
     use common_batcher::flush_policy::timing::TimingFlushPolicy;
-    use common_batcher::notifier::Notifier;
     use common_batcher::pending_worker::PendingWorker as PendingCore;
     use common_batcher::worker_registry::WorkerRegistry;
     use common_meta::cache::new_table_route_cache;
@@ -293,6 +291,7 @@ mod tests {
     use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
     use tokio::time::advance;
 
+    use crate::batcher::flow_notifier::FlowNotifier;
     use crate::batcher::logical_table::BatchKey;
     use crate::batcher::logical_table::batch_convert::TableBatch;
     use crate::batcher::logical_table::pending_worker::{
@@ -303,6 +302,7 @@ mod tests {
         ConcurrentMockNodeManager, mock_aligned_tag_batch,
     };
     use crate::error::Error;
+    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
 
     #[tokio::test]
     async fn test_drain_batch_takes_initialized_pending_batch_from_option() {
@@ -465,66 +465,6 @@ mod tests {
         assert!(!should_close_worker_on_idle_timeout(0, 1));
     }
 
-    const WORKER_TEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-    async fn submit_mock_worker_batch(
-        worker_tx: &mpsc::Sender<WorkerCommand>,
-        total_rows: usize,
-        timestamp: i64,
-    ) -> oneshot::Receiver<std::result::Result<(), Arc<Error>>> {
-        let (response_tx, response_rx) = oneshot::channel();
-        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
-        worker_tx
-            .send(WorkerCommand::Submit {
-                table_batches: vec![(
-                    "cpu".to_string(),
-                    42,
-                    mock_aligned_tag_batch("tag1", "host-1", timestamp, 1.0),
-                )],
-                total_rows,
-                ctx: session::context::QueryContext::arc(),
-                response_tx,
-                _permit: Arc::new(permit),
-            })
-            .await
-            .unwrap();
-
-        // The channel is FIFO, so the ack proves the worker has dequeued and
-        // processed the submission (anchoring the flush deadline) before the
-        // caller advances virtual time.
-        let (ack_tx, ack_rx) = oneshot::channel();
-        worker_tx.send(WorkerCommand::Ack { ack_tx }).await.unwrap();
-        ack_rx
-            .await
-            .expect("worker exited before acking the submitted batch");
-
-        response_rx
-    }
-
-    async fn receive_mock_flush_result(
-        response_rx: oneshot::Receiver<std::result::Result<(), Arc<Error>>>,
-        context: &str,
-    ) -> std::result::Result<(), Arc<Error>> {
-        // Under paused time the timeout auto-advances the clock and fires
-        // deterministically if the flush never completes.
-        tokio::time::timeout(WORKER_TEST_TIMEOUT, response_rx)
-            .await
-            .unwrap_or_else(|_| panic!("{context}"))
-            .expect("flush result channel closed without a result")
-    }
-
-    fn assert_missing_physical_table(result: std::result::Result<(), Arc<Error>>) {
-        let err = result.expect_err("the empty catalog should make the flush fail");
-        assert!(
-            matches!(
-                err.as_ref(),
-                Error::Internal { err_msg }
-                    if err_msg.contains("not found during pending flush")
-            ),
-            "unexpected flush error: {err}"
-        );
-    }
-
     #[tokio::test(start_paused = true)]
     async fn test_worker_preserves_first_deadline_and_inline_shutdown() {
         let flush_interval = Duration::from_secs(10);
@@ -560,7 +500,11 @@ mod tests {
             datanodes: Arc::new(HashMap::new()),
         });
         let catalog_manager = MemoryCatalogManager::with_default_setup();
-        let (flow_notification_tx, _flow_notification_rx) = Notifier::try_new(1).unwrap();
+        let (flow_notification_tx, _flow_notification_rx) = FlowNotifier::try_new(
+            NonZeroUsize::new(1).unwrap(),
+            FLOW_NOTIFICATION_DROPPED.clone(),
+        )
+        .unwrap();
         let (shutdown, _) = broadcast::channel(1);
 
         let flush_limiter = FlushLimiter::try_new(1).unwrap();
@@ -649,6 +593,66 @@ mod tests {
         assert!(
             workers.is_empty().await,
             "worker did not exit after shutdown"
+        );
+    }
+
+    const WORKER_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    async fn submit_mock_worker_batch(
+        worker_tx: &mpsc::Sender<WorkerCommand>,
+        total_rows: usize,
+        timestamp: i64,
+    ) -> oneshot::Receiver<std::result::Result<(), Arc<Error>>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        worker_tx
+            .send(WorkerCommand::Submit {
+                table_batches: vec![(
+                    "cpu".to_string(),
+                    42,
+                    mock_aligned_tag_batch("tag1", "host-1", timestamp, 1.0),
+                )],
+                total_rows,
+                ctx: session::context::QueryContext::arc(),
+                response_tx,
+                _permit: Arc::new(permit),
+            })
+            .await
+            .unwrap();
+
+        // The channel is FIFO, so the ack proves the worker has dequeued and
+        // processed the submission (anchoring the flush deadline) before the
+        // caller advances virtual time.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        worker_tx.send(WorkerCommand::Ack { ack_tx }).await.unwrap();
+        ack_rx
+            .await
+            .expect("worker exited before acking the submitted batch");
+
+        response_rx
+    }
+
+    async fn receive_mock_flush_result(
+        response_rx: oneshot::Receiver<std::result::Result<(), Arc<Error>>>,
+        context: &str,
+    ) -> std::result::Result<(), Arc<Error>> {
+        // Under paused time the timeout auto-advances the clock and fires
+        // deterministically if the flush never completes.
+        tokio::time::timeout(WORKER_TEST_TIMEOUT, response_rx)
+            .await
+            .unwrap_or_else(|_| panic!("{context}"))
+            .expect("flush result channel closed without a result")
+    }
+
+    fn assert_missing_physical_table(result: std::result::Result<(), Arc<Error>>) {
+        let err = result.expect_err("the empty catalog should make the flush fail");
+        assert!(
+            matches!(
+                err.as_ref(),
+                Error::Internal { err_msg }
+                    if err_msg.contains("not found during pending flush")
+            ),
+            "unexpected flush error: {err}"
         );
     }
 }

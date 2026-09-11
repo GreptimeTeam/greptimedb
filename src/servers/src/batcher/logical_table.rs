@@ -29,7 +29,6 @@ use api::v1::RowInsertRequests;
 use catalog::CatalogManagerRef;
 use common_batcher::flush_limiter::FlushLimiter;
 use common_batcher::flush_policy::timing::TimingFlushPolicy;
-use common_batcher::notifier::Notifier;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -40,11 +39,9 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
 
+use crate::batcher::flow_notifier::{FlowNotifier, start_flow_notification_worker};
 pub use crate::batcher::logical_table::batch::flush_batch_physical;
 pub use crate::batcher::logical_table::batch_convert::{RecordBatchWithTsIdx, TableBatch};
-use crate::batcher::logical_table::flow_notifier::{
-    FlowNotification, start_flow_notification_worker,
-};
 use crate::batcher::logical_table::pending_worker::{
     PendingWorker, WorkerCommand, remove_worker_if_same_channel, start_worker,
 };
@@ -57,7 +54,9 @@ pub use crate::batcher::logical_table::tables::{
 };
 use crate::error;
 use crate::error::{Error, Result};
-use crate::metrics::{PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS};
+use crate::metrics::{
+    FLOW_NOTIFICATION_DROPPED, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS,
+};
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
 
@@ -110,7 +109,7 @@ pub struct LogicalTablePendingRowsBatcher {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    flow_notification_tx: Notifier<FlowNotification>,
+    flow_notification_tx: FlowNotifier,
     flush_limiter: FlushLimiter,
     request_limiter: RequestLimiter,
     worker_channel_capacity: usize,
@@ -144,8 +143,10 @@ impl LogicalTablePendingRowsBatcher {
         let flush_limiter = FlushLimiter::try_new(max_concurrent_flushes)?;
 
         let request_limiter = RequestLimiter::try_new(max_inflight_requests)?;
-        let (flow_notification_tx, flow_notification_rx) =
-            Notifier::try_new(flow_notification_queue_capacity.get())?;
+        let (flow_notification_tx, flow_notification_rx) = FlowNotifier::try_new(
+            flow_notification_queue_capacity,
+            FLOW_NOTIFICATION_DROPPED.clone(),
+        )?;
 
         let (shutdown, _) = broadcast::channel(1);
         let pending_rows_batch_sync = pending_rows_batch_sync_enabled();
@@ -319,19 +320,6 @@ mod tests {
     use crate::batcher::logical_table::flow_notifier::extract_timestamps;
     use crate::batcher::logical_table::test_util::{mock_aligned_tag_batch, mock_tag_batch};
 
-    fn mock_timestamp_batch(timestamps: Vec<Option<i64>>) -> RecordBatchWithTsIdx {
-        let batch = RecordBatch::try_new(
-            Arc::new(ArrowSchema::new(vec![Field::new(
-                greptime_timestamp(),
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                true,
-            )])),
-            vec![Arc::new(TimestampMillisecondArray::from(timestamps))],
-        )
-        .unwrap();
-        RecordBatchWithTsIdx::try_new(batch, 0).unwrap()
-    }
-
     #[test]
     fn test_extract_timestamps_appends_non_null_batches_in_order() {
         let table_batch = TableBatch {
@@ -422,5 +410,18 @@ mod tests {
             vec![1000, 2000, 3000, 4000],
             extract_timestamps(&table_batch)
         );
+    }
+
+    fn mock_timestamp_batch(timestamps: Vec<Option<i64>>) -> RecordBatchWithTsIdx {
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![Field::new(
+                greptime_timestamp(),
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                true,
+            )])),
+            vec![Arc::new(TimestampMillisecondArray::from(timestamps))],
+        )
+        .unwrap();
+        RecordBatchWithTsIdx::try_new(batch, 0).unwrap()
     }
 }

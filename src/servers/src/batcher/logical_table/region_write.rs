@@ -383,80 +383,6 @@ mod tests {
     };
     use crate::batcher::logical_table::test_util::ConcurrentMockNodeManager;
 
-    struct TwoRegionPartitionRule {
-        partition_columns: Vec<String>,
-    }
-
-    impl PartitionRule for TwoRegionPartitionRule {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn partition_columns(&self) -> &[String] {
-            &self.partition_columns
-        }
-
-        fn find_region(
-            &self,
-            _values: &[datatypes::prelude::Value],
-        ) -> partition::error::Result<store_api::storage::RegionNumber> {
-            unimplemented!()
-        }
-
-        fn split_record_batch(
-            &self,
-            _record_batch: &RecordBatch,
-        ) -> partition::error::Result<HashMap<store_api::storage::RegionNumber, RegionMask>>
-        {
-            Ok(HashMap::from([
-                (1, RegionMask::new(BooleanArray::from(vec![true, false]), 1)),
-                (2, RegionMask::new(BooleanArray::from(vec![false, true]), 1)),
-                (
-                    3,
-                    RegionMask::new(BooleanArray::from(vec![false, false]), 0),
-                ),
-            ]))
-        }
-    }
-
-    #[derive(Clone)]
-    struct ConcurrentMockDatanode {
-        delay: Duration,
-        inflight: Arc<AtomicUsize>,
-        max_inflight: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl Datanode for ConcurrentMockDatanode {
-        async fn handle(&self, _request: RegionRequest) -> MetaResult<RegionResponse> {
-            let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
-            loop {
-                let max = self.max_inflight.load(Ordering::SeqCst);
-                if now <= max {
-                    break;
-                }
-                if self
-                    .max_inflight
-                    .compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-
-            sleep(self.delay).await;
-            self.inflight.fetch_sub(1, Ordering::SeqCst);
-            Ok(RegionResponse::new(0))
-        }
-
-        async fn handle_query(
-            &self,
-            _request: QueryRequest,
-        ) -> MetaResult<SendableRecordBatchStream> {
-            unimplemented!()
-        }
-    }
-
     #[tokio::test]
     async fn test_flush_region_writes_concurrently_dispatches_multiple_datanodes() {
         let inflight = Arc::new(AtomicUsize::new(0));
@@ -587,5 +513,79 @@ mod tests {
             panic!("expected bulk insert request");
         };
         assert_eq!(RegionId::new(1024, 1).as_u64(), request.region_id);
+    }
+
+    struct TwoRegionPartitionRule {
+        partition_columns: Vec<String>,
+    }
+
+    impl PartitionRule for TwoRegionPartitionRule {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn partition_columns(&self) -> &[String] {
+            &self.partition_columns
+        }
+
+        fn find_region(
+            &self,
+            _values: &[datatypes::prelude::Value],
+        ) -> partition::error::Result<store_api::storage::RegionNumber> {
+            unimplemented!()
+        }
+
+        fn split_record_batch(
+            &self,
+            _record_batch: &RecordBatch,
+        ) -> partition::error::Result<HashMap<store_api::storage::RegionNumber, RegionMask>>
+        {
+            Ok(HashMap::from([
+                (1, RegionMask::new(BooleanArray::from(vec![true, false]), 1)),
+                (2, RegionMask::new(BooleanArray::from(vec![false, true]), 1)),
+                (
+                    3,
+                    RegionMask::new(BooleanArray::from(vec![false, false]), 0),
+                ),
+            ]))
+        }
+    }
+
+    #[derive(Clone)]
+    struct ConcurrentMockDatanode {
+        delay: Duration,
+        inflight: Arc<AtomicUsize>,
+        max_inflight: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Datanode for ConcurrentMockDatanode {
+        async fn handle(&self, _request: RegionRequest) -> MetaResult<RegionResponse> {
+            let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            loop {
+                let max = self.max_inflight.load(Ordering::SeqCst);
+                if now <= max {
+                    break;
+                }
+                if self
+                    .max_inflight
+                    .compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+
+            sleep(self.delay).await;
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+            Ok(RegionResponse::new(0))
+        }
+
+        async fn handle_query(
+            &self,
+            _request: QueryRequest,
+        ) -> MetaResult<SendableRecordBatchStream> {
+            unimplemented!()
+        }
     }
 }

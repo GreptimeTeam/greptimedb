@@ -22,12 +22,12 @@ use sql::statements::statement::Statement;
 pub use tower;
 
 pub mod addrs;
+pub mod batcher;
 pub mod configurator;
 pub(crate) mod elasticsearch;
 pub mod error;
 pub mod grpc;
 
-pub mod batcher;
 mod hint_headers;
 pub mod http;
 pub mod influxdb;

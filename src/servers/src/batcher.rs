@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Logical-table and ordinary-table batching implementations.
+
+mod flow_notifier;
+mod flow_sender;
 pub mod logical_table;
 
-mod flow_sender;
 #[cfg(test)]
 mod test_util;

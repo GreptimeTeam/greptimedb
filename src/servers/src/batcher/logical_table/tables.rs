@@ -424,6 +424,7 @@ impl LogicalTablePendingRowsBatcher {
 
 #[cfg(test)]
 mod tests {
+
     use api::v1::value::ValueData;
     use api::v1::{
         ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
@@ -436,16 +437,6 @@ mod tests {
     use crate::batcher::logical_table::batch_convert::TableBatch;
     use crate::batcher::logical_table::flow_notifier::extract_timestamps;
     use crate::prom_row_builder::rows_to_aligned_record_batch;
-
-    fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
-        Rows {
-            schema: vec![ColumnSchema {
-                column_name: schema_name.to_string(),
-                ..Default::default()
-            }],
-            rows: (0..row_count).map(|_| Row { values: vec![] }).collect(),
-        }
-    }
 
     #[test]
     fn test_extract_timestamps_uses_aligned_custom_timestamp_index() {
@@ -546,5 +537,15 @@ mod tests {
         assert_eq!(1, table_rows.len());
         assert_eq!("cpu", table_rows[0].0);
         assert_eq!(2, table_rows[0].1.rows.len());
+    }
+
+    fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
+        Rows {
+            schema: vec![ColumnSchema {
+                column_name: schema_name.to_string(),
+                ..Default::default()
+            }],
+            rows: (0..row_count).map(|_| Row { values: vec![] }).collect(),
+        }
     }
 }

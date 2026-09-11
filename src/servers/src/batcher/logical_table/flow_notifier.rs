@@ -12,23 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::NonZeroUsize;
-
-use common_batcher::notifier::{Notifier, run_notifier};
+#[cfg(test)]
+#[cfg(test)]
 use common_meta::cache::TableFlownodeSetCacheRef;
+#[cfg(test)]
 use common_meta::node_manager::NodeManagerRef;
-use common_runtime::spawn_global;
-use common_telemetry::{error, warn};
+use common_telemetry::error;
 use datatypes::timestamp::append_timestamps;
-use tokio::sync::mpsc;
 
-pub(in crate::batcher::logical_table) use crate::batcher::flow_sender::FlowNotification;
-use crate::batcher::flow_sender::FlowSender;
+use crate::batcher::flow_notifier::FlowNotifier;
+#[cfg(test)]
+use crate::batcher::flow_notifier::start_flow_notification_worker;
+use crate::batcher::flow_sender::FlowNotification;
 use crate::batcher::logical_table::batch_convert::TableBatch;
+#[cfg(test)]
 use crate::metrics::FLOW_NOTIFICATION_DROPPED;
-
-pub(in crate::batcher::logical_table) const MAX_CONCURRENT_FLOW_NOTIFICATIONS: NonZeroUsize =
-    NonZeroUsize::new(8).unwrap();
 
 pub(in crate::batcher::logical_table) fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
     let mut timestamps = Vec::with_capacity(table_batch.row_count);
@@ -45,68 +43,20 @@ pub(in crate::batcher::logical_table) fn extract_timestamps(table_batch: &TableB
     timestamps
 }
 
-pub(in crate::batcher::logical_table) fn try_enqueue_flow_notification(
-    tx: &Notifier<FlowNotification>,
-    notification: FlowNotification,
-) -> bool {
-    match tx.try_notify(notification) {
-        Ok(()) => true,
-        Err(mpsc::error::TrySendError::Full(notification)) => {
-            FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]).inc();
-            warn!(
-                "Dropping flow notification because queue is full, table_id: {}, queue_capacity: {}",
-                notification.table_id,
-                tx.max_capacity()
-            );
-            false
-        }
-        Err(mpsc::error::TrySendError::Closed(notification)) => {
-            FLOW_NOTIFICATION_DROPPED
-                .with_label_values(&["closed"])
-                .inc();
-            error!(
-                "Dropping flow notification because queue is closed, table_id: {}, queue_capacity: {}",
-                notification.table_id,
-                tx.max_capacity()
-            );
-            false
-        }
-    }
-}
-
 pub(in crate::batcher::logical_table) fn enqueue_flow_notifications(
     table_batches: Vec<TableBatch>,
-    tx: &Notifier<FlowNotification>,
+    tx: &FlowNotifier,
 ) {
     for table_batch in table_batches {
         let timestamps = extract_timestamps(&table_batch);
         if timestamps.is_empty() {
             continue;
         }
-        try_enqueue_flow_notification(
-            tx,
-            FlowNotification {
-                table_id: table_batch.table_id,
-                timestamps,
-            },
-        );
+        tx.try_notify(FlowNotification {
+            table_id: table_batch.table_id,
+            timestamps,
+        });
     }
-}
-
-pub(in crate::batcher::logical_table) fn start_flow_notification_worker(
-    notification_rx: mpsc::Receiver<FlowNotification>,
-    table_flownode_set_cache: TableFlownodeSetCacheRef,
-    node_manager: NodeManagerRef,
-) {
-    let sender = FlowSender::new(table_flownode_set_cache, node_manager);
-    spawn_global(run_notifier(
-        notification_rx,
-        MAX_CONCURRENT_FLOW_NOTIFICATIONS,
-        move |notification| {
-            let sender = sender.clone();
-            async move { sender.send(notification).await }
-        },
-    ));
 }
 
 #[cfg(test)]
@@ -115,7 +65,11 @@ pub(in crate::batcher::logical_table) fn notify_flow_dirty_windows_after_flush(
     table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
-    let (tx, rx) = Notifier::try_new(table_batches.len().max(1)).unwrap();
+    let (tx, rx) = FlowNotifier::try_new(
+        NonZeroUsize::new(table_batches.len().max(1)).unwrap(),
+        FLOW_NOTIFICATION_DROPPED.clone(),
+    )
+    .unwrap();
     start_flow_notification_worker(rx, table_flownode_set_cache, node_manager);
     enqueue_flow_notifications(table_batches, &tx);
 }
@@ -128,7 +82,6 @@ mod tests {
 
     use api::v1::meta::Peer;
     use async_trait::async_trait;
-    use common_batcher::notifier::Notifier;
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::error::Result as MetaResult;
     use common_meta::instruction::{CacheIdent, CreateFlow};
@@ -142,29 +95,32 @@ mod tests {
     use moka::future::CacheBuilder;
     use tokio::sync::{Notify, mpsc, oneshot};
 
+    use crate::batcher::flow_notifier::FlowNotifier;
+    use crate::batcher::flow_sender::FlowNotification;
     use crate::batcher::logical_table::batch_convert::TableBatch;
-    use crate::batcher::logical_table::flow_notifier::{
-        notify_flow_dirty_windows_after_flush, try_enqueue_flow_notification,
-    };
+    use crate::batcher::logical_table::flow_notifier::notify_flow_dirty_windows_after_flush;
     use crate::batcher::logical_table::test_util::{
         FlowNotificationMockNodeManager, RecordingFlownode, mock_aligned_tag_batch,
-        mock_table_flownode_cache,
     };
+    use crate::batcher::test_util::mock_table_flownode_cache;
     use crate::metrics::FLOW_NOTIFICATION_DROPPED;
 
     #[test]
     fn test_flow_notification_queue_drops_when_full() {
-        let (tx, mut rx) = Notifier::try_new(1).unwrap();
-        let notification =
-            |table_id| crate::batcher::logical_table::flow_notifier::FlowNotification {
-                table_id,
-                timestamps: vec![table_id as i64],
-            };
+        let (tx, mut rx) = FlowNotifier::try_new(
+            NonZeroUsize::new(1).unwrap(),
+            FLOW_NOTIFICATION_DROPPED.clone(),
+        )
+        .unwrap();
+        let notification = |table_id| FlowNotification {
+            table_id,
+            timestamps: vec![table_id as i64],
+        };
         let dropped = FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]);
         let dropped_before = dropped.get();
 
-        assert!(try_enqueue_flow_notification(&tx, notification(1)));
-        assert!(!try_enqueue_flow_notification(&tx, notification(2)));
+        assert!(tx.try_notify(notification(1)));
+        assert!(!tx.try_notify(notification(2)));
 
         assert_eq!(1, rx.try_recv().unwrap().table_id);
         assert_eq!(dropped_before + 1, dropped.get());
@@ -172,60 +128,8 @@ mod tests {
         let closed = FLOW_NOTIFICATION_DROPPED.with_label_values(&["closed"]);
         let closed_before = closed.get();
         drop(rx);
-        assert!(!try_enqueue_flow_notification(&tx, notification(3)));
+        assert!(!tx.try_notify(notification(3)));
         assert_eq!(closed_before + 1, closed.get());
-    }
-
-    struct BlockingRangeKvBackend {
-        range_started: Mutex<Option<oneshot::Sender<()>>>,
-        range_release: Arc<Notify>,
-    }
-
-    impl TxnService for BlockingRangeKvBackend {
-        type Error = common_meta::error::Error;
-    }
-
-    #[async_trait]
-    impl KvBackend for BlockingRangeKvBackend {
-        fn name(&self) -> &str {
-            "blocking_range"
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        async fn range(&self, _req: RangeRequest) -> MetaResult<RangeResponse> {
-            let range_started = self.range_started.lock().unwrap().take();
-            if let Some(range_started) = range_started {
-                let _ = range_started.send(());
-                self.range_release.notified().await;
-            }
-            Ok(RangeResponse {
-                kvs: Vec::new(),
-                more: false,
-            })
-        }
-
-        async fn put(&self, _req: PutRequest) -> MetaResult<PutResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_put(&self, _req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_get(&self, _req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
-            unimplemented!()
-        }
-
-        async fn delete_range(&self, _req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_delete(&self, _req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
-            unimplemented!()
-        }
     }
 
     #[tokio::test]
@@ -295,7 +199,7 @@ mod tests {
             id: 7,
             addr: "flow-7".to_string(),
         };
-        let cache = mock_table_flownode_cache(table_id, peer).await;
+        let cache = mock_table_flownode_cache(table_id, vec![(0, peer.clone()), (1, peer)]).await;
         let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
         let _requests_tx = requests_tx.clone();
         let node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
@@ -336,7 +240,7 @@ mod tests {
             id: 7,
             addr: "flow-7".to_string(),
         };
-        let cache = mock_table_flownode_cache(table_id, peer).await;
+        let cache = mock_table_flownode_cache(table_id, vec![(0, peer.clone()), (1, peer)]).await;
         let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
         let _requests_tx = requests_tx.clone();
         let node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
@@ -371,5 +275,57 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    struct BlockingRangeKvBackend {
+        range_started: Mutex<Option<oneshot::Sender<()>>>,
+        range_release: Arc<Notify>,
+    }
+
+    impl TxnService for BlockingRangeKvBackend {
+        type Error = common_meta::error::Error;
+    }
+
+    #[async_trait]
+    impl KvBackend for BlockingRangeKvBackend {
+        fn name(&self) -> &str {
+            "blocking_range"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn range(&self, _req: RangeRequest) -> MetaResult<RangeResponse> {
+            let range_started = self.range_started.lock().unwrap().take();
+            if let Some(range_started) = range_started {
+                let _ = range_started.send(());
+                self.range_release.notified().await;
+            }
+            Ok(RangeResponse {
+                kvs: Vec::new(),
+                more: false,
+            })
+        }
+
+        async fn put(&self, _req: PutRequest) -> MetaResult<PutResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_put(&self, _req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_get(&self, _req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
+            unimplemented!()
+        }
+
+        async fn delete_range(&self, _req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_delete(&self, _req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
+            unimplemented!()
+        }
     }
 }
