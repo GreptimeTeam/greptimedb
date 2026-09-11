@@ -20,7 +20,9 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
-use common_datasource::file_format::parquet::stream_to_parquet;
+use common_datasource::file_format::parquet::{
+    PARQUET_TABLE_NAME_KEY, stream_to_parquet_with_metadata,
+};
 use common_datasource::object_store::build_backend_for_write_with_path;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
@@ -49,11 +51,21 @@ const WRITE_BUFFER_THRESHOLD: ReadableSize = ReadableSize::mb(8);
 /// Default number of concurrent write, it only works on object store backend(e.g., S3).
 const WRITE_CONCURRENCY: usize = 8;
 
+fn parquet_metadata(format: &Format, table_name: Option<&str>) -> Option<(String, String)> {
+    match (format, table_name) {
+        (Format::Parquet(_), Some(table_name)) => {
+            Some((PARQUET_TABLE_NAME_KEY.to_string(), table_name.to_string()))
+        }
+        _ => None,
+    }
+}
+
 impl StatementExecutor {
     async fn stream_to_file(
         &self,
         stream: SendableRecordBatchStream,
         format: &Format,
+        parquet_table_name: Option<&str>,
         object_store: ObjectStore,
         path: &str,
     ) -> Result<usize> {
@@ -87,12 +99,13 @@ impl StatementExecutor {
             .context(error::WriteStreamToFileSnafu { path }),
             Format::Parquet(_) => {
                 let schema = stream.schema();
-                stream_to_parquet(
+                stream_to_parquet_with_metadata(
                     Box::pin(DfRecordBatchStreamAdapter::new(stream)),
                     schema,
                     object_store,
                     path,
                     WRITE_CONCURRENCY,
+                    parquet_metadata(format, parquet_table_name),
                 )
                 .await
                 .context(error::WriteStreamToFileSnafu { path })
@@ -157,13 +170,14 @@ impl StatementExecutor {
         } = &req;
 
         debug!("Copy table: {table_id} to location: {location}");
-        self.copy_to_file(&format, output, location, connection)
+        self.copy_to_file(&format, Some(&req.table_name), output, location, connection)
             .await
     }
 
     pub(crate) async fn copy_to_file(
         &self,
         format: &Format,
+        parquet_table_name: Option<&str>,
         output: Output,
         location: &str,
         connection: &HashMap<String, String>,
@@ -184,7 +198,35 @@ impl StatementExecutor {
         let filename = backend.object_path.context(error::UnexpectedSnafu {
             violated: format!("Expected filename, path: {location}"),
         })?;
-        self.stream_to_file(stream, format, backend.object_store, &filename)
-            .await
+        self.stream_to_file(
+            stream,
+            format,
+            parquet_table_name,
+            backend.object_store,
+            &filename,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_datasource::file_format::Format;
+    use common_datasource::file_format::json::JsonFormat;
+    use common_datasource::file_format::parquet::{PARQUET_TABLE_NAME_KEY, ParquetFormat};
+
+    use super::parquet_metadata;
+
+    #[test]
+    fn parquet_metadata_routes_only_table_parquet_exports() {
+        let parquet = Format::Parquet(ParquetFormat::default());
+        let json = Format::Json(JsonFormat::default());
+
+        assert_eq!(
+            Some((PARQUET_TABLE_NAME_KEY.to_string(), "my_table".to_string())),
+            parquet_metadata(&parquet, Some("my_table"))
+        );
+        assert!(parquet_metadata(&parquet, None).is_none());
+        assert!(parquet_metadata(&json, Some("my_table")).is_none());
     }
 }

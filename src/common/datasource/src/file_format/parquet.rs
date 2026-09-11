@@ -24,7 +24,7 @@ use datafusion::parquet::arrow::async_reader::AsyncFileReader;
 use datafusion::parquet::arrow::{ArrowWriter, parquet_to_arrow_schema};
 use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::{
-    PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader,
+    KeyValue, PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader,
 };
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -43,9 +43,99 @@ use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCom
 
 use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder};
-use crate::error::{self, Result, WriteObjectSnafu, WriteParquetSnafu};
+use crate::error::{
+    self, InvalidParquetTableNameMetadataSnafu, Result, WriteObjectSnafu, WriteParquetSnafu,
+};
 use crate::file_format::FileFormat;
 use crate::share_buffer::SharedBuffer;
+
+/// Parquet file metadata key for the source GreptimeDB table name.
+///
+/// The value is an opaque, unqualified GreptimeDB table name.
+pub const PARQUET_TABLE_NAME_KEY: &str = "greptime.table_name";
+
+/// Extracts the table name identity from one Parquet file's key/value metadata.
+///
+/// Missing metadata or a missing key represents an unknown table identity.
+pub fn parquet_table_name_from_metadata(metadata: Option<&[KeyValue]>) -> Result<Option<&str>> {
+    let mut table_name = None;
+    for item in metadata.unwrap_or_default() {
+        if item.key != PARQUET_TABLE_NAME_KEY {
+            continue;
+        }
+
+        let Some(value) = item.value.as_deref() else {
+            return InvalidParquetTableNameMetadataSnafu {
+                reason: format!("metadata key '{PARQUET_TABLE_NAME_KEY}' has no value"),
+            }
+            .fail();
+        };
+        if value.is_empty() {
+            return InvalidParquetTableNameMetadataSnafu {
+                reason: format!("metadata key '{PARQUET_TABLE_NAME_KEY}' has an empty value"),
+            }
+            .fail();
+        }
+        if let Some(table_name) = table_name
+            && table_name != value
+        {
+            return InvalidParquetTableNameMetadataSnafu {
+                reason: format!(
+                    "metadata key '{PARQUET_TABLE_NAME_KEY}' has conflicting values: {table_name:?} and {value:?}"
+                ),
+            }
+            .fail();
+        }
+        table_name = Some(value);
+    }
+
+    Ok(table_name)
+}
+
+/// Extracts one consistent table identity from a batch of Parquet file metadata.
+pub fn parquet_table_name_from_metadata_batch<'a>(
+    metadata: impl IntoIterator<Item = Option<&'a [KeyValue]>>,
+) -> Result<Option<&'a str>> {
+    let mut table_name = None;
+    let mut saw_missing = false;
+    for metadata in metadata {
+        match parquet_table_name_from_metadata(metadata)? {
+            Some(value) => {
+                if saw_missing {
+                    return InvalidParquetTableNameMetadataSnafu {
+                        reason: format!(
+                            "Parquet table name metadata is missing from some files but other files use {value:?}"
+                        ),
+                    }
+                    .fail();
+                }
+                if let Some(table_name) = table_name
+                    && table_name != value
+                {
+                    return InvalidParquetTableNameMetadataSnafu {
+                        reason: format!(
+                            "Parquet files have conflicting table names: {table_name:?} and {value:?}"
+                        ),
+                    }
+                    .fail();
+                }
+                table_name = Some(value);
+            }
+            None => {
+                if let Some(table_name) = table_name {
+                    return InvalidParquetTableNameMetadataSnafu {
+                        reason: format!(
+                            "Parquet table name metadata is missing from some files but other files use {table_name:?}"
+                        ),
+                    }
+                    .fail();
+                }
+                saw_missing = true;
+            }
+        }
+    }
+    Ok(table_name)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParquetFormat {}
@@ -211,17 +301,33 @@ impl ArrowWriterCloser for ArrowWriter<SharedBuffer> {
 ///
 /// Returns number of rows written.
 pub async fn stream_to_parquet(
-    mut stream: SendableRecordBatchStream,
+    stream: SendableRecordBatchStream,
     schema: datatypes::schema::SchemaRef,
     store: ObjectStore,
     path: &str,
     concurrency: usize,
 ) -> Result<usize> {
+    stream_to_parquet_with_metadata(stream, schema, store, path, concurrency, None).await
+}
+
+/// Output the stream to a parquet file with custom key/value footer metadata.
+///
+/// Returns number of rows written.
+pub async fn stream_to_parquet_with_metadata(
+    mut stream: SendableRecordBatchStream,
+    schema: datatypes::schema::SchemaRef,
+    store: ObjectStore,
+    path: &str,
+    concurrency: usize,
+    metadata: Option<(String, String)>,
+) -> Result<usize> {
+    let metadata = metadata.map(|(key, value)| vec![KeyValue::new(key, value)]);
     let write_props = column_wise_config(
         WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_statistics_truncate_length(None)
-            .set_column_index_truncate_length(None),
+            .set_column_index_truncate_length(None)
+            .set_key_value_metadata(metadata),
         schema,
     )
     .build();
@@ -269,15 +375,273 @@ fn column_wise_config(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+    use common_recordbatch::{RecordBatch, RecordBatches};
     use common_test_util::find_workspace_path;
+    use datafusion::parquet::arrow::async_reader::AsyncFileReader;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
+    use datatypes::vectors::{UInt32Vector, VectorRef};
+    use parquet::file::metadata::KeyValue;
 
     use super::*;
-    use crate::test_util::{format_schema, test_store};
+    use crate::test_util::{format_schema, test_store, test_tmp_store};
 
     fn test_data_root() -> String {
         find_workspace_path("/src/common/datasource/tests/parquet")
             .display()
             .to_string()
+    }
+
+    fn test_record_batch_stream() -> (SendableRecordBatchStream, datatypes::schema::SchemaRef) {
+        let schema = Arc::new(GreptimeSchema::new(vec![ColumnSchema::new(
+            "number",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )]));
+        let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice([1, 2, 3]))];
+        let batch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let batches = RecordBatches::try_new(schema.clone(), vec![batch]).unwrap();
+        (
+            Box::pin(DfRecordBatchStreamAdapter::new(batches.as_stream())),
+            schema,
+        )
+    }
+
+    async fn written_key_values(store: ObjectStore, path: &str) -> Option<Vec<KeyValue>> {
+        let mut reader = LazyParquetFileReader::new(store, path.to_string(), None);
+        reader
+            .get_metadata(None)
+            .await
+            .unwrap()
+            .file_metadata()
+            .key_value_metadata()
+            .cloned()
+    }
+
+    #[tokio::test]
+    async fn legacy_parquet_writer_does_not_write_table_name_metadata() {
+        let (store, dir) = test_tmp_store("legacy_parquet_writer_metadata");
+        let path = format!("{}/output.parquet", dir.path().display());
+        let (stream, schema) = test_record_batch_stream();
+
+        assert_eq!(
+            3,
+            stream_to_parquet(stream, schema, store.clone(), &path, 1)
+                .await
+                .unwrap()
+        );
+
+        let user_key_values = written_key_values(store, &path)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item.key != "ARROW:schema")
+            .collect::<Vec<_>>();
+        assert!(user_key_values.is_empty(), "{user_key_values:?}");
+    }
+
+    #[tokio::test]
+    async fn parquet_writer_writes_table_name_metadata_to_footer() {
+        let (store, dir) = test_tmp_store("parquet_writer_table_name_metadata");
+        let path = format!("{}/output.parquet", dir.path().display());
+        let (stream, schema) = test_record_batch_stream();
+
+        assert_eq!(
+            3,
+            stream_to_parquet_with_metadata(
+                stream,
+                schema,
+                store.clone(),
+                &path,
+                1,
+                Some((PARQUET_TABLE_NAME_KEY.to_string(), "my_table".to_string(),)),
+            )
+            .await
+            .unwrap()
+        );
+
+        let table_names = written_key_values(store, &path)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item.key == PARQUET_TABLE_NAME_KEY)
+            .collect::<Vec<_>>();
+        assert_eq!(1, table_names.len());
+        assert_eq!(Some("my_table"), table_names[0].value.as_deref());
+    }
+
+    #[test]
+    fn missing_parquet_table_name_is_unknown() {
+        let metadata = [KeyValue::new("other".to_string(), "value".to_string())];
+
+        assert_eq!(
+            None,
+            parquet_table_name_from_metadata(Some(&metadata)).unwrap()
+        );
+    }
+
+    #[test]
+    fn present_parquet_table_name_is_returned_as_opaque_value() {
+        let metadata = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            "schema/table.with.dots".to_string(),
+        )];
+
+        assert_eq!(
+            Some("schema/table.with.dots"),
+            parquet_table_name_from_metadata(Some(&metadata)).unwrap()
+        );
+    }
+
+    #[test]
+    fn parquet_table_name_without_value_is_invalid() {
+        let metadata = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            None::<String>,
+        )];
+
+        let err = parquet_table_name_from_metadata(Some(&metadata)).unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: metadata key 'greptime.table_name' has no value",
+            err.to_string()
+        );
+    }
+
+    #[test]
+    fn empty_parquet_table_name_is_invalid() {
+        let metadata = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            String::new(),
+        )];
+
+        assert!(parquet_table_name_from_metadata(Some(&metadata)).is_err());
+    }
+
+    #[test]
+    fn conflicting_parquet_table_names_are_invalid() {
+        let metadata = [
+            KeyValue::new(PARQUET_TABLE_NAME_KEY.to_string(), "first".to_string()),
+            KeyValue::new(PARQUET_TABLE_NAME_KEY.to_string(), "second".to_string()),
+        ];
+
+        let err = parquet_table_name_from_metadata(Some(&metadata)).unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: metadata key 'greptime.table_name' has conflicting values: \"first\" and \"second\"",
+            err.to_string()
+        );
+    }
+
+    #[test]
+    fn identical_duplicate_parquet_table_names_are_accepted() {
+        let metadata = [
+            KeyValue::new(PARQUET_TABLE_NAME_KEY.to_string(), "same".to_string()),
+            KeyValue::new(PARQUET_TABLE_NAME_KEY.to_string(), "same".to_string()),
+        ];
+
+        assert_eq!(
+            Some("same"),
+            parquet_table_name_from_metadata(Some(&metadata)).unwrap()
+        );
+    }
+
+    #[test]
+    fn empty_parquet_metadata_batch_is_unknown() {
+        assert_eq!(
+            None,
+            parquet_table_name_from_metadata_batch(std::iter::empty()).unwrap()
+        );
+    }
+
+    #[test]
+    fn all_missing_parquet_metadata_batch_is_unknown() {
+        assert_eq!(
+            None,
+            parquet_table_name_from_metadata_batch([None, None]).unwrap()
+        );
+    }
+
+    #[test]
+    fn same_parquet_table_name_across_batch_is_returned() {
+        let first = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            "same".to_string(),
+        )];
+        let second = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            "same".to_string(),
+        )];
+
+        assert_eq!(
+            Some("same"),
+            parquet_table_name_from_metadata_batch([
+                Some(first.as_slice()),
+                Some(second.as_slice())
+            ])
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn different_parquet_table_names_across_batch_are_invalid() {
+        let first = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            "first".to_string(),
+        )];
+        let second = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            "second".to_string(),
+        )];
+
+        let err = parquet_table_name_from_metadata_batch([
+            Some(first.as_slice()),
+            Some(second.as_slice()),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: Parquet files have conflicting table names: \"first\" and \"second\"",
+            err.to_string()
+        );
+    }
+
+    #[test]
+    fn invalid_parquet_table_name_in_batch_is_propagated() {
+        let invalid = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            None::<String>,
+        )];
+
+        assert!(parquet_table_name_from_metadata_batch([Some(invalid.as_slice())]).is_err());
+    }
+
+    #[test]
+    fn mixed_present_and_missing_parquet_table_names_are_invalid() {
+        let present = [KeyValue::new(
+            PARQUET_TABLE_NAME_KEY.to_string(),
+            "table".to_string(),
+        )];
+        let missing = [KeyValue::new("other".to_string(), "value".to_string())];
+
+        let err = parquet_table_name_from_metadata_batch([
+            Some(present.as_slice()),
+            Some(missing.as_slice()),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: Parquet table name metadata is missing from some files but other files use \"table\"",
+            err.to_string()
+        );
+        let err = parquet_table_name_from_metadata_batch([
+            Some(missing.as_slice()),
+            Some(present.as_slice()),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            "Invalid Parquet table name metadata: Parquet table name metadata is missing from some files but other files use \"table\"",
+            err.to_string()
+        );
     }
 
     #[tokio::test]

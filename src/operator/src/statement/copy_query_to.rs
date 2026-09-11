@@ -37,7 +37,7 @@ impl StatementExecutor {
         let format = Format::try_from(with).context(error::ParseFileFormatSnafu)?;
 
         debug!("Copy query to location: {location}");
-        self.copy_to_file(&format, query_output, location, connection)
+        self.copy_to_file(&format, None, query_output, location, connection)
             .await
     }
 }
