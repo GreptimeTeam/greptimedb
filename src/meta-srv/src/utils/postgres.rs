@@ -96,19 +96,6 @@ fn is_unix_socket_url(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_unix_socket_url;
-
-    #[test]
-    fn detects_postgres_unix_socket_url() {
-        assert!(is_unix_socket_url(
-            "postgresql://user@/db?host=%2Fvar%2Frun%2Fpostgresql"
-        ));
-        assert!(!is_unix_socket_url("postgresql://user@localhost/db"));
-    }
-}
-
 /// Builds a Postgres-backed metadata [`KvBackendRef`].
 ///
 /// * `store_addrs` - Postgres connection URLs; only the first address is used.
@@ -181,4 +168,17 @@ pub async fn build_postgres_election(
     )
     .await
     .context(error::KvBackendSnafu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_unix_socket_url;
+
+    #[test]
+    fn detects_postgres_unix_socket_url() {
+        assert!(is_unix_socket_url(
+            "postgresql://user@/db?host=%2Fvar%2Frun%2Fpostgresql"
+        ));
+        assert!(!is_unix_socket_url("postgresql://user@localhost/db"));
+    }
 }
