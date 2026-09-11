@@ -243,7 +243,7 @@ recovery complexity; otherwise record the evidence and defer them explicitly.
 
 # Delivery and acceptance
 
-The [implementation plan](2026-09-11-metric-export-import/metric-export-import-tracking.md) defines
+The [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120) defines
 seven required PRs and one conditional merged-write PR. Production integration
 remains pending. The [experiment summary](2026-09-11-metric-export-import/experiment-results.md)
 contains the supporting comparisons and conclusions.

@@ -93,4 +93,4 @@ successful batch and retry. Existing standalone COPY cases also passed.
 Production acceptance still requires release-build measurements with repeated
 runs, larger workloads, distributed/multi-region execution, object stores,
 released-reader compatibility and export cancellation/recovery. These are tracked
-in the [implementation plan](metric-export-import-tracking.md).
+in the [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120).
