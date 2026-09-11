@@ -132,7 +132,7 @@ impl QuantileOverTime {
                         value_len,
                         &mut samples,
                     );
-                    match quantile_with_scratch(window, quantile, &mut scratch) {
+                    match window_quantile(window, quantile, &mut scratch) {
                         Some(value) => result_builder.append_value(value),
                         None => result_builder.append_null(),
                     }
@@ -183,7 +183,7 @@ impl QuantileOverTime {
                         value_len,
                         &mut samples,
                     );
-                    match quantile_with_scratch(window, quantile, &mut scratch) {
+                    match window_quantile(window, quantile, &mut scratch) {
                         Some(value) => result_builder.append_value(value),
                         None => result_builder.append_null(),
                     }
@@ -216,6 +216,18 @@ fn window_samples<'a>(
             .map(|index| raw_values[index]),
     );
     samples
+}
+
+/// Quantile of one range window, or `None` when the window holds no sample.
+///
+/// Prometheus returns an empty vector for a range without float samples rather than the NaN
+/// that [`quantile_impl`] yields for an empty slice, so the emptiness check belongs here and
+/// not in the shared kernel.
+fn window_quantile(values: &[f64], quantile: f64, scratch: &mut Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    quantile_with_scratch(values, quantile, scratch)
 }
 
 /// Refer to <https://github.com/prometheus/prometheus/blob/6e2905a4d4ff9b47b1f6d201333f5bd53633f921/promql/quantile.go#L357-L386>
@@ -337,8 +349,34 @@ mod tests {
         let output = extract_array(&QuantileOverTime::quantile_over_time(&input).unwrap()).unwrap();
         let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
 
-        assert_eq!(output.value(0), 2.5);
-        assert!(output.value(1).is_nan());
-        assert!(output.value(2).is_nan());
+        assert_eq!(
+            output.iter().collect::<Vec<_>>(),
+            vec![Some(2.5), None, None]
+        );
+    }
+
+    #[test]
+    fn quantile_over_time_keeps_nan_for_an_invalid_quantile() {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values([0i64, 1000]));
+        let values_array = Arc::new(Float64Array::from_iter_values([1.0, 4.0]));
+        let ranges = [(0, 2)];
+
+        let input = vec![
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(ts_array, ranges)
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(values_array, ranges)
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Scalar(ScalarValue::Float64(None)),
+        ];
+        let output = extract_array(&QuantileOverTime::quantile_over_time(&input).unwrap()).unwrap();
+        let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+
+        assert!(output.value(0).is_nan());
     }
 }
