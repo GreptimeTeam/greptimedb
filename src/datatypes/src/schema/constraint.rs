@@ -397,6 +397,53 @@ mod tests {
     }
 
     #[test]
+    fn test_struct_default_null_fields_and_json() {
+        use crate::types::{StructField, StructType};
+        use crate::value::StructValue;
+
+        let inner_type = StructType::from([StructField::new(
+            "x",
+            ConcreteDataType::int32_datatype(),
+            true,
+        )]);
+        let inner = Value::Struct(StructValue::new(vec![Value::Null], inner_type));
+        let json = crate::json::JsonSettings::default()
+            .encode(serde_json::json!({"answer": 42}))
+            .unwrap();
+        let nested_type = StructType::from([StructField::new("nested", inner.data_type(), true)]);
+        let json_type = StructType::from([StructField::new("json", json.data_type(), true)]);
+        let values = [
+            inner.clone(),
+            Value::Struct(StructValue::new(vec![inner], nested_type)),
+            Value::Struct(StructValue::new(vec![], StructType::default())),
+            Value::Struct(StructValue::new(vec![json], json_type)),
+        ];
+        for value in values {
+            let data_type = value.data_type();
+            // JSON children are read back as their underlying struct values.
+            let expected = serde_json::Value::try_from(value.clone()).unwrap();
+            for num_rows in [1, 3] {
+                let vector = ColumnDefaultConstraint::Value(value.clone())
+                    .create_default_vector(&data_type, false, num_rows)
+                    .unwrap();
+                assert_eq!(data_type, vector.data_type());
+                assert_eq!(
+                    data_type.as_arrow_type(),
+                    *vector.to_arrow_array().data_type()
+                );
+                assert_eq!(num_rows, vector.len());
+                assert_eq!(0, vector.null_count());
+                for row in 0..num_rows {
+                    assert_eq!(
+                        expected,
+                        serde_json::Value::try_from(vector.get(row)).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_string_default_preserves_batch_schema() {
         use arrow::datatypes::{Field, Schema};
         use arrow::record_batch::RecordBatch;
