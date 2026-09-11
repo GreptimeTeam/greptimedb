@@ -565,8 +565,8 @@ struct ParquetFlat {
     /// A logical column may expand to multiple parquet leaf columns (e.g. a
     /// JSON2 struct stores the remainder and one leaf per promoted path), so
     /// the logical column index in the SST schema cannot be used to look up
-    /// row group statistics directly. The value is `None` for such columns
-    /// because they don't have single column statistics.
+    /// row group statistics directly. Nested columns map to `None` even when
+    /// they have one leaf: child statistics do not describe the parent value.
     column_id_to_leaf_index: HashMap<ColumnId, Option<usize>>,
 }
 
@@ -626,8 +626,7 @@ impl ParquetFlat {
             return StatValues::NoColumn;
         };
         let Some(leaf_index) = leaf_index else {
-            // The column expands to multiple parquet leaf columns, so it
-            // doesn't have a single column null count.
+            // Child/element null counts do not describe a nested parent.
             return StatValues::NoStats;
         };
 
@@ -645,16 +644,13 @@ impl ParquetFlat {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
-        // Safety: `column_id_to_leaf_index` is built from the same map as
-        // `column_id_to_sst_index`.
         let Some(leaf_index) = self
             .column_id_to_leaf_index
             .get(&column_id)
             .copied()
             .flatten()
         else {
-            // The column expands to multiple parquet leaf columns, so it
-            // doesn't have single column statistics.
+            // Nested columns do not have scalar column statistics.
             return StatValues::NoStats;
         };
 
@@ -693,8 +689,8 @@ pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<Column
 /// in the flat SST schema may expand to multiple leaf columns (e.g. a JSON2
 /// struct stores the remainder and one leaf per promoted path), so the logical
 /// column index in the SST schema cannot be used to look up statistics
-/// directly. Columns that expand to multiple leaves map to `None` because they
-/// don't have single column statistics.
+/// directly. Nested columns map to `None` regardless of their leaf count:
+/// a child's null count or min/max is not a statistic of the parent value.
 fn leaf_column_indices(
     arrow_schema: &Schema,
     id_to_sst_index: &HashMap<ColumnId, usize>,
@@ -713,7 +709,7 @@ fn leaf_column_indices(
             let leaf_index = arrow_schema
                 .fields()
                 .get(*sst_index)
-                .filter(|field| num_leaf_columns(field.data_type()) == 1)
+                .filter(|field| !field.data_type().is_nested())
                 .map(|_| leaf_offsets[*sst_index]);
             (*column_id, leaf_index)
         })
@@ -1242,6 +1238,45 @@ mod tests {
             read_format.null_counts(&row_groups, 2),
             StatValues::NoStats
         ));
+    }
+
+    /// Even one leaf cannot supply the null count of a nested parent:
+    /// {"a": null} and [null] are non-null parents with null children.
+    #[test]
+    fn test_single_leaf_nested_columns_have_no_root_stats() {
+        let child = Arc::new(Field::new("a", ArrowDataType::Int64, true));
+        for nested_type in [
+            ArrowDataType::Struct(vec![child.clone()].into()),
+            ArrowDataType::List(child.clone()),
+            ArrowDataType::LargeList(child.clone()),
+            ArrowDataType::FixedSizeList(child, 1),
+        ] {
+            let metadata = Arc::new(metadata_with_struct_field());
+            let (schema, _) = struct_column_file_and_row_group();
+            let mut fields = schema.fields().to_vec();
+            fields[2] = Arc::new(Field::new("payload", nested_type.clone(), true));
+            let format = ParquetFlat::new(
+                metadata,
+                ReadColumns::new([0, 1, 2, 3]),
+                Arc::new(Schema::new(fields)),
+            );
+
+            // The nested root has no usable statistics, independently of the
+            // values stored in any row group. Its leaf still occupies a slot.
+            let groups: &[RowGroupMetaData] = &[];
+            assert!(
+                matches!(format.min_values(groups, 2), StatValues::NoStats),
+                "{nested_type:?}"
+            );
+            assert!(
+                matches!(format.max_values(groups, 2), StatValues::NoStats),
+                "{nested_type:?}"
+            );
+            assert!(
+                matches!(format.null_counts(groups, 2), StatValues::NoStats),
+                "{nested_type:?}"
+            );
+        }
     }
 
     #[test]
