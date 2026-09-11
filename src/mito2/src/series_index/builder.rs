@@ -177,7 +177,7 @@ pub(crate) async fn build_series_index(
                 .into_stream(),
         )
     };
-    // TODO: Deduplicate update-mode rows before series indexes are used by queries.
+    // TODO(yingwen): Deduplicate update-mode rows before series indexes are used by queries.
     let path = series_index_path(region.region_id, entry.index_uuid);
     let mut writer = SeriesIndexWriter::try_new(
         version.metadata.clone(),
