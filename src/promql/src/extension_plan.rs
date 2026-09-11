@@ -68,12 +68,11 @@ pub(crate) fn nanoseconds_per_native_tick(unit: TimeUnit) -> i128 {
     }
 }
 
-/// Returns the offset serialized only by an immediately underlying normalize node.
+/// Recovers the offset serialized only by an immediately underlying normalize node.
 ///
-/// Manipulators have no offset wire field, so a planner-only constructor argument
-/// would be lost on deserialization. Follow identity projections (as used by
-/// `timestamp()`) to recover it, but stop at other nodes or changed time columns
-/// to avoid applying an inner selector's offset again to an outer subquery.
+/// This is decode-only recovery for manipulators whose wire messages have no offset field.
+/// Follow identity projections (as used by `timestamp()`), but stop at other nodes or changed
+/// time columns to avoid applying an inner selector's offset again to an outer subquery.
 pub(crate) fn local_offset(plan: &LogicalPlan, time_index: &str) -> Millisecond {
     let Some(index) = plan.schema().index_of_column_by_name(None, time_index) else {
         return 0;

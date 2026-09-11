@@ -587,6 +587,7 @@ impl PromPlanner {
             self.ctx.start,
             self.ctx.end,
             self.ctx.interval,
+            0,
             range_ms,
             time_index_column,
             self.ctx.field_columns.clone(),
@@ -2037,6 +2038,7 @@ impl PromPlanner {
             self.ctx.end,
             self.ctx.lookback_delta,
             self.ctx.interval,
+            offset_ms,
             time_index_column,
             if self.ctx.use_tsid {
                 vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
@@ -2112,6 +2114,11 @@ impl PromPlanner {
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
+        let offset_ms = match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
 
         // Some functions like rate may require special fields in the RangeManipulate plan
         // so we can't skip RangeManipulate.
@@ -2126,6 +2133,7 @@ impl PromPlanner {
             self.ctx.start,
             self.ctx.end,
             self.ctx.interval,
+            offset_ms,
             // TODO(ruihang): convert via Timestamp datatypes to support different time units
             range_ms,
             self.ctx
@@ -10912,6 +10920,7 @@ mod test {
                 1_000,
                 5_000,
                 1_000,
+                0,
                 "timestamp".to_string(),
                 Vec::new(),
                 Some(greptime_native_histogram().to_string()),
@@ -11541,6 +11550,7 @@ mod test {
                     3000,
                     3000,
                     1000,
+                    0,
                     3000,
                     "timestamp".to_string(),
                     planner.ctx.field_columns.clone(),

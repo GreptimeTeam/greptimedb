@@ -85,6 +85,10 @@ TQL EVAL (1, 1, '1s', '300s') last_over_time(native_time_us{series="window"}[1s]
 -- The inner selector consumes native time; the subquery consumes ms evaluations.
 TQL EVAL (1, 1, '1s') last_over_time((native_time_us{series="exact"})[1s:1s]);
 
+-- Inner offsets are applied once when evaluating the subquery selector.
+TQL EVAL (0, 0, '1s') last_over_time((native_time_us{series="offset"} offset 1s)[1s:1s]);
+TQL EVAL (0, 0, '1s') last_over_time((native_time_us{series="offset"} offset -1s)[1s:1s]);
+
 DROP TABLE native_time_us;
 
 CREATE TABLE native_time_ns (
@@ -170,6 +174,10 @@ TQL EVAL (1, 1, '1s', '300s') last_over_time(native_time_ns{series="window"}[1s]
 
 -- The inner selector consumes native time; the subquery consumes ms evaluations.
 TQL EVAL (1, 1, '1s') last_over_time((native_time_ns{series="exact"})[1s:1s]);
+
+-- Inner offsets are applied once when evaluating the subquery selector.
+TQL EVAL (0, 0, '1s') last_over_time((native_time_ns{series="offset"} offset 1s)[1s:1s]);
+TQL EVAL (0, 0, '1s') last_over_time((native_time_ns{series="offset"} offset -1s)[1s:1s]);
 
 DROP TABLE native_time_ns;
 

@@ -834,6 +834,7 @@ mod test {
             2_000,
             2_000,
             1,
+            1_000,
             1,
             TIME_INDEX_COLUMN.to_string(),
             vec!["value".to_string()],

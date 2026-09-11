@@ -75,6 +75,7 @@ pub struct InstantManipulate {
     end: Millisecond,
     lookback_delta: Millisecond,
     interval: Millisecond,
+    offset: Millisecond,
     time_index_column: String,
     // Planner-provided tag-column hint for execution fast paths.
     tag_columns: Vec<String>,
@@ -92,6 +93,7 @@ impl PartialOrd for InstantManipulate {
             self.end,
             self.lookback_delta,
             self.interval,
+            self.offset,
             &self.time_index_column,
             &self.tag_columns,
             &self.field_column,
@@ -103,6 +105,7 @@ impl PartialOrd for InstantManipulate {
                 other.end,
                 other.lookback_delta,
                 other.interval,
+                other.offset,
                 &other.time_index_column,
                 &other.tag_columns,
                 &other.field_column,
@@ -210,6 +213,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
                 end: self.end,
                 lookback_delta: self.lookback_delta,
                 interval: self.interval,
+                offset: local_offset(&input, &time_index_column),
                 output_schema: Self::calculate_output_schema(&input, &time_index_column)?,
                 time_index_column,
                 tag_columns: Self::resolve_tag_columns(&input, &self.tag_columns),
@@ -223,6 +227,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
                 end: self.end,
                 lookback_delta: self.lookback_delta,
                 interval: self.interval,
+                offset: self.offset,
                 time_index_column: self.time_index_column.clone(),
                 tag_columns: Self::resolve_tag_columns(&input, &self.tag_columns),
                 field_column: self.field_column.clone(),
@@ -273,6 +278,7 @@ impl InstantManipulate {
         end: Millisecond,
         lookback_delta: Millisecond,
         interval: Millisecond,
+        offset: Millisecond,
         time_index_column: String,
         tag_columns: Vec<String>,
         field_column: Option<String>,
@@ -283,6 +289,7 @@ impl InstantManipulate {
             end,
             lookback_delta,
             interval,
+            offset,
             output_schema: Self::calculate_output_schema(&input, &time_index_column)
                 .unwrap_or_else(|_| input.schema().clone()),
             time_index_column,
@@ -360,7 +367,7 @@ impl InstantManipulate {
             input_properties.boundedness,
         ));
         Arc::new(InstantManipulateExec {
-            offset: local_offset(&self.input, &self.time_index_column),
+            offset: self.offset,
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
@@ -415,6 +422,7 @@ impl InstantManipulate {
             end: pb_instant_manipulate.end,
             lookback_delta: pb_instant_manipulate.lookback_delta,
             interval: pb_instant_manipulate.interval,
+            offset: 0,
             time_index_column: String::new(),
             tag_columns: Vec::new(),
             field_column: None,
@@ -925,6 +933,7 @@ mod test {
                     1_001,
                     1,
                     1,
+                    0,
                     TIME_INDEX_COLUMN.to_string(),
                     Vec::new(),
                     Some("value".to_string()),
@@ -1028,7 +1037,7 @@ mod test {
             let normalize =
                 crate::extension_plan::SeriesNormalize::deserialize(&normalize.serialize())
                     .unwrap()
-                    .with_exprs_and_inputs(vec![], vec![input])
+                    .with_exprs_and_inputs(vec![], vec![input.clone()])
                     .unwrap();
             let normalized = LogicalPlan::Projection(
                 Projection::try_new(
@@ -1039,17 +1048,31 @@ mod test {
                 )
                 .unwrap(),
             );
-            let plan = InstantManipulate::new(
+            let fresh = InstantManipulate::new(
                 start,
                 start,
                 lookback_delta,
                 1,
+                offset,
+                TIME_INDEX_COLUMN.to_string(),
+                Vec::new(),
+                Some("value".to_string()),
+                input.clone(),
+            )
+            .with_exprs_and_inputs(vec![], vec![input.clone()])
+            .unwrap();
+            let serialized = InstantManipulate::new(
+                start,
+                start,
+                lookback_delta,
+                1,
+                offset,
                 TIME_INDEX_COLUMN.to_string(),
                 Vec::new(),
                 Some("value".to_string()),
                 normalized.clone(),
             );
-            let rebuilt = InstantManipulate::deserialize(&plan.serialize())
+            let decoded = InstantManipulate::deserialize(&serialized.serialize())
                 .unwrap()
                 .with_exprs_and_inputs(vec![], vec![normalized])
                 .unwrap();
@@ -1063,42 +1086,51 @@ mod test {
                 vec![timestamp, Arc::new(Float64Array::from(vec![7.0]))],
             )
             .unwrap();
-            let empty_exec_input = Arc::new(DataSourceExec::new(Arc::new(
-                MemorySourceConfig::try_new(&[vec![]], schema.clone(), None).unwrap(),
-            )));
-            let exec_input = Arc::new(DataSourceExec::new(Arc::new(
-                MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
-            )));
-            let exec = rebuilt
-                .to_execution_plan(empty_exec_input)
-                .with_new_children(vec![exec_input])
-                .unwrap();
-            let output =
-                datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
-                    .await
+            for (mode, rebuilt) in [("fresh", fresh), ("decoded", decoded)] {
+                let rebuilt = rebuilt
+                    .with_exprs_and_inputs(vec![], vec![input.clone()])
                     .unwrap();
-            let output = &output[0];
-            assert_eq!(output.num_rows(), 1, "{name}");
-            assert_eq!(
-                output
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap()
-                    .value(0),
-                start,
-                "{name}"
-            );
-            assert_eq!(
-                output
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(0),
-                7.0,
-                "{name}"
-            );
+                assert_eq!(rebuilt.offset, offset, "{name}: {mode}");
+                assert_eq!(rebuilt.input.schema(), input.schema(), "{name}: {mode}");
+
+                let empty_exec_input = Arc::new(DataSourceExec::new(Arc::new(
+                    MemorySourceConfig::try_new(&[vec![]], schema.clone(), None).unwrap(),
+                )));
+                let exec_input = Arc::new(DataSourceExec::new(Arc::new(
+                    MemorySourceConfig::try_new(&[vec![batch.clone()]], schema.clone(), None)
+                        .unwrap(),
+                )));
+                let exec = rebuilt
+                    .to_execution_plan(empty_exec_input)
+                    .with_new_children(vec![exec_input])
+                    .unwrap();
+                let output =
+                    datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+                        .await
+                        .unwrap();
+                let output = &output[0];
+                assert_eq!(output.num_rows(), 1, "{name}: {mode}");
+                assert_eq!(
+                    output
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .value(0),
+                    start,
+                    "{name}: {mode}"
+                );
+                assert_eq!(
+                    output
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .value(0),
+                    7.0,
+                    "{name}: {mode}"
+                );
+            }
         }
     }
 
@@ -1114,6 +1146,35 @@ mod test {
         let third = InstantManipulate::deserialize(&wire.encode_to_vec()).unwrap();
         assert_ne!(second, third);
         assert_eq!(second.partial_cmp(&third), Some(std::cmp::Ordering::Less));
+
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: prepare_test_data().schema().to_dfschema_ref().unwrap(),
+        });
+        let first = InstantManipulate::new(
+            0,
+            0,
+            0,
+            0,
+            0,
+            TIME_INDEX_COLUMN.to_string(),
+            Vec::new(),
+            Some("value".to_string()),
+            input.clone(),
+        );
+        let second = InstantManipulate::new(
+            0,
+            0,
+            0,
+            0,
+            1,
+            TIME_INDEX_COLUMN.to_string(),
+            Vec::new(),
+            Some("value".to_string()),
+            input,
+        );
+        assert_ne!(first, second);
+        assert_eq!(first.partial_cmp(&second), Some(std::cmp::Ordering::Less));
     }
 
     #[test]
@@ -1124,6 +1185,7 @@ mod test {
             schema: df_schema,
         });
         let plan = InstantManipulate::new(
+            0,
             0,
             0,
             0,
@@ -1156,6 +1218,7 @@ mod test {
             )),
         });
         let bytes = InstantManipulate::new(
+            0,
             0,
             0,
             0,
@@ -1202,6 +1265,7 @@ mod test {
             0,
             0,
             0,
+            0,
             TIME_INDEX_COLUMN.to_string(),
             vec!["__tsid".to_string()],
             Some("value".to_string()),
@@ -1231,6 +1295,7 @@ mod test {
         )));
 
         let exec = InstantManipulate::new(
+            0,
             0,
             0,
             0,

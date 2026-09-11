@@ -68,6 +68,7 @@ pub struct RangeManipulate {
     end: Millisecond,
     interval: Millisecond,
     range: Millisecond,
+    offset: Millisecond,
     time_index: String,
     field_columns: Vec<String>,
     input: LogicalPlan,
@@ -82,10 +83,12 @@ struct UnfixIndices {
 }
 
 impl RangeManipulate {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         start: Millisecond,
         end: Millisecond,
         interval: Millisecond,
+        offset: Millisecond,
         range: Millisecond,
         time_index: String,
         field_columns: Vec<String>,
@@ -98,6 +101,7 @@ impl RangeManipulate {
             end,
             interval,
             range,
+            offset,
             time_index,
             field_columns,
             input,
@@ -191,7 +195,7 @@ impl RangeManipulate {
             properties.boundedness,
         ));
         Arc::new(RangeManipulateExec {
-            offset: local_offset(&self.input, &self.time_index),
+            offset: self.offset,
             start: self.start,
             end: self.end,
             interval: self.interval,
@@ -250,6 +254,7 @@ impl RangeManipulate {
             end: pb_range_manipulate.end,
             interval: pb_range_manipulate.interval,
             range: pb_range_manipulate.range,
+            offset: 0,
             time_index: String::new(),
             field_columns: Vec::new(),
             input: placeholder_plan,
@@ -275,6 +280,10 @@ impl PartialOrd for RangeManipulate {
             ord => return ord,
         }
         match self.range.partial_cmp(&other.range) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.offset.partial_cmp(&other.offset) {
             Some(core::cmp::Ordering::Equal) => {}
             ord => return ord,
         }
@@ -398,6 +407,7 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
                 end: self.end,
                 interval: self.interval,
                 range: self.range,
+                offset: local_offset(&input, &time_index),
                 time_index,
                 field_columns,
                 input,
@@ -413,6 +423,7 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
                 end: self.end,
                 interval: self.interval,
                 range: self.range,
+                offset: self.offset,
                 time_index: self.time_index.clone(),
                 field_columns: self.field_columns.clone(),
                 input,
@@ -983,6 +994,7 @@ mod test {
                 1_001,
                 1_001,
                 1,
+                0,
                 1,
                 TIME_INDEX_COLUMN.to_string(),
                 vec!["value".to_string()],
@@ -1071,6 +1083,38 @@ mod test {
         }
     }
 
+    #[test]
+    fn logical_offset_participates_in_ordering() {
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: prepare_test_data().schema().to_dfschema_ref().unwrap(),
+        });
+        let first = RangeManipulate::new(
+            0,
+            0,
+            0,
+            0,
+            0,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value_1".to_string()],
+            input.clone(),
+        )
+        .unwrap();
+        let second = RangeManipulate::new(
+            0,
+            0,
+            0,
+            1,
+            0,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value_1".to_string()],
+            input,
+        )
+        .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.partial_cmp(&second), Some(std::cmp::Ordering::Less));
+    }
+
     #[tokio::test]
     async fn logical_normalize_offset_survives_rebuild_and_executes() {
         for (name, time_unit, raw, offset, start, range, expected_payload) in [
@@ -1124,22 +1168,36 @@ mod test {
             let normalize =
                 crate::extension_plan::SeriesNormalize::deserialize(&normalize.serialize())
                     .unwrap()
-                    .with_exprs_and_inputs(vec![], vec![input])
+                    .with_exprs_and_inputs(vec![], vec![input.clone()])
                     .unwrap();
             let normalized = LogicalPlan::Extension(Extension {
                 node: Arc::new(normalize),
             });
-            let plan = RangeManipulate::new(
+            let fresh = RangeManipulate::new(
                 start,
                 start,
                 1,
+                offset,
+                range,
+                TIME_INDEX_COLUMN.to_string(),
+                vec!["value".to_string()],
+                input.clone(),
+            )
+            .unwrap()
+            .with_exprs_and_inputs(vec![], vec![input.clone()])
+            .unwrap();
+            let serialized = RangeManipulate::new(
+                start,
+                start,
+                1,
+                offset,
                 range,
                 TIME_INDEX_COLUMN.to_string(),
                 vec!["value".to_string()],
                 normalized.clone(),
             )
             .unwrap();
-            let rebuilt = RangeManipulate::deserialize(&plan.serialize())
+            let decoded = RangeManipulate::deserialize(&serialized.serialize())
                 .unwrap()
                 .with_exprs_and_inputs(vec![], vec![normalized])
                 .unwrap();
@@ -1154,63 +1212,76 @@ mod test {
                 vec![timestamp, Arc::new(Float64Array::from(vec![7.0]))],
             )
             .unwrap();
-            let empty_exec_input = Arc::new(DataSourceExec::new(Arc::new(
-                MemorySourceConfig::try_new(&[vec![]], schema.clone(), None).unwrap(),
-            )));
-            let exec_input = Arc::new(DataSourceExec::new(Arc::new(
-                MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
-            )));
-            let exec = rebuilt
-                .to_execution_plan(empty_exec_input)
-                .with_new_children(vec![exec_input])
-                .unwrap();
-            let output =
-                datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
-                    .await
+            for (mode, rebuilt) in [("fresh", fresh), ("decoded", decoded)] {
+                let rebuilt = rebuilt
+                    .with_exprs_and_inputs(vec![], vec![input.clone()])
                     .unwrap();
-            assert_eq!(output.len(), 1, "{name}");
-            let output = &output[0];
-            assert_eq!(output.num_rows(), 1, "{name}");
-            assert_eq!(
-                output
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap()
-                    .value(0),
-                start,
-                "{name}"
-            );
-            let values = RangeArray::try_new(
-                output
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<DictionaryArray<Int64Type>>()
-                    .unwrap()
-                    .clone(),
-            )
-            .unwrap();
-            assert_eq!(values.get_offset_length(0), Some((0, 1)), "{name}");
-            assert_eq!(
-                values.get(0).unwrap().to_data(),
-                Float64Array::from(vec![7.0]).to_data(),
-                "{name}"
-            );
-            let timestamps = RangeArray::try_new(
-                output
-                    .column(2)
-                    .as_any()
-                    .downcast_ref::<DictionaryArray<Int64Type>>()
-                    .unwrap()
-                    .clone(),
-            )
-            .unwrap();
-            assert_eq!(timestamps.get_offset_length(0), Some((0, 1)), "{name}");
-            assert_eq!(
-                timestamps.get(0).unwrap().to_data(),
-                TimestampMillisecondArray::from(vec![expected_payload]).to_data(),
-                "{name}"
-            );
+                assert_eq!(rebuilt.offset, offset, "{name}: {mode}");
+                assert_eq!(rebuilt.input.schema(), input.schema(), "{name}: {mode}");
+
+                let empty_exec_input = Arc::new(DataSourceExec::new(Arc::new(
+                    MemorySourceConfig::try_new(&[vec![]], schema.clone(), None).unwrap(),
+                )));
+                let exec_input = Arc::new(DataSourceExec::new(Arc::new(
+                    MemorySourceConfig::try_new(&[vec![batch.clone()]], schema.clone(), None)
+                        .unwrap(),
+                )));
+                let exec = rebuilt
+                    .to_execution_plan(empty_exec_input)
+                    .with_new_children(vec![exec_input])
+                    .unwrap();
+                let output =
+                    datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+                        .await
+                        .unwrap();
+                assert_eq!(output.len(), 1, "{name}: {mode}");
+                let output = &output[0];
+                assert_eq!(output.num_rows(), 1, "{name}: {mode}");
+                assert_eq!(
+                    output
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .value(0),
+                    start,
+                    "{name}: {mode}"
+                );
+                let values = RangeArray::try_new(
+                    output
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<DictionaryArray<Int64Type>>()
+                        .unwrap()
+                        .clone(),
+                )
+                .unwrap();
+                assert_eq!(values.get_offset_length(0), Some((0, 1)), "{name}: {mode}");
+                assert_eq!(
+                    values.get(0).unwrap().to_data(),
+                    Float64Array::from(vec![7.0]).to_data(),
+                    "{name}: {mode}"
+                );
+                let timestamps = RangeArray::try_new(
+                    output
+                        .column(2)
+                        .as_any()
+                        .downcast_ref::<DictionaryArray<Int64Type>>()
+                        .unwrap()
+                        .clone(),
+                )
+                .unwrap();
+                assert_eq!(
+                    timestamps.get_offset_length(0),
+                    Some((0, 1)),
+                    "{name}: {mode}"
+                );
+                assert_eq!(
+                    timestamps.get(0).unwrap().to_data(),
+                    TimestampMillisecondArray::from(vec![expected_payload]).to_data(),
+                    "{name}: {mode}"
+                );
+            }
         }
     }
 
@@ -1237,6 +1308,7 @@ mod test {
             1_000,
             1_000,
             1,
+            0,
             1,
             TIME_INDEX_COLUMN.to_string(),
             vec!["value".to_string()],
@@ -1294,6 +1366,7 @@ mod test {
             1,
             1,
             1,
+            0,
             1,
             TIME_INDEX_COLUMN.to_string(),
             vec!["value".to_string()],
@@ -1328,6 +1401,7 @@ mod test {
             0,
             310_000,
             30_000,
+            0,
             90_000,
             TIME_INDEX_COLUMN.to_string(),
             vec!["value_1".to_string(), "value_2".to_string()],
@@ -1535,6 +1609,7 @@ mod test {
             0,
             50,
             10,
+            0,
             1,
             TIME_INDEX_COLUMN.to_string(),
             vec!["value".to_string()],
