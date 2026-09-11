@@ -117,7 +117,6 @@ impl<T, P: FlushPolicy> PendingWorker<T, P> {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
-    use std::num::NonZeroUsize;
     use std::task::Poll;
     use std::time::Duration;
 
@@ -125,10 +124,7 @@ mod tests {
     use crate::flush_policy::timing::TimingFlushPolicy;
 
     fn worker(rows: usize) -> PendingWorker<i32, TimingFlushPolicy> {
-        PendingWorker::new(
-            TimingFlushPolicy::try_new(Duration::from_millis(10), NonZeroUsize::new(rows).unwrap())
-                .unwrap(),
-        )
+        PendingWorker::new(TimingFlushPolicy::try_new(Duration::from_millis(10), rows).unwrap())
     }
 
     async fn assert_wait_pending<T, P>(worker: &mut PendingWorker<T, P>) {

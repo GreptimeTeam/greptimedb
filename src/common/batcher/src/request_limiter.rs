@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
@@ -27,10 +26,10 @@ pub struct RequestLimiter {
 }
 
 impl RequestLimiter {
-    /// Returns `None` if the limit exceeds Tokio's supported semaphore capacity.
-    pub fn try_new(max_inflight_requests: NonZeroUsize) -> Option<Self> {
-        let permits = max_inflight_requests.get();
-        (permits <= Semaphore::MAX_PERMITS).then(|| Self {
+    /// Returns `None` if the limit is zero or exceeds Tokio's supported semaphore capacity.
+    pub fn try_new(max_inflight_requests: usize) -> Option<Self> {
+        let permits = max_inflight_requests;
+        ((1..=Semaphore::MAX_PERMITS).contains(&permits)).then(|| Self {
             semaphore: Arc::new(Semaphore::new(permits)),
         })
     }
@@ -48,7 +47,6 @@ impl RequestLimiter {
 #[cfg(test)]
 mod tests {
     use std::future::{Future, poll_fn};
-    use std::num::NonZeroUsize;
     use std::pin::Pin;
     use std::task::Poll;
 
@@ -63,16 +61,16 @@ mod tests {
     #[test]
     fn test_capacity_boundaries() {
         for capacity in [1, Semaphore::MAX_PERMITS] {
-            assert!(RequestLimiter::try_new(NonZeroUsize::new(capacity).unwrap()).is_some());
+            assert!(RequestLimiter::try_new(capacity).is_some());
         }
-        for capacity in [Semaphore::MAX_PERMITS + 1, usize::MAX] {
-            assert!(RequestLimiter::try_new(NonZeroUsize::new(capacity).unwrap()).is_none());
+        for capacity in [0, Semaphore::MAX_PERMITS + 1, usize::MAX] {
+            assert!(RequestLimiter::try_new(capacity).is_none());
         }
     }
 
     #[tokio::test]
     async fn test_last_submission_releases_request_slot() {
-        let limiter = RequestLimiter::try_new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let limiter = RequestLimiter::try_new(1).unwrap();
         let other = limiter.clone();
         let request = limiter.acquire().await.unwrap();
         let first_submission = request.clone();
@@ -90,7 +88,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancelled_acquisition_does_not_leak_capacity() {
-        let limiter = RequestLimiter::try_new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let limiter = RequestLimiter::try_new(1).unwrap();
         let permit = limiter.acquire().await.unwrap();
         let mut cancelled = Box::pin(limiter.acquire());
         assert!(is_pending(cancelled.as_mut()).await);
@@ -105,7 +103,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_independent_requests_consume_separate_slots() {
-        let limiter = RequestLimiter::try_new(NonZeroUsize::new(2).unwrap()).unwrap();
+        let limiter = RequestLimiter::try_new(2).unwrap();
         let first = limiter.acquire().await.unwrap();
         let second = limiter.acquire().await.unwrap();
         let mut third = Box::pin(limiter.acquire());

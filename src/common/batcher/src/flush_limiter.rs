@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
@@ -24,10 +23,10 @@ pub struct FlushLimiter {
 }
 
 impl FlushLimiter {
-    /// Returns `None` if the limit exceeds Tokio's supported semaphore capacity.
-    pub fn try_new(max_concurrent_flushes: NonZeroUsize) -> Option<Self> {
-        let permits = max_concurrent_flushes.get();
-        (permits <= Semaphore::MAX_PERMITS).then(|| Self {
+    /// Returns `None` if the limit is zero or exceeds Tokio's supported semaphore capacity.
+    pub fn try_new(max_concurrent_flushes: usize) -> Option<Self> {
+        let permits = max_concurrent_flushes;
+        ((1..=Semaphore::MAX_PERMITS).contains(&permits)).then(|| Self {
             semaphore: Arc::new(Semaphore::new(permits)),
         })
     }
@@ -46,12 +45,17 @@ mod tests {
 
     #[test]
     fn test_invalid_capacity() {
-        assert!(FlushLimiter::try_new(NonZeroUsize::new(usize::MAX).unwrap()).is_none());
+        for capacity in [0, Semaphore::MAX_PERMITS + 1, usize::MAX] {
+            assert!(FlushLimiter::try_new(capacity).is_none());
+        }
+        for capacity in [1, Semaphore::MAX_PERMITS] {
+            assert!(FlushLimiter::try_new(capacity).is_some());
+        }
     }
 
     #[tokio::test]
     async fn test_clones_share_flush_budget() {
-        let limiter = FlushLimiter::try_new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let limiter = FlushLimiter::try_new(1).unwrap();
         let other = limiter.clone();
         let permit = limiter.acquire().await.unwrap();
         let waiting = other.acquire();
