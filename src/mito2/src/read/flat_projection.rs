@@ -40,7 +40,7 @@ use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::sst::parquet::Json2RewriteTargets;
-use crate::sst::parquet::flat_format::sst_column_id_indices;
+use crate::sst::parquet::flat_format::sst_column_id_root_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
@@ -135,7 +135,7 @@ impl FlatProjectionMapper {
         }
 
         // Creates a map to lookup index.
-        let id_to_index = sst_column_id_indices(metadata);
+        let id_to_index = sst_column_id_root_indices(metadata);
 
         // TODO(yingwen): Support different flat schema options.
         let format_projection = FormatProjection::compute_format_projection(

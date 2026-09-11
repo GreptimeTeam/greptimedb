@@ -42,6 +42,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::RowGroupMetaData;
+use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
@@ -508,7 +509,7 @@ impl ParquetPrimaryKeyToFlat {
         });
 
         // Creates a map to lookup index based on the new format.
-        let id_to_index = sst_column_id_indices(&metadata);
+        let id_to_index = sst_column_id_root_indices(&metadata);
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
 
@@ -561,7 +562,7 @@ struct ParquetFlat {
     /// Projection computed for the flat format.
     format_projection: FormatProjection,
     /// Column id to logical root index in the SST schema.
-    column_id_to_sst_index: HashMap<ColumnId, usize>,
+    column_id_to_root_index: HashMap<ColumnId, usize>,
 }
 
 impl ParquetFlat {
@@ -572,7 +573,7 @@ impl ParquetFlat {
         arrow_schema: SchemaRef,
     ) -> ParquetFlat {
         // Creates a map to lookup index.
-        let id_to_index = sst_column_id_indices(&metadata);
+        let id_to_index = sst_column_id_root_indices(&metadata);
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
         let format_projection = FormatProjection::compute_format_projection(
@@ -586,7 +587,7 @@ impl ParquetFlat {
             metadata,
             arrow_schema,
             format_projection,
-            column_id_to_sst_index: id_to_index,
+            column_id_to_root_index: id_to_index,
         }
     }
 
@@ -614,10 +615,15 @@ impl ParquetFlat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        if !self.column_id_to_sst_index.contains_key(&column_id) {
+        if !self.column_id_to_root_index.contains_key(&column_id) {
             return StatValues::NoColumn;
         }
-        let Some(leaf_index) = self.physical_leaf_index(row_groups, column_id) else {
+        let Some(row_group) = row_groups.first() else {
+            return StatValues::NoStats;
+        };
+        let Some(leaf_index) =
+            self.physical_leaf_index(row_group.borrow().schema_descr(), column_id)
+        else {
             return StatValues::NoStats;
         };
 
@@ -635,7 +641,12 @@ impl ParquetFlat {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
-        let Some(leaf_index) = self.physical_leaf_index(row_groups, column_id) else {
+        let Some(row_group) = row_groups.first() else {
+            return StatValues::NoStats;
+        };
+        let Some(leaf_index) =
+            self.physical_leaf_index(row_group.borrow().schema_descr(), column_id)
+        else {
             return StatValues::NoStats;
         };
 
@@ -643,40 +654,24 @@ impl ParquetFlat {
         StatValues::from_stats_opt(stats)
     }
 
-    /// Returns the physical Parquet leaf index for a logical root column.
-    ///
-    /// [`RowGroupMetaData::column`] is indexed by physical leaves, whereas the
-    /// SST schema indexes logical roots. They are equal only while every root
-    /// has one leaf. Nested values such as JSON2 break that assumption and
-    /// shift all following leaf positions. Statistics are only meaningful for a
-    /// root with exactly one leaf; return `None` otherwise to disable pruning
-    /// conservatively.
+    /// Returns the leaf index only when the root has one leaf.
+    /// Returns `None` if it has no leaf or multiple leaves.
     fn physical_leaf_index(
         &self,
-        row_groups: &[impl Borrow<RowGroupMetaData>],
+        schema_descr: &SchemaDescriptor,
         column_id: ColumnId,
     ) -> Option<usize> {
-        let root_index = *self.column_id_to_sst_index.get(&column_id)?;
-        let row_group = row_groups.first()?.borrow();
-        let schema = row_group.schema_descr();
-        let mut leaves = schema
-            .columns()
-            .iter()
-            .enumerate()
-            .filter_map(|(leaf_index, _)| {
-                (schema.get_column_root_idx(leaf_index) == root_index).then_some(leaf_index)
-            });
+        let root_index = *self.column_id_to_root_index.get(&column_id)?;
+        let mut leaves = (0..schema_descr.num_columns())
+            .filter(|&index| schema_descr.get_column_root_idx(index) == root_index);
         let leaf_index = leaves.next()?;
         leaves.next().is_none().then_some(leaf_index)
     }
 }
 
 /// Returns a map from column id to logical root-column position in the SST.
-///
-/// This is not a Parquet physical leaf index. Callers accessing
-/// [`RowGroupMetaData::column`] must resolve the root to a unique leaf first.
 /// It only supports SSTs with raw primary key columns.
-pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<ColumnId, usize> {
+pub(crate) fn sst_column_id_root_indices(metadata: &RegionMetadata) -> HashMap<ColumnId, usize> {
     let mut id_to_index = HashMap::with_capacity(metadata.column_metadatas.len());
     let mut column_index = 0;
     // keys

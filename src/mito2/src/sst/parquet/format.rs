@@ -899,7 +899,7 @@ mod tests {
     use super::*;
     use crate::error::InvalidMetadataSnafu;
     use crate::sst::parquet::flat_format::{
-        FlatReadFormat, FlatWriteFormat, sequence_column_index, sst_column_id_indices,
+        FlatReadFormat, FlatWriteFormat, sequence_column_index, sst_column_id_root_indices,
     };
     use crate::sst::{
         FlatSchemaOptions, OP_TYPE_PARQUET_FIELD_ID, PRIMARY_KEY_PARQUET_FIELD_ID,
@@ -1100,7 +1100,7 @@ mod tests {
             })
             .primary_key(vec![1]);
         let metadata = Arc::new(builder.build().context(InvalidMetadataSnafu)?);
-        let column_id_to_parquet_index = sst_column_id_indices(&metadata);
+        let column_id_to_parquet_index = sst_column_id_root_indices(&metadata);
         let projection = FormatProjection::compute_format_projection(
             &metadata,
             &column_id_to_parquet_index,
