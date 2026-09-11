@@ -27,7 +27,7 @@ use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format, file_to_stream};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::build_backend_with_path;
+use common_datasource::object_store::{LocalFileAccess, build_backend_with_path};
 use common_query::{OutputCost, OutputRows};
 use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
@@ -44,7 +44,7 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
-use object_store::{Entry, EntryMode, ObjectStore};
+use object_store::{EntryMode, ObjectStore};
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ResultExt, ensure};
@@ -92,43 +92,60 @@ impl FileMetadata {
     }
 }
 
-impl StatementExecutor {
-    async fn list_copy_from_entries(
-        &self,
-        req: &CopyTableRequest,
-    ) -> Result<(ObjectStore, Vec<Entry>)> {
-        let backend =
-            build_backend_with_path(&req.location, &req.connection, &self.local_file_access)
-                .await
-                .context(error::BuildBackendSnafu)?;
-        let regex = req
-            .pattern
-            .as_ref()
-            .map(|x| Regex::new(x))
-            .transpose()
-            .context(error::BuildRegexSnafu)?;
+async fn list_copy_from_paths(
+    req: &CopyTableRequest,
+    local_file_access: &LocalFileAccess,
+) -> Result<(ObjectStore, Vec<String>)> {
+    let backend = build_backend_with_path(&req.location, &req.connection, local_file_access)
+        .await
+        .context(error::BuildBackendSnafu)?;
+    let regex = req
+        .pattern
+        .as_ref()
+        .map(|x| Regex::new(x))
+        .transpose()
+        .context(error::BuildRegexSnafu)?;
 
-        let source = if let Some(filename) = backend.object_path {
-            Source::Filename(filename)
+    // A known file needs only stat. Listing its parent directory for every
+    // table makes COPY DATABASE do quadratic directory work.
+    if let Some(filename) = backend.object_path {
+        let metadata = backend
+            .object_store
+            .stat(&filename)
+            .await
+            .with_context(|_| common_datasource::error::ListObjectsSnafu {
+                path: req.location.clone(),
+            })
+            .context(error::ListObjectsSnafu)?;
+        let paths = if metadata.mode() == EntryMode::FILE {
+            vec![filename]
         } else {
-            Source::Dir
+            vec![]
         };
-
-        let lister = Lister::new(
-            backend.object_store.clone(),
-            source.clone(),
-            req.location.clone(),
-            regex,
-        );
-
-        let entries = lister.list().await.context(error::ListObjectsSnafu)?;
-        debug!(
-            "Copy from location: {:?}, {source:?}, entries: {entries:?}",
-            req.location
-        );
-        Ok((backend.object_store, entries))
+        return Ok((backend.object_store, paths));
     }
 
+    let lister = Lister::new(
+        backend.object_store.clone(),
+        Source::Dir,
+        req.location.clone(),
+        regex,
+    );
+
+    let entries = lister.list().await.context(error::ListObjectsSnafu)?;
+    debug!(
+        "Copy from location: {:?}, entries: {entries:?}",
+        req.location
+    );
+    let paths = entries
+        .into_iter()
+        .filter(|entry| entry.metadata().mode() == EntryMode::FILE)
+        .map(|entry| entry.path().to_string())
+        .collect();
+    Ok((backend.object_store, paths))
+}
+
+impl StatementExecutor {
     async fn collect_metadata(
         &self,
         object_store: &ObjectStore,
@@ -371,8 +388,8 @@ impl StatementExecutor {
         };
         let table = self.get_table(&table_ref).await?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
-        let (object_store, entries) = self.list_copy_from_entries(&req).await?;
-        let mut files = Vec::with_capacity(entries.len());
+        let (object_store, paths) = list_copy_from_paths(&req, &self.local_file_access).await?;
+        let mut files = Vec::with_capacity(paths.len());
         let table_schema = table.schema().arrow_schema().clone();
         let filters = table
             .schema()
@@ -383,13 +400,9 @@ impl StatementExecutor {
             .into_iter()
             .collect::<Vec<_>>();
 
-        for entry in entries.iter() {
-            if entry.metadata().mode() != EntryMode::FILE {
-                continue;
-            }
-            let path = entry.path();
+        for path in paths {
             let file_metadata = self
-                .collect_metadata(&object_store, format.clone(), path.to_string())
+                .collect_metadata(&object_store, format.clone(), path)
                 .await?;
 
             validate_csv_headers_if_required(&file_metadata, &table_schema)?;
@@ -825,6 +838,205 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
     use super::*;
+
+    fn copy_from_request(location: &str, pattern: Option<&str>) -> CopyTableRequest {
+        CopyTableRequest {
+            catalog_name: "greptime".into(),
+            schema_name: "public".into(),
+            table_name: "test".into(),
+            location: location.into(),
+            with: HashMap::new(),
+            connection: HashMap::new(),
+            pattern: pattern.map(String::from),
+            direction: table::requests::CopyDirection::Import,
+            timestamp_range: None,
+            limit: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_copy_from_local_paths() {
+        use common_test_util::temp_dir::create_temp_dir;
+
+        let dir = create_temp_dir("copy_from_paths");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(nested.join("data.dir")).unwrap();
+        std::fs::write(nested.join("data file.parquet"), b"data").unwrap();
+        std::fs::write(nested.join("other.csv"), b"other").unwrap();
+        let access = LocalFileAccess::sandboxed(dir.path()).unwrap();
+        for location in [
+            "nested/data file.parquet".to_string(),
+            url::Url::from_file_path(nested.join("data file.parquet"))
+                .unwrap()
+                .to_string(),
+        ] {
+            // PATTERN applies to directories, not an explicitly selected file.
+            let req = copy_from_request(&location, Some("does-not-match"));
+            let (store, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+            assert_eq!(paths, ["data file.parquet"]);
+            assert_eq!(store.read(&paths[0]).await.unwrap().to_vec(), b"data");
+        }
+
+        let req = copy_from_request("nested/", Some("^data"));
+        let (_, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        assert_eq!(paths, ["data file.parquet"]);
+        let req = copy_from_request("nested/", None);
+        let (_, mut paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        paths.sort();
+        assert_eq!(paths, ["data file.parquet", "other.csv"]);
+        let req = copy_from_request("nested/data.dir", None);
+        assert!(
+            list_copy_from_paths(&req, &access)
+                .await
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        let req = copy_from_request("nested/", Some("does-not-match"));
+        assert!(
+            list_copy_from_paths(&req, &access)
+                .await
+                .unwrap()
+                .1
+                .is_empty()
+        );
+
+        let req = copy_from_request("nested/missing.parquet", None);
+        assert!(matches!(
+            list_copy_from_paths(&req, &access).await,
+            Err(error::Error::ListObjects {
+                source: common_datasource::error::Error::ListObjects { error, .. }, ..
+            }) if error.kind() == object_store::ErrorKind::NotFound
+        ));
+        let req = copy_from_request("nested/data file.parquet", Some("["));
+        assert!(matches!(
+            list_copy_from_paths(&req, &access).await,
+            Err(error::Error::BuildRegex { .. })
+        ));
+        let req = copy_from_request("nested/data file.parquet", None);
+        assert!(matches!(
+            list_copy_from_paths(&req, &LocalFileAccess::Disabled).await,
+            Err(error::Error::BuildBackend {
+                source: common_datasource::error::Error::LocalFileAccessDisabled { .. },
+                ..
+            })
+        ));
+        let req = copy_from_request("../outside.parquet", None);
+        assert!(matches!(
+            list_copy_from_paths(&req, &access).await,
+            Err(error::Error::BuildBackend {
+                source: common_datasource::error::Error::LocalFileAccessDenied { .. },
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_copy_from_s3_paths_without_relisting() {
+        use std::sync::Mutex;
+
+        use axum::Router;
+        use axum::http::{Method, StatusCode, Uri};
+        use axum::response::IntoResponse;
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let app = Router::new().fallback(move |method: Method, uri: Uri| {
+            let recorded = recorded.clone();
+            async move {
+                recorded.lock().unwrap().push((method.clone(), uri.clone()));
+                if method == Method::HEAD {
+                    let status = if uri.path().ends_with("missing.parquet") {
+                        StatusCode::NOT_FOUND
+                    } else if uri.path().ends_with("denied.parquet") {
+                        StatusCode::FORBIDDEN
+                    } else {
+                        StatusCode::OK
+                    };
+                    return (status, [("content-length", "0")]).into_response();
+                }
+                assert_eq!(method, Method::GET);
+                let query =
+                    axum::extract::Query::<HashMap<String, String>>::try_from_uri(&uri).unwrap();
+                assert_eq!(query.get("prefix").unwrap(), "backup/schema/1/");
+                assert_eq!(query.get("list-type").unwrap(), "2");
+                let files = (0..16).map(|i| format!(
+                    "<Contents><Key>backup/schema/1/data.{i}.parquet</Key><LastModified>2026-09-01T00:00:00Z</LastModified><Size>0</Size></Contents>"
+                )).collect::<String>();
+                format!(
+                    "<ListBucketResult><IsTruncated>false</IsTruncated>{files}\
+                    <Contents><Key>backup/schema/1/other.csv</Key><LastModified>2026-09-01T00:00:00Z</LastModified><Size>0</Size></Contents>\
+                    <CommonPrefixes><Prefix>backup/schema/1/data.dir/</Prefix></CommonPrefixes>\
+                    </ListBucketResult>"
+                )
+                .into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let connection = HashMap::from([
+            ("endpoint".into(), endpoint),
+            ("region".into(), "us-east-1".into()),
+            ("access_key_id".into(), "test".into()),
+            ("secret_access_key".into(), "test".into()),
+            ("disable_ec2_metadata".into(), "true".into()),
+        ]);
+        for i in 0..16 {
+            let filename = format!("data.{i}.parquet");
+            let mut req = copy_from_request(
+                &format!("s3://bucket/backup/schema/1/{filename}"),
+                Some("does-not-match"),
+            );
+            req.connection = connection.clone();
+            let (_, paths) = list_copy_from_paths(&req, &LocalFileAccess::Disabled)
+                .await
+                .unwrap();
+            assert_eq!(paths, [filename]);
+        }
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 16);
+            assert!(requests.iter().all(|(method, uri)| method == Method::HEAD
+                && uri.path().starts_with("/bucket/backup/schema/1/")));
+        }
+        let mut req = copy_from_request("s3://bucket/backup/schema/1/", Some(r"^data\."));
+        req.connection = connection.clone();
+        let (_, mut paths) = list_copy_from_paths(&req, &LocalFileAccess::Disabled)
+            .await
+            .unwrap();
+        paths.sort();
+        let mut expected = (0..16)
+            .map(|i| format!("data.{i}.parquet"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(paths, expected);
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, _)| *method == Method::GET)
+                .count(),
+            1
+        );
+
+        for (name, kind) in [
+            ("missing", object_store::ErrorKind::NotFound),
+            ("denied", object_store::ErrorKind::PermissionDenied),
+        ] {
+            let mut req =
+                copy_from_request(&format!("s3://bucket/backup/schema/1/{name}.parquet"), None);
+            req.connection = connection.clone();
+            assert!(matches!(
+                list_copy_from_paths(&req, &LocalFileAccess::Disabled).await,
+                Err(error::Error::ListObjects {
+                    source: common_datasource::error::Error::ListObjects { error, .. }, ..
+                }) if error.kind() == kind
+            ));
+        }
+        server.abort();
+    }
 
     fn test_schema_matches(from: (DataType, bool), to: (DataType, bool), matches: bool) {
         let s1 = Arc::new(Schema::new(vec![Field::new("col", from.0.clone(), from.1)]));
