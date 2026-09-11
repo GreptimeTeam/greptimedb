@@ -37,7 +37,8 @@ use datatypes::arrow::datatypes::{DataType, Field};
 use futures::StreamExt;
 use promql::extension_plan::RangeManipulate;
 use promql::functions::{
-    Changes, Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate, Resets, SumOverTime,
+    AbsentOverTime, Changes, CountOverTime, Delta, DoubleExponentialSmoothing, IDelta, Increase,
+    LastOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, SumOverTime,
 };
 use promql::range_array::RangeArray;
 
@@ -270,6 +271,26 @@ fn make_predict_linear_input(num_points: usize, window_size: u32) -> Vec<Columna
     ]
 }
 
+fn make_double_exponential_smoothing_input(
+    num_points: usize,
+    window_size: u32,
+    window_step: usize,
+) -> Vec<ColumnarValue> {
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        window_step,
+        build_gauge_values(num_points),
+        0,
+    );
+    vec![
+        ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+        ColumnarValue::Array(Arc::new(val_range.into_dict())),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(0.5))),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(0.1))),
+    ]
+}
+
 struct PreparedUdfCall {
     args: Vec<ColumnarValue>,
     arg_fields: Vec<Arc<Field>>,
@@ -357,6 +378,43 @@ fn assert_edge_count_output(
     let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
     let actual = output.iter().collect::<Vec<_>>();
     assert_eq!(actual, expected);
+}
+
+fn bench_presence_range_functions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("presence_range_fn");
+    let values = build_default_values(4_096);
+    let overlapping = PreparedUdfCall::new(make_edge_count_input(4_096, 20, values.clone()));
+    let low_coverage_ranges = vec![
+        (0, 4),
+        (512, 4),
+        (1_024, 4),
+        (1_536, 4),
+        (2_048, 4),
+        (2_560, 4),
+        (3_584, 4),
+        (4_092, 4),
+    ];
+    let low_coverage = PreparedUdfCall::new(make_edge_count_input_with_ranges(
+        values,
+        low_coverage_ranges,
+    ));
+    let udfs = [
+        ("count_over_time", CountOverTime::scalar_udf()),
+        ("last_over_time", LastOverTime::scalar_udf()),
+        ("present_over_time", PresentOverTime::scalar_udf()),
+        ("absent_over_time", AbsentOverTime::scalar_udf()),
+    ];
+
+    for (name, udf) in &udfs {
+        group.bench_with_input(BenchmarkId::new(*name, "N4096_overlap_w20"), &(), |b, _| {
+            b.iter(|| invoke_prepared(udf, &overlapping))
+        });
+        group.bench_with_input(BenchmarkId::new(*name, "N4096_windows8_w4"), &(), |b, _| {
+            b.iter(|| invoke_prepared(udf, &low_coverage))
+        });
+    }
+
+    group.finish();
 }
 
 fn bench_range_functions(c: &mut Criterion) {
@@ -494,6 +552,26 @@ fn bench_range_functions(c: &mut Criterion) {
             BenchmarkId::new("predict_linear", format!("n{n}_w{w}")),
             &(n, w),
             |b, _| b.iter(|| invoke_prepared(&predict_udf, &prepared)),
+        );
+    }
+
+    // --- double_exponential_smoothing ---
+    let smoothing_udf = DoubleExponentialSmoothing::scalar_udf();
+    for (window_size, window_step, case) in [
+        (4, 1, "N4096_w4_overlap"),
+        (20, 1, "N4096_w20_overlap"),
+        (240, 1, "N4096_w240_overlap"),
+        (240, 240, "N4096_w240_nonoverlap"),
+    ] {
+        let prepared = PreparedUdfCall::new(make_double_exponential_smoothing_input(
+            4_096,
+            window_size,
+            window_step,
+        ));
+        group.bench_with_input(
+            BenchmarkId::new("double_exponential_smoothing", case),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&smoothing_udf, &prepared)),
         );
     }
 
@@ -943,6 +1021,7 @@ fn bench_range_manipulate_wall_time(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_range_functions,
+    bench_presence_range_functions,
     bench_delta_rate_comparison,
     bench_rate_window_steps,
     bench_edge_count_functions,
