@@ -47,6 +47,7 @@ use object_store::config::{
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::{AzblobConnection, GcsConnection, ObjectStore, OssConnection, S3Connection};
+use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{FlightCompression, GrpcOptions, GrpcServer, GrpcServerConfig};
@@ -54,7 +55,6 @@ use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
-use servers::pending_rows_batcher::PendingRowsBatcher;
 use servers::postgres::PostgresServer;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -671,7 +671,7 @@ async fn setup_test_prom_app_with_frontend_inner(
     // Mirror the production wiring at `frontend::server`: build the batcher from the
     // instance's managers. A short flush interval keeps the test responsive.
     let pending_rows_batcher = if enable_batcher {
-        PendingRowsBatcher::try_new(
+        LogicalTablePendingRowsBatcher::try_new(
             frontend_ref.partition_manager().clone(),
             frontend_ref.node_manager().clone(),
             frontend_ref.catalog_manager().clone(),

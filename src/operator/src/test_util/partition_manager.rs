@@ -15,9 +15,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+#[cfg(test)]
 use api::v1::helper::tag_column_schema;
+#[cfg(test)]
 use api::v1::value::ValueData;
+#[cfg(test)]
 use api::v1::{ColumnDataType, Row, Rows};
+#[cfg(test)]
 use common_base::hash::partition_expr_version;
 use common_meta::cache::{TableRouteCacheRef, new_table_route_cache};
 use common_meta::key::TableMetadataManager;
@@ -93,10 +97,12 @@ fn new_test_table_info_with_columns(
         .unwrap()
 }
 
+#[cfg(test)]
 fn new_physical_test_table_info(table_id: u32, table_name: &str) -> TableInfo {
     new_test_table_info_with_columns(table_id, table_name, test_column_schemas(true), vec![0, 2])
 }
 
+#[cfg(test)]
 fn new_logical_test_table_info(table_id: u32, table_name: &str) -> TableInfo {
     new_test_table_info_with_columns(table_id, table_name, test_column_schemas(false), vec![0])
 }
@@ -141,9 +147,7 @@ fn test_new_partition_info_cache(table_route_cache: TableRouteCacheRef) -> Parti
 ///   PARTITION r2 VALUES LESS THAN (50, 'sh'),
 ///   PARTITION r3 VALUES LESS THAN (MAXVALUE, MAXVALUE),
 /// )
-pub(crate) async fn create_partition_rule_manager(
-    kv_backend: KvBackendRef,
-) -> PartitionRuleManagerRef {
+pub async fn create_partition_rule_manager(kv_backend: KvBackendRef) -> PartitionRuleManagerRef {
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
     let table_route_cache = test_new_table_route_cache(kv_backend.clone());
     let partition_info_cache = test_new_partition_info_cache(table_route_cache.clone());

@@ -1854,9 +1854,9 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
     use tower::ServiceExt;
 
-    use super::*;
     use crate::frontend::FrontendOptions;
     use crate::instance::builder::FrontendBuilder;
+    use crate::instance::*;
 
     fn parse_test_sql(sql: &str) -> Vec<Statement> {
         parse_stmt(sql, &GreptimeDbDialect {}).unwrap()

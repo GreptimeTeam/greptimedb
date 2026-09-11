@@ -35,8 +35,8 @@ use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::Instance;
 use crate::service_config::{
-    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
-    PromStoreOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
+    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -65,6 +65,8 @@ pub struct FrontendOptions {
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
+    /// Shared experimental ordinary-table batching; independent of Prom batching.
+    pub experimental_pending_rows_batcher: PendingRowsBatcherOptions,
     pub prom_store: PromStoreOptions,
     pub jaeger: JaegerOptions,
     pub otlp: OtlpOptions,
@@ -100,6 +102,7 @@ impl Default for FrontendOptions {
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
+            experimental_pending_rows_batcher: PendingRowsBatcherOptions::default(),
             jaeger: JaegerOptions::default(),
             prom_store: PromStoreOptions::default(),
             otlp: OtlpOptions::default(),
@@ -208,7 +211,7 @@ mod tests {
     use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
     use tonic::{Request, Response, Status, Streaming};
 
-    use super::*;
+    use crate::frontend::*;
     use crate::heartbeat::{
         FrontendHeartbeatExtension, FrontendHeartbeatExtensionResult, FrontendHeartbeatExtensions,
     };
@@ -219,12 +222,48 @@ mod tests {
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
 
     #[test]
+    fn test_protocol_pending_rows_batcher_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(
+            !defaults
+                .experimental_pending_rows_batcher
+                .pending_rows_batching_enabled()
+        );
+        let options: FrontendOptions = toml::from_str(
+            r#"
+[experimental_pending_rows_batcher]
+protocols = ["influxdb", "http_sql"]
+pending_rows_flush_interval = "5ms"
+max_batch_rows = 25
+"#,
+        )
+        .unwrap();
+        assert_eq!(options.experimental_pending_rows_batcher.max_batch_rows, 25);
+        assert_eq!(options.experimental_pending_rows_batcher.protocols.len(), 2);
+        assert!(
+            options
+                .experimental_pending_rows_batcher
+                .pending_rows_batching_enabled()
+        );
+        let serialized = toml::to_string(&options).unwrap();
+        let parsed: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.influxdb, parsed.influxdb);
+        assert_eq!(options.opentsdb, parsed.opentsdb);
+        assert_eq!(
+            options.experimental_pending_rows_batcher,
+            parsed.experimental_pending_rows_batcher
+        );
+    }
+
+    #[test]
     fn test_toml() {
         let opts = FrontendOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
         assert!(toml_string.contains("experimental_enable_exponential_histogram = false"));
         let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
         assert_eq!(parsed.otlp, opts.otlp);
+        assert_eq!(parsed.influxdb, opts.influxdb);
+        assert_eq!(parsed.opentsdb, opts.opentsdb);
     }
 
     #[test]

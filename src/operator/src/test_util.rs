@@ -12,20 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod batcher;
-mod bulk_insert;
-pub mod delete;
-pub mod error;
-pub mod expr_helper;
-pub mod flow;
-pub mod insert;
-pub mod metrics;
-pub mod procedure;
-pub mod region_req_factory;
-pub mod req_convert;
-pub mod request;
-pub mod statement;
-pub mod table;
-#[cfg(any(test, feature = "testing"))]
-pub mod test_util;
-pub mod utils;
+mod kv_backend;
+mod partition_manager;
+
+pub use crate::test_util::kv_backend::prepare_mocked_backend;
+pub use crate::test_util::partition_manager::{create_partition_rule_manager, new_test_table_info};

@@ -21,13 +21,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::extract::{DefaultBodyLimit, Request};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::Route;
 use axum::serve::ListenerExt;
-use axum::{Router, middleware, routing};
+use axum::{Extension, Router, middleware, routing};
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{error, info};
@@ -40,6 +40,7 @@ use futures::FutureExt;
 use http::{HeaderValue, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use session::context::QueryContext;
 use snafu::{ResultExt, ensure};
 use tokio::sync::Mutex;
 use tokio::sync::oneshot::{self, Sender};
@@ -52,6 +53,7 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::elasticsearch;
 use crate::error::{
     AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
@@ -73,7 +75,6 @@ use crate::http::result::null_result::NullResponse;
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
-use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -188,6 +189,22 @@ pub(crate) enum HttpServerKind {
     Api,
 }
 
+/// HTTP write protocols eligible for the shared pending-row batcher.
+/// Prometheus uses this selector only when metric-engine storage is disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchingProtocol {
+    Prom,
+    Influxdb,
+    Opentsdb,
+    Otlp,
+    Logs,
+    Loki,
+    Splunk,
+    Elasticsearch,
+    HttpSql,
+}
+
 #[derive(Default)]
 pub struct HttpServer {
     router: StdMutex<Router>,
@@ -197,6 +214,7 @@ pub struct HttpServer {
 
     // server configs
     options: HttpOptions,
+    batching_protocols: Vec<BatchingProtocol>,
     bind_addr: Option<SocketAddr>,
     /// What this server instance exposes. See [`HttpServerKind`].
     kind: HttpServerKind,
@@ -215,6 +233,22 @@ pub(crate) fn is_namespace(path: &str, root: &str) -> bool {
 /// Paths visible on the dedicated API listener: the `/v1` APIs and the dashboard.
 pub fn is_api_listener_path(path: &str) -> bool {
     is_namespace(path, HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH) || is_namespace(path, "/dashboard")
+}
+
+/// Sets a local-only write selector after authentication creates the context.
+async fn set_http_write_batching(
+    State(protocol): State<BatchingProtocol>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let enabled = req
+        .extensions()
+        .get::<Arc<Vec<BatchingProtocol>>>()
+        .is_some_and(|protocols| protocols.contains(&protocol));
+    if let Some(ctx) = req.extensions_mut().get_mut::<QueryContext>() {
+        ctx.set_batching_enabled(enabled);
+    }
+    next.run(req).await
 }
 
 /// Outer guard for the API listener. Rejects any path outside the API surface
@@ -613,6 +647,7 @@ pub struct DashboardState {
 
 pub struct HttpServerBuilder {
     options: HttpOptions,
+    batching_protocols: Vec<BatchingProtocol>,
     user_provider: Option<UserProviderRef>,
     router: Router,
     memory_limiter: ServerMemoryLimiter,
@@ -622,10 +657,17 @@ impl HttpServerBuilder {
     pub fn new(options: HttpOptions) -> Self {
         Self {
             options,
+            batching_protocols: Vec::new(),
             user_provider: None,
             router: Router::new(),
             memory_limiter: ServerMemoryLimiter::default(),
         }
+    }
+
+    /// Selects HTTP write protocols allowed to use the shared batcher.
+    pub fn with_batching_protocols(mut self, protocols: Vec<BatchingProtocol>) -> Self {
+        self.batching_protocols = protocols;
+        self
     }
 
     /// Set a global memory limiter for all server protocols.
@@ -683,7 +725,7 @@ impl HttpServerBuilder {
         prom_store_with_metric_engine: bool,
         prom_validation_mode: PromValidationMode,
         experimental_enable_prometheus_native_histogram: bool,
-        pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+        pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     ) -> Self {
         let state = PromStoreState {
             prom_store_handler: handler,
@@ -849,6 +891,7 @@ impl HttpServerBuilder {
     pub fn build(self) -> HttpServer {
         HttpServer {
             options: self.options,
+            batching_protocols: self.batching_protocols.clone(),
             user_provider: self.user_provider,
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router),
@@ -882,6 +925,7 @@ impl HttpServerBuilder {
 
         let internal = HttpServer {
             options: self.options,
+            batching_protocols: self.batching_protocols.clone(),
             user_provider: self.user_provider.clone(),
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router.clone()),
@@ -899,6 +943,7 @@ impl HttpServerBuilder {
             };
             Some(HttpServer {
                 options: api_options,
+                batching_protocols: self.batching_protocols,
                 user_provider: self.user_provider.clone(),
                 shutdown_tx: Mutex::new(None),
                 router: StdMutex::new(self.router),
@@ -1056,6 +1101,7 @@ impl HttpServer {
                         AuthState::new(self.user_provider.clone()),
                         authorize::check_http_auth,
                     ))
+                    .layer(Extension(Arc::new(self.batching_protocols.clone())))
                     .layer(middleware::from_fn(hints::extract_hints))
                     .layer(middleware::from_fn(client_ip::log_error_with_client_ip))
                     .layer(middleware::from_fn(
@@ -1142,6 +1188,10 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
+            .layer(middleware::from_fn_with_state(
+                BatchingProtocol::Loki,
+                set_http_write_batching,
+            ))
             .with_state(log_state)
     }
 
@@ -1177,6 +1227,10 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
+            .layer(middleware::from_fn_with_state(
+                BatchingProtocol::Splunk,
+                set_http_write_batching,
+            ))
             .with_state(log_state)
     }
 
@@ -1253,6 +1307,10 @@ impl HttpServer {
                 )),
             )
             .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
+            .layer(middleware::from_fn_with_state(
+                BatchingProtocol::Elasticsearch,
+                set_http_write_batching,
+            ))
             .with_state(log_state)
     }
 
@@ -1277,6 +1335,10 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
+            .layer(middleware::from_fn_with_state(
+                BatchingProtocol::Logs,
+                set_http_write_batching,
+            ))
             .with_state(log_state)
     }
 
@@ -1304,12 +1366,24 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
+            .layer(middleware::from_fn_with_state(
+                BatchingProtocol::Logs,
+                set_http_write_batching,
+            ))
             .with_state(log_state)
     }
 
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
         Router::new()
-            .route("/sql", routing::get(handler::sql).post(handler::sql))
+            .route(
+                "/sql",
+                routing::get(handler::sql).post(handler::sql).layer(
+                    middleware::from_fn_with_state(
+                        BatchingProtocol::HttpSql,
+                        set_http_write_batching,
+                    ),
+                ),
+            )
             .route(
                 "/sql/parse",
                 routing::get(handler::sql_parse).post(handler::sql_parse),
@@ -1365,9 +1439,18 @@ impl HttpServer {
     /// [read]: https://prometheus.io/docs/prometheus/latest/querying/remote_read_api/
     /// [write]: https://prometheus.io/docs/concepts/remote_write_spec/
     fn route_prom<S>(state: PromStoreState) -> Router<S> {
+        let write = routing::post(prom_store::remote_write);
+        let write = if state.prom_store_with_metric_engine {
+            write
+        } else {
+            write.layer(middleware::from_fn_with_state(
+                BatchingProtocol::Prom,
+                set_http_write_batching,
+            ))
+        };
         Router::new()
             .route("/read", routing::post(prom_store::remote_read))
-            .route("/write", routing::post(prom_store::remote_write))
+            .route("/write", write)
             .with_state(state)
     }
 
@@ -1381,12 +1464,20 @@ impl HttpServer {
             )
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
+            .layer(middleware::from_fn_with_state(
+                BatchingProtocol::Influxdb,
+                set_http_write_batching,
+            ))
             .with_state(influxdb_handler)
     }
 
     fn route_opentsdb<S>(opentsdb_handler: OpentsdbProtocolHandlerRef) -> Router<S> {
         Router::new()
             .route("/api/put", routing::post(opentsdb::put))
+            .layer(middleware::from_fn_with_state(
+                BatchingProtocol::Opentsdb,
+                set_http_write_batching,
+            ))
             .with_state(opentsdb_handler)
     }
 
@@ -1403,6 +1494,10 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
+            .layer(middleware::from_fn_with_state(
+                BatchingProtocol::Otlp,
+                set_http_write_batching,
+            ))
             .with_state(OtlpState {
                 with_metric_engine,
                 experimental_enable_exponential_histogram,
@@ -1575,8 +1670,8 @@ mod test {
     use tokio::sync::mpsc;
     use tokio::time::Instant;
 
-    use super::*;
     use crate::http::test_helpers::TestClient;
+    use crate::http::*;
     use crate::prom_remote_write::validation::validate_label_name;
     use crate::query_handler::sql::SqlQueryHandler;
 
@@ -2309,5 +2404,122 @@ mod test {
         assert!(!validate_label_name(b"has.dot"));
         assert!(!validate_label_name(b"has space"));
         assert!(!validate_label_name(&[0xff, 0xfe]));
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::http::StatusCode;
+    use common_query::Output;
+    use session::context::QueryContextRef;
+
+    use crate::error::Result as ServerResult;
+    use crate::http::test_helpers::TestClient;
+    use crate::http::{BatchingProtocol, HttpOptions, HttpServerBuilder};
+    use crate::influxdb::InfluxdbRequest;
+    use crate::opentsdb::codec::DataPoint;
+    use crate::query_handler::{InfluxdbLineProtocolHandler, OpentsdbProtocolHandler};
+
+    #[test]
+    fn test_protocol_names_reject_unknown_values() {
+        assert_eq!(
+            serde_json::from_str::<BatchingProtocol>("\"prom\"").unwrap(),
+            BatchingProtocol::Prom
+        );
+        for name in ["sql", "unknown"] {
+            assert!(serde_json::from_str::<BatchingProtocol>(&format!("\"{name}\"")).is_err());
+        }
+        assert_eq!(
+            serde_json::from_str::<BatchingProtocol>("\"http_sql\"").unwrap(),
+            BatchingProtocol::HttpSql
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingWriteHandler {
+        selections: Mutex<Vec<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OpentsdbProtocolHandler for RecordingWriteHandler {
+        async fn preflight(&self, _: &[DataPoint], _: QueryContextRef) -> ServerResult<()> {
+            Ok(())
+        }
+
+        async fn exec(&self, points: Vec<DataPoint>, ctx: QueryContextRef) -> ServerResult<usize> {
+            self.selections.lock().unwrap().push(ctx.batching_enabled());
+            Ok(points.len())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl InfluxdbLineProtocolHandler for RecordingWriteHandler {
+        async fn exec(&self, _: InfluxdbRequest, ctx: QueryContextRef) -> ServerResult<Output> {
+            self.selections.lock().unwrap().push(ctx.batching_enabled());
+            Ok(Output::new_with_affected_rows(1))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_real_influx_and_opentsdb_routes_keep_selection() {
+        for protocols in [
+            vec![],
+            vec![BatchingProtocol::Influxdb],
+            vec![BatchingProtocol::Opentsdb],
+            vec![BatchingProtocol::Influxdb, BatchingProtocol::Opentsdb],
+        ] {
+            let handler = Arc::new(RecordingWriteHandler::default());
+            let influx_enabled = protocols.contains(&BatchingProtocol::Influxdb);
+            let opentsdb_enabled = protocols.contains(&BatchingProtocol::Opentsdb);
+            let server = HttpServerBuilder::new(HttpOptions::default())
+                .with_batching_protocols(protocols)
+                .with_influxdb_handler(handler.clone())
+                .with_opentsdb_handler(handler.clone())
+                .build();
+            let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+            for path in [
+                "/v1/influxdb/write",
+                "/v1/influxdb/api/v2/write?bucket=public",
+            ] {
+                assert_eq!(
+                    client
+                        .post(path)
+                        .body("cpu value=1 42")
+                        .send()
+                        .await
+                        .status(),
+                    StatusCode::NO_CONTENT
+                );
+            }
+            let point =
+                serde_json::json!({"metric":"cpu", "timestamp":42, "value":1, "tags":{"host":"a"}});
+            for query in ["", "?summary", "?details"] {
+                let response = client
+                    .post(&format!("/v1/opentsdb/api/put{query}"))
+                    .json(&point)
+                    .send()
+                    .await;
+                assert_eq!(
+                    response.status(),
+                    if query.is_empty() {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::OK
+                    }
+                );
+            }
+            assert_eq!(
+                *handler.selections.lock().unwrap(),
+                vec![
+                    influx_enabled,
+                    influx_enabled,
+                    opentsdb_enabled,
+                    opentsdb_enabled,
+                    opentsdb_enabled
+                ]
+            );
+        }
     }
 }

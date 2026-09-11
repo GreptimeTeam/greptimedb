@@ -40,7 +40,7 @@ use servers::error::{self, Result};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::http::test_helpers::{TestClient, TestResponse};
-use servers::http::{HttpOptions, HttpServerBuilder};
+use servers::http::{BatchingProtocol, HttpOptions, HttpServerBuilder};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store;
@@ -62,6 +62,7 @@ struct DummyInstance {
 }
 
 struct RemoteWriteCapture {
+    batching_enabled: bool,
     schema: String,
     physical_table: Option<String>,
     with_metric_engine: bool,
@@ -80,6 +81,12 @@ impl PromStoreProtocolHandler for DummyInstance {
         ctx: QueryContextRef,
         with_metric_engine: bool,
     ) -> Result<Output> {
+        if with_metric_engine {
+            assert!(
+                !ctx.batching_enabled(),
+                "metric-engine Prom must retain its dedicated batcher"
+            );
+        }
         let write_call = self.write_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if self.fail_write_call == Some(write_call) {
             return error::InvalidPromRemoteRequestSnafu {
@@ -91,6 +98,7 @@ impl PromStoreProtocolHandler for DummyInstance {
         let _ = self
             .write_tx
             .send(RemoteWriteCapture {
+                batching_enabled: ctx.batching_enabled(),
                 schema: ctx.current_schema(),
                 physical_table: ctx.extension(PHYSICAL_TABLE_PARAM).map(ToString::to_string),
                 with_metric_engine,
@@ -150,8 +158,12 @@ impl PromStoreProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
-        unimplemented!()
+    async fn do_query(&self, _: &str, ctx: QueryContextRef) -> Vec<Result<Output>> {
+        self.read_tx
+            .send((ctx.current_schema(), vec![u8::from(ctx.batching_enabled())]))
+            .await
+            .unwrap();
+        vec![Ok(Output::new_with_affected_rows(1))]
     }
 
     async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
@@ -237,6 +249,17 @@ fn make_test_app_with_write_failure_inner(
         fail_write_call,
     });
     let server = HttpServerBuilder::new(http_opts)
+        .with_batching_protocols(vec![
+            BatchingProtocol::Prom,
+            BatchingProtocol::Influxdb,
+            BatchingProtocol::Opentsdb,
+            BatchingProtocol::Otlp,
+            BatchingProtocol::Logs,
+            BatchingProtocol::Loki,
+            BatchingProtocol::Splunk,
+            BatchingProtocol::Elasticsearch,
+            BatchingProtocol::HttpSql,
+        ])
         .with_sql_handler(instance.clone())
         .with_prom_handler(
             instance,
@@ -794,4 +817,79 @@ fn assert_remote_write_v2_written_headers_with_histograms(
             .get("X-Prometheus-Remote-Write-Exemplars-Written")
             .map(|x| x.to_str().unwrap())
     );
+}
+
+#[tokio::test]
+async fn test_http_sql_protocol_selection() {
+    for protocols in [
+        vec![],
+        vec![BatchingProtocol::Influxdb],
+        vec![BatchingProtocol::HttpSql],
+    ] {
+        let expected = protocols.contains(&BatchingProtocol::HttpSql);
+        let (read_tx, mut read_rx) = mpsc::channel(1);
+        let (write_tx, _write_rx) = mpsc::channel(1);
+        let instance = Arc::new(DummyInstance {
+            read_tx,
+            write_tx,
+            write_calls: Arc::new(AtomicUsize::new(0)),
+            fail_write_call: None,
+        });
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_batching_protocols(protocols)
+            .with_sql_handler(instance)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = client.get("/v1/sql?sql=SELECT%201").send().await;
+        assert!(response.status().is_success());
+        assert_eq!(
+            read_rx.recv().await.unwrap(),
+            ("public".to_string(), vec![u8::from(expected)])
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_prom_batching_depends_on_protocol_and_metric_engine() {
+    for with_metric_engine in [false, true] {
+        for enabled in [false, true] {
+            let (read_tx, _read_rx) = mpsc::channel(1);
+            let (write_tx, mut write_rx) = mpsc::channel(16);
+            let instance = Arc::new(DummyInstance {
+                read_tx,
+                write_tx,
+                write_calls: Arc::new(AtomicUsize::new(0)),
+                fail_write_call: None,
+            });
+            let server = HttpServerBuilder::new(HttpOptions::default())
+                .with_batching_protocols(if enabled {
+                    vec![BatchingProtocol::Prom]
+                } else {
+                    vec![]
+                })
+                .with_prom_handler(
+                    instance,
+                    None,
+                    with_metric_engine,
+                    PromValidationMode::Unchecked,
+                    false,
+                    None,
+                )
+                .build();
+            let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+            let request = WriteRequest {
+                timeseries: prom_store::mock_timeseries(),
+                ..Default::default()
+            };
+            let response = client
+                .post("/v1/prometheus/write")
+                .body(snappy_compress(&request.encode_to_vec()).unwrap())
+                .send()
+                .await;
+            assert_eq!(response.status(), 204);
+            let capture = write_rx.recv().await.unwrap();
+            assert_eq!(capture.batching_enabled, enabled && !with_metric_engine);
+            assert_eq!(capture.with_metric_engine, with_metric_engine);
+        }
+    }
 }
