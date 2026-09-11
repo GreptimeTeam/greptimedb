@@ -85,6 +85,7 @@ async fn prepare_region_with_timestamps(
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: vec![row(vec![

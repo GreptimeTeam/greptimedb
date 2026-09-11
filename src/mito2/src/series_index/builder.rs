@@ -405,6 +405,7 @@ mod tests {
             .handle_request(
                 region.region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: vec![pk, ts, full_schema[4].clone()],
                         rows: [500_500, 2_500_500, 3_500_500]
