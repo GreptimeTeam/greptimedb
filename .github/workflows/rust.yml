@@ -122,6 +122,35 @@ jobs:
       - name: Run cargo check for riscv64
         run: cargo check --locked --workspace --all-targets --features servers/dashboard --target riscv64gc-unknown-linux-gnu
 
+  check-windows:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Check Windows build
+    runs-on: windows-2022-8-cores
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "check-windows"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run cargo check for Windows
+        run: cargo check --locked --workspace --all-targets --features servers/dashboard
+        env:
+          RUSTFLAGS: "-D warnings"
+
   conflict-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check for conflict
