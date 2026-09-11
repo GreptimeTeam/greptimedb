@@ -16,11 +16,14 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_base::memory_limit::MemoryLimit;
 use common_config::Configurable;
 use common_error::ext::BoxedError;
+use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::key::TableMetadataManagerRef;
 use common_options::memory::MemoryOptions;
 use common_recordbatch::map_dictionary_to_values_data_type;
@@ -42,6 +45,7 @@ use servers::http::HttpOptions;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::storage::{ConcreteDataType, RegionId};
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 
 use crate::adapter::stateless::StatelessFlow;
 use crate::adapter::table_source::ManagedTableSource;
@@ -431,10 +435,18 @@ impl Configurable for FlownodeOptions {
 
 pub type FlowStreamingEngineRef = Arc<StreamingEngine>;
 
+#[derive(Default)]
+struct StatelessFlowRuntime {
+    flow: Option<Arc<StatelessFlow>>,
+    failed_rebuild: Option<(u32, Instant)>,
+}
+
 struct StatelessFlowSlot {
-    runtime: Arc<RwLock<Option<Arc<StatelessFlow>>>>,
+    runtime: Arc<RwLock<StatelessFlowRuntime>>,
     /// Cleared at registry-detach time, fencing creators that already captured this slot.
     active: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    rebuild_attempts: AtomicUsize,
 }
 
 fn validate_captured_slot(
@@ -543,6 +555,7 @@ impl StreamingEngine {
                 .runtime
                 .read()
                 .await
+                .flow
                 .as_ref()
                 .is_some_and(|flow| flow.source_table_id == table_id)
             {
@@ -563,7 +576,10 @@ impl StreamingEngine {
     ) -> Result<usize, Error> {
         // Keep the captured lifecycle slot rather than resolving the ID again after a drop.
         let mut guard = slot.runtime.clone().read_owned().await;
-        let current = guard.as_ref().context(FlowNotFoundSnafu { id: flow_id })?;
+        let current = guard
+            .flow
+            .as_ref()
+            .context(FlowNotFoundSnafu { id: flow_id })?;
         validate_captured_slot(
             &slot,
             Some(current.source_table_id),
@@ -571,11 +587,26 @@ impl StreamingEngine {
             flow_id,
         )?;
         if current.source_schema_version != source_schema_version {
+            if guard
+                .failed_rebuild
+                .as_ref()
+                .is_some_and(|(version, until)| {
+                    *version == source_schema_version && *until > Instant::now()
+                })
+            {
+                return InvalidQuerySnafu {
+                    reason: format!(
+                        "Flow {flow_id} schema rebuild for source version {source_schema_version} is cooling down"
+                    ),
+                }
+                .fail();
+            }
             drop(guard);
             // Serialize rebuilds with definition replacement using the existing publication
             // lease. Another write may already have rebuilt this schema while we waited.
             let mut published = slot.runtime.clone().write_owned().await;
             let current = published
+                .flow
                 .as_ref()
                 .context(FlowNotFoundSnafu { id: flow_id })?;
             validate_captured_slot(
@@ -585,22 +616,60 @@ impl StreamingEngine {
                 flow_id,
             )?;
             if current.source_schema_version != source_schema_version {
+                if published
+                    .failed_rebuild
+                    .as_ref()
+                    .is_some_and(|(version, until)| {
+                        *version == source_schema_version && *until > Instant::now()
+                    })
+                {
+                    return InvalidQuerySnafu {
+                        reason: format!(
+                            "Flow {flow_id} schema rebuild for source version {source_schema_version} is cooling down"
+                        ),
+                    }
+                    .fail();
+                }
+                #[cfg(test)]
+                slot.rebuild_attempts.fetch_add(1, Ordering::Relaxed);
                 let replacement = self
                     .build_stateless_flow(&current.create_args, false)
-                    .await?;
-                ensure!(
-                    replacement.source_table_id == expected_table_id
-                        && replacement.source_schema_version == source_schema_version,
-                    InvalidQuerySnafu {
-                        reason: format!("Source schema changed while rebuilding flow {flow_id}")
+                    .await
+                    .and_then(|replacement| {
+                        ensure!(
+                            replacement.source_table_id == expected_table_id
+                                && replacement.source_schema_version == source_schema_version,
+                            InvalidQuerySnafu {
+                                reason: format!(
+                                    "Source schema changed while rebuilding flow {flow_id}"
+                                )
+                            }
+                        );
+                        Ok(replacement)
+                    });
+                match replacement {
+                    Ok(replacement) => {
+                        published.flow = Some(Arc::new(replacement));
+                        published.failed_rebuild = None;
                     }
-                );
-                *published = Some(Arc::new(replacement));
+                    Err(error) => {
+                        // Reuse the default heartbeat retry baseline; this is neither a
+                        // negotiated interval nor a cache-freshness guarantee.
+                        published.failed_rebuild = Some((
+                            source_schema_version,
+                            Instant::now() + BASE_HEARTBEAT_INTERVAL,
+                        ));
+                        return Err(error);
+                    }
+                }
             }
             // Do not open a replacement/drop gap between preparation and sink execution.
             guard = tokio::sync::OwnedRwLockWriteGuard::downgrade(published);
         }
-        let flow = guard.as_ref().context(FlowNotFoundSnafu { id: flow_id })?;
+        let flow = guard
+            .flow
+            .as_ref()
+            .context(FlowNotFoundSnafu { id: flow_id })?;
         // This is the last check before planning.  In particular, a request normalized against
         // an old source schema is never allowed to reach a newly published plan.
         let latest = self
@@ -641,7 +710,9 @@ impl StreamingEngine {
             .remove(&flow_id)
             .context(FlowNotFoundSnafu { id: flow_id })?;
         slot.active.store(false, Ordering::Release);
-        slot.runtime.write().await.take();
+        let mut runtime = slot.runtime.write().await;
+        runtime.flow.take();
+        runtime.failed_rebuild = None;
         Ok(())
     }
 
@@ -659,7 +730,7 @@ impl StreamingEngine {
                 id: flow.create_args.flow_id
             }
         );
-        if runtime.is_some() && !or_replace {
+        if runtime.flow.is_some() && !or_replace {
             if create_if_not_exists {
                 return Ok(false);
             }
@@ -688,7 +759,8 @@ impl StreamingEngine {
                 )
             }
         );
-        *runtime = Some(flow);
+        runtime.flow = Some(flow);
+        runtime.failed_rebuild = None;
         Ok(true)
     }
 
@@ -701,8 +773,10 @@ impl StreamingEngine {
                 Arc::clone(slot)
             } else {
                 let slot = Arc::new(StatelessFlowSlot {
-                    runtime: Arc::new(RwLock::new(None)),
+                    runtime: Arc::new(RwLock::new(StatelessFlowRuntime::default())),
                     active: AtomicBool::new(true),
+                    #[cfg(test)]
+                    rebuild_attempts: AtomicUsize::new(0),
                 });
                 slots.insert(flow_id, Arc::clone(&slot));
                 slot
@@ -891,7 +965,7 @@ impl StreamingEngine {
         let slots = self.stateless_flows.read().await;
         let mut ids = Vec::new();
         for (id, slot) in slots.iter() {
-            if slot.runtime.read().await.is_some() {
+            if slot.runtime.read().await.flow.is_some() {
                 ids.push(*id);
             }
         }
@@ -901,7 +975,7 @@ impl StreamingEngine {
     pub async fn flow_exist_inner(&self, flow_id: FlowId) -> Result<bool, Error> {
         let slot = self.stateless_flows.read().await.get(&flow_id).cloned();
         Ok(match slot {
-            Some(slot) => slot.runtime.read().await.is_some(),
+            Some(slot) => slot.runtime.read().await.flow.is_some(),
             None => false,
         })
     }

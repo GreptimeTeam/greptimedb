@@ -308,24 +308,13 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
 fn mock_harness_flow_node_manager() {}
 
 #[test]
-fn stateless_flow_slot_write_lease_fences_replacement() {
-    let slot = Arc::new(super::StatelessFlowSlot {
-        runtime: Arc::new(tokio::sync::RwLock::new(None)),
-        active: std::sync::atomic::AtomicBool::new(true),
-    });
-    let guard = slot.runtime.try_read().unwrap();
-    assert!(guard.is_none());
-    // A writer cannot acquire the lease while an execution read lease is held.
-    assert!(slot.runtime.try_write().is_err());
-    drop(guard);
-    assert!(slot.runtime.try_write().is_ok());
-}
-
-#[test]
 fn stateless_captured_slot_rejects_inactive_or_detached_slot() {
     let slot = super::StatelessFlowSlot {
-        runtime: Arc::new(tokio::sync::RwLock::new(None)),
+        runtime: Arc::new(tokio::sync::RwLock::new(
+            super::StatelessFlowRuntime::default(),
+        )),
         active: std::sync::atomic::AtomicBool::new(false),
+        rebuild_attempts: std::sync::atomic::AtomicUsize::new(0),
     };
 
     assert!(super::validate_captured_slot(&slot, None, 1, 42).is_err());
@@ -334,8 +323,11 @@ fn stateless_captured_slot_rejects_inactive_or_detached_slot() {
 #[test]
 fn stateless_captured_slot_rejects_source_mismatch() {
     let slot = super::StatelessFlowSlot {
-        runtime: Arc::new(tokio::sync::RwLock::new(None)),
+        runtime: Arc::new(tokio::sync::RwLock::new(
+            super::StatelessFlowRuntime::default(),
+        )),
         active: std::sync::atomic::AtomicBool::new(true),
+        rebuild_attempts: std::sync::atomic::AtomicUsize::new(0),
     };
 
     assert!(super::validate_captured_slot(&slot, Some(2), 1, 42).is_err());
@@ -344,6 +336,7 @@ fn stateless_captured_slot_rejects_source_mismatch() {
 #[derive(Default)]
 struct RecordingSink {
     inserts: std::sync::Mutex<Vec<api::v1::RowInsertRequest>>,
+    failed_calls: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -361,6 +354,8 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError for R
             .iter()
             .any(|insert| insert.table_name == "failed_sink")
         {
+            self.failed_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Err(BoxedError::new(
                 InvalidQuerySnafu {
                     reason: "injected sink failure",
@@ -553,6 +548,31 @@ async fn stateless_failed_flow_and_table_do_not_starve_healthy_sinks() {
             ("healthy_b".into(), vec![22])
         ]
     );
+    let failed_slot = h
+        .engine
+        .flow_ids_for_table(1)
+        .await
+        .into_iter()
+        .find(|(id, _)| *id == 1)
+        .unwrap()
+        .1;
+    assert!(failed_slot.runtime.read().await.failed_rebuild.is_none());
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[12])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_a".into(), vec![12])]);
+    assert_eq!(
+        h.sink
+            .failed_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert!(failed_slot.runtime.read().await.failed_rebuild.is_none());
 
     let mut malformed = mirror_request(1, 1, &[99]);
     malformed.rows.as_mut().unwrap().schema.pop();
@@ -652,16 +672,27 @@ async fn stateless_schema_bump_rebuilds_for_current_and_subsequent_writes() {
         })
         .unwrap();
     h.register(&source);
-    let slot = h.engine.flow_ids_for_table(1).await.pop().unwrap().1;
+    let slot = h
+        .engine
+        .flow_ids_for_table(1)
+        .await
+        .into_iter()
+        .find(|(id, _)| *id == 1)
+        .unwrap()
+        .1;
     assert_eq!(
         slot.runtime
             .read()
             .await
+            .flow
             .as_ref()
             .unwrap()
             .source_schema_version,
         123
     );
+    // The stale-provider failure above is cooled down; expire this private test deadline
+    // after repairing the catalog so the existing rebuild behavior remains deterministic.
+    slot.runtime.write().await.failed_rebuild = Some((124, tokio::time::Instant::now()));
     let (left_rows, types, version) = h
         .engine
         .handle_insert_request(mirror_request(1, 0, &[5]))
@@ -698,6 +729,7 @@ async fn stateless_schema_bump_rebuilds_for_current_and_subsequent_writes() {
         slot.runtime
             .read()
             .await
+            .flow
             .as_ref()
             .unwrap()
             .source_schema_version,
@@ -715,12 +747,313 @@ async fn stateless_schema_bump_rebuilds_for_current_and_subsequent_writes() {
 }
 
 #[tokio::test]
+async fn stateless_failed_schema_rebuild_is_cooled_down_and_retried() {
+    let h = StreamingHarness::new().await;
+    let mut source = h.table(1, "source").await;
+    let mut sink = h.table(2, "sink").await;
+    h.table(3, "healthy_sink").await;
+    h.flow(1, 1, "sink", "SELECT * FROM source").await;
+    h.flow(2, 1, "healthy_sink", "SELECT number, ts FROM source")
+        .await;
+    let slot = h
+        .engine
+        .flow_ids_for_table(1)
+        .await
+        .into_iter()
+        .find(|(id, _)| *id == 1)
+        .unwrap()
+        .1;
+    let current = h
+        .metadata
+        .table_info_manager()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut columns = source.meta.schema.column_schemas().to_vec();
+    columns.push(ColumnSchema::new(
+        "extra",
+        ConcreteDataType::int32_datatype(),
+        true,
+    ));
+    source.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns.clone())
+            .unwrap()
+            .version(124)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current, None, source.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+
+    // Queue two stale runtimes before either can take the publication writer. The second
+    // must recheck the failed attempt under the writer rather than rebuilding again.
+    let (left_rows, types, version) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 0, &[1]))
+        .await
+        .unwrap();
+    let (right_rows, _, _) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 1, &[2]))
+        .await
+        .unwrap();
+    let lease = slot.runtime.write().await;
+    let left = h
+        .engine
+        .execute_flow(1, slot.clone(), 1, left_rows, &types, version);
+    let right = h
+        .engine
+        .execute_flow(1, slot.clone(), 1, right_rows, &types, version);
+    tokio::pin!(left, right);
+    assert!(futures::poll!(&mut left).is_pending());
+    assert!(futures::poll!(&mut right).is_pending());
+    drop(lease);
+    let (left, right) = tokio::join!(left, right);
+    let errors = [
+        left.unwrap_err().to_string(),
+        right.unwrap_err().to_string(),
+    ];
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("Flow output has 3 columns, but sink has 2 columns"))
+    );
+    assert!(errors.iter().any(|error| {
+        error.contains("Flow 1 schema rebuild for source version 124 is cooling down")
+    }));
+    assert_eq!(
+        slot.rebuild_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let deadline = slot.runtime.read().await.failed_rebuild.unwrap();
+
+    // SELECT * is still invalid, while the sibling flow keeps producing output.
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[3])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_sink".into(), vec![3])]);
+    assert_eq!(slot.runtime.read().await.failed_rebuild, Some(deadline));
+    assert_eq!(
+        slot.rebuild_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // A new source version bypasses the old version's cooldown immediately.
+    let current = h
+        .metadata
+        .table_info_manager()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap();
+    source.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns.clone())
+            .unwrap()
+            .version(125)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current, None, source.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[5])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        slot.rebuild_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_sink".into(), vec![5])]);
+
+    // Make the rebuilt SELECT * layout valid, then expire only this test's private deadline.
+    let current_sink = h
+        .metadata
+        .table_info_manager()
+        .get(2)
+        .await
+        .unwrap()
+        .unwrap();
+    sink.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns)
+            .unwrap()
+            .version(124)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current_sink, None, sink.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: sink.catalog_name.clone(),
+            schema: sink.schema_name.clone(),
+            table_name: sink.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    h.register(&sink);
+    slot.runtime.write().await.failed_rebuild = Some((125, tokio::time::Instant::now()));
+    h.engine
+        .handle_inserts_inner(api::v1::region::InsertRequests {
+            requests: vec![mirror_request(1, 0, &[6])],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        slot.rebuild_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        3
+    );
+    assert!(slot.runtime.read().await.failed_rebuild.is_none());
+    let mut inserted = h.take_numbers();
+    inserted.sort();
+    assert_eq!(
+        inserted,
+        vec![("healthy_sink".into(), vec![6]), ("sink".into(), vec![6])]
+    );
+
+    // IF NOT EXISTS is a no-op and preserves cooldown; a successful replacement clears it.
+    let current = h
+        .metadata
+        .table_info_manager()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut columns = source.meta.schema.column_schemas().to_vec();
+    columns.push(ColumnSchema::new(
+        "extra2",
+        ConcreteDataType::int32_datatype(),
+        true,
+    ));
+    source.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns)
+            .unwrap()
+            .version(126)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current, None, source.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[7])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_sink".into(), vec![7])]);
+    let cooldown = slot.runtime.read().await.failed_rebuild.unwrap();
+    let mut args = slot
+        .runtime
+        .read()
+        .await
+        .flow
+        .as_ref()
+        .unwrap()
+        .create_args
+        .clone();
+    args.or_replace = true;
+    assert!(h.engine.create_flow_inner(args.clone()).await.is_err());
+    assert_eq!(slot.runtime.read().await.failed_rebuild, Some(cooldown));
+    let current_sink = h
+        .metadata
+        .table_info_manager()
+        .get(2)
+        .await
+        .unwrap()
+        .unwrap();
+    sink.meta.schema = source.meta.schema.clone();
+    h.metadata
+        .update_table_info(&current_sink, None, sink.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: sink.catalog_name.clone(),
+            schema: sink.schema_name.clone(),
+            table_name: sink.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    h.register(&sink);
+    args.or_replace = false;
+    args.create_if_not_exists = true;
+    h.engine.create_flow_inner(args.clone()).await.unwrap();
+    assert_eq!(slot.runtime.read().await.failed_rebuild, Some(cooldown));
+    args.create_if_not_exists = false;
+    args.or_replace = true;
+    h.engine.create_flow_inner(args).await.unwrap();
+    assert!(slot.runtime.read().await.failed_rebuild.is_none());
+}
+
+#[tokio::test]
 async fn stateless_rejects_wrong_provider_identity_and_detached_lifecycle() {
     let h = StreamingHarness::new().await;
     let source = h.table(1, "source").await;
     h.table(2, "sink").await;
     h.flow(1, 1, "sink", "SELECT number, ts FROM source").await;
     let old_slot = h.engine.flow_ids_for_table(1).await.pop().unwrap().1;
+    old_slot.runtime.write().await.failed_rebuild = Some((123, tokio::time::Instant::now()));
     let (rows, types, version) = h
         .engine
         .handle_insert_request(mirror_request(1, 0, &[9]))
@@ -728,6 +1061,8 @@ async fn stateless_rejects_wrong_provider_identity_and_detached_lifecycle() {
         .unwrap();
     h.engine.remove_flow_inner(1).await.unwrap();
     h.flow(1, 1, "sink", "SELECT number, ts FROM source").await;
+    let fresh_slot = h.engine.flow_ids_for_table(1).await.pop().unwrap().1;
+    assert!(fresh_slot.runtime.read().await.failed_rebuild.is_none());
     assert!(
         h.engine
             .execute_flow(1, old_slot, 1, rows, &types, version)
@@ -756,6 +1091,7 @@ async fn stateless_rejects_wrong_provider_identity_and_detached_lifecycle() {
         .runtime
         .read()
         .await
+        .flow
         .as_ref()
         .unwrap()
         .create_args
