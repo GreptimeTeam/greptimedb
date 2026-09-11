@@ -1,0 +1,21 @@
+src/operator/src/req_convert/insert.rs
+  s_d78101474c9fc3::t_e6aa575e0b4f80 17,26
+src/operator/src/req_convert/insert/row_to_batch.rs
+  s_d78101474c9fc3::t_8d07462443f641 1-379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ccfaec4d739db8795fc037ec71f521b6862fae8c",
+  "prompts": {},
+  "sessions": {
+    "s_d78101474c9fc3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b65-825f-7a61-8799-ac2603e8fa03",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
