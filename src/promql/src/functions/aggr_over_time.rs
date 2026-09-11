@@ -87,23 +87,49 @@ fn evaluate_presence(
 
     // The generic range-function wrapper downcasts both arrays for each window.
     // Do it once after retaining its zero-window behavior above.
-    timestamp_ranges
-        .values()
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .unwrap();
+    assert!(
+        timestamp_ranges
+            .values()
+            .as_any()
+            .is::<TimestampMillisecondArray>()
+    );
     let values = value_ranges
         .values()
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    let evaluator: fn(&Float64Array, usize, usize) -> Option<f64> = match operation {
-        PresenceEvaluator::Count => |_, _, length| (length != 0).then_some(length as f64),
-        PresenceEvaluator::Last => {
-            |values, offset, length| (length != 0).then(|| values.value(offset + length - 1))
+    let evaluator: fn(&Float64Array, usize, usize) -> Option<f64> = if values.null_count() == 0 {
+        match operation {
+            PresenceEvaluator::Count => |_, _, length| (length != 0).then_some(length as f64),
+            PresenceEvaluator::Last => {
+                |values, offset, length| (length != 0).then(|| values.value(offset + length - 1))
+            }
+            PresenceEvaluator::Absent => |_, _, length| (length == 0).then_some(1.0),
+            PresenceEvaluator::Present => |_, _, length| (length != 0).then_some(1.0),
         }
-        PresenceEvaluator::Absent => |_, _, length| (length == 0).then_some(1.0),
-        PresenceEvaluator::Present => |_, _, length| (length != 0).then_some(1.0),
+    } else {
+        match operation {
+            PresenceEvaluator::Count => |values, offset, length| {
+                let count = (offset..offset + length)
+                    .filter(|&index| values.is_valid(index))
+                    .count();
+                (count != 0).then_some(count as f64)
+            },
+            PresenceEvaluator::Last => |values, offset, length| {
+                (offset..offset + length)
+                    .rev()
+                    .find(|&index| values.is_valid(index))
+                    .map(|index| values.value(index))
+            },
+            PresenceEvaluator::Absent => |values, offset, length| {
+                (!(offset..offset + length).any(|index| values.is_valid(index))).then_some(1.0)
+            },
+            PresenceEvaluator::Present => |values, offset, length| {
+                (offset..offset + length)
+                    .any(|index| values.is_valid(index))
+                    .then_some(1.0)
+            },
+        }
     };
 
     let mut result = Vec::with_capacity(len);
@@ -185,11 +211,8 @@ pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
     evaluator = count_over_time_evaluator
 )]
 pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        Some(values.len() as f64)
-    }
+    let count = values.iter().flatten().count();
+    (count != 0).then_some(count as f64)
 }
 
 /// The most recent point value in specified interval.
@@ -200,7 +223,7 @@ pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> 
     evaluator = last_over_time_evaluator
 )]
 pub fn last_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    values.values().last().copied()
+    values.iter().flatten().last()
 }
 
 /// absent_over_time returns an empty vector if the range vector passed to it has any
@@ -213,7 +236,7 @@ pub fn last_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> O
     evaluator = absent_over_time_evaluator
 )]
 pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() { Some(1.0) } else { None }
+    values.iter().flatten().next().is_none().then_some(1.0)
 }
 
 /// the value 1 for any series in the specified interval.
@@ -224,7 +247,7 @@ pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
     evaluator = present_over_time_evaluator
 )]
 pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() { None } else { Some(1.0) }
+    values.iter().flatten().next().is_some().then_some(1.0)
 }
 
 /// the population standard variance of the values in the specified interval.
@@ -439,6 +462,67 @@ mod test {
         assert_specialized_matches_oracle(LastOverTime::scalar_udf(), last_over_time);
         assert_specialized_matches_oracle(AbsentOverTime::scalar_udf(), absent_over_time);
         assert_specialized_matches_oracle(PresentOverTime::scalar_udf(), present_over_time);
+    }
+
+    #[test]
+    fn specialized_presence_range_udfs_ignore_null_samples() {
+        use datafusion::arrow::buffer::NullBuffer;
+
+        let make_ranges = || {
+            let timestamps =
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..9)).slice(1, 7);
+            let values = Arc::new(Float64Array::new(
+                vec![99.0, 1.0, 0.0, 0.0, 4.0, f64::NAN, 0.0, -0.0, 42.0].into(),
+                Some(NullBuffer::from(vec![
+                    true, true, false, false, true, true, true, true, true,
+                ])),
+            ))
+            .slice(1, 7);
+            let ranges = [(0, 4), (0, 3), (1, 2), (4, 1), (5, 2), (7, 0)];
+
+            (
+                RangeArray::from_ranges(Arc::new(timestamps), ranges).unwrap(),
+                RangeArray::from_ranges(Arc::new(values), ranges).unwrap(),
+            )
+        };
+        // The first window is [1, NULL, NULL, 4]; the old physical-length evaluator
+        // incorrectly returned 4 for count_over_time.
+        let cases = [
+            (
+                CountOverTime::scalar_udf(),
+                [Some(2.0), Some(1.0), None, Some(1.0), Some(2.0), None],
+            ),
+            (
+                LastOverTime::scalar_udf(),
+                [Some(4.0), Some(1.0), None, Some(f64::NAN), Some(-0.0), None],
+            ),
+            (
+                AbsentOverTime::scalar_udf(),
+                [None, None, Some(1.0), None, None, Some(1.0)],
+            ),
+            (
+                PresentOverTime::scalar_udf(),
+                [Some(1.0), Some(1.0), None, Some(1.0), Some(1.0), None],
+            ),
+        ];
+
+        for (udf, expected) in cases {
+            let (timestamps, values) = make_ranges();
+            let output =
+                crate::functions::test_util::invoke_range_udf(udf, timestamps, values).unwrap();
+            let output_array = extract_array(&output).unwrap();
+            let output = output_array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+
+            for (index, expected) in expected.into_iter().enumerate() {
+                assert_eq!(output.is_valid(index), expected.is_some());
+                if let Some(expected) = expected {
+                    assert_eq!(output.value(index).to_bits(), expected.to_bits());
+                }
+            }
+        }
     }
 
     #[test]
