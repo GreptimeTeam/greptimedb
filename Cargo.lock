@@ -5646,6 +5646,7 @@ dependencies = [
  "catalog",
  "client",
  "common-base",
+ "common-batcher",
  "common-catalog",
  "common-config",
  "common-datasource",

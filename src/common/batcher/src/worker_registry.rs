@@ -77,6 +77,10 @@ impl<K: Eq + Hash, T> WorkerRegistry<K, T> {
     where
         F: FnOnce() -> Sender<T>,
     {
+        if let Some(tx) = self.get(&key).await {
+            return tx;
+        }
+
         match self.workers.entry(key) {
             Entry::Occupied(mut entry) => {
                 if entry.get().is_closed() {
@@ -113,6 +117,27 @@ mod tests {
     use tokio::sync::{Barrier, mpsc};
 
     use crate::worker_registry::WorkerRegistry;
+
+    #[tokio::test]
+    async fn test_live_lookup_uses_read_lock() {
+        let registry = Arc::new(WorkerRegistry::<_, ()>::new());
+        let (sender, _receiver) = registry.get_or_create(1, 1).await;
+        let guard = registry.workers.get(&1).unwrap();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker_registry = registry.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let thread = std::thread::spawn(move || {
+            let result = runtime.block_on(worker_registry.get_or_create(1, 1));
+            let _ = result_tx.send(result);
+        });
+        // Release the read guard before joining, even if lookup needs a write lock.
+        let result = result_rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(guard);
+        thread.join().unwrap();
+        let (reused, receiver) = result.expect("live lookup must not wait for an exclusive lock");
+        assert!(sender.same_channel(&reused));
+        assert!(receiver.is_none());
+    }
 
     #[tokio::test]
     async fn test_reuses_live_sender_and_returns_receiver_to_caller() {
