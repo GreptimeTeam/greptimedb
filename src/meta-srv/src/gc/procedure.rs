@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_error::ext::PlainError;
+use common_error::status_code::StatusCode;
 use common_meta::instruction::{
     self, GetPackedFileRefs, GetPackedFileRefsReply, InstructionReply, PackedFileRefsManifest,
     PackedGcRegions, PackedRegionFileRefs,
@@ -340,12 +342,10 @@ impl BatchGcProcedure {
             .context(error::RuntimeSwitchManagerSnafu)
             .map_err(ProcedureError::retry_later)?;
         if enabled {
-            return Err(ProcedureError::retry_later(
-                error::RetryLaterSnafu {
-                    reason: "maintenance mode is enabled".to_string(),
-                }
-                .build(),
-            ));
+            return Err(ProcedureError::external(PlainError::new(
+                "maintenance mode is enabled".to_string(),
+                StatusCode::IllegalState,
+            )));
         }
         Ok(())
     }
@@ -1399,7 +1399,11 @@ mod tests {
             };
             let err = procedure.execute(&ctx).await.unwrap_err();
 
-            assert!(err.is_retry_later());
+            assert!(!err.is_retry_later());
+            assert_eq!(
+                common_error::ext::ErrorExt::retry_hint(&err),
+                common_error::ext::RetryHint::NonRetryable
+            );
             assert_eq!(procedure.data.state, state);
             assert_eq!(procedure.dump().unwrap(), dump_before);
             if matches!(state, State::Acquiring | State::Gcing) {
