@@ -218,6 +218,7 @@ mod tests {
     use common_event_recorder::testing::assert_event_contract;
     use common_event_recorder::{EventTypeFilter, PersistentEventContext, TriggerReason};
     use common_meta::key::TableMetadataManager;
+    use common_meta::key::runtime_switch::RuntimeSwitchManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
     use common_procedure::{
@@ -588,11 +589,13 @@ mod tests {
     fn batch_gc_procedure() -> BatchGcProcedure {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
         let mailbox_sequence = SequenceBuilder::new("test_batch_gc_event", kv_backend).build();
         let mailbox = MailboxContext::new(mailbox_sequence);
         BatchGcProcedure::new(
             mailbox.mailbox().clone(),
             table_metadata_manager,
+            runtime_switch_manager,
             "localhost".to_string(),
             vec![RegionId::new(1024, 1)],
             true,
