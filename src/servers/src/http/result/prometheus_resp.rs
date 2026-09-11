@@ -15,8 +15,9 @@
 //! prom supply the prometheus HTTP API Server compliance
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasher;
 
-use arrow::array::{Array, AsArray, StructArray};
+use arrow::array::{Array, ArrayRef, AsArray, StructArray};
 use arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use arrow_schema::DataType;
 use axum::Json;
@@ -36,6 +37,9 @@ use common_recordbatch::RecordBatches;
 use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::prelude::ConcreteDataType;
 use indexmap::IndexMap;
+use indexmap::map::RawEntryApiV1;
+use indexmap::map::raw_entry_v1::RawEntryMut;
+use itertools::Either;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
 use ryu::Buffer;
@@ -356,13 +360,8 @@ impl PrometheusJsonResponse {
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(&str, &str)>, PromSeriesSamples>::new();
 
-        // Consecutive rows often belong to the same series: instant query plans
-        // keep their output sort, and range query plans, which no longer do, still
-        // tend to emit a series' rows together. Remember the index of the previous
-        // row's entry in `buffer` and reuse it when the tags are unchanged, so the
-        // label vector is not rebuilt and rehashed per row. Unclustered rows only
-        // cost one `Vec` comparison before falling back to the map lookup.
-        let mut last_entry_index = None;
+        // Only a series that is new to `buffer` needs its own key vector.
+        let mut tags = Vec::with_capacity(num_label_columns + 1);
 
         let schema = batches.schema();
         for batch in batches.iter() {
@@ -398,71 +397,106 @@ impl PrometheusJsonResponse {
                 })
                 .transpose()?;
 
-            // assemble rows
-            for row_index in 0..batch.num_rows() {
-                let value = field_column.and_then(|field_column| {
-                    if !field_column.is_valid(row_index) {
-                        return None;
-                    }
-                    let value = field_column.value(row_index);
-                    (!is_prometheus_stale_nan(value))
-                        .then_some((timestamp_column.value(row_index), value))
-                });
-                let histogram = native_histogram_column
-                    .and_then(|column| {
-                        read_histogram(column, row_index)
-                            .context(DataFusionSnafu)
-                            .transpose()
-                    })
-                    .transpose()?
-                    .filter(|histogram| !is_prometheus_stale_nan(histogram.sum))
-                    .map(|histogram| {
-                        prometheus_native_histogram(&histogram)
-                            .map(|histogram| (timestamp_column.value(row_index), histogram))
-                    })
-                    .transpose()?;
-
-                if value.is_none() && histogram.is_none() {
-                    continue;
-                }
-
-                // retrieve tags
-                let mut tags = Vec::with_capacity(num_label_columns + 1);
-                if let Some(metric_name) = &metric_name {
-                    tags.push((METRIC_NAME, metric_name.as_str()));
-                }
-                for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                    if let Some(tag_value) = string_array_value_at_index(tag_column, row_index) {
-                        tags.push((tag_name, tag_value));
-                    }
-                }
-
-                let reuse = last_entry_index.filter(|index| {
-                    buffer
-                        .get_index(*index)
-                        .is_some_and(|(key, _)| key == &tags)
-                });
-                let samples = if let Some(index) = reuse {
-                    buffer
-                        .get_index_mut(index)
-                        .map(|(_, samples)| samples)
-                        .with_context(|| UnexpectedResultSnafu {
-                            reason: "reused series entry must exist",
-                        })?
+            // Read the labels once per run of rows that share them instead of
+            // once per row. `partition` marks every boundary, so the probe only
+            // decides whether looking for runs is worth its cost.
+            let label_runs = if !prefer_label_runs(&tag_columns, batch.num_rows()) {
+                Either::Left((0..batch.num_rows()).map(|row| row..row + 1))
+            } else {
+                let runs = if tag_columns.is_empty() {
+                    // Without labels the whole batch is a single series.
+                    std::iter::once(0..batch.num_rows()).collect()
                 } else {
-                    let entry = buffer.entry(tags);
-                    last_entry_index = Some(entry.index());
-                    entry.or_default()
+                    let columns = tag_columns
+                        .iter()
+                        .map(|column| (*column).clone())
+                        .collect::<Vec<_>>();
+                    arrow::compute::partition(&columns)
+                        .context(ArrowSnafu)?
+                        .ranges()
                 };
-                if let Some((timestamp_millis, histogram)) = histogram {
-                    samples
-                        .histograms
-                        .push((timestamp_millis as f64 / 1000.0, histogram));
-                } else if let Some((timestamp_millis, value)) = value {
-                    samples.values.push((
-                        timestamp_millis as f64 / 1000.0,
-                        PromSampleValue::Number(value),
-                    ));
+                Either::Right(runs.into_iter())
+            };
+
+            // assemble rows
+            for run in label_runs {
+                let mut run_entry_index = None;
+                for row_index in run {
+                    let value = field_column.and_then(|field_column| {
+                        if !field_column.is_valid(row_index) {
+                            return None;
+                        }
+                        let value = field_column.value(row_index);
+                        (!is_prometheus_stale_nan(value))
+                            .then_some((timestamp_column.value(row_index), value))
+                    });
+                    let histogram = native_histogram_column
+                        .and_then(|column| {
+                            read_histogram(column, row_index)
+                                .context(DataFusionSnafu)
+                                .transpose()
+                        })
+                        .transpose()?
+                        .filter(|histogram| !is_prometheus_stale_nan(histogram.sum))
+                        .map(|histogram| {
+                            prometheus_native_histogram(&histogram)
+                                .map(|histogram| (timestamp_column.value(row_index), histogram))
+                        })
+                        .transpose()?;
+
+                    if value.is_none() && histogram.is_none() {
+                        continue;
+                    }
+
+                    let entry_index = match run_entry_index {
+                        Some(index) => index,
+                        None => {
+                            // retrieve tags
+                            tags.clear();
+                            if let Some(metric_name) = &metric_name {
+                                tags.push((METRIC_NAME, metric_name.as_str()));
+                            }
+                            for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
+                                if let Some(tag_value) =
+                                    string_array_value_at_index(tag_column, row_index)
+                                {
+                                    tags.push((tag_name, tag_value));
+                                }
+                            }
+
+                            let hash = buffer.hasher().hash_one(&tags);
+                            let entry = buffer
+                                .raw_entry_mut_v1()
+                                .from_key_hashed_nocheck(hash, &tags);
+                            let index = entry.index();
+                            if let RawEntryMut::Vacant(entry) = entry {
+                                // Hand the key buffer over with the hash that was
+                                // just computed for the lookup.
+                                let key = std::mem::replace(
+                                    &mut tags,
+                                    Vec::with_capacity(num_label_columns + 1),
+                                );
+                                entry.insert_hashed_nocheck(
+                                    hash,
+                                    key,
+                                    PromSeriesSamples::default(),
+                                );
+                            }
+                            run_entry_index = Some(index);
+                            index
+                        }
+                    };
+                    let samples = &mut buffer[entry_index];
+                    if let Some((timestamp_millis, histogram)) = histogram {
+                        samples
+                            .histograms
+                            .push((timestamp_millis as f64 / 1000.0, histogram));
+                    } else if let Some((timestamp_millis, value)) = value {
+                        samples.values.push((
+                            timestamp_millis as f64 / 1000.0,
+                            PromSampleValue::Number(value),
+                        ));
+                    }
                 }
             }
         }
@@ -543,6 +577,40 @@ impl PrometheusJsonResponse {
 
         Ok(data)
     }
+}
+
+/// Decides whether to group the rows of a batch into runs that share their
+/// label values.
+///
+/// Sampling adjacent row pairs keeps the decision independent of the batch
+/// size. Probe positions come from a xorshift sequence instead of a fixed
+/// stride, which would alias with periodic series layouts. A wrong guess only
+/// costs time: `partition` still validates every boundary, and the row-by-row
+/// path builds the labels of every row.
+fn prefer_label_runs(columns: &[&ArrayRef], rows: usize) -> bool {
+    if columns.is_empty() {
+        return true;
+    }
+    if rows < 2 {
+        return false;
+    }
+    let mut position = 0x9e37_79b9_u32;
+    let mut changes = 0;
+    for _ in 0..8 {
+        position ^= position << 13;
+        position ^= position >> 17;
+        position ^= position << 5;
+        let row = position as usize % (rows - 1);
+        if columns.iter().any(|column| {
+            string_array_value_at_index(column, row) != string_array_value_at_index(column, row + 1)
+        }) {
+            changes += 1;
+            if changes > 2 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn merge_annotations(target: &mut Option<Vec<String>>, source: Option<Vec<String>>) {
@@ -953,11 +1021,10 @@ mod tests {
     }
 
     #[test]
-    fn record_batches_to_data_reuses_entries_for_clustered_series() {
-        // Rows are clustered by series (a, b, a, a, b, c): consecutive rows of
-        // the same series exercise the entry-reuse fast path, while series
-        // transitions fall back to the map lookup. The result must keep the
-        // first-occurrence order and accumulate values per series as before.
+    fn record_batches_to_data_groups_clustered_series() {
+        // Rows are clustered by series (a, b, a, a, b, c) and `a` is revisited
+        // after `b`. The result must keep the first-occurrence order and
+        // accumulate values per series.
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "timestamp",
@@ -1021,6 +1088,169 @@ mod tests {
         assert_eq!(series[0].value, Some((4.0, "4.0".to_string())));
         assert_eq!(series[1].value, Some((5.0, "5.0".to_string())));
         assert_eq!(series[2].value, Some((6.0, "6.0".to_string())));
+    }
+
+    #[test]
+    fn label_strategy_switches_preserve_all_rows_when_probes_miss_changes() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let mut batches = Vec::new();
+        let mut expected = BTreeMap::<String, Vec<(f64, PromSampleValue)>>::new();
+        for layout in 0..3 {
+            let labels = (0..1024)
+                .map(|row| {
+                    let alternating = match layout {
+                        0 => true,
+                        1 => row < 64,
+                        _ => row >= 64,
+                    };
+                    if alternating && row % 2 != 0 {
+                        "b"
+                    } else {
+                        "a"
+                    }
+                })
+                .collect::<Vec<_>>();
+            for (row, label) in labels.iter().enumerate() {
+                let value = (layout * 1024 + row) as f64;
+                expected
+                    .entry((*label).to_string())
+                    .or_default()
+                    .push((value, PromSampleValue::Number(value)));
+            }
+            let batch = RecordBatch::new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondVector::from_values(
+                        (0..1024).map(|row| (layout * 1024 + row) as i64 * 1000),
+                    )) as _,
+                    Arc::new(StringVector::from(
+                        labels.into_iter().map(Some).collect::<Vec<_>>(),
+                    )) as _,
+                    Arc::new(Float64Vector::from(
+                        (0..1024)
+                            .map(|row| Some((layout * 1024 + row) as f64))
+                            .collect::<Vec<_>>(),
+                    )) as _,
+                ],
+            )
+            .unwrap();
+            // The middle batch alternates only over a prefix the probes miss,
+            // so it takes the run path even though most rows are not runs.
+            assert_eq!(
+                prefer_label_runs(&[batch.column(1)], batch.num_rows()),
+                layout == 1
+            );
+            batches.push(batch);
+        }
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, batches).unwrap(),
+            None,
+            ValueType::Matrix,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+        assert_eq!(series.len(), expected.len());
+        for series in series {
+            assert_eq!(series.metric.len(), 1);
+            assert!(series.histograms.is_empty());
+            assert_eq!(
+                series.values,
+                expected.remove(&series.metric["host"]).unwrap()
+            );
+        }
+        assert!(expected.is_empty());
+    }
+
+    #[test]
+    fn label_runs_keep_null_and_empty_labels_apart_across_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("rack", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        // Two batches of two runs each, with only `rack` changing: a null label
+        // and an empty one must not share a run, and the run opening the second
+        // batch continues the series that ended the first one.
+        let mut batches = Vec::new();
+        let mut expected = vec![Vec::new(), Vec::new()];
+        for (batch_index, leading_null) in [true, false].into_iter().enumerate() {
+            let mut racks = Vec::new();
+            let mut values = Vec::new();
+            for row in 0..1024 {
+                let value = (batch_index * 1024 + row) as f64;
+                let null_rack = (row < 512) == leading_null;
+                racks.push((!null_rack).then_some(""));
+                values.push(Some(value));
+                expected[usize::from(!null_rack)].push((value, PromSampleValue::Number(value)));
+            }
+            batches.push(
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_values(
+                            values.iter().map(|value| value.unwrap() as i64 * 1000),
+                        )) as _,
+                        Arc::new(StringVector::from(vec![Some("a"); 1024])) as _,
+                        Arc::new(StringVector::from(racks)) as _,
+                        Arc::new(Float64Vector::from(values)) as _,
+                    ],
+                )
+                .unwrap(),
+            );
+        }
+        for batch in &batches {
+            assert!(prefer_label_runs(
+                &[batch.column(1), batch.column(2)],
+                batch.num_rows()
+            ));
+        }
+        for series in &mut expected {
+            series.sort_by(|left, right| left.0.total_cmp(&right.0));
+        }
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, batches).unwrap(),
+            None,
+            ValueType::Matrix,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+        assert_eq!(series.len(), 2);
+        assert_eq!(
+            series[0].metric,
+            BTreeMap::from([("host".into(), "a".into())])
+        );
+        assert_eq!(series[0].values, expected[0]);
+        assert_eq!(
+            series[1].metric,
+            BTreeMap::from([("host".into(), "a".into()), ("rack".into(), "".into())])
+        );
+        assert_eq!(series[1].values, expected[1]);
     }
 
     #[test]
