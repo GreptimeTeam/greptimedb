@@ -80,7 +80,7 @@ use servers::request_memory_limiter::ServerMemoryLimiter;
 use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
-    MockInstanceImpl, StorageType, assert_wal_delta, setup_test_http_app,
+    MockInstanceImpl, StorageType, assert_wal_delta, build_test_prom_server, setup_test_http_app,
     setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
     setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
@@ -3308,6 +3308,94 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     .await;
 
     guard.remove_all().await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_prometheus_remote_write_batched_skip_wal(distributed: bool) {
+    check_prometheus_remote_write_batched_skip_wal(distributed, false).await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_prometheus_remote_write_v2_batched_skip_wal(distributed: bool) {
+    check_prometheus_remote_write_batched_skip_wal(distributed, true).await;
+}
+
+async fn check_prometheus_remote_write_batched_skip_wal(distributed: bool, v2: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut instance =
+        MockInstanceImpl::new(&format!("prom_bulk_skip_wal_v2_{v2}"), distributed).await;
+    let server = build_test_prom_server(instance.frontend(), true, false).build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    write_prometheus_skip_wal_sample(&client, v2, 1000, None).await;
+    wait_for_data(&client, "SELECT count(*) FROM wal_prom_bulk", "[[1]]").await;
+    let mut before = instance.flush_and_snapshot_wal().await;
+    // Reuse the same batcher across policy transitions to detect leaked policy.
+    for (index, hint) in [None, Some("true"), Some("false"), None]
+        .into_iter()
+        .enumerate()
+    {
+        write_prometheus_skip_wal_sample(&client, v2, (index as i64 + 2) * 1000, hint).await;
+        wait_for_data(
+            &client,
+            "SELECT count(*) FROM wal_prom_bulk",
+            &format!("[[{}]]", index + 2),
+        )
+        .await;
+        let after = instance.flush_and_snapshot_wal().await;
+        assert_wal_delta(&before, &after, hint == Some("true"));
+        before = after;
+    }
+    instance.shutdown().await;
+}
+
+async fn write_prometheus_skip_wal_sample(
+    client: &TestClient,
+    v2: bool,
+    timestamp: i64,
+    hint: Option<&str>,
+) {
+    let payload = if v2 {
+        remote_write_v2::request_with_labels_and_samples(
+            vec![(prom_store::METRIC_NAME_LABEL, "wal_prom_bulk")],
+            vec![RemoteWriteV2Sample {
+                value: 1.0,
+                timestamp,
+                start_timestamp: 0,
+            }],
+        )
+        .encode_to_vec()
+    } else {
+        WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "wal_prom_bulk".to_string(),
+                }],
+                samples: vec![Sample {
+                    value: 1.0,
+                    timestamp,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec()
+    };
+    let mut request = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(prom_store::snappy_compress(&payload).unwrap());
+    if v2 {
+        request = request.header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        );
+    }
+    if let Some(hint) = hint {
+        request = request.header("x-greptime-insert-skip-wal", hint);
+    }
+    assert_eq!(request.send().await.status(), StatusCode::NO_CONTENT);
 }
 
 /// Covers the batched (pending-rows-batcher) Prometheus remote write path, which
@@ -11240,7 +11328,7 @@ async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: boo
                 if let Some(expected_written_nodes) = case.expected_written_nodes {
                     let written_nodes = after
                         .iter()
-                        .filter(|(key, (written_bytes, _))| *written_bytes > before[*key].0)
+                        .filter(|(key, (flushed_sequence, _))| *flushed_sequence > before[*key].0)
                         .map(|((node_id, _), _)| *node_id)
                         .collect::<std::collections::BTreeSet<_>>();
                     assert_eq!(

@@ -3003,6 +3003,7 @@ fn build_schema_v0_bulk_request(region_id: RegionId) -> RegionBulkInsertsRequest
     let raw_data = encode_arrow_ipc(&payload);
 
     RegionBulkInsertsRequest {
+        skip_wal: false,
         region_id,
         payload,
         raw_data,

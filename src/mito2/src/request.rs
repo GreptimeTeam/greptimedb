@@ -560,6 +560,7 @@ pub(crate) struct SenderWriteRequest {
 }
 
 pub(crate) struct SenderBulkRequest {
+    pub(crate) skip_wal: bool,
     pub(crate) sender: OptionOutputTx,
     pub(crate) region_id: RegionId,
     pub(crate) request: BulkPart,

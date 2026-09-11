@@ -49,6 +49,7 @@ mod test {
     use futures_util::{Stream, StreamExt};
     use hyper_util::rt::TokioIo;
     use itertools::Itertools;
+    use rstest::rstest;
     use servers::grpc::builder::GrpcServerBuilder;
     use servers::grpc::flight::{
         FlightCraft, FlightCraftWrapper, FlightRecordBatchSource, FlightRecordBatchStream,
@@ -59,6 +60,7 @@ mod test {
     use servers::query_handler::grpc::GrpcQueryHandler;
     use servers::server::Server;
     use session::context::QueryContextRef;
+    use session::hints::INSERT_SKIP_WAL_HINT;
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Server as TonicServer;
@@ -67,7 +69,7 @@ mod test {
 
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::grpc::query_and_expect;
-    use crate::test_util::{StorageType, setup_grpc_server};
+    use crate::test_util::{MockInstanceImpl, StorageType, assert_wal_delta, setup_grpc_server};
     use crate::tests::test_util::MockInstance;
 
     struct SlowFlightCraft;
@@ -399,6 +401,68 @@ mod test {
         assert!(start.elapsed() >= Duration::from_secs(1));
         assert!(matches!(output.data, OutputData::Stream(_)));
     }
+
+    #[rstest]
+    #[case::standalone_single_region(false, false)]
+    #[case::standalone_partitioned(false, true)]
+    #[case::distributed_single_region(true, false)]
+    #[case::distributed_partitioned(true, true)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_bulk_skip_wal(#[case] distributed: bool, #[case] partitioned: bool) {
+        let mut db =
+            MockInstanceImpl::new(&format!("flight_bulk_skip_wal_{partitioned}"), distributed)
+                .await;
+        let runtime = common_runtime::global_runtime().clone();
+        let handler = GreptimeRequestHandler::new(
+            db.frontend(),
+            None,
+            Some(runtime.clone()),
+            FlightCompression::default(),
+        );
+        let mut server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
+            .flight_handler(Arc::new(handler))
+            .build();
+        server.start("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let client = Database::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            Client::with_urls(vec![server.bind_addr().unwrap().to_string()]),
+        );
+        let partition = if partitioned {
+            " PARTITION ON COLUMNS (a) (a < 0, a >= 0)"
+        } else {
+            ""
+        };
+        client.sql(&format!(
+            "CREATE TABLE foo (ts TIMESTAMP TIME INDEX, a INT NOT NULL, \"B\" STRING, PRIMARY KEY (a)){partition}"
+        )).await.unwrap();
+        let mut before = db.flush_and_snapshot_wal().await;
+        assert_eq!(before.len(), if partitioned { 2 } else { 1 });
+        // The same stream spans both partitions and includes multiple data messages.
+        // Repeated rows still exercise real writes; each round flushes before the next.
+        for hint in [None, Some("true"), Some("false"), None] {
+            let hints = hint.map(|value| [(INSERT_SKIP_WAL_HINT, value)]);
+            test_put_record_batches_with_hints(
+                &client,
+                create_record_batches(-4),
+                hints.as_ref().map_or(&[], |hints| hints.as_slice()),
+            )
+            .await;
+            let after = db.flush_and_snapshot_wal().await;
+            assert_wal_delta(&before, &after, hint == Some("true"));
+            // Both regions must receive rows, not merely exist in the catalog.
+            for (id, &(flushed_sequence, _)) in &after {
+                assert!(
+                    flushed_sequence > before[id].0,
+                    "region {id:?} received no rows"
+                );
+            }
+            before = after;
+        }
+        server.shutdown().await.unwrap();
+        db.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_flight_do_put() {
         common_telemetry::init_default_ut_logging();
@@ -735,6 +799,14 @@ mod test {
     }
 
     async fn test_put_record_batches(client: &Database, record_batches: Vec<RecordBatch>) {
+        test_put_record_batches_with_hints(client, record_batches, &[]).await;
+    }
+
+    async fn test_put_record_batches_with_hints(
+        client: &Database,
+        record_batches: Vec<RecordBatch>,
+        hints: &[(&str, &str)],
+    ) {
         let requests_count = record_batches.len();
         let schema = record_batches[0].schema.arrow_schema().clone();
 
@@ -767,7 +839,7 @@ mod test {
         )
         .boxed();
 
-        let response_stream = client.do_put(stream).await.unwrap();
+        let response_stream = client.do_put_with_hints(stream, hints).await.unwrap();
 
         let responses = response_stream.collect::<Vec<_>>().await;
         let responses_count = responses.len();
