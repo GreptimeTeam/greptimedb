@@ -14,7 +14,7 @@
 
 //! Reads selected metric series from partition ranges.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,7 +23,8 @@ use futures::TryStreamExt;
 use mito_codec::row_converter::{PrimaryKeyFilter, SparsePrimaryKeyCodec};
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
-use tokio::sync::Semaphore;
+use store_api::storage::FileId;
+use tokio::sync::{OnceCell, Semaphore};
 
 #[cfg(feature = "enterprise")]
 use crate::error::InvalidRequestSnafu;
@@ -41,12 +42,13 @@ use crate::read::scan_util::{
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_candidate::validate_metric_metadata;
-use crate::series_index::MetricSeriesId;
+use crate::series_index::{MetricSeriesId, SeriesIndexReadContext};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::prefilter::prefilter_flat_batch_by_primary_key;
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
+use crate::sst::range_index::{SstRangeIndexSearcher, range_index_path};
 
 const TSID_DOMAIN_END: u128 = 1u128 << u64::BITS;
 
@@ -158,15 +160,20 @@ impl SeriesBatchCollector {
 struct MetricSeriesFilter {
     range: SeriesRange,
     series: Arc<HashSet<MetricSeriesId>>,
+    sorted_series: Arc<Vec<MetricSeriesId>>,
     enable_range_cache: bool,
 }
 
 impl MetricSeriesFilter {
     fn new(assigned: &AssignedSeriesBatch) -> Self {
-        let series = assigned.series().iter().copied().collect();
+        let mut sorted_series = assigned.series().to_vec();
+        sorted_series.sort_unstable();
+        sorted_series.dedup();
+        let series = sorted_series.iter().copied().collect();
         Self {
             range: assigned.range(),
             series: Arc::new(series),
+            sorted_series: Arc::new(sorted_series),
             enable_range_cache: assigned.enable_range_cache(),
         }
     }
@@ -251,12 +258,66 @@ fn filter_flat_stream_by_series(
     })
 }
 
+/// Lazily opened range indexes shared by a data partition's range tasks.
+struct SeriesRangeIndexes {
+    context: SeriesIndexReadContext,
+    region_id: store_api::storage::RegionId,
+    searchers: HashMap<FileId, OnceCell<SstRangeIndexSearcher>>,
+}
+
+impl SeriesRangeIndexes {
+    fn new(stream_ctx: &StreamContext) -> Option<Self> {
+        let context = stream_ctx.input.series_index.clone()?;
+        let region_id = stream_ctx.input.region_metadata().region_id;
+        let searchers = stream_ctx
+            .input
+            .files
+            .iter()
+            .filter(|file| {
+                file.region_id() == region_id
+                    && context
+                        .version
+                        .range_indexes
+                        .contains(&file.file_id().file_id())
+            })
+            .map(|file| (file.file_id().file_id(), OnceCell::new()))
+            .collect();
+        Some(Self {
+            context,
+            region_id,
+            searchers,
+        })
+    }
+
+    async fn searcher(
+        &self,
+        file: &crate::sst::file::FileHandle,
+    ) -> Result<Option<&SstRangeIndexSearcher>> {
+        if file.region_id() != self.region_id {
+            return Ok(None);
+        }
+        let file_id = file.file_id().file_id();
+        let Some(cell) = self.searchers.get(&file_id) else {
+            return Ok(None);
+        };
+        cell.get_or_try_init(|| async {
+            SstRangeIndexSearcher::open(
+                self.context.store.clone(),
+                &range_index_path(self.region_id, file_id),
+            )
+            .await
+        })
+        .await
+        .map(Some)
+    }
+}
+
 /// Reads all collected metric series assigned to one partition.
 pub(crate) struct SeriesReader {
     stream_ctx: Arc<StreamContext>,
     partition_ranges: Vec<PartitionRange>,
-    range: SeriesRange,
     filter: MetricSeriesFilter,
+    range_indexes: Option<Arc<SeriesRangeIndexes>>,
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
     range_semaphore: Arc<Semaphore>,
@@ -291,14 +352,14 @@ impl SeriesReader {
             }
         );
 
-        let range = assigned_series.range();
+        let range_indexes = SeriesRangeIndexes::new(&stream_ctx).map(Arc::new);
         let filter = MetricSeriesFilter::new(&assigned_series);
         let codec = SparsePrimaryKeyCodec::new(stream_ctx.input.region_metadata());
         Ok(Self {
             stream_ctx,
             partition_ranges,
-            range,
             filter,
+            range_indexes,
             codec,
             partition_pruner,
             range_semaphore,
@@ -315,11 +376,11 @@ impl SeriesReader {
         for part_range in self.partition_ranges.iter().copied() {
             let stream_ctx = self.stream_ctx.clone();
             let filter = self.filter.clone();
+            let range_indexes = self.range_indexes.clone();
             let codec = self.codec.clone();
             let partition_pruner = self.partition_pruner.clone();
             let range_semaphore = self.range_semaphore.clone();
             let part_metrics = self.part_metrics.clone();
-            let range = self.range;
             tasks.push(common_runtime::spawn_query(async move {
                 let _permit = range_semaphore.acquire().await.map_err(|error| {
                     UnexpectedSnafu {
@@ -330,8 +391,8 @@ impl SeriesReader {
                 build_series_partition_range(
                     stream_ctx,
                     part_range,
-                    range,
                     filter,
+                    range_indexes,
                     codec,
                     partition_pruner,
                     part_metrics,
@@ -366,12 +427,13 @@ impl SeriesReader {
 async fn build_series_partition_range(
     stream_ctx: Arc<StreamContext>,
     part_range: PartitionRange,
-    range: SeriesRange,
     filter: MetricSeriesFilter,
+    range_indexes: Option<Arc<SeriesRangeIndexes>>,
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
     part_metrics: PartitionMetrics,
 ) -> Result<(BoxedRecordBatchStream, usize)> {
+    let range = filter.range;
     let cache_key = filter
         .enable_range_cache
         .then(|| build_series_range_cache_key(&stream_ctx, &part_range, range))
@@ -446,6 +508,7 @@ async fn build_series_partition_range(
                 part_metrics.clone(),
                 ranges,
                 filter.clone(),
+                range_indexes.clone(),
                 codec.clone(),
             );
             sources.push(Box::pin(stream) as BoxedRecordBatchStream);
@@ -493,6 +556,7 @@ fn scan_series_file_ranges(
     part_metrics: PartitionMetrics,
     ranges: smallvec::SmallVec<[crate::sst::parquet::file_range::FileRange; 2]>,
     filter: MetricSeriesFilter,
+    range_indexes: Option<Arc<SeriesRangeIndexes>>,
     codec: SparsePrimaryKeyCodec,
 ) -> impl futures::Stream<Item = Result<datatypes::arrow::record_batch::RecordBatch>> {
     try_stream! {
@@ -507,18 +571,25 @@ fn scan_series_file_ranges(
 
         for range in ranges {
             let build_start = Instant::now();
-            let Some(mut reader) = range
-                .reader_by_primary_key(
-                    primary_key_filter.as_mut(),
-                    fetch_metrics.as_deref(),
-                )
-                .await?
-            else {
-                continue;
+            let searcher = match &range_indexes {
+                Some(indexes) => indexes.searcher(range.file_handle()).await?,
+                None => None,
+            };
+            let reader = if let Some(searcher) = searcher {
+                let row_group_id = u32::try_from(range.row_group_index()).map_err(|_| UnexpectedSnafu {
+                    reason: format!("row group index exceeds u32: {}", range.row_group_index()),
+                }.build())?;
+                let selected = searcher.search(row_group_id, &filter.sorted_series).await?;
+                range.reader_by_row_ranges(selected, fetch_metrics.as_deref()).await?
+            } else {
+                range.reader_by_primary_key(primary_key_filter.as_mut(), fetch_metrics.as_deref()).await?
             };
             let build_cost = build_start.elapsed();
             reader_metrics.build_cost += build_cost;
             part_metrics.inc_build_reader_cost(build_cost);
+            let Some(mut reader) = reader else {
+                continue;
+            };
 
             let scan_start = Instant::now();
             while let Some(record_batch) = reader.next_batch().await? {
@@ -579,6 +650,135 @@ mod tests {
         let mut collector = SeriesBatchCollector::new(partitions).unwrap();
         collector.push(series);
         collector.finish(true).remove(partition)
+    }
+
+    #[tokio::test]
+    async fn range_index_searcher_reuse_and_errors() {
+        use datatypes::arrow::array::{ArrayRef, BinaryArray};
+        use datatypes::arrow::record_batch::RecordBatch;
+        use object_store::ObjectStore;
+        use object_store::services::Memory;
+        use store_api::storage::RegionId;
+
+        use crate::series_index::SeriesIndexVersion;
+        use crate::sst::file::{FileHandle, FileMeta};
+        use crate::sst::range_index::{SstRangeIndexWriter, SstRangeIndexWriterOptions};
+        use crate::test_util::new_noop_file_purger;
+
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let region_id = metadata.region_id;
+        let file_id = FileId::random();
+        let missing_id = FileId::random();
+        let corrupt_id = FileId::random();
+        let indexes = SeriesRangeIndexes {
+            context: SeriesIndexReadContext {
+                store: store.clone(),
+                version: Arc::new(SeriesIndexVersion::default()),
+            },
+            region_id,
+            searchers: [file_id, missing_id, corrupt_id]
+                .into_iter()
+                .map(|id| (id, OnceCell::new()))
+                .collect(),
+        };
+        let file = |region_id, file_id| {
+            FileHandle::new(
+                FileMeta {
+                    region_id,
+                    file_id,
+                    ..Default::default()
+                },
+                new_noop_file_purger(),
+            )
+        };
+        let path = range_index_path(region_id, file_id);
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+        let mut writer = SstRangeIndexWriter::try_new(
+            metadata.clone(),
+            store.clone(),
+            &path,
+            SstRangeIndexWriterOptions::default(),
+        )
+        .await
+        .unwrap();
+        for (group, ids) in [
+            vec![(1, 10), (1, 10), (1, 20), (2, 10)],
+            vec![(2, 10), (2, 10), (2, 20)],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let keys: Vec<_> = ids
+                .into_iter()
+                .map(|(table, tsid)| {
+                    let mut key = Vec::new();
+                    codec.encode_internal(table, tsid, &mut key).unwrap();
+                    key
+                })
+                .collect();
+            let batch = RecordBatch::try_from_iter(vec![(
+                "__primary_key",
+                Arc::new(BinaryArray::from_iter_values(keys)) as ArrayRef,
+            )])
+            .unwrap();
+            writer.write(group as u32, &batch).await.unwrap();
+        }
+        writer.finish().await.unwrap();
+        let indexed_file = file(region_id, file_id);
+        let (first, second) = tokio::join!(
+            indexes.searcher(&indexed_file),
+            indexes.searcher(&indexed_file)
+        );
+        let first = first.unwrap().unwrap();
+        assert!(std::ptr::eq(first, second.unwrap().unwrap()));
+        assert_eq!(
+            vec![0..2, 3..4],
+            first
+                .search(0, &[series(1, 10), series(2, 10)])
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            vec![0..2],
+            first
+                .search(1, &[series(1, 10), series(2, 10)])
+                .await
+                .unwrap()
+        );
+        assert!(first.search(0, &[series(3, 10)]).await.unwrap().is_empty());
+        assert!(
+            indexes
+                .searcher(&file(region_id, FileId::random()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            indexes
+                .searcher(&file(RegionId::new(999, 1), file_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            indexes
+                .searcher(&file(region_id, missing_id))
+                .await
+                .is_err()
+        );
+        store
+            .write(&range_index_path(region_id, corrupt_id), vec![0_u8; 32])
+            .await
+            .unwrap();
+        assert!(
+            indexes
+                .searcher(&file(region_id, corrupt_id))
+                .await
+                .is_err()
+        );
     }
 
     #[test]
