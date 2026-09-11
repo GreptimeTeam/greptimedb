@@ -25,6 +25,6 @@ pub mod req_convert;
 pub mod request;
 pub mod statement;
 pub mod table;
-#[cfg(test)]
-pub(crate) mod tests;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
 pub mod utils;
