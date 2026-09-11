@@ -4,6 +4,8 @@ FEATURES ?=
 TARGET_DIR ?=
 TARGET ?=
 BUILD_BIN ?= greptime
+BUILD_PACKAGE ?= $(if $(filter greptime,$(strip $(BUILD_BIN))),cmd)
+BUILD_PACKAGE_OPT = $(if $(strip $(BUILD_PACKAGE)),-p ${BUILD_PACKAGE})
 CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
@@ -84,7 +86,7 @@ endif
 
 .PHONY: build
 build: ## Build debug version greptime.
-	cargo ${CARGO_EXTENSION} build ${CARGO_BUILD_OPTS}
+	cargo ${CARGO_EXTENSION} build ${BUILD_PACKAGE_OPT} ${CARGO_BUILD_OPTS}
 
 .PHONY: build-by-dev-builder
 build-by-dev-builder: ## Build greptime by dev-builder.
@@ -93,6 +95,8 @@ build-by-dev-builder: ## Build greptime by dev-builder.
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make build \
+	BUILD_PACKAGE="${BUILD_PACKAGE}" \
+	BUILD_BIN="${BUILD_BIN}" \
 	CARGO_EXTENSION="${CARGO_EXTENSION}" \
 	CARGO_PROFILE=${CARGO_PROFILE} \
 	FEATURES=${FEATURES} \
@@ -108,6 +112,8 @@ build-riscv64-bin: ## Build greptime binary for riscv64 (linux-gnu) by the riscv
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-riscv64:${DEV_BUILDER_RISCV64_IMAGE_TAG} \
 	make build \
+	BUILD_PACKAGE="${BUILD_PACKAGE}" \
+	BUILD_BIN="${BUILD_BIN}" \
 	CARGO_EXTENSION="${CARGO_EXTENSION}" \
 	CARGO_PROFILE=${CARGO_PROFILE} \
 	FEATURES=${FEATURES} \
@@ -122,6 +128,8 @@ build-android-bin: ## Build greptime binary for android.
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:${DEV_BUILDER_IMAGE_TAG} \
 	make build \
+	BUILD_PACKAGE="${BUILD_PACKAGE}" \
+	BUILD_BIN="${BUILD_BIN}" \
 	CARGO_EXTENSION="ndk --platform 23 -t aarch64-linux-android" \
 	CARGO_PROFILE=release \
 	FEATURES="${FEATURES}" \
@@ -278,6 +286,7 @@ dashboards: ## Generate the Grafana dashboards for standalone mode and intermedi
 	@./grafana/scripts/gen-dashboards.sh
 
 ##@ Docs
+.PHONY: config-docs
 config-docs: ## Generate configuration documentation from toml files.
 	docker run --rm \
     -v ${PWD}:/greptimedb \
