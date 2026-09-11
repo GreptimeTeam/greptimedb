@@ -37,12 +37,9 @@ use common_stat::ResourceStatImpl;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
-use flow::{
-    FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient, FrontendInvoker,
-};
+use flow::{FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient};
 use meta_client::{MetaClientOptions, MetaClientType};
 use plugins::flownode::context::GrpcConfigureContext;
-use servers::addrs;
 use servers::configurator::GrpcBuilderConfiguratorRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -410,25 +407,6 @@ impl StartCommand {
             .build()
             .context(StartFlownodeSnafu)?;
         flownode.setup_services(services);
-        let flownode = flownode;
-
-        let invoker = FrontendInvoker::build_from(
-            flownode.flow_engine().streaming_engine(),
-            catalog_manager.clone(),
-            cached_meta_backend.clone(),
-            layered_cache_registry.clone(),
-            meta_client.clone(),
-            client,
-            addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
-        )
-        .await
-        .context(StartFlownodeSnafu)?;
-        flownode
-            .flow_engine()
-            .streaming_engine()
-            // TODO(discord9): refactor and avoid circular reference
-            .set_frontend_invoker(invoker)
-            .await;
 
         Ok(Instance::new(flownode, guard))
     }

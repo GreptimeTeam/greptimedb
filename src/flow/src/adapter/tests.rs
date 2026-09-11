@@ -15,11 +15,256 @@
 //! Mock test for adapter module
 //! TODO(discord9): write mock test
 
-use datatypes::schema::{ColumnSchema, SchemaBuilder};
-use store_api::storage::ConcreteDataType;
+use api::v1::SemanticType;
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
+use datafusion::catalog::MemTable;
+use datafusion::datasource::provider_as_source;
+use datafusion_common::TableReference;
+use datafusion_expr::LogicalPlanBuilder;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaBuilder};
+use store_api::storage::{ConcreteDataType, TableId};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 
 use super::*;
+
+#[test]
+fn stateless_output_aliases_are_matched_by_position() {
+    let output = vec![ColumnSchema::new(
+        "output_alias",
+        ConcreteDataType::int32_datatype(),
+        false,
+    )];
+    let sink = vec![ColumnSchema::new(
+        "sink_column",
+        ConcreteDataType::int32_datatype(),
+        false,
+    )];
+    assert!(validate_sink_layout(&output, &sink).is_ok());
+    let proto = crate::adapter::util::column_schemas_to_proto(sink, &[]).unwrap();
+    assert_eq!(proto[0].column_name, "sink_column");
+}
+
+#[test]
+fn stateless_sink_schema_has_tag_and_timestamp_semantics() {
+    let schema = vec![
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("ts", ConcreteDataType::timestamp_second_datatype(), false)
+            .with_time_index(true),
+    ];
+    let proto =
+        crate::adapter::util::column_schemas_to_proto(schema, &["host".to_string()]).unwrap();
+    assert_eq!(proto[0].semantic_type, SemanticType::Tag as i32);
+    assert_eq!(proto[1].semantic_type, SemanticType::Timestamp as i32);
+}
+
+#[test]
+fn stateless_resolves_suffix_by_output_arity() {
+    let ordinary = ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false);
+    let update_at = ColumnSchema::new(
+        AUTO_CREATED_UPDATE_AT_TS_COL,
+        ConcreteDataType::timestamp_second_datatype(),
+        true,
+    );
+    // Equal arity is an ordinary sink, despite the reserved-looking name.
+    assert!(
+        resolve_sink_layout(
+            &[ordinary.clone(), update_at.clone()],
+            &[ordinary.clone(), update_at.clone()]
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        resolve_sink_layout(
+            std::slice::from_ref(&ordinary),
+            &[ordinary.clone(), update_at]
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn stateless_explicit_timestamp_compatibility_requires_default_and_lineage_absence() {
+    let source = Arc::new(Schema::new(vec![
+        ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let output = vec![ColumnSchema::new(
+        "value",
+        ConcreteDataType::int32_datatype(),
+        false,
+    )];
+    let sink_ts = ColumnSchema::new(
+        "event_time",
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+    )
+    .with_time_index(true)
+    .with_default_constraint(Some(ColumnDefaultConstraint::Function("now()".into())))
+    .unwrap();
+    assert!(is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(0)],
+        &[output[0].clone(), sink_ts.clone()],
+        &source,
+    ));
+    assert!(!is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(1)],
+        &[output[0].clone(), sink_ts],
+        &source,
+    ));
+    let sink_ts_without_default = ColumnSchema::new(
+        "event_time",
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+    )
+    .with_time_index(true);
+    assert!(!is_explicit_source_timestamp_compatibility(
+        &output,
+        &[Some(0)],
+        &[output[0].clone(), sink_ts_without_default],
+        &source,
+    ));
+}
+
+#[test]
+fn stateless_rejects_reserved_auto_names_for_auto_sink() {
+    assert!(
+        validate_auto_column_names(&[ColumnSchema::new(
+            AUTO_CREATED_UPDATE_AT_TS_COL,
+            ConcreteDataType::int32_datatype(),
+            true,
+        )])
+        .is_err()
+    );
+    assert!(
+        validate_auto_column_names(&[ColumnSchema::new(
+            AUTO_CREATED_PLACEHOLDER_TS_COL,
+            ConcreteDataType::int32_datatype(),
+            true,
+        )])
+        .is_err()
+    );
+}
+
+#[test]
+fn stateless_distinct_preserves_direct_column_lineage() {
+    let source = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::int32_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let provider = MemTable::try_new(
+        Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+            Field::new("number", ArrowDataType::Int32, false),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+        ])),
+        vec![vec![]],
+    )
+    .unwrap();
+    let plan = LogicalPlanBuilder::scan(
+        TableReference::bare("source"),
+        provider_as_source(Arc::new(provider)),
+        None,
+    )
+    .unwrap()
+    .project(vec![datafusion_expr::col("number").alias("dis")])
+    .unwrap()
+    .distinct()
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let (output, lineage) = super::output_column_schemas(&plan, &source).unwrap();
+    assert_eq!(output[0].name, "dis");
+    assert_eq!(lineage, vec![Some(0)]);
+    let relation = super::relation_desc_from_output(&output, &lineage, &[0]);
+    assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
+}
+
+#[test]
+fn stateless_normalizes_dictionary_output_type() {
+    let field = Field::new_dictionary("host", ArrowDataType::UInt32, ArrowDataType::Utf8, true);
+    let arrow_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![field]));
+    let provider = MemTable::try_new(arrow_schema.clone(), vec![vec![]]).unwrap();
+    let plan = LogicalPlanBuilder::scan(
+        TableReference::bare("source"),
+        provider_as_source(Arc::new(provider)),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let source = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "host",
+        ConcreteDataType::string_datatype(),
+        true,
+    )]));
+    let (output, lineage) = super::output_column_schemas(&plan, &source).unwrap();
+    assert_eq!(output[0].data_type, ConcreteDataType::string_datatype());
+    assert_eq!(lineage, vec![Some(0)]);
+
+    let relation = super::relation_desc_from_output(&output, &lineage, &[0]);
+    assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
+}
+
+#[test]
+fn stateless_allows_only_trailing_auto_columns() {
+    let ordinary = ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false);
+    let update_at = ColumnSchema::new(
+        AUTO_CREATED_UPDATE_AT_TS_COL,
+        ConcreteDataType::timestamp_second_datatype(),
+        true,
+    );
+    let placeholder = ColumnSchema::new(
+        AUTO_CREATED_PLACEHOLDER_TS_COL,
+        ConcreteDataType::timestamp_microsecond_datatype(),
+        true,
+    )
+    .with_time_index(true);
+
+    assert_eq!(
+        sink_output_column_count(&[ordinary.clone(), update_at.clone()]).unwrap(),
+        1
+    );
+    assert_eq!(
+        sink_output_column_count(&[ordinary.clone(), update_at, placeholder]).unwrap(),
+        1
+    );
+    assert!(
+        validate_sink_layout(
+            std::slice::from_ref(&ordinary),
+            std::slice::from_ref(&ordinary)
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_sink_layout(
+            &[ordinary],
+            &[
+                ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+                ColumnSchema::new("unexpected", ConcreteDataType::int32_datatype(), false),
+            ]
+        )
+        .is_err()
+    );
+}
 
 pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
     table_id: TableId,
@@ -63,23 +308,794 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
 fn mock_harness_flow_node_manager() {}
 
 #[test]
-fn test_expire_after_secs_to_millis() {
-    assert_eq!(expire_after_secs_to_millis(300).unwrap(), 300_000);
-    assert_eq!(expire_after_secs_to_millis(0).unwrap(), 0);
+fn stateless_captured_slot_rejects_inactive_or_detached_slot() {
+    let slot = super::StatelessFlowSlot {
+        runtime: Arc::new(tokio::sync::RwLock::new(
+            super::StatelessFlowRuntime::default(),
+        )),
+        active: std::sync::atomic::AtomicBool::new(false),
+        rebuild_attempts: std::sync::atomic::AtomicUsize::new(0),
+    };
 
-    let max_secs = i64::MAX / 1_000;
-    assert_eq!(
-        expire_after_secs_to_millis(max_secs).unwrap(),
-        max_secs * 1_000
-    );
+    assert!(super::validate_captured_slot(&slot, None, 1, 42).is_err());
 }
 
 #[test]
-fn test_expire_after_secs_to_millis_invalid() {
-    let invalid_values = [i64::MAX / 1_000 + 1, -1];
+fn stateless_captured_slot_rejects_source_mismatch() {
+    let slot = super::StatelessFlowSlot {
+        runtime: Arc::new(tokio::sync::RwLock::new(
+            super::StatelessFlowRuntime::default(),
+        )),
+        active: std::sync::atomic::AtomicBool::new(true),
+        rebuild_attempts: std::sync::atomic::AtomicUsize::new(0),
+    };
 
-    for invalid_secs in invalid_values {
-        let error = expire_after_secs_to_millis(invalid_secs).unwrap_err();
-        assert!(matches!(error, Error::InvalidQuery { .. }));
+    assert!(super::validate_captured_slot(&slot, Some(2), 1, 42).is_err());
+}
+
+#[derive(Default)]
+struct RecordingSink {
+    inserts: std::sync::Mutex<Vec<api::v1::RowInsertRequest>>,
+    failed_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError for RecordingSink {
+    async fn do_query(
+        &self,
+        request: api::v1::greptime_request::Request,
+        _: session::context::QueryContextRef,
+    ) -> std::result::Result<common_query::Output, BoxedError> {
+        let api::v1::greptime_request::Request::RowInserts(request) = request else {
+            panic!("unexpected frontend request");
+        };
+        if request
+            .inserts
+            .iter()
+            .any(|insert| insert.table_name == "failed_sink")
+        {
+            self.failed_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(BoxedError::new(
+                InvalidQuerySnafu {
+                    reason: "injected sink failure",
+                }
+                .build(),
+            ));
+        }
+        let count = request
+            .inserts
+            .iter()
+            .map(|insert| insert.rows.as_ref().unwrap().rows.len())
+            .sum();
+        self.inserts.lock().unwrap().extend(request.inserts);
+        Ok(common_query::Output::new_with_affected_rows(count))
     }
+}
+
+struct StreamingHarness {
+    engine: StreamingEngine,
+    metadata: TableMetadataManagerRef,
+    catalog: Arc<catalog::memory::MemoryCatalogManager>,
+    sink: Arc<RecordingSink>,
+}
+
+impl StreamingHarness {
+    async fn new() -> Self {
+        let metadata = Arc::new(common_meta::key::TableMetadataManager::new(Arc::new(
+            common_meta::kv_backend::memory::MemoryKvBackend::new(),
+        )));
+        metadata.init().await.unwrap();
+        let catalog = catalog::memory::new_memory_catalog_manager().unwrap();
+        let query = query::QueryEngineFactory::new(
+            catalog.clone(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let sink = Arc::new(RecordingSink::default());
+        let handler: Arc<
+            dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+        > = sink.clone();
+        let frontend =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        Self {
+            engine: StreamingEngine::new(None, query, metadata.clone(), Arc::new(frontend)),
+            metadata,
+            catalog,
+            sink,
+        }
+    }
+
+    async fn table(&self, id: u32, name: &str) -> TableInfo {
+        let info = new_test_table_info_with_name(id, name, []);
+        self.metadata
+            .create_table_metadata(
+                info.clone(),
+                common_meta::key::table_route::TableRouteValue::physical(vec![]),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        self.register(&info);
+        info
+    }
+
+    fn register(&self, info: &TableInfo) {
+        self.catalog
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: info.catalog_name.clone(),
+                schema: info.schema_name.clone(),
+                table_name: info.name.clone(),
+                table_id: info.ident.table_id,
+                table: table::test_util::EmptyTable::from_table_info(info),
+            })
+            .unwrap();
+    }
+
+    async fn flow(&self, id: FlowId, source: u32, sink: &str, sql: &str) {
+        self.engine
+            .create_flow_inner(CreateFlowArgs {
+                flow_id: id,
+                source_table_ids: vec![source],
+                sink_table_name: ["greptime".into(), "public".into(), sink.into()],
+                create_if_not_exists: false,
+                or_replace: false,
+                expire_after: None,
+                eval_interval: None,
+                comment: None,
+                sql: sql.into(),
+                flow_options: Default::default(),
+                query_ctx: Some(session::context::QueryContext::arc().as_ref().clone()),
+                eval_schedule: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    fn take_numbers(&self) -> Vec<(String, Vec<i32>)> {
+        let inserts = std::mem::take(&mut *self.sink.inserts.lock().unwrap());
+        inserts
+            .into_iter()
+            .map(|insert| {
+                let mut values = insert
+                    .rows
+                    .unwrap()
+                    .rows
+                    .into_iter()
+                    .map(|row| {
+                        let Some(api::v1::value::ValueData::I32Value(value)) =
+                            row.values[0].value_data
+                        else {
+                            panic!("expected int32 output");
+                        };
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                values.sort_unstable();
+                (insert.table_name, values)
+            })
+            .collect()
+    }
+}
+
+fn mirror_request(table: u32, region: u32, values: &[i32]) -> api::v1::region::InsertRequest {
+    use api::v1::value::ValueData;
+    api::v1::region::InsertRequest {
+        region_id: RegionId::new(table, region).as_u64(),
+        rows: Some(api::v1::Rows {
+            schema: util::column_schemas_to_proto(
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ],
+                &["number".into()],
+            )
+            .unwrap(),
+            rows: values
+                .iter()
+                .map(|value| api::v1::Row {
+                    values: vec![
+                        api::v1::Value {
+                            value_data: Some(ValueData::I32Value(*value)),
+                        },
+                        api::v1::Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1)),
+                        },
+                    ],
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn stateless_failed_flow_and_table_do_not_starve_healthy_sinks() {
+    let h = StreamingHarness::new().await;
+    h.table(1, "source_a").await;
+    h.table(2, "source_b").await;
+    h.table(3, "failed_sink").await;
+    h.table(4, "healthy_a").await;
+    h.table(5, "healthy_b").await;
+    h.flow(1, 1, "failed_sink", "SELECT number, ts FROM source_a")
+        .await;
+    h.flow(2, 1, "healthy_a", "SELECT number, ts FROM source_a")
+        .await;
+    h.flow(3, 2, "healthy_b", "SELECT number, ts FROM source_b")
+        .await;
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[11]), mirror_request(2, 0, &[22])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        h.take_numbers(),
+        vec![
+            ("healthy_a".into(), vec![11]),
+            ("healthy_b".into(), vec![22])
+        ]
+    );
+    let failed_slot = h
+        .engine
+        .flow_ids_for_table(1)
+        .await
+        .into_iter()
+        .find(|(id, _)| *id == 1)
+        .unwrap()
+        .1;
+    assert!(failed_slot.runtime.read().await.failed_rebuild.is_none());
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[12])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_a".into(), vec![12])]);
+    assert_eq!(
+        h.sink
+            .failed_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert!(failed_slot.runtime.read().await.failed_rebuild.is_none());
+
+    let mut malformed = mirror_request(1, 1, &[99]);
+    malformed.rows.as_mut().unwrap().schema.pop();
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![
+                    mirror_request(1, 0, &[33]),
+                    malformed,
+                    mirror_request(1, 2, &[44]),
+                    mirror_request(2, 0, &[55])
+                ],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_b".into(), vec![55])]);
+    h.engine.remove_flow_inner(1).await.unwrap();
+    h.engine
+        .handle_inserts_inner(api::v1::region::InsertRequests {
+            requests: vec![mirror_request(1, 0, &[66])],
+        })
+        .await
+        .unwrap();
+    assert_eq!(h.take_numbers(), vec![("healthy_a".into(), vec![66])]);
+}
+
+#[tokio::test]
+async fn stateless_distinct_groups_regions_without_retaining_previous_envelope() {
+    let h = StreamingHarness::new().await;
+    h.table(1, "source").await;
+    h.table(2, "sink").await;
+    h.flow(
+        1,
+        1,
+        "sink",
+        "SELECT DISTINCT number AS value, ts FROM source",
+    )
+    .await;
+    for _ in 0..2 {
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[1, 2]), mirror_request(1, 1, &[2, 3])],
+            })
+            .await
+            .unwrap();
+        assert_eq!(h.take_numbers(), vec![("sink".into(), vec![1, 2, 3])]);
+    }
+}
+
+#[tokio::test]
+async fn stateless_schema_bump_rebuilds_for_current_and_subsequent_writes() {
+    let h = StreamingHarness::new().await;
+    let mut source = h.table(1, "source").await;
+    h.table(2, "sink").await;
+    h.flow(1, 1, "sink", "SELECT number, ts FROM source").await;
+    let current = h
+        .metadata
+        .table_info_manager()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut columns = source.meta.schema.column_schemas().to_vec();
+    columns.push(ColumnSchema::new(
+        "extra",
+        ConcreteDataType::int32_datatype(),
+        true,
+    ));
+    source.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns)
+            .unwrap()
+            .version(124)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current, None, source.clone())
+        .await
+        .unwrap();
+    // The metadata is newer than the catalog provider: do not publish a plan
+    // carrying old column indices under the new version.
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[99])],
+            })
+            .await
+            .is_err()
+    );
+    assert!(h.take_numbers().is_empty());
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    let slot = h
+        .engine
+        .flow_ids_for_table(1)
+        .await
+        .into_iter()
+        .find(|(id, _)| *id == 1)
+        .unwrap()
+        .1;
+    assert_eq!(
+        slot.runtime
+            .read()
+            .await
+            .flow
+            .as_ref()
+            .unwrap()
+            .source_schema_version,
+        123
+    );
+    // The stale-provider failure above is cooled down; expire this private test deadline
+    // after repairing the catalog so the existing rebuild behavior remains deterministic.
+    slot.runtime.write().await.failed_rebuild = Some((124, tokio::time::Instant::now()));
+    let (left_rows, types, version) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 0, &[5]))
+        .await
+        .unwrap();
+    let (right_rows, _, _) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 1, &[6]))
+        .await
+        .unwrap();
+    // Queue both readers behind a writer. Releasing it grants both readers,
+    // so neither rebuild can publish before both writes observe the old runtime.
+    let lease = slot.runtime.write().await;
+    let left = h
+        .engine
+        .execute_flow(1, slot.clone(), 1, left_rows, &types, version);
+    let right = h
+        .engine
+        .execute_flow(1, slot.clone(), 1, right_rows, &types, version);
+    tokio::pin!(left, right);
+    assert!(futures::poll!(&mut left).is_pending());
+    assert!(futures::poll!(&mut right).is_pending());
+    drop(lease);
+    let (left, right) = tokio::join!(left, right);
+    left.unwrap();
+    right.unwrap();
+    let mut inserted = h.take_numbers();
+    inserted.sort();
+    assert_eq!(
+        inserted,
+        vec![("sink".into(), vec![5]), ("sink".into(), vec![6])]
+    );
+    assert_eq!(
+        slot.runtime
+            .read()
+            .await
+            .flow
+            .as_ref()
+            .unwrap()
+            .source_schema_version,
+        124
+    );
+    for number in [7, 8] {
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[number])],
+            })
+            .await
+            .unwrap();
+        assert_eq!(h.take_numbers(), vec![("sink".into(), vec![number])]);
+    }
+}
+
+#[tokio::test]
+async fn stateless_failed_schema_rebuild_is_cooled_down_and_retried() {
+    let h = StreamingHarness::new().await;
+    let mut source = h.table(1, "source").await;
+    let mut sink = h.table(2, "sink").await;
+    h.table(3, "healthy_sink").await;
+    h.flow(1, 1, "sink", "SELECT * FROM source").await;
+    h.flow(2, 1, "healthy_sink", "SELECT number, ts FROM source")
+        .await;
+    let slot = h
+        .engine
+        .flow_ids_for_table(1)
+        .await
+        .into_iter()
+        .find(|(id, _)| *id == 1)
+        .unwrap()
+        .1;
+    let current = h
+        .metadata
+        .table_info_manager()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut columns = source.meta.schema.column_schemas().to_vec();
+    columns.push(ColumnSchema::new(
+        "extra",
+        ConcreteDataType::int32_datatype(),
+        true,
+    ));
+    source.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns.clone())
+            .unwrap()
+            .version(124)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current, None, source.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+
+    // Queue two stale runtimes before either can take the publication writer. The second
+    // must recheck the failed attempt under the writer rather than rebuilding again.
+    let (left_rows, types, version) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 0, &[1]))
+        .await
+        .unwrap();
+    let (right_rows, _, _) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 1, &[2]))
+        .await
+        .unwrap();
+    let lease = slot.runtime.write().await;
+    let left = h
+        .engine
+        .execute_flow(1, slot.clone(), 1, left_rows, &types, version);
+    let right = h
+        .engine
+        .execute_flow(1, slot.clone(), 1, right_rows, &types, version);
+    tokio::pin!(left, right);
+    assert!(futures::poll!(&mut left).is_pending());
+    assert!(futures::poll!(&mut right).is_pending());
+    drop(lease);
+    let (left, right) = tokio::join!(left, right);
+    let errors = [
+        left.unwrap_err().to_string(),
+        right.unwrap_err().to_string(),
+    ];
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("Flow output has 3 columns, but sink has 2 columns"))
+    );
+    assert!(errors.iter().any(|error| {
+        error.contains("Flow 1 schema rebuild for source version 124 is cooling down")
+    }));
+    assert_eq!(
+        slot.rebuild_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let deadline = slot.runtime.read().await.failed_rebuild.unwrap();
+
+    // SELECT * is still invalid, while the sibling flow keeps producing output.
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[3])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_sink".into(), vec![3])]);
+    assert_eq!(slot.runtime.read().await.failed_rebuild, Some(deadline));
+    assert_eq!(
+        slot.rebuild_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // A new source version bypasses the old version's cooldown immediately.
+    let current = h
+        .metadata
+        .table_info_manager()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap();
+    source.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns.clone())
+            .unwrap()
+            .version(125)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current, None, source.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[5])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        slot.rebuild_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_sink".into(), vec![5])]);
+
+    // Make the rebuilt SELECT * layout valid, then expire only this test's private deadline.
+    let current_sink = h
+        .metadata
+        .table_info_manager()
+        .get(2)
+        .await
+        .unwrap()
+        .unwrap();
+    sink.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns)
+            .unwrap()
+            .version(124)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current_sink, None, sink.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: sink.catalog_name.clone(),
+            schema: sink.schema_name.clone(),
+            table_name: sink.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    h.register(&sink);
+    slot.runtime.write().await.failed_rebuild = Some((125, tokio::time::Instant::now()));
+    h.engine
+        .handle_inserts_inner(api::v1::region::InsertRequests {
+            requests: vec![mirror_request(1, 0, &[6])],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        slot.rebuild_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        3
+    );
+    assert!(slot.runtime.read().await.failed_rebuild.is_none());
+    let mut inserted = h.take_numbers();
+    inserted.sort();
+    assert_eq!(
+        inserted,
+        vec![("healthy_sink".into(), vec![6]), ("sink".into(), vec![6])]
+    );
+
+    // IF NOT EXISTS is a no-op and preserves cooldown; a successful replacement clears it.
+    let current = h
+        .metadata
+        .table_info_manager()
+        .get(1)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut columns = source.meta.schema.column_schemas().to_vec();
+    columns.push(ColumnSchema::new(
+        "extra2",
+        ConcreteDataType::int32_datatype(),
+        true,
+    ));
+    source.meta.schema = Arc::new(
+        SchemaBuilder::try_from(columns)
+            .unwrap()
+            .version(126)
+            .build()
+            .unwrap(),
+    );
+    h.metadata
+        .update_table_info(&current, None, source.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    assert!(
+        h.engine
+            .handle_inserts_inner(api::v1::region::InsertRequests {
+                requests: vec![mirror_request(1, 0, &[7])],
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(h.take_numbers(), vec![("healthy_sink".into(), vec![7])]);
+    let cooldown = slot.runtime.read().await.failed_rebuild.unwrap();
+    let mut args = slot
+        .runtime
+        .read()
+        .await
+        .flow
+        .as_ref()
+        .unwrap()
+        .create_args
+        .clone();
+    args.or_replace = true;
+    assert!(h.engine.create_flow_inner(args.clone()).await.is_err());
+    assert_eq!(slot.runtime.read().await.failed_rebuild, Some(cooldown));
+    let current_sink = h
+        .metadata
+        .table_info_manager()
+        .get(2)
+        .await
+        .unwrap()
+        .unwrap();
+    sink.meta.schema = source.meta.schema.clone();
+    h.metadata
+        .update_table_info(&current_sink, None, sink.clone())
+        .await
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: sink.catalog_name.clone(),
+            schema: sink.schema_name.clone(),
+            table_name: sink.name.clone(),
+        })
+        .unwrap();
+    h.register(&source);
+    h.register(&sink);
+    args.or_replace = false;
+    args.create_if_not_exists = true;
+    h.engine.create_flow_inner(args.clone()).await.unwrap();
+    assert_eq!(slot.runtime.read().await.failed_rebuild, Some(cooldown));
+    args.create_if_not_exists = false;
+    args.or_replace = true;
+    h.engine.create_flow_inner(args).await.unwrap();
+    assert!(slot.runtime.read().await.failed_rebuild.is_none());
+}
+
+#[tokio::test]
+async fn stateless_rejects_wrong_provider_identity_and_detached_lifecycle() {
+    let h = StreamingHarness::new().await;
+    let source = h.table(1, "source").await;
+    h.table(2, "sink").await;
+    h.flow(1, 1, "sink", "SELECT number, ts FROM source").await;
+    let old_slot = h.engine.flow_ids_for_table(1).await.pop().unwrap().1;
+    old_slot.runtime.write().await.failed_rebuild = Some((123, tokio::time::Instant::now()));
+    let (rows, types, version) = h
+        .engine
+        .handle_insert_request(mirror_request(1, 0, &[9]))
+        .await
+        .unwrap();
+    h.engine.remove_flow_inner(1).await.unwrap();
+    h.flow(1, 1, "sink", "SELECT number, ts FROM source").await;
+    let fresh_slot = h.engine.flow_ids_for_table(1).await.pop().unwrap().1;
+    assert!(fresh_slot.runtime.read().await.failed_rebuild.is_none());
+    assert!(
+        h.engine
+            .execute_flow(1, old_slot, 1, rows, &types, version)
+            .await
+            .is_err()
+    );
+    assert!(h.take_numbers().is_empty());
+
+    h.catalog
+        .deregister_table_sync(catalog::DeregisterTableRequest {
+            catalog: source.catalog_name.clone(),
+            schema: source.schema_name.clone(),
+            table_name: source.name.clone(),
+        })
+        .unwrap();
+    let mut wrong = source.clone();
+    wrong.ident.table_id = 99;
+    h.register(&wrong);
+    let args = h
+        .engine
+        .stateless_flows
+        .read()
+        .await
+        .get(&1)
+        .unwrap()
+        .runtime
+        .read()
+        .await
+        .flow
+        .as_ref()
+        .unwrap()
+        .create_args
+        .clone();
+    assert!(h.engine.build_stateless_flow(&args, false).await.is_err());
+    assert!(h.take_numbers().is_empty());
 }

@@ -57,7 +57,7 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use flow::{
     FlowDualEngineRef, FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient,
-    FrontendInvoker, GrpcQueryHandlerWithBoxedError,
+    GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
 use frontend::instance::builder::FrontendBuilder;
@@ -702,22 +702,6 @@ impl StartCommand {
         frontend_instance_handler
             .set_handler(weak_grpc_handler)
             .await;
-
-        // set the frontend invoker for flownode
-        let flow_streaming_engine = flow_engine.streaming_engine();
-        // flow server need to be able to use frontend to write insert requests back
-        let invoker = FrontendInvoker::build_from(
-            flow_streaming_engine.clone(),
-            catalog_manager.clone(),
-            kv_backend.clone(),
-            layered_cache_registry.clone(),
-            procedure_executor,
-            node_manager.clone(),
-            fe_instance.frontend_peer_addr().to_string(),
-        )
-        .await
-        .context(StartFlownodeSnafu)?;
-        flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
