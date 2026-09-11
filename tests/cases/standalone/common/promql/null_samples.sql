@@ -1,68 +1,71 @@
+-- NULL fields are missing samples, not zero-valued samples.
 CREATE TABLE null_samples (
     ts TIMESTAMP(3) TIME INDEX,
-    "region" STRING,
-    host STRING,
+    host STRING PRIMARY KEY,
     val DOUBLE,
-    PRIMARY KEY ("region", host)
 );
 
 INSERT INTO null_samples VALUES
-    (0, 'empty', 'e', NULL),
-    (1000, 'empty', 'e', NULL),
-    (0, 'ok', 'o', 1.0),
-    (1000, 'ok', 'o', 2.0),
-    (2000, 'ok', 'o', 3.0);
-
--- The `empty` series has no sample in any window, so it must not reach the aggregation.
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 15, '1s') avg by (region) (rate(null_samples[4s]));
-
-DROP TABLE null_samples;
-
-CREATE TABLE sparse_samples (
-    ts TIMESTAMP(3) TIME INDEX,
-    host STRING PRIMARY KEY,
-    val DOUBLE
-);
-
-INSERT INTO sparse_samples VALUES
     (0, 'a', 1.0),
     (1000, 'a', NULL),
     (2000, 'a', NULL),
-    (3000, 'a', 4.0);
+    (3000, 'a', 4.0),
+    (0, 'b', NULL),
+    (1000, 'b', NULL),
+    (2000, 'b', NULL),
+    (3000, 'b', NULL);
 
--- Every window below holds two samples, 1.0 at 0s and 4.0 at 3s.
-TQL EVAL (3, 3, '1s') rate(sparse_samples[4s]);
+-- At t=2 the trailing NULLs must not hide 1; at t=3 count must be 2.
+-- At t=7 the left-open window is empty. Valid results must disappear.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (2, 7, '1s') count_over_time(null_samples{host="a"}[4s]);
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (2, 7, '1s') last_over_time(null_samples{host="a"}[4s]);
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (2, 7, '1s') present_over_time(null_samples{host="a"}[4s]);
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (2, 7, '1s') absent_over_time(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') increase(sparse_samples[4s]);
+-- All-NULL windows have no samples: only absent_over_time returns 1.
+TQL EVAL (3, 3, '1s') count_over_time(null_samples{host="b"}[4s]);
+TQL EVAL (3, 3, '1s') last_over_time(null_samples{host="b"}[4s]);
+TQL EVAL (3, 3, '1s') present_over_time(null_samples{host="b"}[4s]);
+TQL EVAL (3, 3, '1s') absent_over_time(null_samples{host="b"}[4s]);
 
-TQL EVAL (3, 3, '1s') delta(sparse_samples[4s]);
+-- Every function below sees the same two samples, 1.0 at 0s and 4.0 at 3s.
+TQL EVAL (3, 3, '1s') rate(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') idelta(sparse_samples[4s]);
+TQL EVAL (3, 3, '1s') increase(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') irate(sparse_samples[4s]);
+TQL EVAL (3, 3, '1s') delta(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') changes(sparse_samples[4s]);
+TQL EVAL (3, 3, '1s') idelta(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') resets(sparse_samples[4s]);
+TQL EVAL (3, 3, '1s') irate(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') avg_over_time(sparse_samples[4s]);
+TQL EVAL (3, 3, '1s') changes(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') stddev_over_time(sparse_samples[4s]);
+TQL EVAL (3, 3, '1s') resets(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') stdvar_over_time(sparse_samples[4s]);
+TQL EVAL (3, 3, '1s') avg_over_time(null_samples{host="a"}[4s]);
 
-TQL EVAL (3, 3, '1s') quantile_over_time(0.5, sparse_samples[4s]);
+TQL EVAL (3, 3, '1s') stddev_over_time(null_samples{host="a"}[4s]);
 
--- A window whose only slot is NULL holds no sample.
-TQL EVAL (1, 1, '1s') rate(sparse_samples[1s]);
+TQL EVAL (3, 3, '1s') stdvar_over_time(null_samples{host="a"}[4s]);
 
-TQL EVAL (1, 1, '1s') changes(sparse_samples[1s]);
+TQL EVAL (3, 3, '1s') quantile_over_time(0.5, null_samples{host="a"}[4s]);
+
+-- A window whose only slot is NULL holds no sample, like a window with no row.
+TQL EVAL (1, 1, '1s') rate(null_samples{host="a"}[1s]);
 
 -- Prometheus returns an empty vector for a range without samples, not NaN.
-TQL EVAL (1, 1, '1s') quantile_over_time(0.5, sparse_samples[1s]);
+TQL EVAL (1, 1, '1s') quantile_over_time(0.5, null_samples{host="a"}[1s]);
 
-DROP TABLE sparse_samples;
+-- `b` never has a sample, so it must not reach the aggregation.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '1s') avg by (host) (rate(null_samples[4s]));
+
+DROP TABLE null_samples;
 
 CREATE TABLE multi_field (
     ts TIMESTAMP(3) TIME INDEX,
@@ -77,12 +80,8 @@ INSERT INTO multi_field VALUES
     (2000, 'a', 3.0, NULL),
     (3000, 'a', 4.0, 40.0);
 
--- f1 and f2 share the same rows but have samples at different timestamps. Dropping the rows
--- where f2 is NULL would also drop two of f1's samples, so each field is counted separately.
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (3, 3, '1s') rate(multi_field[4s]);
-
 -- f1 has two samples in this window and f2 only one, so f1 keeps its result while f2 is NULL.
+-- Dropping the whole row would take f1's samples with it.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (1, 1, '1s') rate(multi_field[4s]);
 
