@@ -1,0 +1,19 @@
+.github/workflows/rust.yml
+  s_cd17afc428d85a::t_43dfe9d94f7ee2 128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "7a2929dbad43f5e748df1e4d6f76c44f4ab99422",
+  "prompts": {},
+  "sessions": {
+    "s_cd17afc428d85a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e5e-c225-7e83-b498-f3fe753a8217",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
