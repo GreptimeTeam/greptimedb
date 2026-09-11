@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EMPTY_VALUE_NAME","PROCESSOR_CSV","QUOTE_NAME","SEPARATOR_NAME","TARGET_FIELDS","TRIM_NAME"],"struct":["CsvProcessor"]};

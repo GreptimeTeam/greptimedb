@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["B","BINARY_DATA_MAGNITUDE","GIB","KIB","MIB","PIB","TIB","UNIT"],"struct":["ReadableSize"]};

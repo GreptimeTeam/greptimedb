@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_PROJECTED_TAGS","OTEL_RESOURCE_INFO_TABLE_NAME"],"fn":["for_each_encoded_time","is_projected_attr"],"struct":["ResourceInfoData"]};

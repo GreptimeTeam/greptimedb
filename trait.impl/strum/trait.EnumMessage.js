@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["servers",[["impl EnumMessage for <a class=\"enum\" href=\"servers/postgres/types/error/enum.PgErrorCode.html\" title=\"enum servers::postgres::types::error::PgErrorCode\">PgErrorCode</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[194]}

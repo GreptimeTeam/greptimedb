@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["AskLeader","LeaderProviderFactoryImpl","LeadershipGroup"],"trait":["LeaderProvider","LeaderProviderFactory"],"type":["LeaderProviderFactoryRef","LeaderProviderRef"]};

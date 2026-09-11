@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LogFileKind"],"fn":["build_file_appender"],"struct":["DirectoryRetention","FileIndex","LogFile","RetentionAppender","RetentionState"]};

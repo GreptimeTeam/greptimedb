@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TableType"],"fn":["partition_column_types"],"struct":["DistExtensionPlanner","MergeSortExtensionPlanner","TableNameExtractor"]};

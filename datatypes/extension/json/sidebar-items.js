@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JSON2_LAYOUT_V1","JSON2_LAYOUT_V2","LEGACY_JSON_STRUCTURE_SETTINGS_KEY"],"fn":["is_any_json_extension_type","is_json2_extension_type","is_legacy_json2_extension_type","json2_remainder_field","parse_legacy_json2_settings","parse_version"],"struct":["Json2ExtensionType","Json2PhysicalLayout","JsonExtensionType","JsonMetadata"]};

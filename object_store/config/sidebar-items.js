@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_OBJECT_STORE_CACHE_SIZE"],"enum":["ObjectStoreConfig"],"struct":["AzblobConfig","AzblobConnection","FileConfig","GcsConfig","GcsConnection","HttpClientConfig","ObjectStorageCacheConfig","OssConfig","OssConnection","S3Config","S3Connection"]};

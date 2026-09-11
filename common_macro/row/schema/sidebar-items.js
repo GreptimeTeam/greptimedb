@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["column_data_type_extension_to_tokens","derive_schema_impl","impl_schema_method"]};

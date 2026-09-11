@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OTHER_PHY_PART_COL_PLACEHOLDER"],"enum":["RewriterStatus"],"fn":["pre_merge_scan_optimizer","unwrap_dictionary_literals"],"mod":["fallback","utils"],"struct":["DistPlannerAnalyzer","DistPlannerOptions","EnforceDistRequirementRewriter","MergeScanRemoteDynFilterProducerIdAssigner","PlanRewriter","RemoteDynFilterProducerIdAllocator"]};

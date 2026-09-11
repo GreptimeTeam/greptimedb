@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["aggr_delta_merge_func_name","aggr_merge_func_name","aggr_state_func_name","get_aggr_func","is_all_aggr_exprs_steppable"],"mod":["fix_order"],"struct":["DeltaMergeAccum","DeltaMergeWrapper","MergeAccum","MergeWrapper","StateAccum","StateGroupsAccum","StateMergeHelper","StateWrapper","StepAggrPlan"]};

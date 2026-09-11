@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SEQ_PREFIX"],"fn":["seq_name"],"struct":["Inner","Sequence","SequenceBuilder"],"type":["SequenceRef"]};

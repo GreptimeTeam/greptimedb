@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["WATCH_FILE_USER_PROVIDER"],"struct":["WatchFileUserProvider"],"type":["WatchedCredentialRef"]};

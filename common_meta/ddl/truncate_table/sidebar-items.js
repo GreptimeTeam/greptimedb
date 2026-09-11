@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TruncateTableState"],"struct":["TruncateTableData","TruncateTableProcedure"]};

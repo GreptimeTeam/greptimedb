@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FIRST_HEARTBEAT_ESTIMATE_MILLIS"],"fn":["phi"],"struct":["HeartbeatHistory","PhiAccrualFailureDetector","PhiAccrualFailureDetectorOptions"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["KvBackendCatalogManagerBuilder"],"trait":["CatalogManagerConfigurator"],"type":["CatalogManagerConfiguratorRef"]};

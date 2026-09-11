@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_arrow_array","build_prom_create_table_schema_from_proto","identify_missing_columns_from_proto","rows_to_aligned_record_batch","unzip_logical_region_schema"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TimeSeriesDistribution","TimeSeriesRowSelector","VectorDistanceMetric","VectorIndexEngineType"],"struct":["ScanRequest","VectorSearchMatches","VectorSearchRequest"],"trait":["VectorIndexEngine"]};

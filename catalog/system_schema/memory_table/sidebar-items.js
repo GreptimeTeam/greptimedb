@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["table_columns"],"struct":["MemoryTable","MemoryTableBuilder"]};

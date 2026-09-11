@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["GlobalId","Id"],"struct":["LocalId"]};

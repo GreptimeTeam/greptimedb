@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["table_idents_to_full_name","table_name_to_full_name"]};

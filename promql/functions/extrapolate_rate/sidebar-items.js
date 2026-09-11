@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_counter_resets","extract_eval_timestamps"],"struct":["CounterResetIndex","ExtrapolatedRate"],"type":["Delta","Increase","Rate"]};

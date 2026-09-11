@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RegionMigrationTriggerReason"],"struct":["RegionMigrationManager","RegionMigrationProcedureGuard","RegionMigrationProcedureTask","RegionMigrationProcedureTracker","SubmitRegionMigrationTaskResult"],"type":["RegionMigrationManagerRef"]};

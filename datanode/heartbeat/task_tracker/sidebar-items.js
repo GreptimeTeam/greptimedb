@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RegisterResult","TaskState","WaitResult"],"fn":["wait"],"struct":["Task","TaskTracker","TaskTrackerInner"],"type":["TaskWatcher"]};

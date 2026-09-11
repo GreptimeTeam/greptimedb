@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompositeValues"],"fn":["build_primary_key_codec","build_primary_key_codec_with_fields"],"mod":["dense","sparse"],"trait":["PrimaryKeyCodec","PrimaryKeyCodecExt","PrimaryKeyFilter"]};

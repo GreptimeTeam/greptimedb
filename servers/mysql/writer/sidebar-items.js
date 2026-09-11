@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MYSQL_DATETIME_MAX_YEAR","MYSQL_DATETIME_MIN_YEAR"],"fn":["create_mysql_column","create_mysql_column_def","handle_err","mysql_error_kind","write_output"],"struct":["MysqlResultWriter","PrecisionTimestamp","StagedTimestamp"]};

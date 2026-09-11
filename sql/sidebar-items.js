@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ENGINE","MAXVALUE","TQL"],"fn":["parse_json2_type_hint_path"],"mod":["ast","dialect","error","parser","parsers","partition","statements","util"]};

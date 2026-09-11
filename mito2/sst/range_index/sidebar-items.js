@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["END_COLUMN","ROW_GROUP_ID_COLUMN","START_COLUMN"],"fn":["range_index_schema"],"mod":["deleter","searcher","writer"],"struct":["RangeIndexDeleter","SstRangeIndexSearcher","SstRangeIndexWriter","SstRangeIndexWriterMetrics","SstRangeIndexWriterOptions"]};

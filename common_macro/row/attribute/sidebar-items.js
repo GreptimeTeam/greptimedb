@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["find_column_attribute","parse_column_attribute","parse_column_attribute_field","parse_datatype_field","parse_name_field","parse_semantic_field","parse_skip_field"],"static":["PARSE_COLUMN_ATTRIBUTE_FIELDS"],"struct":["ColumnAttribute"],"type":["ParseColumnAttributeField"]};
