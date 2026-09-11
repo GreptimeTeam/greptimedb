@@ -50,3 +50,49 @@ impl TimeProvider for StdTimeProvider {
         current_time_millis() - current_millis
     }
 }
+
+/// Controllable event time with short waits for background-task tests.
+#[cfg(test)]
+pub(crate) mod mock {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::time::Duration;
+
+    use crate::time_provider::TimeProvider;
+
+    #[derive(Debug)]
+    pub(crate) struct MockTimeProvider {
+        now: AtomicI64,
+        elapsed: AtomicI64,
+    }
+
+    impl TimeProvider for MockTimeProvider {
+        fn current_time_millis(&self) -> i64 {
+            self.now.load(Ordering::Relaxed)
+        }
+
+        fn elapsed_since(&self, _current_millis: i64) -> i64 {
+            self.elapsed.load(Ordering::Relaxed)
+        }
+
+        fn wait_duration(&self, _duration: Duration) -> Duration {
+            Duration::from_millis(20)
+        }
+    }
+
+    impl MockTimeProvider {
+        pub(crate) fn new(now: i64) -> Self {
+            Self {
+                now: AtomicI64::new(now),
+                elapsed: AtomicI64::new(0),
+            }
+        }
+
+        pub(crate) fn set_now(&self, now: i64) {
+            self.now.store(now, Ordering::Relaxed);
+        }
+
+        pub(crate) fn set_elapsed(&self, elapsed: i64) {
+            self.elapsed.store(elapsed, Ordering::Relaxed);
+        }
+    }
+}
