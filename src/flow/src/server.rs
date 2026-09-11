@@ -124,6 +124,7 @@ impl flow_server::Flow for FlowService {
                     api::v1::region::InsertRequest {
                         region_id: insert.region_id,
                         rows: insert.rows,
+                        skip_wal: false,
                         partition_expr_version: insert.partition_expr_version,
                     }
                 })

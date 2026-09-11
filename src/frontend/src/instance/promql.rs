@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use auth::PermissionTableTarget;
@@ -21,6 +22,7 @@ use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_catalog::format_full_table_name;
 use common_recordbatch::util;
 use common_telemetry::tracing;
+use datafusion_expr::LogicalPlan;
 use promql_parser::label::{Matcher, Matchers};
 use query::promql;
 use query::promql::planner::PromPlanner;
@@ -34,6 +36,21 @@ use crate::error::{
     Result, TableNotFoundSnafu, TableSnafu,
 };
 use crate::instance::Instance;
+
+/// Strips the output sort a PromQL plan ends with, keeping the plan schema intact.
+///
+/// Only the sort the caller would observe is removed: recursion stops at any other
+/// node, so ordering consumed by windows, limits or PromQL extension nodes stays.
+pub(super) fn remove_output_sort(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Sort(sort) if sort.fetch.is_none() => Arc::unwrap_or_clone(sort.input),
+        LogicalPlan::Projection(mut projection) => {
+            projection.input = Arc::new(remove_output_sort(Arc::unwrap_or_clone(projection.input)));
+            LogicalPlan::Projection(projection)
+        }
+        plan => plan,
+    }
+}
 
 impl Instance {
     /// Handles metric names query request, returns the names.
@@ -178,5 +195,81 @@ impl Instance {
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::array::Int64Array;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    use datafusion_expr::{LogicalPlanBuilder, Sort, col, lit};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn remove_output_sort_keeps_schema_and_row_selection() {
+        let input =
+            LogicalPlanBuilder::values(vec![vec![lit(3_i64)], vec![lit(1_i64)], vec![lit(2_i64)]])
+                .unwrap()
+                .build()
+                .unwrap();
+        let sort = Sort {
+            expr: vec![col("column1").sort(true, false)],
+            input: Arc::new(input),
+            fetch: None,
+        };
+        let projected = LogicalPlanBuilder::from(LogicalPlan::Sort(sort.clone()))
+            .project(vec![col("column1").alias("sample")])
+            .unwrap()
+            .project(vec![col("sample")])
+            .unwrap()
+            .build()
+            .unwrap();
+        // The root sort is removed, but the sort feeding the limit selects the rows.
+        let limited = LogicalPlanBuilder::from(LogicalPlan::Sort(sort.clone()))
+            .limit(0, Some(2))
+            .unwrap()
+            .sort(vec![col("column1").sort(false, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+        let fetched = LogicalPlan::Sort(Sort {
+            fetch: Some(2),
+            ..sort.clone()
+        });
+
+        let context =
+            SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+        for (name, plan, expected) in [
+            ("root", LogicalPlan::Sort(sort), vec![3, 1, 2]),
+            ("projection", projected, vec![3, 1, 2]),
+            ("sort below limit", limited, vec![1, 2]),
+            ("fetch", fetched, vec![1, 2]),
+        ] {
+            let schema = plan.schema().clone();
+            let plan = remove_output_sort(plan);
+            assert_eq!(plan.schema(), &schema, "{name}");
+            let output = context
+                .execute_logical_plan(plan)
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let values = output
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .values()
+                        .iter()
+                        .copied()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(values, expected, "{name}");
+        }
     }
 }

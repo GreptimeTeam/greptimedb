@@ -60,6 +60,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_extract_skip_wal_hint() {
+        use session::hints::INSERT_SKIP_WAL_HINT;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HINTS_KEY, HeaderValue::from_static("insert_skip_wal=true"));
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            HINTS_KEY,
+            MetadataValue::from_static("insert_skip_wal=true"),
+        );
+        let expected = vec![(INSERT_SKIP_WAL_HINT.to_string(), "true".to_string())];
+        assert_eq!(extract_hints(&headers), expected);
+        assert_eq!(extract_hints(&metadata), expected);
+    }
+
+    #[test]
     fn test_extract_hints_with_full_header_map() {
         let mut headers = HeaderMap::new();
         headers.insert(

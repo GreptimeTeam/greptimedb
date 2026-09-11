@@ -286,6 +286,7 @@ async fn test_write_during_region_editing_is_queued() {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows,
                     hint: None,
                     partition_expr_version: None,
@@ -400,6 +401,7 @@ async fn test_stalled_write_fails_fast_if_region_closed_during_editing() {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows,
                     hint: None,
                     partition_expr_version: None,

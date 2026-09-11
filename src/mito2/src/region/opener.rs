@@ -953,6 +953,7 @@ where
                 OptionOutputTx::none(),
                 // We should respect the sequence in WAL during replay.
                 Some(mutation.sequence),
+                false,
             );
         }
 

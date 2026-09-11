@@ -55,8 +55,8 @@ use otel_arrow_rust::schema::consts as arrow_consts;
 use servers::grpc::GrpcServerConfig;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::http::prometheus::{
-    PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
-    PrometheusResponse,
+    PromData, PromQueryResult, PromSampleValue, PromSeriesMatrix, PromSeriesVector,
+    PrometheusJsonResponse, PrometheusResponse,
 };
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
@@ -1538,7 +1538,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         panic!("unexpected result type")
     };
 
-    mat.sort_unstable_by_key(|v| v.values[0].1.clone());
+    mat.sort_unstable_by_key(|v| serde_json::to_string(&v.values[0].1).unwrap());
 
     assert_eq!(
         mat,
@@ -1550,7 +1550,10 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                values: vec![(5.0, "1.0".to_string()), (10.0, "1.0".to_string())],
+                values: vec![
+                    (5.0, PromSampleValue::Text("1.0".to_string())),
+                    (10.0, PromSampleValue::Text("1.0".to_string())),
+                ],
                 ..Default::default()
             },
             PromSeriesMatrix {
@@ -1560,7 +1563,10 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                values: vec![(5.0, "2.0".to_string()), (10.0, "2.0".to_string())],
+                values: vec![
+                    (5.0, PromSampleValue::Text("2.0".to_string())),
+                    (10.0, PromSampleValue::Text("2.0".to_string())),
+                ],
                 ..Default::default()
             },
         ]

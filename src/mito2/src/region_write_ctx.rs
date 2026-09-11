@@ -89,12 +89,14 @@ pub(crate) struct RegionWriteCtx {
     /// We keep [WalEntry] instead of mutations to avoid taking mutations
     /// out of the context to construct the wal entry when we write to the wal.
     wal_entry: WalEntry,
+    /// Mutations that skip WAL, paired with their write notifiers.
+    memtable_mutations: Vec<(Mutation, WriteNotify)>,
     /// Wal options of the region being written to.
     provider: Provider,
     /// Notifiers to send write results to waiters.
     ///
-    /// The i-th notify is for i-th mutation.
-    notifiers: Vec<WriteNotify>,
+    /// The i-th notify is for the i-th mutation in `wal_entry`.
+    wal_notifiers: Vec<WriteNotify>,
     /// Notifiers for bulk requests.
     bulk_notifiers: Vec<WriteNotify>,
     /// Pending bulk write requests
@@ -133,8 +135,9 @@ impl RegionWriteCtx {
             next_sequence: committed_sequence + 1,
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
+            memtable_mutations: Vec::new(),
             provider,
-            notifiers: Vec::new(),
+            wal_notifiers: Vec::new(),
             bulk_notifiers: vec![],
             failed: false,
             put_num: 0,
@@ -153,21 +156,28 @@ impl RegionWriteCtx {
         write_hint: Option<WriteHint>,
         tx: OptionOutputTx,
         sequence: Option<SequenceNumber>,
+        skip_wal: bool,
     ) {
         if let Some(sequence) = sequence {
             self.next_sequence = sequence;
         }
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
-        self.wal_entry.mutations.push(Mutation {
+        let mutation = Mutation {
             op_type,
             sequence: self.next_sequence,
             rows,
             write_hint,
-        });
+        };
 
+        // Assign sequences before routing so concurrent memtable writes retain
+        // their logical order regardless of the WAL policy.
         let notify = WriteNotify::new(tx, num_rows);
-        // Notifiers are 1:1 map to mutations.
-        self.notifiers.push(notify);
+        if skip_wal {
+            self.memtable_mutations.push((mutation, notify));
+        } else {
+            self.wal_entry.mutations.push(mutation);
+            self.wal_notifiers.push(notify);
+        }
 
         // Increase sequence number.
         self.next_sequence += num_rows as u64;
@@ -206,13 +216,19 @@ impl RegionWriteCtx {
 
     /// Returns whether writes in this context should skip WAL.
     pub(crate) fn skip_wal(&self) -> bool {
-        self.provider == Provider::Noop || self.version.options.skip_wal
+        self.provider == Provider::Noop
+            || self.version.options.skip_wal
+            || (self.wal_entry.mutations.is_empty() && self.wal_entry.bulk_entries.is_empty())
     }
 
     /// Sets error and marks all write operations are failed.
     pub(crate) fn set_error(&mut self, err: Arc<Error>) {
         // Set error for all notifiers.
-        for notify in &mut self.notifiers {
+        for notify in self
+            .wal_notifiers
+            .iter_mut()
+            .chain(self.memtable_mutations.iter_mut().map(|(_, notify)| notify))
+        {
             notify.err = Some(err.clone());
         }
         for notify in &mut self.bulk_notifiers {
@@ -241,7 +257,7 @@ impl RegionWriteCtx {
 
     /// Consumes mutations and writes them into mutable memtable.
     pub(crate) async fn write_memtable(&mut self) {
-        debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
+        debug_assert_eq!(self.wal_notifiers.len(), self.wal_entry.mutations.len());
 
         if self.failed {
             return;
@@ -254,34 +270,38 @@ impl RegionWriteCtx {
             None
         };
 
-        let mutations = mem::take(&mut self.wal_entry.mutations)
+        let mut mutations = mem::take(&mut self.wal_entry.mutations)
             .into_iter()
-            .enumerate()
-            .filter_map(|(i, mutation)| {
+            .zip(&mut self.wal_notifiers)
+            .chain(
+                self.memtable_mutations
+                    .iter_mut()
+                    // Keep notifiers in the context until all writes complete.
+                    .map(|(mutation, notify)| (mem::take(mutation), notify)),
+            )
+            .filter_map(|(mutation, notify)| {
                 let kvs = KeyValues::new(&self.version.metadata, mutation)?;
-                Some((i, kvs))
+                Some((notify, kvs))
             })
             .collect::<Vec<_>>();
 
         if mutations.len() == 1 {
             if let Err(err) = mutable_memtable.write(&mutations[0].1) {
-                self.notifiers[mutations[0].0].err = Some(Arc::new(err));
+                mutations[0].0.err = Some(Arc::new(err));
             }
         } else {
             let mut tasks = FuturesUnordered::new();
-            for (i, kvs) in mutations {
+            for (notify, kvs) in mutations {
                 let mutable = mutable_memtable.clone();
                 // use tokio runtime to schedule tasks.
-                tasks.push(common_runtime::spawn_blocking_global(move || {
-                    (i, mutable.write(&kvs))
-                }));
+                let task = common_runtime::spawn_blocking_global(move || mutable.write(&kvs));
+                tasks.push(async move { (notify, task.await) });
             }
 
-            while let Some(result) = tasks.next().await {
-                // first unwrap the result from `spawn` above
-                let (i, result) = result.unwrap();
-                if let Err(err) = result {
-                    self.notifiers[i].err = Some(Arc::new(err));
+            while let Some((notify, result)) = tasks.next().await {
+                // First unwrap the result from `spawn` above.
+                if let Err(err) = result.unwrap() {
+                    notify.err = Some(Arc::new(err));
                 }
             }
         }
@@ -523,6 +543,7 @@ mod tests {
     use common_recordbatch::DfRecordBatch;
     use datatypes::arrow::array::{ArrayRef, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use prost::Message;
     use store_api::logstore::provider::Provider;
     use tokio::sync::oneshot;
 
@@ -530,6 +551,163 @@ mod tests {
     use crate::error::UnexpectedSnafu;
     use crate::memtable::bulk::part::BulkPart;
     use crate::test_util::version_util::VersionControlBuilder;
+
+    #[test]
+    fn test_request_skip_wal_preserves_sequences_and_other_writes() {
+        // Ablate only the request flag: the workload and sequence allocation stay identical.
+        check_request_skip_wal_preserves_sequences_and_other_writes(false);
+        check_request_skip_wal_preserves_sequences_and_other_writes(true);
+    }
+
+    fn check_request_skip_wal_preserves_sequences_and_other_writes(skip_wal: bool) {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        for (op_type, skip, num_rows) in [
+            (OpType::Put, skip_wal, 2),
+            (OpType::Put, false, 3),
+            (OpType::Delete, false, 1),
+        ] {
+            ctx.push_mutation(
+                op_type as i32,
+                Some(Rows {
+                    schema: vec![],
+                    rows: vec![api::v1::Row::default(); num_rows],
+                }),
+                None,
+                OptionOutputTx::none(),
+                None,
+                skip,
+            );
+        }
+        // Unequal row counts make a notifier/mutation pairing mismatch visible.
+        for (mutation, notify) in ctx
+            .wal_entry
+            .mutations
+            .iter()
+            .zip(&ctx.wal_notifiers)
+            .chain(
+                ctx.memtable_mutations
+                    .iter()
+                    .map(|(mutation, notify)| (mutation, notify)),
+            )
+        {
+            assert_eq!(mutation.rows.as_ref().unwrap().rows.len(), notify.num_rows);
+        }
+        assert!(ctx.push_bulk(OptionOutputTx::none(), new_bulk_part(), None));
+        assert!(!ctx.skip_wal());
+        assert_eq!(ctx.next_sequence, 9);
+        assert_eq!(ctx.wal_entry.bulk_entries.len(), 1);
+        assert_eq!(ctx.bulk_parts[0].sequence, 7);
+        let sequences: Vec<_> = ctx.wal_entry.mutations.iter().map(|m| m.sequence).collect();
+        assert_eq!(sequences, if skip_wal { vec![3, 6] } else { vec![1, 3, 6] });
+        // Check the actual WAL bytes after routing the mutations.
+        let encoded = crate::wal::encoder::WalEntryEncoder::new().encode_to_vec(&ctx.wal_entry);
+        let decoded = WalEntry::decode(encoded.as_slice()).unwrap();
+        assert_eq!(
+            decoded
+                .mutations
+                .iter()
+                .map(|m| m.sequence)
+                .collect::<Vec<_>>(),
+            sequences
+        );
+        assert_eq!(decoded.bulk_entries, ctx.wal_entry.bulk_entries);
+        assert_eq!(ctx.wal_entry.mutations.len(), if skip_wal { 2 } else { 3 });
+        assert_eq!(ctx.memtable_mutations.len(), usize::from(skip_wal));
+        if skip_wal {
+            assert_eq!(ctx.memtable_mutations[0].0.sequence, 1);
+        }
+        assert_eq!(
+            ctx.wal_entry.mutations.last().unwrap().op_type,
+            OpType::Delete as i32
+        );
+    }
+
+    #[test]
+    fn test_internal_delete_respects_skip_wal_flag() {
+        check_internal_delete_respects_skip_wal_flag(false);
+        check_internal_delete_respects_skip_wal_flag(true);
+    }
+
+    fn check_internal_delete_respects_skip_wal_flag(skip_wal: bool) {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        ctx.push_mutation(
+            OpType::Delete as i32,
+            Some(Rows {
+                schema: vec![],
+                rows: vec![api::v1::Row::default(); 2],
+            }),
+            None,
+            OptionOutputTx::none(),
+            None,
+            skip_wal,
+        );
+        assert_eq!(ctx.skip_wal(), skip_wal);
+        assert_eq!(ctx.next_sequence, 3);
+        assert_eq!(ctx.delete_num, 2);
+        assert_eq!(ctx.wal_entry.mutations.len(), usize::from(!skip_wal));
+        assert_eq!(ctx.memtable_mutations.len(), usize::from(skip_wal));
+        let encoded = crate::wal::encoder::WalEntryEncoder::new().encode_to_vec(&ctx.wal_entry);
+        let decoded = WalEntry::decode(encoded.as_slice()).unwrap();
+        if skip_wal {
+            assert!(decoded.mutations.is_empty());
+        } else {
+            assert_eq!(decoded, ctx.wal_entry);
+        }
+    }
+
+    #[test]
+    fn test_all_request_skip_wal_keeps_entry_id_and_propagates_errors() {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        let (tx, rx) = oneshot::channel();
+        ctx.push_mutation(
+            OpType::Put as i32,
+            Some(Rows {
+                schema: vec![],
+                rows: vec![api::v1::Row::default(); 2],
+            }),
+            None,
+            OptionOutputTx::from(tx),
+            None,
+            true,
+        );
+        assert!(ctx.skip_wal());
+        assert!(ctx.wal_entry.mutations.is_empty());
+        assert_eq!(ctx.memtable_mutations.len(), 1);
+        assert_eq!(ctx.next_entry_id(), 1);
+        assert_eq!(ctx.next_sequence, 3);
+        ctx.set_error(Arc::new(
+            UnexpectedSnafu {
+                reason: "wal failed".to_string(),
+            }
+            .build(),
+        ));
+        drop(ctx);
+        assert!(rx.blocking_recv().unwrap().is_err());
+    }
 
     #[test]
     fn test_set_error_marks_bulk_notifiers_failed() {
