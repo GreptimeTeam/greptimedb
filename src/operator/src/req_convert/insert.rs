@@ -17,6 +17,7 @@ mod fill_impure_default;
 mod row_to_region;
 mod stmt_to_region;
 mod table_to_region;
+mod timestamps;
 
 use api::v1::SemanticType;
 pub use column_to_row::ColumnToRow;
@@ -26,6 +27,7 @@ use snafu::{OptionExt, ResultExt};
 pub use stmt_to_region::StatementToRegion;
 use table::metadata::TableInfo;
 pub use table_to_region::TableToRegion;
+pub use timestamps::extract_timestamps;
 
 use crate::error::{ColumnNotFoundSnafu, MissingTimeIndexColumnSnafu, Result};
 
