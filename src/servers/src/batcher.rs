@@ -17,6 +17,7 @@
 mod flow_notifier;
 mod flow_sender;
 pub mod logical_table;
+pub mod table;
 
 #[cfg(test)]
 mod test_util;
