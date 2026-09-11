@@ -975,7 +975,7 @@ mod tests {
     }
 
     /// Builds the metadata of a table with a JSON2 struct field column:
-    /// `[tag_0, field_0, payload, ts]` with primary key `tag_0`.
+    /// `[tag_0, field_0, payload, nullable_after_payload, ts]` with primary key `tag_0`.
     fn metadata_with_struct_field() -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(0, 0));
         builder
@@ -1005,6 +1005,15 @@ mod tests {
                 ),
                 semantic_type: SemanticType::Field,
                 column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "nullable_after_payload".to_string(),
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
@@ -1039,6 +1048,7 @@ mod tests {
                 ),
                 false,
             ),
+            Field::new("nullable_after_payload", ArrowDataType::Int64, true),
             Field::new(
                 "ts",
                 ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -1076,6 +1086,7 @@ mod tests {
             leaf("tag_0", PhysicalType::BYTE_ARRAY),
             leaf("field_0", PhysicalType::INT64),
             payload,
+            leaf("nullable_after_payload", PhysicalType::INT64),
             leaf("ts", PhysicalType::INT64),
             leaf(PRIMARY_KEY_COLUMN_NAME, PhysicalType::BYTE_ARRAY),
             leaf(SEQUENCE_COLUMN_NAME, PhysicalType::INT64),
@@ -1091,9 +1102,10 @@ mod tests {
                 .unwrap(),
         )));
 
-        // Leaf column indices: tag_0=0, field_0=1, payload leaves=2..=4, ts=5.
+        // Omitted raw tags shift all subsequent leaves in primary-key SSTs.
         let ns_edge_leaf = if raw_pk_columns { 4 } else { 3 };
-        let ts_leaf = ns_edge_leaf + 1;
+        let nullable_leaf = ns_edge_leaf + 1;
+        let ts_leaf = nullable_leaf + 1;
         let chunks: Vec<_> = (0..schema_descr.num_columns())
             .map(|i| {
                 let mut builder = ColumnChunkMetaData::builder(schema_descr.column(i));
@@ -1104,6 +1116,14 @@ mod tests {
                         Some(86_400_000_000_000),
                         None,
                         Some(65),
+                        true,
+                    ));
+                } else if i == nullable_leaf {
+                    builder = builder.set_statistics(Statistics::int64(
+                        Some(100),
+                        Some(200),
+                        None,
+                        Some(7),
                         true,
                     ));
                 } else if i == ts_leaf {
@@ -1147,7 +1167,7 @@ mod tests {
             let (file_schema, row_group) = struct_column_file_and_row_group(raw_pk_columns);
             let read_format = FlatReadFormat::new(
                 metadata,
-                ReadColumns::new([0, 1, 2, 3]),
+                ReadColumns::new([0, 1, 2, 3, 4]),
                 Some(file_schema),
                 "test",
                 false,
@@ -1198,7 +1218,17 @@ mod tests {
                 panic!("expected ts null counts")
             };
             let nulls = nulls.as_any().downcast_ref::<UInt64Array>().unwrap();
+            assert!(nulls.is_valid(0));
             assert_eq!(0, nulls.value(0));
+
+            // A null slot may contain an underlying zero. Check validity and
+            // a nonzero count to distinguish unknown or wrong-leaf statistics.
+            let StatValues::Values(nulls) = read_format.null_counts(&row_groups, 4) else {
+                panic!("expected nullable field null counts")
+            };
+            let nulls = nulls.as_any().downcast_ref::<UInt64Array>().unwrap();
+            assert!(nulls.is_valid(0));
+            assert_eq!(7, nulls.value(0));
 
             // A column that expands to multiple leaf columns has no single column
             // statistics.
