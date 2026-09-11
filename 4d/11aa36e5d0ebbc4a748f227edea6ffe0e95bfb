@@ -1,0 +1,23 @@
+Cargo.lock
+  s_c8f343c7af25c4::t_5526f603b78bdf 2323
+src/common/batcher/Cargo.toml
+  s_c8f343c7af25c4::t_cc0df8dd713657 14
+src/common/batcher/src/worker_registry.rs
+  s_c8f343c7af25c4::t_f482768e55d08a 17-18,27,30,33,50,72,80-87,93-95,100,104,162,217
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "4d11aa36e5d0ebbc4a748f227edea6ffe0e95bfb",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
