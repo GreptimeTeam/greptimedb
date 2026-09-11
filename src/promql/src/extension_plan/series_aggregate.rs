@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use common_telemetry::debug;
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, StringArray, StringViewArray,
     TimestampMillisecondArray, UInt16Array, UInt32Array, UInt64Array,
@@ -636,6 +637,69 @@ fn proves_one_series_per_batch(
 }
 
 impl SeriesAggregateExec {
+    /// The partial aggregate shapes this operator can stand in for, or the reason it
+    /// cannot. Returning a reason rather than a bool is what makes a near miss
+    /// explainable: these are the plans the rewrite was meant to catch.
+    fn unsupported_partial(aggregate: &AggregateExec) -> Option<&'static str> {
+        if aggregate.mode() != &AggregateMode::Partial {
+            return Some("aggregate is not in Partial mode");
+        }
+        if aggregate.input_order_mode() != &InputOrderMode::Linear {
+            // This node keeps the aggregate's PlanProperties, and those are projected from
+            // the input: a non-Linear mode means the input is sorted on a group-key prefix
+            // and that ordering is carried into the output. Groups come out here in
+            // first-seen order, so inheriting such a claim would mislead whatever consumes
+            // it. The emission type differs for the same reason.
+            return Some("input order mode is not Linear");
+        }
+        if !aggregate.group_expr().is_single() {
+            // ROLLUP/CUBE need one state per grouping set.
+            return Some("grouping is not a single group-by set");
+        }
+        if aggregate.limit_options().is_some() {
+            return Some("aggregate carries a limit");
+        }
+        if aggregate.filter_expr().iter().any(Option::is_some) {
+            return Some("aggregate has a per-aggregate filter");
+        }
+        if aggregate.aggr_expr().is_empty() {
+            return Some("aggregate has no accumulators");
+        }
+        None
+    }
+
+    /// Whether `expr` is one of the float accumulators whose partial state this operator
+    /// can produce, reading a single `Float64` column.
+    fn unsupported_accumulator(
+        expr: &AggregateFunctionExpr,
+        schema: &SchemaRef,
+    ) -> Result<Option<&'static str>> {
+        // Checked before `groups_accumulator_supported`, which happens to reject DISTINCT
+        // for both SUM and AVG today but is not obliged to keep doing so. Accepting a
+        // DISTINCT aggregate would feed every row to a non-distinct accumulator.
+        if expr.is_distinct() {
+            return Ok(Some("accumulator is DISTINCT"));
+        }
+        if !expr.order_bys().is_empty() {
+            return Ok(Some("accumulator has an ORDER BY"));
+        }
+        if !expr.groups_accumulator_supported() {
+            return Ok(Some("accumulator has no GroupsAccumulator"));
+        }
+        if !(expr.fun().inner().as_any().is::<Avg>() || expr.fun().inner().as_any().is::<Sum>()) {
+            // Scope, not safety: the merge path is generic over GroupsAccumulator, but
+            // only these two are verified against the original partial state layout.
+            return Ok(Some("accumulator is neither SUM nor AVG"));
+        }
+        if expr.expressions().len() != 1 || !expr.expressions()[0].as_any().is::<Column>() {
+            return Ok(Some("accumulator argument is not a single column"));
+        }
+        if expr.expressions()[0].data_type(schema.as_ref())? != DataType::Float64 {
+            return Ok(Some("accumulator argument is not Float64"));
+        }
+        Ok(None)
+    }
+
     /// Retains the original partial schema and accumulator implementations.
     pub fn try_new(
         aggregate: &AggregateExec,
@@ -643,60 +707,54 @@ impl SeriesAggregateExec {
         end: i64,
         step: i64,
     ) -> Result<Option<Self>> {
-        if aggregate.mode() != &AggregateMode::Partial
-            || aggregate.input_order_mode() != &InputOrderMode::Linear
-            || !aggregate.group_expr().is_single()
-            || aggregate.limit_options().is_some()
-            || aggregate.filter_expr().iter().any(Option::is_some)
-            || aggregate.aggr_expr().is_empty()
-        {
-            return Ok(None);
+        // The caller has already traced the group columns back to a range manipulation, so
+        // anything rejected below is a plan that looked like a match and was not.
+        macro_rules! reject {
+            ($reason:expr) => {{
+                debug!(
+                    "PromSeriesAggregateExec: not rewriting partial aggregate: {}",
+                    $reason
+                );
+                return Ok(None);
+            }};
+        }
+        if let Some(reason) = Self::unsupported_partial(aggregate) {
+            reject!(reason);
         }
         let Some(filter) = aggregate.input().as_any().downcast_ref::<FilterExec>() else {
-            return Ok(None);
+            reject!("aggregate input is not a filter");
         };
         if filter.fetch().is_some() || filter.projection().is_some() {
-            return Ok(None);
+            reject!("filter carries a fetch or a projection");
         }
         let Some(grid) = Grid::new(start, end, step) else {
-            return Ok(None);
+            reject!("evaluation grid is empty or has a non-positive step");
         };
         let schema = filter.schema();
         let mut columns = Vec::new();
         let mut time_group = None;
         for (group, (expr, _)) in aggregate.group_expr().expr().iter().enumerate() {
             let Some(column) = expr.as_any().downcast_ref::<Column>() else {
-                return Ok(None);
+                // A computed group key would have to be evaluated per row.
+                reject!("group key is not a plain column");
             };
             match schema.field(column.index()).data_type() {
+                // The first millisecond timestamp is the evaluation time; the grid is
+                // expressed in those units, and `Grid::slot` rejects anything off it.
                 DataType::Timestamp(TimeUnit::Millisecond, None) if time_group.is_none() => {
                     time_group = Some(group)
                 }
                 data_type if supported_label(data_type) => {}
-                _ => return Ok(None),
+                _ => reject!("group key is neither a supported label nor the evaluation time"),
             }
             columns.push(column.index());
         }
         let Some(time_group) = time_group else {
-            return Ok(None);
+            reject!("no millisecond timestamp among the group keys");
         };
         for expr in aggregate.aggr_expr() {
-            if expr.is_distinct()
-                || !expr.order_bys().is_empty()
-                || !expr.groups_accumulator_supported()
-                || !(expr.fun().inner().as_any().is::<Avg>()
-                    || expr.fun().inner().as_any().is::<Sum>())
-                || expr
-                    .expressions()
-                    .iter()
-                    .any(|expr| !expr.as_any().is::<Column>())
-            {
-                return Ok(None);
-            }
-            if expr.expressions().len() != 1
-                || expr.expressions()[0].data_type(schema.as_ref())? != DataType::Float64
-            {
-                return Ok(None);
+            if let Some(reason) = Self::unsupported_accumulator(expr, &schema)? {
+                reject!(reason);
             }
         }
         let (input, input_mode) = match FusedRateInput::try_new(

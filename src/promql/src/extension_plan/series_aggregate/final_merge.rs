@@ -18,6 +18,7 @@ mod tests;
 use std::cmp::Ordering;
 use std::sync::Mutex;
 
+use common_telemetry::debug;
 use datafusion::arrow::compute::SortOptions;
 use datafusion::common::runtime::SpawnedTask;
 use datafusion::error::DataFusionError;
@@ -157,8 +158,101 @@ impl SeriesFinalAggregateExec {
         Self::try_new(&ordered)
     }
 
+    /// Whether the sort this operator would absorb is the complete one it reproduces.
+    ///
+    /// `finish` emits label groups in ascending order with nulls last, then time ascending.
+    /// Anything else — a partial sort, a fetch, a different direction — would silently
+    /// change the output order, so it is left alone.
+    fn unsupported_sort(
+        merge: &SortPreservingMergeExec,
+        sort: &SortExec,
+        expected_order: &[usize],
+    ) -> Option<&'static str> {
+        if merge.fetch().is_some() || sort.fetch().is_some() {
+            return Some("sort carries a fetch");
+        }
+        if !sort.preserve_partitioning() {
+            return Some("sort does not preserve partitioning");
+        }
+        if merge.expr() != sort.expr() {
+            return Some("merge and sort disagree on the ordering");
+        }
+        if merge.expr().len() != expected_order.len() {
+            return Some("ordering does not cover every group key");
+        }
+        if merge
+            .expr()
+            .iter()
+            .zip(expected_order)
+            .any(|(sort, column)| {
+                sort.options.descending
+                    || sort.options.nulls_first
+                    || sort
+                        .expr
+                        .as_any()
+                        .downcast_ref::<Column>()
+                        .map(Column::index)
+                        != Some(*column)
+            })
+        {
+            // Labels ascending with nulls last, then the evaluation time: the exact order
+            // `finish` rebuilds from the group state.
+            return Some("ordering is not labels ascending nulls-last then time ascending");
+        }
+        None
+    }
+
+    /// Whether the final aggregate consumes exactly the partial state below it, unchanged.
+    fn unsupported_final(
+        aggregate: &AggregateExec,
+        partial: &SeriesAggregateExec,
+        count: usize,
+    ) -> Option<&'static str> {
+        if aggregate.mode() != &AggregateMode::FinalPartitioned {
+            return Some("aggregate is not in FinalPartitioned mode");
+        }
+        if aggregate.limit_options().is_some() {
+            return Some("aggregate carries a limit");
+        }
+        if !aggregate.group_expr().is_single() {
+            return Some("grouping is not a single group-by set");
+        }
+        if aggregate.filter_expr().iter().any(Option::is_some) {
+            return Some("aggregate has a per-aggregate filter");
+        }
+        if aggregate.group_expr().expr().len() != count {
+            return Some("final and partial disagree on the number of group keys");
+        }
+        if aggregate.aggr_expr() != partial.aggregates.as_slice() {
+            // The state this operator merges is the one the partial produced; a different
+            // accumulator list means a different state layout.
+            return Some("final and partial disagree on the accumulators");
+        }
+        if !matches!(partial.properties().boundedness, Boundedness::Bounded) {
+            // Merging holds every group until the input ends, which never happens on an
+            // unbounded stream.
+            return Some("partial input is unbounded");
+        }
+        if aggregate
+            .group_expr()
+            .expr()
+            .iter()
+            .enumerate()
+            .any(|(index, (expr, _))| {
+                expr.as_any().downcast_ref::<Column>().map(Column::index) != Some(index)
+            })
+        {
+            // The final reads the partial's own output columns in order. Any permutation
+            // or computed key would break the (label group, slot) addressing.
+            return Some("final group keys are not the partial output columns in order");
+        }
+        None
+    }
+
     /// Requires an unchanged partial-state schema and a complete label/time sort.
     pub fn try_new(plan: &Arc<dyn ExecutionPlan>) -> Result<Option<Self>> {
+        // Walking the chain first keeps the logging below to plans that are this rewrite's
+        // target shape; every other node in the plan leaves here without a word.
         let Some(merge) = plan.as_any().downcast_ref::<SortPreservingMergeExec>() else {
             return Ok(None);
         };
@@ -179,45 +273,15 @@ impl SeriesFinalAggregateExec {
             return Ok(None);
         };
         let count = partial.columns.len();
+        // Labels in group order, then the evaluation time last.
         let expected_order = (0..count)
             .filter(|column| *column != partial.time_group)
             .chain(std::iter::once(partial.time_group))
             .collect::<Vec<_>>();
-        if merge.fetch().is_some()
-            || sort.fetch().is_some()
-            || !sort.preserve_partitioning()
-            || merge.expr() != sort.expr()
-            || aggregate.mode() != &AggregateMode::FinalPartitioned
-            || aggregate.limit_options().is_some()
-            || !aggregate.group_expr().is_single()
-            || aggregate.filter_expr().iter().any(Option::is_some)
-            || aggregate.group_expr().expr().len() != count
-            || aggregate.aggr_expr() != partial.aggregates.as_slice()
-            || !matches!(partial.properties().boundedness, Boundedness::Bounded)
-            || merge.expr().len() != count
-            || merge
-                .expr()
-                .iter()
-                .zip(&expected_order)
-                .any(|(sort, column)| {
-                    sort.options.descending
-                        || sort.options.nulls_first
-                        || sort
-                            .expr
-                            .as_any()
-                            .downcast_ref::<Column>()
-                            .map(Column::index)
-                            != Some(*column)
-                })
-            || aggregate
-                .group_expr()
-                .expr()
-                .iter()
-                .enumerate()
-                .any(|(index, (expr, _))| {
-                    expr.as_any().downcast_ref::<Column>().map(Column::index) != Some(index)
-                })
+        if let Some(reason) = Self::unsupported_sort(merge, sort, &expected_order)
+            .or_else(|| Self::unsupported_final(aggregate, partial, count))
         {
+            debug!("PromSeriesFinalAggregateExec: not merging partial states: {reason}");
             return Ok(None);
         }
         let ordering = merge.expr().clone();
