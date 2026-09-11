@@ -66,7 +66,7 @@ pub(in crate::batcher::logical_table) fn notify_flow_dirty_windows_after_flush(
     node_manager: NodeManagerRef,
 ) {
     let (tx, rx) = FlowNotifier::try_new(
-        NonZeroUsize::new(table_batches.len().max(1)).unwrap(),
+        table_batches.len().max(1),
         FLOW_NOTIFICATION_DROPPED.clone(),
     )
     .unwrap();
@@ -107,11 +107,7 @@ mod tests {
 
     #[test]
     fn test_flow_notification_queue_drops_when_full() {
-        let (tx, mut rx) = FlowNotifier::try_new(
-            NonZeroUsize::new(1).unwrap(),
-            FLOW_NOTIFICATION_DROPPED.clone(),
-        )
-        .unwrap();
+        let (tx, mut rx) = FlowNotifier::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
         let notification = |table_id| FlowNotification {
             table_id,
             timestamps: vec![table_id as i64],
