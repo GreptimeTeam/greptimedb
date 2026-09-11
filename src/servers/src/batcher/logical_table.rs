@@ -144,7 +144,7 @@ impl LogicalTablePendingRowsBatcher {
 
         let request_limiter = RequestLimiter::try_new(max_inflight_requests)?;
         let (flow_notification_tx, flow_notification_rx) = FlowNotifier::try_new(
-            flow_notification_queue_capacity,
+            flow_notification_queue_capacity.get(),
             FLOW_NOTIFICATION_DROPPED.clone(),
         )?;
 

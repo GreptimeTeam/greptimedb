@@ -51,7 +51,7 @@ impl FlowNotifier {
         capacity: NonZeroUsize,
     ) -> Option<Self> {
         let (notifier, receiver) =
-            NotificationQueue::try_new(capacity, FLOW_NOTIFICATION_DROPPED.clone())?;
+            NotificationQueue::try_new(capacity.get(), FLOW_NOTIFICATION_DROPPED.clone())?;
         start_flow_notification_worker(receiver, cache, node_manager);
         Some(Self { notifier })
     }
@@ -84,7 +84,6 @@ impl FlowNotifier {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     use api::helper::ColumnDataTypeWrapper;
@@ -105,11 +104,8 @@ mod tests {
 
     #[test]
     fn test_full_and_closed_queues_do_not_block() {
-        let (notifier, receiver) = NotificationQueue::try_new(
-            NonZeroUsize::new(1).unwrap(),
-            FLOW_NOTIFICATION_DROPPED.clone(),
-        )
-        .unwrap();
+        let (notifier, receiver) =
+            NotificationQueue::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
         let notifier = FlowNotifier { notifier };
         let full = FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]);
         let closed = FLOW_NOTIFICATION_DROPPED.with_label_values(&["closed"]);
@@ -160,11 +156,8 @@ mod tests {
             table.meta.schema = Arc::new(Schema::new(vec![column]));
             let batch = RecordBatch::try_new(table.meta.schema.arrow_schema().clone(), vec![array])
                 .unwrap();
-            let (notifier, mut receiver) = NotificationQueue::try_new(
-                NonZeroUsize::new(1).unwrap(),
-                FLOW_NOTIFICATION_DROPPED.clone(),
-            )
-            .unwrap();
+            let (notifier, mut receiver) =
+                NotificationQueue::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
             FlowNotifier { notifier }.notify(Arc::new(table), &batch);
             let notification = receiver.try_recv().unwrap();
             assert_eq!(notification.table_id, 1);

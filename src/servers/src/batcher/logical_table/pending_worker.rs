@@ -500,11 +500,8 @@ mod tests {
             datanodes: Arc::new(HashMap::new()),
         });
         let catalog_manager = MemoryCatalogManager::with_default_setup();
-        let (flow_notification_tx, _flow_notification_rx) = FlowNotifier::try_new(
-            NonZeroUsize::new(1).unwrap(),
-            FLOW_NOTIFICATION_DROPPED.clone(),
-        )
-        .unwrap();
+        let (flow_notification_tx, _flow_notification_rx) =
+            FlowNotifier::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
         let (shutdown, _) = broadcast::channel(1);
 
         let flush_limiter = FlushLimiter::try_new(1).unwrap();

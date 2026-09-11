@@ -720,11 +720,7 @@ mod tests {
         cache: TableFlownodeSetCacheRef,
         node_manager: NodeManagerRef,
     ) -> FlowNotifier {
-        let (tx, rx) = FlowNotifier::try_new(
-            NonZeroUsize::new(16).unwrap(),
-            FLOW_NOTIFICATION_DROPPED.clone(),
-        )
-        .unwrap();
+        let (tx, rx) = FlowNotifier::try_new(16, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
         start_flow_notification_worker(rx, cache, node_manager);
         tx
     }

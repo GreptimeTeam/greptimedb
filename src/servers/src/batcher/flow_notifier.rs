@@ -35,10 +35,10 @@ pub(in crate::batcher) struct FlowNotifier {
 impl FlowNotifier {
     /// Each construction creates an independent queue with caller-owned metrics.
     pub fn try_new(
-        capacity: NonZeroUsize,
+        capacity: usize,
         dropped: IntCounterVec,
     ) -> Option<(Self, Receiver<FlowNotification>)> {
-        let (notifier, receiver) = Notifier::try_new(capacity.get())?;
+        let (notifier, receiver) = Notifier::try_new(capacity)?;
         Some((Self { notifier, dropped }, receiver))
     }
 
@@ -84,7 +84,6 @@ pub(in crate::batcher) fn start_flow_notification_worker(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
 
     use prometheus::{IntCounterVec, Opts};
 
@@ -118,10 +117,8 @@ mod tests {
     fn test_queues_and_metrics_are_independent() {
         let first_dropped = dropped_counter();
         let second_dropped = dropped_counter();
-        let (first, mut first_rx) =
-            FlowNotifier::try_new(NonZeroUsize::new(1).unwrap(), first_dropped.clone()).unwrap();
-        let (second, mut second_rx) =
-            FlowNotifier::try_new(NonZeroUsize::new(2).unwrap(), second_dropped.clone()).unwrap();
+        let (first, mut first_rx) = FlowNotifier::try_new(1, first_dropped.clone()).unwrap();
+        let (second, mut second_rx) = FlowNotifier::try_new(2, second_dropped.clone()).unwrap();
 
         assert!(first.try_notify(notification(1)));
         assert!(!first.try_notify(notification(2)));
@@ -157,8 +154,7 @@ mod tests {
     #[test]
     fn test_clones_share_queue_and_drop_metrics() {
         let dropped = dropped_counter();
-        let (notifier, mut receiver) =
-            FlowNotifier::try_new(NonZeroUsize::new(1).unwrap(), dropped.clone()).unwrap();
+        let (notifier, mut receiver) = FlowNotifier::try_new(1, dropped.clone()).unwrap();
         let clone = notifier.clone();
         assert!(notifier.try_notify(notification(1)));
         assert!(!clone.try_notify(notification(2)));
