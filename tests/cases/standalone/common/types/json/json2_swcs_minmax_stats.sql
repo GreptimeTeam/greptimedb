@@ -44,6 +44,10 @@ select count(*) from json2_swcs_minmax_stats;
 
 admin flush_table('json2_swcs_minmax_stats');
 
+-- Check pruning on flush-written SSTs before any manual compaction.
+select count(*) from json2_swcs_minmax_stats
+where event_time >= 1788998400000000000 and event_time < 1789084800000000000;
+
 -- SWCS compaction reads the SST with a time window predicate. Before the
 -- fix, min-max pruning compared the window against the small `ns_edge`
 -- statistics and dropped every row group.
