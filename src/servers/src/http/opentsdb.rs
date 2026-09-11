@@ -97,7 +97,7 @@ pub async fn put(
     }
 
     let response = if !summary && !details {
-        if let Err(e) = opentsdb_handler.exec(data_points, ctx.clone()).await {
+        if let Err(e) = opentsdb_handler.exec_batch(data_points, ctx.clone()).await {
             // Not debugging purpose, failed fast.
             return error::InternalSnafu {
                 err_msg: e.to_string(),
@@ -172,7 +172,87 @@ impl OpentsdbDebuggingResponse {
 #[cfg(test)]
 mod test {
 
-    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use session::context::QueryContextRef;
+
+    use crate::http::opentsdb::*;
+    use crate::query_handler::OpentsdbProtocolHandler;
+
+    #[derive(Default)]
+    struct CountingHandler {
+        direct: AtomicUsize,
+        batched: AtomicUsize,
+        preflight: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl OpentsdbProtocolHandler for CountingHandler {
+        async fn preflight(&self, _: &[DataPoint], _: QueryContextRef) -> Result<()> {
+            self.preflight.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn exec(&self, points: Vec<DataPoint>, _: QueryContextRef) -> Result<usize> {
+            self.direct.fetch_add(1, Ordering::Relaxed);
+            Ok(points.len())
+        }
+
+        async fn exec_batch(&self, points: Vec<DataPoint>, _: QueryContextRef) -> Result<usize> {
+            self.batched.fetch_add(1, Ordering::Relaxed);
+            Ok(points.len())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_put_batches_only_non_debug_requests() {
+        for params in [
+            HashMap::new(),
+            HashMap::from([("summary".to_string(), String::new())]),
+            HashMap::from([("details".to_string(), String::new())]),
+            HashMap::from([
+                ("summary".to_string(), String::new()),
+                ("details".to_string(), String::new()),
+            ]),
+        ] {
+            let debug = !params.is_empty();
+            let handler = Arc::new(CountingHandler::default());
+            let body = Bytes::from_static(
+                br#"[
+                {"metric":"cpu","timestamp":1000,"value":1,"tags":{"host":"a"}},
+                {"metric":"cpu","timestamp":1001,"value":2,"tags":{"host":"b"}}
+            ]"#,
+            );
+            let (status, Json(response)) = put(
+                State(handler.clone() as OpentsdbProtocolHandlerRef),
+                Query(params),
+                Extension(QueryContext::with("greptime", "public")),
+                body,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                usize::from(debug) * 2,
+                handler.direct.load(Ordering::Relaxed)
+            );
+            assert_eq!(usize::from(!debug), handler.batched.load(Ordering::Relaxed));
+            assert_eq!(
+                usize::from(debug),
+                handler.preflight.load(Ordering::Relaxed)
+            );
+            if debug {
+                assert_eq!(HttpStatusCode::OK, status);
+                let OpentsdbPutResponse::Debug(response) = response else {
+                    panic!("expected debug response")
+                };
+                assert_eq!(2, response.success);
+                assert_eq!(0, response.failed);
+            } else {
+                assert_eq!(HttpStatusCode::NO_CONTENT, status);
+                assert!(matches!(response, OpentsdbPutResponse::Empty));
+            }
+        }
+    }
 
     #[test]
     fn test_into_opentsdb_data_point() {
