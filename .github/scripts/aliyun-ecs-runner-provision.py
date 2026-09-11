@@ -81,8 +81,8 @@ POLL_INTERVAL_SECONDS = 5
 SWAP_FILE = "/swapfile"
 SWAP_SIZE_GIB = 16
 # Image (~12G), 16G swap, checkout, base+candidate data homes, and cold
-# build caches. Deleted with the instance.
-SYSTEM_DISK_GIB = 50
+# build caches. 80 GiB provides capacity headroom. Deleted with the instance.
+SYSTEM_DISK_GIB = 80
 
 
 @dataclass(frozen=True)
