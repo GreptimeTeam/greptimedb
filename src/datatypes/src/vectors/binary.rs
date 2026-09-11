@@ -479,7 +479,6 @@ mod tests {
 
         assert_eq!(2, v.len());
         assert_eq!("BinaryVector", v.vector_type_name());
-        assert!(!v.is_const());
         assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
         assert_eq!(128, v.memory_size());

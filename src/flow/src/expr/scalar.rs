@@ -216,6 +216,7 @@ impl ScalarExpr {
                     msg: "Failed to convert literal to scalar value",
                 })?,
                 batch.row_count(),
+                None,
             )
             .context(DataTypeSnafu {
                 msg: "Failed to convert scalar value to vector ref when parsing literal",

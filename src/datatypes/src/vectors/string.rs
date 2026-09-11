@@ -604,7 +604,6 @@ mod tests {
         let v = StringVector::from(strs.clone());
         assert_eq!(3, v.len());
         assert_eq!("StringVector", v.vector_type_name());
-        assert!(!v.is_const());
         assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
         assert_eq!(1040, v.memory_size());
