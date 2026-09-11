@@ -26,7 +26,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `compaction` | `src/mito2/src/compaction/` | Compaction scheduler (`scheduler.rs` + `scheduler/`), TWCS picker, strict-window manual picker, compactor, memory control |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
-| `series_index` | `src/mito2/src/series_index/` | Series index writer/searcher, catalogs, immutable snapshots, file lifecycle, and background maintenance |
+| `series_index` | `src/mito2/src/series_index/` | Series index writer/searcher, bucket planning and SST builders, catalogs, immutable snapshots, file lifecycle, and background maintenance |
 | `read` | `src/mito2/src/read/` | `ScanRegion`, merge, dedup, projection, streaming |
 | `manifest` | `src/mito2/src/manifest/` | `RegionManifestManager`, manifest actions/edits |
 | `cache` | `src/mito2/src/cache.rs` | Write/file/page caches |
@@ -62,6 +62,8 @@ filtered `RecordBatch` stream.
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
   follower replay. Keep it backward compatible.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
+- **Series-index coverage** (`series_index/catalog.rs`): `SeriesIndexEntry` stores
+  compaction-window width and SST summaries keyed by aligned start in both catalogs and Parquet footers.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.
 - **WAL/memtable encoding** (`wal/`, `memtable/`): breaks replay if changed incompatibly.
 

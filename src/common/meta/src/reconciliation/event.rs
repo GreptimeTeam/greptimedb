@@ -28,6 +28,10 @@ use store_api::storage::TableId;
 
 use crate::reconciliation::ResolveStrategy;
 
+/// Stable event type stored for catalog reconciliation procedures.
+pub(crate) const RECONCILE_CATALOG_EVENT_TYPE: &str = "reconcile_catalog";
+/// Stable event type stored for database reconciliation procedures.
+pub(crate) const RECONCILE_DATABASE_EVENT_TYPE: &str = "reconcile_database";
 /// Stable event type stored for logical table reconciliation procedures.
 pub(crate) const RECONCILE_LOGICAL_TABLES_EVENT_TYPE: &str = "reconcile_logical_tables";
 /// Stable event type stored for physical table reconciliation procedures.
@@ -45,6 +49,23 @@ pub(crate) struct ReconciliationLocator {
 }
 
 impl ReconciliationLocator {
+    /// Creates a locator for a catalog.
+    pub(crate) fn catalog(catalog_name: &str) -> Self {
+        Self {
+            catalog_name: Some(catalog_name.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Creates a locator for a database.
+    pub(crate) fn database(catalog_name: &str, schema_name: &str) -> Self {
+        Self {
+            catalog_name: Some(catalog_name.to_string()),
+            schema_name: Some(schema_name.to_string()),
+            ..Default::default()
+        }
+    }
+
     /// Creates a locator for a physical table with its fully qualified name and ID.
     pub(crate) fn physical_table(
         catalog_name: &str,
@@ -98,6 +119,229 @@ impl ReconciliationLocator {
                 nullable_table_id(self.physical_table_id),
             ],
         }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ReconcileCatalogPayload {
+    Submitted(CatalogSubmittedPayload),
+    Result(CatalogResultPayload),
+}
+
+#[derive(Debug, Serialize)]
+struct CatalogSubmittedPayload {
+    version: u8,
+    resolve_strategy: &'static str,
+    fail_fast: bool,
+    parallelism: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CatalogResultPayload {
+    version: u8,
+    complete: bool,
+    processed_database_count: usize,
+    succeeded_database_count: usize,
+    failed_database_count: usize,
+}
+
+/// Event representation for catalog reconciliation.
+#[derive(Debug)]
+pub(crate) struct ReconcileCatalogEvent {
+    locator: ReconciliationLocator,
+    payload: Option<ReconcileCatalogPayload>,
+}
+
+impl ReconcileCatalogEvent {
+    /// Builds the bounded intent event emitted when catalog reconciliation is submitted.
+    pub(crate) fn submitted(
+        locator: ReconciliationLocator,
+        resolve_strategy: ResolveStrategy,
+        fail_fast: bool,
+        parallelism: usize,
+    ) -> Self {
+        Self {
+            locator,
+            payload: Some(ReconcileCatalogPayload::Submitted(
+                CatalogSubmittedPayload {
+                    version: PAYLOAD_VERSION,
+                    resolve_strategy: resolve_strategy_name(resolve_strategy),
+                    fail_fast,
+                    parallelism,
+                },
+            )),
+        }
+    }
+
+    /// Builds a terminal event from the existing volatile reconciliation metrics.
+    ///
+    /// Metrics are best-effort observations from the current process and reset on recovery.
+    pub(crate) fn result(
+        locator: ReconciliationLocator,
+        complete: bool,
+        succeeded_database_count: usize,
+        failed_database_count: usize,
+    ) -> Self {
+        Self {
+            locator,
+            payload: Some(ReconcileCatalogPayload::Result(CatalogResultPayload {
+                version: PAYLOAD_VERSION,
+                complete,
+                processed_database_count: succeeded_database_count + failed_database_count,
+                succeeded_database_count,
+                failed_database_count,
+            })),
+        }
+    }
+
+    /// Builds a catalog lifecycle event whose reconciliation payload is null.
+    pub(crate) fn lifecycle(locator: ReconciliationLocator) -> Self {
+        Self {
+            locator,
+            payload: None,
+        }
+    }
+}
+
+impl Event for ReconcileCatalogEvent {
+    fn event_type(&self) -> &str {
+        RECONCILE_CATALOG_EVENT_TYPE
+    }
+
+    fn json_payload(&self) -> Result<serde_json::Value> {
+        match &self.payload {
+            Some(payload) => serde_json::to_value(payload).context(SerializeEventSnafu),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    fn extra_schema(&self) -> Vec<ColumnSchema> {
+        ReconciliationLocator::schema()
+    }
+
+    fn extra_rows(&self) -> Result<Vec<Row>> {
+        Ok(vec![self.locator.row()])
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ReconcileDatabasePayload {
+    Submitted(DatabaseSubmittedPayload),
+    Result(DatabaseResultPayload),
+}
+
+#[derive(Debug, Serialize)]
+struct DatabaseSubmittedPayload {
+    version: u8,
+    resolve_strategy: &'static str,
+    fail_fast: bool,
+    parallelism: usize,
+    is_subprocedure: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DatabaseResultPayload {
+    version: u8,
+    complete: bool,
+    processed_table_count: usize,
+    succeeded_table_count: usize,
+    failed_table_count: usize,
+    succeeded_subprocedure_count: usize,
+    failed_subprocedure_count: usize,
+}
+
+/// Event representation for database reconciliation.
+#[derive(Debug)]
+pub(crate) struct ReconcileDatabaseEvent {
+    locator: ReconciliationLocator,
+    payload: Option<ReconcileDatabasePayload>,
+}
+
+impl ReconcileDatabaseEvent {
+    /// Builds the bounded intent event emitted when database reconciliation is submitted.
+    pub(crate) fn submitted(
+        locator: ReconciliationLocator,
+        resolve_strategy: ResolveStrategy,
+        fail_fast: bool,
+        parallelism: usize,
+        is_subprocedure: bool,
+    ) -> Self {
+        Self {
+            locator,
+            payload: Some(ReconcileDatabasePayload::Submitted(
+                DatabaseSubmittedPayload {
+                    version: PAYLOAD_VERSION,
+                    resolve_strategy: resolve_strategy_name(resolve_strategy),
+                    fail_fast,
+                    parallelism,
+                    is_subprocedure,
+                },
+            )),
+        }
+    }
+
+    /// Builds a terminal event from the existing volatile reconciliation metrics.
+    ///
+    /// Metrics are best-effort observations from the current process and reset on recovery.
+    pub(crate) fn result(
+        locator: ReconciliationLocator,
+        complete: bool,
+        succeeded_table_count: usize,
+        failed_table_count: usize,
+        succeeded_subprocedure_count: usize,
+        failed_subprocedure_count: usize,
+    ) -> Self {
+        Self {
+            locator,
+            payload: Some(ReconcileDatabasePayload::Result(DatabaseResultPayload {
+                version: PAYLOAD_VERSION,
+                complete,
+                processed_table_count: succeeded_table_count + failed_table_count,
+                succeeded_table_count,
+                failed_table_count,
+                succeeded_subprocedure_count,
+                failed_subprocedure_count,
+            })),
+        }
+    }
+
+    /// Builds a database lifecycle event whose reconciliation payload is null.
+    pub(crate) fn lifecycle(locator: ReconciliationLocator) -> Self {
+        Self {
+            locator,
+            payload: None,
+        }
+    }
+}
+
+impl Event for ReconcileDatabaseEvent {
+    fn event_type(&self) -> &str {
+        RECONCILE_DATABASE_EVENT_TYPE
+    }
+
+    fn json_payload(&self) -> Result<serde_json::Value> {
+        match &self.payload {
+            Some(payload) => serde_json::to_value(payload).context(SerializeEventSnafu),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    fn extra_schema(&self) -> Vec<ColumnSchema> {
+        ReconciliationLocator::schema()
+    }
+
+    fn extra_rows(&self) -> Result<Vec<Row>> {
+        Ok(vec![self.locator.row()])
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -355,12 +599,14 @@ mod tests {
 
     #[test]
     fn reconciliation_events_use_the_shared_locator_contract() {
+        let catalog = ReconcileCatalogEvent::lifecycle(ReconciliationLocator::catalog("greptime"));
+        assert_eq!(catalog.event_type(), RECONCILE_CATALOG_EVENT_TYPE);
         let table = ReconcileTableEvent::table_lifecycle(ReconciliationLocator::physical_table(
             "greptime", "public", "metrics", 42,
         ));
         assert_eq!(table.event_type(), RECONCILE_TABLE_EVENT_TYPE);
         assert_eq!(
-            table
+            catalog
                 .extra_schema()
                 .into_iter()
                 .map(|column| {
@@ -375,22 +621,22 @@ mod tests {
                 (
                     "catalog_name".to_string(),
                     ColumnDataType::String,
-                    SemanticType::Field
+                    SemanticType::Field,
                 ),
                 (
                     "schema_name".to_string(),
                     ColumnDataType::String,
-                    SemanticType::Field
+                    SemanticType::Field,
                 ),
                 (
                     "table_name".to_string(),
                     ColumnDataType::String,
-                    SemanticType::Field
+                    SemanticType::Field,
                 ),
                 (
                     "table_id".to_string(),
                     ColumnDataType::Uint32,
-                    SemanticType::Field
+                    SemanticType::Field,
                 ),
                 (
                     "physical_table_id".to_string(),
@@ -399,6 +645,40 @@ mod tests {
                 ),
             ]
         );
+        assert_eq!(
+            catalog.extra_rows().unwrap(),
+            vec![Row {
+                values: vec![
+                    ValueData::StringValue("greptime".to_string()).into(),
+                    Value::default(),
+                    Value::default(),
+                    Value::default(),
+                    Value::default(),
+                ],
+            }]
+        );
+        assert_eq!(catalog.json_payload().unwrap(), serde_json::Value::Null);
+
+        let database = ReconcileDatabaseEvent::lifecycle(ReconciliationLocator::database(
+            "greptime", "public",
+        ));
+        assert_eq!(database.event_type(), RECONCILE_DATABASE_EVENT_TYPE);
+        assert_eq!(database.extra_schema(), catalog.extra_schema());
+        assert_eq!(
+            database.extra_rows().unwrap(),
+            vec![Row {
+                values: vec![
+                    ValueData::StringValue("greptime".to_string()).into(),
+                    ValueData::StringValue("public".to_string()).into(),
+                    Value::default(),
+                    Value::default(),
+                    Value::default(),
+                ],
+            }]
+        );
+        assert_eq!(database.json_payload().unwrap(), serde_json::Value::Null);
+
+        assert_eq!(table.extra_schema(), catalog.extra_schema());
         assert_eq!(
             table.extra_rows().unwrap(),
             vec![Row {
@@ -458,6 +738,22 @@ mod tests {
             (ResolveStrategy::UseMetasrv, "use_metasrv"),
             (ResolveStrategy::AbortOnConflict, "abort_on_conflict"),
         ] {
+            let catalog = ReconcileCatalogEvent::submitted(
+                ReconciliationLocator::catalog("greptime"),
+                strategy,
+                true,
+                16,
+            );
+            assert_eq!(
+                catalog.json_payload().unwrap(),
+                json!({
+                    "version": 1,
+                    "resolve_strategy": expected,
+                    "fail_fast": true,
+                    "parallelism": 16,
+                })
+            );
+
             let table = ReconcileTableEvent::table_submitted(
                 ReconciliationLocator::physical_table("greptime", "public", "metrics", 42),
                 strategy,
@@ -472,6 +768,24 @@ mod tests {
                 })
             );
         }
+
+        let database = ReconcileDatabaseEvent::submitted(
+            ReconciliationLocator::database("greptime", "public"),
+            ResolveStrategy::UseMetasrv,
+            false,
+            64,
+            true,
+        );
+        assert_eq!(
+            database.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "resolve_strategy": "use_metasrv",
+                "fail_fast": false,
+                "parallelism": 64,
+                "is_subprocedure": true,
+            })
+        );
 
         let logical_tables = ReconcileLogicalTablesEvent::submitted(
             vec![
@@ -492,6 +806,40 @@ mod tests {
 
     #[test]
     fn terminal_payloads_distinguish_complete_and_partial_results() {
+        let catalog =
+            ReconcileCatalogEvent::result(ReconciliationLocator::catalog("greptime"), true, 3, 1);
+        assert_eq!(
+            catalog.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "complete": true,
+                "processed_database_count": 4,
+                "succeeded_database_count": 3,
+                "failed_database_count": 1,
+            })
+        );
+
+        let database = ReconcileDatabaseEvent::result(
+            ReconciliationLocator::database("greptime", "public"),
+            false,
+            5,
+            2,
+            4,
+            1,
+        );
+        assert_eq!(
+            database.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "complete": false,
+                "processed_table_count": 7,
+                "succeeded_table_count": 5,
+                "failed_table_count": 2,
+                "succeeded_subprocedure_count": 4,
+                "failed_subprocedure_count": 1,
+            })
+        );
+
         let table = ReconcileTableEvent::table_result(
             ReconciliationLocator::physical_table("greptime", "public", "metrics", 42),
             false,

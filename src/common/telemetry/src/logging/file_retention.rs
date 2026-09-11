@@ -453,7 +453,9 @@ pub(crate) fn build_file_appender(
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
+    #[cfg(unix)]
+    use std::fs;
+    use std::fs::File;
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -464,8 +466,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::FileIndex;
+    #[cfg(unix)]
     use crate::logging::LoggingOptions;
-    use crate::logging::file_retention::{DirectoryRetention, LogFileKind, build_file_appender};
+    #[cfg(unix)]
+    use crate::logging::file_retention::build_file_appender;
+    use crate::logging::file_retention::{DirectoryRetention, LogFileKind};
 
     fn write_file(path: &Path, contents: &[u8]) {
         let mut file = File::create(path).unwrap();
