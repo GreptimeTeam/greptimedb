@@ -82,8 +82,11 @@ pub(crate) fn new_repeated_vector(
     value: &Value,
     num_rows: usize,
 ) -> common_recordbatch::error::Result<VectorRef> {
-    if let Ok(scalar) = value.try_to_scalar_value(data_type) {
-        return Helper::try_from_scalar_value(scalar, num_rows).context(DataTypesSnafu);
+    if let Ok(vector) = value
+        .try_to_scalar_value(data_type)
+        .and_then(|scalar| Helper::try_from_scalar_value(scalar, num_rows, Some(data_type)))
+    {
+        return Ok(vector);
     }
 
     // Preserve extension types that cannot safely round-trip through ScalarValue.

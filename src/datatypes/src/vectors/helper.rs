@@ -118,8 +118,37 @@ impl Helper {
             })
     }
 
-    /// Try to cast an arrow scalar value into vector
-    pub fn try_from_scalar_value(value: ScalarValue, length: usize) -> Result<VectorRef> {
+    /// Materializes an Arrow scalar as a vector of the given length.
+    ///
+    /// With a type hint, casts the array to the requested representation and returns
+    /// an error if the vector cannot preserve that concrete type. Without a hint,
+    /// normalizes the scalar to a supported GreptimeDB representation.
+    pub fn try_from_scalar_value(
+        value: ScalarValue,
+        length: usize,
+        type_hint: Option<&ConcreteDataType>,
+    ) -> Result<VectorRef> {
+        if let Some(data_type) = type_hint {
+            let mut array = value
+                .to_array_of_size(length)
+                .context(ConvertScalarToArrowArraySnafu)?;
+            let arrow_type = data_type.as_arrow_type();
+            if array.data_type() != &arrow_type {
+                array = compute::cast(&array, &arrow_type).context(error::ArrowComputeSnafu)?;
+            }
+            let vector = Self::try_into_vector(array)?;
+            if &vector.data_type() != data_type {
+                return error::CastTypeSnafu {
+                    msg: format!(
+                        "Scalar materialization produced {:?}, expected {data_type:?}",
+                        vector.data_type()
+                    ),
+                }
+                .fail();
+            }
+            return Ok(vector);
+        }
+
         let value = match value {
             // GreptimeDB doesn't support Float16 vectors.
             ScalarValue::Float16(v) => ScalarValue::Float32(v.map(f32::from)),
@@ -405,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_try_from_scalar_date_value() {
-        let vector = Helper::try_from_scalar_value(ScalarValue::Date32(Some(42)), 3).unwrap();
+        let vector = Helper::try_from_scalar_value(ScalarValue::Date32(Some(42)), 3, None).unwrap();
         assert_eq!(ConcreteDataType::date_datatype(), vector.data_type());
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
@@ -416,7 +445,7 @@ mod tests {
     #[test]
     fn test_try_from_scalar_duration_value() {
         let vector =
-            Helper::try_from_scalar_value(ScalarValue::DurationSecond(Some(42)), 3).unwrap();
+            Helper::try_from_scalar_value(ScalarValue::DurationSecond(Some(42)), 3, None).unwrap();
         assert_eq!(
             ConcreteDataType::duration_second_datatype(),
             vector.data_type()
@@ -433,7 +462,8 @@ mod tests {
     #[test]
     fn test_try_from_scalar_decimal128_value() {
         let vector =
-            Helper::try_from_scalar_value(ScalarValue::Decimal128(Some(42), 3, 1), 3).unwrap();
+            Helper::try_from_scalar_value(ScalarValue::Decimal128(Some(42), 3, 1), 3, None)
+                .unwrap();
         assert_eq!(
             ConcreteDataType::decimal128_datatype(3, 1),
             vector.data_type()
@@ -451,7 +481,7 @@ mod tests {
             &ArrowDataType::Int32,
             true,
         ));
-        let vector = Helper::try_from_scalar_value(value, 3).unwrap();
+        let vector = Helper::try_from_scalar_value(value, 3, None).unwrap();
         assert_eq!(
             ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
             vector.data_type()
@@ -466,7 +496,7 @@ mod tests {
 
     #[test]
     fn test_try_from_scalar_value_materializes_values() {
-        let vector = Helper::try_from_scalar_value(ScalarValue::Int32(Some(42)), 4).unwrap();
+        let vector = Helper::try_from_scalar_value(ScalarValue::Int32(Some(42)), 4, None).unwrap();
         assert_eq!(ConcreteDataType::int32_datatype(), vector.data_type());
         assert_eq!(4, vector.len());
         assert_eq!(0, vector.null_count());
@@ -474,11 +504,11 @@ mod tests {
             assert_eq!(Value::Int32(42), vector.get(i));
         }
 
-        let empty = Helper::try_from_scalar_value(ScalarValue::Int32(Some(42)), 0).unwrap();
+        let empty = Helper::try_from_scalar_value(ScalarValue::Int32(Some(42)), 0, None).unwrap();
         assert_eq!(ConcreteDataType::int32_datatype(), empty.data_type());
         assert!(empty.is_empty());
 
-        let nulls = Helper::try_from_scalar_value(ScalarValue::Int32(None), 3).unwrap();
+        let nulls = Helper::try_from_scalar_value(ScalarValue::Int32(None), 3, None).unwrap();
         assert_eq!(3, nulls.len());
         assert_eq!(3, nulls.null_count());
         for i in 0..nulls.len() {
@@ -503,7 +533,7 @@ mod tests {
             None,
         )));
 
-        let vector = Helper::try_from_scalar_value(value, 3).unwrap();
+        let vector = Helper::try_from_scalar_value(value, 3, None).unwrap();
         assert_eq!(
             ConcreteDataType::struct_datatype(StructType::from(&fields)),
             vector.data_type()
@@ -520,7 +550,7 @@ mod tests {
         }
 
         let null = ScalarStructBuilder::new_null(fields);
-        let vector = Helper::try_from_scalar_value(null, 2).unwrap();
+        let vector = Helper::try_from_scalar_value(null, 2, None).unwrap();
         assert_eq!(2, vector.len());
         assert_eq!(2, vector.null_count());
         assert_eq!(Value::Null, vector.get(0));
@@ -529,21 +559,28 @@ mod tests {
 
     #[test]
     fn test_try_from_scalar_value_normalizes_arrow_types() {
-        let string =
-            Helper::try_from_scalar_value(ScalarValue::LargeUtf8(Some("greptime".to_string())), 2)
-                .unwrap();
+        let string = Helper::try_from_scalar_value(
+            ScalarValue::LargeUtf8(Some("greptime".to_string())),
+            2,
+            None,
+        )
+        .unwrap();
         assert_eq!(ConcreteDataType::string_datatype(), string.data_type());
         assert_eq!(&ArrowDataType::Utf8, string.to_arrow_array().data_type());
 
-        let binary =
-            Helper::try_from_scalar_value(ScalarValue::FixedSizeBinary(2, Some(vec![1, 2])), 2)
-                .unwrap();
+        let binary = Helper::try_from_scalar_value(
+            ScalarValue::FixedSizeBinary(2, Some(vec![1, 2])),
+            2,
+            None,
+        )
+        .unwrap();
         assert_eq!(ConcreteDataType::binary_datatype(), binary.data_type());
         assert_eq!(&ArrowDataType::Binary, binary.to_arrow_array().data_type());
 
         let timestamp = Helper::try_from_scalar_value(
             ScalarValue::TimestampMillisecond(Some(42), Some("UTC".into())),
             2,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -742,7 +779,8 @@ mod tests {
 
     #[test]
     fn test_try_from_scalar_time_value() {
-        let vector = Helper::try_from_scalar_value(ScalarValue::Time32Second(Some(42)), 3).unwrap();
+        let vector =
+            Helper::try_from_scalar_value(ScalarValue::Time32Second(Some(42)), 3, None).unwrap();
         assert_eq!(ConcreteDataType::time_second_datatype(), vector.data_type());
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
@@ -755,6 +793,7 @@ mod tests {
         let vector = Helper::try_from_scalar_value(
             ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::new(1, 1, 2000))),
             3,
+            None,
         )
         .unwrap();
 

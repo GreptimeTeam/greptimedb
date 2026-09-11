@@ -674,6 +674,77 @@ mod tests {
     }
 
     #[test]
+    fn test_single_value_dictionary_preserves_string_type() {
+        use datatypes::arrow::array::{DictionaryArray, TimestampMillisecondArray, UInt32Array};
+        use datatypes::arrow::datatypes::UInt32Type;
+
+        for data_type in [
+            ConcreteDataType::large_string_datatype(),
+            ConcreteDataType::utf8_view_datatype(),
+        ] {
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new("tag", data_type.clone(), true),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 0,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 1,
+                })
+                .primary_key(vec![0]);
+            let metadata = Arc::new(builder.build().unwrap());
+            let mapper = FlatProjectionMapper::new(&metadata, [0, 1]).unwrap();
+
+            for value in [Value::from("greptime"), Value::Null] {
+                let mut values = data_type.create_mutable_vector(1);
+                values.try_push_value_ref(&value.as_value_ref()).unwrap();
+                let dictionary = Arc::new(
+                    DictionaryArray::<UInt32Type>::try_new(
+                        UInt32Array::from(vec![0, 0, 0]),
+                        values.to_vector().to_arrow_array(),
+                    )
+                    .unwrap(),
+                );
+                let arrays: Vec<Arc<dyn Array>> = mapper
+                    .batch_schema()
+                    .iter()
+                    .map(|(id, _)| match id {
+                        0 => dictionary.clone() as Arc<dyn Array>,
+                        1 => Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3])),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                let fields = mapper
+                    .batch_schema()
+                    .iter()
+                    .zip(&arrays)
+                    .map(|((id, _), array)| {
+                        Field::new(id.to_string(), array.data_type().clone(), true)
+                    })
+                    .collect::<Vec<_>>();
+                let batch = DfRecordBatch::try_new(
+                    Arc::new(datatypes::arrow::datatypes::Schema::new(fields)),
+                    arrays,
+                )
+                .unwrap();
+                let output = mapper.convert(&batch, &CacheStrategy::Disabled).unwrap();
+                let vector = Helper::try_into_vector(output.column(0)).unwrap();
+                assert_eq!(data_type, vector.data_type());
+                for row in 0..3 {
+                    assert_eq!(value, vector.get(row));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_json_type_hint_does_not_concretize_legacy_json() {
         let metadata = metadata_with_legacy_json();
         let mapper = FlatProjectionMapper::new_with_read_columns(

@@ -151,8 +151,10 @@ impl ColumnDefaultConstraint {
             ColumnDefaultConstraint::Value(v) => {
                 ensure!(is_nullable || !v.is_null(), error::NullDefaultSnafu);
 
-                if let Ok(scalar) = v.try_to_scalar_value(data_type) {
-                    return Helper::try_from_scalar_value(scalar, num_rows);
+                if let Ok(vector) = v.try_to_scalar_value(data_type).and_then(|scalar| {
+                    Helper::try_from_scalar_value(scalar, num_rows, Some(data_type))
+                }) {
+                    return Ok(vector);
                 }
 
                 // Some extension values, such as JSON nested in a struct, cannot safely
@@ -392,6 +394,35 @@ mod tests {
         assert_eq!(expect, v);
         let v = constraint.create_default(&data_type, false).unwrap();
         assert_eq!(Value::Int32(10), v);
+    }
+
+    #[test]
+    fn test_string_default_preserves_batch_schema() {
+        use arrow::datatypes::{Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        for data_type in [
+            ConcreteDataType::large_string_datatype(),
+            ConcreteDataType::utf8_view_datatype(),
+        ] {
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "tag",
+                data_type.as_arrow_type(),
+                true,
+            )]));
+            for value in [Value::from("greptime"), Value::Null] {
+                let vector = ColumnDefaultConstraint::Value(value.clone())
+                    .create_default_vector(&data_type, true, 3)
+                    .unwrap();
+                let batch =
+                    RecordBatch::try_new(schema.clone(), vec![vector.to_arrow_array()]).unwrap();
+                assert_eq!(3, batch.num_rows());
+                assert_eq!(data_type, vector.data_type());
+                for row in 0..batch.num_rows() {
+                    assert_eq!(value, vector.get(row));
+                }
+            }
+        }
     }
 
     #[test]
