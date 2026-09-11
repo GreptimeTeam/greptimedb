@@ -266,34 +266,35 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let sampled_interval_ms = (last_ts - first_ts) as f64;
             let average_interval_ms = sampled_interval_ms / (sample_count - 1) as f64;
             let mut duration_to_start_ms = (first_ts - range_start) as f64;
-            let duration_to_end_ms = (range_end - last_ts) as f64;
+            let mut duration_to_end_ms = (range_end - last_ts) as f64;
+            let extrapolation_threshold = average_interval_ms * 1.1;
 
-            // Counters cannot be negative, so Prometheus allows the extrapolation window to snap
-            // back to the inferred zero point instead of extending into negative values.
+            // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
+            // close enough, otherwise only half an average sampling interval, which is the guess
+            // for where the series actually starts or ends.
+            if duration_to_start_ms >= extrapolation_threshold {
+                duration_to_start_ms = average_interval_ms / 2.0;
+            }
+            // Counters cannot be negative, so the extrapolation can snap back to the inferred
+            // zero point instead of extending into negative values. Prometheus applies this
+            // after the threshold clamp, so it can only shorten the leading extrapolation.
             if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
                 let duration_to_zero = sampled_interval_ms * (first_value / result_value);
                 if duration_to_zero < duration_to_start_ms {
                     duration_to_start_ms = duration_to_zero;
                 }
             }
-
-            let extrapolation_threshold = average_interval_ms * 1.1;
-            let mut extrapolated_interval_ms = sampled_interval_ms;
-
-            // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
-            // close enough, otherwise add half an average sampling interval on that side.
-            if duration_to_start_ms < extrapolation_threshold {
-                extrapolated_interval_ms += duration_to_start_ms;
-            } else {
-                extrapolated_interval_ms += average_interval_ms / 2.0;
-            }
-            if duration_to_end_ms < extrapolation_threshold {
-                extrapolated_interval_ms += duration_to_end_ms;
-            } else {
-                extrapolated_interval_ms += average_interval_ms / 2.0;
+            if duration_to_end_ms >= extrapolation_threshold {
+                duration_to_end_ms = average_interval_ms / 2.0;
             }
 
-            let mut factor = extrapolated_interval_ms / sampled_interval_ms;
+            // Samples sharing one timestamp leave nothing to extrapolate over.
+            let mut factor = if sampled_interval_ms == 0.0 {
+                1.0
+            } else {
+                (sampled_interval_ms + duration_to_start_ms + duration_to_end_ms)
+                    / sampled_interval_ms
+            };
 
             if IS_RATE {
                 factor /= range_length_secs;
@@ -528,6 +529,7 @@ mod test {
     use datafusion_common::ScalarValue;
 
     use super::*;
+    use crate::functions::test_util::TinyPrng;
 
     /// Range length is fixed to 5
     fn extrapolated_rate_runner<const IS_COUNTER: bool, const IS_RATE: bool>(
@@ -779,6 +781,163 @@ mod test {
         assert_eq!(output, vec![Some(7.5)]);
     }
 
+    /// Line-by-line port of Prometheus `extrapolatedRate` (promql/functions.go), float path
+    /// without start timestamps. Kept as a second implementation so that the order of the
+    /// threshold clamp and the counter zero-snap stays pinned to the upstream one.
+    fn prometheus_extrapolated_rate(
+        timestamps: &[i64],
+        values: &[f64],
+        eval_ts: i64,
+        range_ms: i64,
+        is_counter: bool,
+        is_rate: bool,
+    ) -> Option<f64> {
+        if values.len() < 2 {
+            return None;
+        }
+        let num_samples_minus_one = values.len() - 1;
+        let first_t = timestamps[0];
+        let last_t = timestamps[num_samples_minus_one];
+        let mut result = values[num_samples_minus_one] - values[0];
+        if is_counter {
+            for index in 1..values.len() {
+                if values[index] < values[index - 1] {
+                    result += values[index - 1];
+                }
+            }
+        }
+
+        let range_start = eval_ts - range_ms;
+        let mut duration_to_start = (first_t - range_start) as f64 / 1000.0;
+        let mut duration_to_end = (eval_ts - last_t) as f64 / 1000.0;
+        let sampled_interval = (last_t - first_t) as f64 / 1000.0;
+        let average_duration_between_samples = sampled_interval / num_samples_minus_one as f64;
+        let extrapolation_threshold = average_duration_between_samples * 1.1;
+
+        if duration_to_start >= extrapolation_threshold {
+            duration_to_start = average_duration_between_samples / 2.0;
+        }
+        if is_counter {
+            let mut duration_to_zero = duration_to_start;
+            if result > 0.0 && values[0] >= 0.0 {
+                duration_to_zero = sampled_interval * (values[0] / result);
+            }
+            if duration_to_zero < duration_to_start {
+                duration_to_start = duration_to_zero;
+            }
+        }
+        if duration_to_end >= extrapolation_threshold {
+            duration_to_end = average_duration_between_samples / 2.0;
+        }
+
+        let mut factor = 1.0;
+        if sampled_interval != 0.0 {
+            factor = (sampled_interval + duration_to_start + duration_to_end) / sampled_interval;
+        }
+        if is_rate {
+            factor /= range_ms as f64 / 1000.0;
+        }
+        Some(result * factor)
+    }
+
+    fn assert_matches_prometheus<const IS_COUNTER: bool, const IS_RATE: bool>(
+        timestamps: &[i64],
+        values: &[f64],
+        ranges: &[(u32, u32)],
+        eval_timestamps: &[i64],
+        range_ms: i64,
+    ) {
+        let actual = nullable_rate_runner::<IS_COUNTER, IS_RATE>(
+            timestamps.to_vec(),
+            Arc::new(Float64Array::from(values.to_vec())),
+            ranges.to_vec(),
+            eval_timestamps.to_vec(),
+            range_ms,
+        );
+
+        for (index, ((offset, length), eval_ts)) in ranges.iter().zip(eval_timestamps).enumerate() {
+            let window = *offset as usize..(*offset + *length) as usize;
+            let expected = prometheus_extrapolated_rate(
+                &timestamps[window.clone()],
+                &values[window],
+                *eval_ts,
+                range_ms,
+                IS_COUNTER,
+                IS_RATE,
+            );
+            match (actual[index], expected) {
+                (None, None) => {}
+                (Some(actual), Some(expected)) => assert!(
+                    (actual - expected).abs() <= expected.abs() * 1e-9,
+                    "window {index} {:?}: got {actual}, Prometheus gives {expected}",
+                    ranges[index]
+                ),
+                (actual, expected) => {
+                    panic!("window {index}: got {actual:?}, Prometheus gives {expected:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extrapolation_matches_prometheus_on_seeded_windows() {
+        let mut prng = TinyPrng(0x51ed_270b_8f26_1a37);
+        // Uneven spacing so the average interval, and with it the extrapolation threshold,
+        // differs from window to window.
+        let timestamps = (0..48)
+            .scan(0i64, |clock, _| {
+                *clock += 1_000 + prng.next_index(4) as i64 * 500;
+                Some(*clock)
+            })
+            .collect::<Vec<_>>();
+        // A counter that resets a few times, so the zero-snap branch is reached with both
+        // small and large leading values.
+        let values = (0..48)
+            .scan(0.0f64, |counter, _| {
+                *counter = match prng.next_index(8) {
+                    0 => 0.0,
+                    1 => *counter / 2.0,
+                    _ => *counter + prng.next_index(50) as f64,
+                };
+                Some(*counter)
+            })
+            .collect::<Vec<_>>();
+
+        let mut ranges = Vec::new();
+        let mut eval_timestamps = Vec::new();
+        for _ in 0..32 {
+            let length = 2 + prng.next_index(10) as u32;
+            let offset = prng.next_index(48 - length as usize) as u32;
+            ranges.push((offset, length));
+            // Land the range boundary at varying distances from the samples, so the clamp
+            // fires on neither, one, or both sides.
+            let last = timestamps[(offset + length - 1) as usize];
+            eval_timestamps.push(last + prng.next_index(5) as i64 * 500);
+        }
+
+        assert_matches_prometheus::<true, true>(
+            &timestamps,
+            &values,
+            &ranges,
+            &eval_timestamps,
+            20_000,
+        );
+        assert_matches_prometheus::<true, false>(
+            &timestamps,
+            &values,
+            &ranges,
+            &eval_timestamps,
+            20_000,
+        );
+        assert_matches_prometheus::<false, false>(
+            &timestamps,
+            &values,
+            &ranges,
+            &eval_timestamps,
+            20_000,
+        );
+    }
+
     #[test]
     fn rate_rejects_wrong_input_arity() {
         let err = ExtrapolatedRate::<true, true>::new(5)
@@ -856,7 +1015,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            vec![2.0, 5.0, 0.0, 2.5, 0.0, 0.0],
+            vec![1.5, 5.0, 0.0, 2.5, 0.0, 0.0],
         );
     }
 
@@ -887,8 +1046,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            // `2.0` is because that `duration_to_zero` less than `extrapolation_threshold`
-            vec![2.0, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
+            vec![1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
         );
     }
 
@@ -961,7 +1119,7 @@ mod test {
             // that two `2.0` is because `duration_to_start` are shrunk to
             // `duration_to_zero`, and causes `duration_to_zero` less than
             // `extrapolation_threshold`.
-            vec![2.0, 1.5, 1.5, 1.5, 2.0, 1.5, 1.5, 1.5],
+            vec![1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
         );
     }
 
@@ -981,7 +1139,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            vec![4.0, 3.5, 3.5, 4.0],
+            vec![3.5, 3.5, 3.5, 3.5],
         );
     }
 
@@ -1156,7 +1314,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            vec![400.0, 300.0, 300.0, 300.0, 400.0, 300.0, 300.0, 300.0],
+            vec![300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
         );
     }
 
@@ -1187,7 +1345,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            vec![400.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
+            vec![300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
         );
     }
 
