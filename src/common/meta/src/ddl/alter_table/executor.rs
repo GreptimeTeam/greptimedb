@@ -174,7 +174,7 @@ impl AlterTableExecutor {
             .await
     }
 
-    /// Alters all replicas for the irreversible skip-WAL flow.
+    /// Alters all replicas for the skip-WAL flow.
     pub(crate) async fn on_alter_skip_wal_regions(
         &self,
         node_manager: &NodeManagerRef,

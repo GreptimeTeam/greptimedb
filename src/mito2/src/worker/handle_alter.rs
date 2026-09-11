@@ -23,6 +23,7 @@ use common_telemetry::{error, info};
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
 use store_api::metadata::{
     InvalidSetRegionOptionRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,
     RegionMetadataRef,
@@ -50,16 +51,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
-        let skip_wal_only = only_enables_skip_wal(&request.kind);
-        let (region, is_follower) = match self.regions.writable_non_staging_region(region_id) {
-            Ok(region) => (region, false),
-            Err(_) if skip_wal_only => match self.regions.follower_region(region_id) {
-                Ok(region) => (region, true),
-                Err(e) => {
-                    sender.send(Err(e));
-                    return;
+        let requested_skip_wal = skip_wal_value(&request.kind);
+        let (region, follower_skip_wal) = match self.regions.writable_non_staging_region(region_id)
+        {
+            Ok(region) => (region, None),
+            Err(_) if requested_skip_wal.is_some() => {
+                match self.regions.follower_region(region_id) {
+                    Ok(region) => (region, requested_skip_wal),
+                    Err(e) => {
+                        sender.send(Err(e));
+                        return;
+                    }
                 }
-            },
+            }
             Err(e) => {
                 sender.send(Err(e));
                 return;
@@ -68,13 +72,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
-        // Followers only accept skip-WAL, which is an in-memory option change and must
+        // Followers only accept skip-WAL changes, which are in-memory option changes and must
         // never enter the leader path that may flush memtables.
-        if is_follower {
+        if let Some(skip_wal) = follower_skip_wal {
+            if let Err(e) = validate_skip_wal_change(&region, skip_wal) {
+                sender.send(Err(e).context(InvalidMetadataSnafu));
+                return;
+            }
             let mut options = region.version().options.clone();
-            if !options.skip_wal {
-                info!("Stop writing WAL for follower region: {}", region_id);
-                options.skip_wal = true;
+            if options.skip_wal != skip_wal {
+                info!(
+                    "Set skip_wal for follower region: {}, previous: {} new: {}",
+                    region_id, options.skip_wal, skip_wal
+                );
+                options.skip_wal = skip_wal;
                 region.version_control.alter_options(options);
             }
             sender.send(Ok(0));
@@ -317,10 +328,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         current_options.preserve_row_sequence = new_preserve;
                     }
                 }
-                SetRegionOption::SkipWal => {
-                    if !current_options.skip_wal {
-                        info!("Stop writing WAL for region: {}", region.region_id);
-                        current_options.skip_wal = true;
+                SetRegionOption::SkipWal(skip_wal) => {
+                    validate_skip_wal_change(region, skip_wal)?;
+                    if current_options.skip_wal != skip_wal {
+                        info!(
+                            "Set skip_wal for region: {}, previous: {} new: {}",
+                            region.region_id, current_options.skip_wal, skip_wal
+                        );
+                        current_options.skip_wal = skip_wal;
                     }
                 }
             }
@@ -352,12 +367,28 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
-fn only_enables_skip_wal(kind: &AlterKind) -> bool {
-    matches!(
-        kind,
-        AlterKind::SetRegionOptions { options }
-            if matches!(options.as_slice(), [SetRegionOption::SkipWal])
-    )
+fn skip_wal_value(kind: &AlterKind) -> Option<bool> {
+    let AlterKind::SetRegionOptions { options } = kind else {
+        return None;
+    };
+    let [SetRegionOption::SkipWal(skip_wal)] = options.as_slice() else {
+        return None;
+    };
+    Some(*skip_wal)
+}
+
+fn validate_skip_wal_change(
+    region: &MitoRegionRef,
+    skip_wal: bool,
+) -> std::result::Result<(), MetadataError> {
+    ensure!(
+        skip_wal || !matches!(&region.provider, Provider::Noop),
+        store_api::metadata::InvalidRegionRequestSnafu {
+            region_id: region.region_id,
+            err: "cannot enable WAL because the region uses the Noop WAL provider".to_string(),
+        }
+    );
+    Ok(())
 }
 
 /// Returns the new region options if there are updates to the options.
@@ -382,7 +413,7 @@ fn new_region_options_on_empty_memtable(
             | SetRegionOption::Ttl(_)
             | SetRegionOption::Twsc(_, _)
             | SetRegionOption::AutoFlushInterval(_)
-            | SetRegionOption::SkipWal => (),
+            | SetRegionOption::SkipWal(_) => (),
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.
                 let new_format = format_str.parse::<FormatType>().unwrap();

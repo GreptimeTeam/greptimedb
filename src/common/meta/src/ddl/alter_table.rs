@@ -31,6 +31,7 @@ use common_procedure::{
     EventTrigger, LockKey, PoisonKey, PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
 use common_telemetry::{error, info, warn};
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
@@ -47,12 +48,12 @@ use crate::ddl::event::table::{
     TableDdlEvent, TableDdlEventType, TableDdlLocator, alter_table_kind_name,
 };
 use crate::ddl::utils::{
-    MultipleResults, extract_column_metadatas, handle_multiple_results, map_to_procedure_error,
-    sync_follower_regions,
+    MultipleResults, extract_column_metadatas, extract_region_wal_options, handle_multiple_results,
+    map_to_procedure_error, sync_follower_regions,
 };
 use crate::error::{
     AbortProcedureSnafu, ConvertAlterTableRequestSnafu, NoLeaderSnafu, PutPoisonSnafu, Result,
-    RetryLaterSnafu, UnsupportedSnafu,
+    RetryLaterSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
@@ -148,11 +149,11 @@ impl AlterTableProcedure {
 
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
-        if enables_skip_wal(alter_kind) {
+        if sets_skip_wal(alter_kind) {
             ensure!(
-                only_enables_skip_wal(alter_kind),
+                only_sets_skip_wal(alter_kind),
                 UnsupportedSnafu {
-                    operation: "combining skip_wal = 'true' with other table options".to_string()
+                    operation: "combining skip_wal with other table options".to_string()
                 }
             );
             let engine = table_info_value.table_info.meta.engine.as_str();
@@ -162,7 +163,8 @@ impl AlterTableProcedure {
                     operation: format!("setting skip_wal on {engine} engine tables")
                 }
             );
-            // Persist the irreversible intent before any region stops writing WAL.
+            // Keep skip-WAL changes serialized with region migration and use the same
+            // route snapshot for validation and RPC delivery.
             let (physical_table_id, physical_table_route) = self
                 .context
                 .table_metadata_manager
@@ -199,6 +201,34 @@ impl AlterTableProcedure {
                     table_id: physical_table_id
                 }
             );
+            // validate_alter_table_expr() has already parsed this single skip-WAL option.
+            let Some(skip_wal) = skip_wal_value(alter_kind) else {
+                return UnexpectedSnafu {
+                    err_msg: "missing or invalid skip_wal value after validation".to_string(),
+                }
+                .fail();
+            };
+            if !skip_wal {
+                let datanode_table_values = self
+                    .context
+                    .table_metadata_manager
+                    .datanode_table_manager()
+                    .regions(physical_table_id, &physical_table_route)
+                    .await?;
+                let region_wal_options = extract_region_wal_options(&datanode_table_values)?;
+                ensure!(
+                    current_region_ids.iter().all(|region_id| {
+                        matches!(
+                            region_wal_options.get(&region_id.region_number()),
+                            Some(WalOptions::RaftEngine | WalOptions::Kafka(_))
+                        )
+                    }),
+                    UnsupportedSnafu {
+                        operation: "setting skip_wal = 'false' without an existing WAL provider"
+                            .to_string()
+                    }
+                );
+            }
             self.data.region_distribution =
                 Some(region_distribution(&physical_table_route.region_routes));
         }
@@ -265,8 +295,8 @@ impl AlterTableProcedure {
                 MultipleResults::PartialRetryable(error) => Err(error),
                 MultipleResults::PartialNonRetryable(error)
                 | MultipleResults::AllNonRetryable(error) => {
-                    // The metadata already enables skip-WAL. Retry the idempotent request
-                    // so later attempts can update the remaining replicas.
+                    // The metadata already contains the requested skip-WAL value. Retry the
+                    // idempotent request so later attempts can update the remaining replicas.
                     Err(BoxedError::new(error)).context(RetryLaterSnafu {
                         clean_poisons: true,
                     })
@@ -450,24 +480,35 @@ impl AlterTableProcedure {
     }
 }
 
-fn enables_skip_wal(alter_kind: &Kind) -> bool {
+fn sets_skip_wal(alter_kind: &Kind) -> bool {
     let Kind::SetTableOptions(SetTableOptions { table_options }) = alter_kind else {
         return false;
     };
 
     table_options
         .iter()
-        .any(|option| option.key == SKIP_WAL_KEY && option.value == "true")
+        .any(|option| option.key == SKIP_WAL_KEY)
 }
 
-pub(crate) fn only_enables_skip_wal(alter_kind: &Kind) -> bool {
+pub(crate) fn only_sets_skip_wal(alter_kind: &Kind) -> bool {
     let Kind::SetTableOptions(SetTableOptions { table_options }) = alter_kind else {
         return false;
     };
 
-    table_options.len() == 1
-        && table_options[0].key == SKIP_WAL_KEY
-        && table_options[0].value == "true"
+    table_options.len() == 1 && table_options[0].key == SKIP_WAL_KEY
+}
+
+fn skip_wal_value(alter_kind: &Kind) -> Option<bool> {
+    let Kind::SetTableOptions(SetTableOptions { table_options }) = alter_kind else {
+        return None;
+    };
+    let [option] = table_options.as_slice() else {
+        return None;
+    };
+    if option.key != SKIP_WAL_KEY {
+        return None;
+    }
+    option.value.parse().ok()
 }
 
 fn is_metadata_only_alter(alter_kind: &Kind) -> Result<bool> {
@@ -487,7 +528,7 @@ enum AlterTableFlow {
 
 impl AlterTableFlow {
     fn from_kind(kind: &Kind) -> Result<Self> {
-        Ok(if only_enables_skip_wal(kind) {
+        Ok(if only_sets_skip_wal(kind) {
             Self::MetadataFirst
         } else if is_metadata_only_alter(kind)? {
             Self::MetadataOnly
@@ -611,7 +652,7 @@ pub struct AlterTableData {
     table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
     /// Region distribution for table in case we need to update region options.
     region_distribution: Option<RegionDistribution>,
-    /// Region locks held by irreversible region-option alters.
+    /// Region locks held by skip-WAL alters.
     #[serde(default)]
     region_locks: Vec<RegionId>,
 }

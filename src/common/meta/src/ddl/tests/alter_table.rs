@@ -19,7 +19,7 @@ use std::sync::Arc;
 use api::region::RegionResponse;
 use api::v1::alter_table_expr::Kind;
 use api::v1::region::sync_request::ManifestInfo;
-use api::v1::region::{RegionRequest, region_request};
+use api::v1::region::{RegionRequest, alter_request, region_request};
 use api::v1::{
     AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
     DropColumns, SemanticType, SetTableOptions,
@@ -30,6 +30,7 @@ use common_error::status_code::StatusCode;
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::{Procedure, ProcedureId, Status};
 use common_procedure_test::{MockContextProvider, execute_procedure_until_done};
+use common_wal::options::{KafkaWalOptions, WalOptions};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
@@ -162,6 +163,29 @@ fn assert_alter_request(
         unreachable!();
     };
     assert_eq!(req.region_id, expected_region_id);
+}
+
+fn assert_skip_wal_alter_request(
+    peer: Peer,
+    request: RegionRequest,
+    expected_peer_id: u64,
+    expected_region_id: RegionId,
+    expected_skip_wal: bool,
+) {
+    assert_eq!(peer.id, expected_peer_id);
+    let Some(region_request::Body::Alter(req)) = request.body else {
+        unreachable!();
+    };
+    assert_eq!(req.region_id, expected_region_id);
+    let Some(alter_request::Kind::SetTableOptions(options)) = req.kind else {
+        unreachable!();
+    };
+    assert_eq!(1, options.table_options.len());
+    assert_eq!(SKIP_WAL_KEY, options.table_options[0].key);
+    assert_eq!(
+        expected_skip_wal.to_string(),
+        options.table_options[0].value
+    );
 }
 
 fn assert_sync_request(
@@ -729,39 +753,42 @@ async fn test_skip_wal_rejects_file_engine_table() {
 fn test_skip_wal_holds_region_locks() {
     let table_id = 1024;
     let region_ids = vec![RegionId::new(table_id, 2), RegionId::new(table_id, 1)];
-    let task = AlterTableTask {
-        alter_table: AlterTableExpr {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "foo".to_string(),
-            kind: Some(Kind::SetTableOptions(SetTableOptions {
-                table_options: vec![api::v1::Option {
-                    key: SKIP_WAL_KEY.to_string(),
-                    value: "true".to_string(),
-                }],
-            })),
-        },
-    };
     let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
-    let procedure = AlterTableProcedure::new_with_region_locks(
-        table_id,
-        task,
-        region_ids.clone(),
-        context.clone(),
-    )
-    .unwrap();
+    for value in ["true", "false"] {
+        let task = AlterTableTask {
+            alter_table: AlterTableExpr {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "foo".to_string(),
+                kind: Some(Kind::SetTableOptions(SetTableOptions {
+                    table_options: vec![api::v1::Option {
+                        key: SKIP_WAL_KEY.to_string(),
+                        value: value.to_string(),
+                    }],
+                })),
+            },
+        };
+        let procedure = AlterTableProcedure::new_with_region_locks(
+            table_id,
+            task,
+            region_ids.clone(),
+            context.clone(),
+        )
+        .unwrap();
 
-    let lock_key = procedure.lock_key();
-    for region_id in &region_ids {
-        assert!(
-            lock_key
-                .keys_to_lock()
-                .any(|key| key == &RegionLock::Write(*region_id).into())
-        );
+        let lock_key = procedure.lock_key();
+        for region_id in &region_ids {
+            assert!(
+                lock_key
+                    .keys_to_lock()
+                    .any(|key| key == &RegionLock::Write(*region_id).into())
+            );
+        }
+
+        let recovered =
+            AlterTableProcedure::from_json(&procedure.dump().unwrap(), context.clone()).unwrap();
+        assert_eq!(lock_key, recovered.lock_key());
     }
-
-    let recovered = AlterTableProcedure::from_json(&procedure.dump().unwrap(), context).unwrap();
-    assert_eq!(lock_key, recovered.lock_key());
 }
 
 #[tokio::test]
@@ -873,6 +900,192 @@ async fn test_skip_wal_rejects_no_leader_before_updating_metadata() {
         .into_inner()
         .table_info;
     assert!(!table_info.meta.options.skip_wal);
+}
+
+#[tokio::test]
+async fn test_enable_wal_rejects_noop_provider_before_updating_metadata() {
+    let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let table_name = "foo";
+    let table_id = 1024;
+    let mut task = test_create_table_task(table_name, table_id);
+    task.table_info.meta.options.skip_wal = true;
+    task.table_info
+        .meta
+        .options
+        .extra_options
+        .insert(SKIP_WAL_KEY.to_string(), "true".to_string());
+    let table_route = prepare_table_route(table_id);
+    let region_locks = table_route
+        .region_routes()
+        .unwrap()
+        .iter()
+        .map(|route| route.region.id)
+        .collect();
+    let region_wal_options = HashMap::from([
+        (1, WalOptions::Noop),
+        (2, WalOptions::Noop),
+        (3, WalOptions::Noop),
+    ]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(task.table_info, table_route, region_wal_options)
+        .await
+        .unwrap();
+
+    let alter_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "false".to_string(),
+                }],
+            })),
+        },
+    };
+    let mut procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        alter_task,
+        region_locks,
+        ddl_context.clone(),
+    )
+    .unwrap();
+
+    let error = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(error, Error::Unsupported { .. });
+    assert!(
+        error
+            .to_string()
+            .contains("without an existing WAL provider")
+    );
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(table_info.meta.options.skip_wal);
+}
+
+#[tokio::test]
+async fn test_enable_wal_updates_metadata_and_region_request() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_name = "foo";
+    let table_id = 1024;
+    let mut task = test_create_table_task(table_name, table_id);
+    task.table_info.meta.options.skip_wal = true;
+    task.table_info
+        .meta
+        .options
+        .extra_options
+        .insert(SKIP_WAL_KEY.to_string(), "true".to_string());
+    let table_route = prepare_table_route(table_id);
+    let region_locks = table_route
+        .region_routes()
+        .unwrap()
+        .iter()
+        .map(|route| route.region.id)
+        .collect();
+    let region_wal_options = HashMap::from([
+        (1, WalOptions::RaftEngine),
+        (
+            2,
+            WalOptions::Kafka(KafkaWalOptions::new("topic-2".to_string())),
+        ),
+        (
+            3,
+            WalOptions::Kafka(KafkaWalOptions::new("topic-3".to_string())),
+        ),
+    ]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(task.table_info, table_route, region_wal_options)
+        .await
+        .unwrap();
+
+    let alter_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "false".to_string(),
+                }],
+            })),
+        },
+    };
+    let mut procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        alter_task,
+        region_locks,
+        ddl_context.clone(),
+    )
+    .unwrap();
+
+    procedure.on_prepare().await.unwrap();
+    let persisted: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    assert_eq!("UpdateMetadata", persisted["state"]);
+
+    let Some(alter_request::Kind::SetTableOptions(options)) =
+        procedure.make_region_alter_kind().unwrap()
+    else {
+        unreachable!();
+    };
+    assert_eq!(1, options.table_options.len());
+    assert_eq!(SKIP_WAL_KEY, options.table_options[0].key);
+    assert_eq!("false", options.table_options[0].value);
+
+    procedure.on_update_metadata().await.unwrap();
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(!table_info.meta.options.skip_wal);
+    assert_eq!(
+        Some("false"),
+        table_info
+            .meta
+            .options
+            .extra_options
+            .get(SKIP_WAL_KEY)
+            .map(String::as_str)
+    );
+
+    let provider = Arc::new(MockContextProvider::default());
+    procedure
+        .submit_alter_region_requests(ProcedureId::random(), provider.as_ref())
+        .await
+        .unwrap();
+    let mut requests = Vec::new();
+    while let Ok(request) = rx.try_recv() {
+        requests.push(request);
+    }
+    requests.sort_unstable_by_key(|(peer, _)| peer.id);
+    let expected = [
+        (1, RegionId::new(table_id, 1)),
+        (2, RegionId::new(table_id, 2)),
+        (3, RegionId::new(table_id, 3)),
+        (4, RegionId::new(table_id, 2)),
+        (5, RegionId::new(table_id, 1)),
+    ];
+    assert_eq!(expected.len(), requests.len());
+    for ((peer, request), (peer_id, region_id)) in requests.into_iter().zip(expected) {
+        assert_skip_wal_alter_request(peer, request, peer_id, region_id, false);
+    }
 }
 
 #[tokio::test]
