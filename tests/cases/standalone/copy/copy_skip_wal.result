@@ -1,0 +1,274 @@
+CREATE TABLE copy_skip_wal(host STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO copy_skip_wal VALUES ('host1', 1000), ('host2', 2000);
+
+Affected Rows: 2
+
+COPY copy_skip_wal TO '${SQLNESS_HOME}/copy_skip_wal/copy_skip_wal.csv' WITH (FORMAT='csv');
+
+Affected Rows: 2
+
+TRUNCATE TABLE copy_skip_wal;
+
+Affected Rows: 0
+
+-- MYSQL: COPY TABLE inherits the connection WAL policy.
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+COPY copy_skip_wal FROM '${SQLNESS_HOME}/copy_skip_wal/copy_skip_wal.csv' WITH (FORMAT='csv');
+
+affected_rows: 2
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+---------------------+
+| host  | ts                  |
++-------+---------------------+
+| host1 | 1970-01-01 00:00:01 |
+| host2 | 1970-01-01 00:00:02 |
++-------+---------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+COPY copy_skip_wal FROM '${SQLNESS_HOME}/copy_skip_wal/copy_skip_wal.csv' WITH (FORMAT='csv');
+
+affected_rows: 2
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+---------------------+
+| host  | ts                  |
++-------+---------------------+
+| host1 | 1970-01-01 00:00:01 |
+| host2 | 1970-01-01 00:00:02 |
++-------+---------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+---------------------+
+| host  | ts                  |
++-------+---------------------+
+| host1 | 1970-01-01 00:00:01 |
+| host2 | 1970-01-01 00:00:02 |
++-------+---------------------+
+
+TRUNCATE TABLE copy_skip_wal;
+
+Affected Rows: 0
+
+-- MYSQL: COPY DATABASE inherits the connection WAL policy.
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+COPY DATABASE public FROM '${SQLNESS_HOME}/copy_skip_wal/' WITH (FORMAT='csv');
+
+affected_rows: 2
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+---------------------+
+| host  | ts                  |
++-------+---------------------+
+| host1 | 1970-01-01 00:00:01 |
+| host2 | 1970-01-01 00:00:02 |
++-------+---------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+COPY DATABASE public FROM '${SQLNESS_HOME}/copy_skip_wal/' WITH (FORMAT='csv');
+
+affected_rows: 2
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+---------------------+
+| host  | ts                  |
++-------+---------------------+
+| host1 | 1970-01-01 00:00:01 |
+| host2 | 1970-01-01 00:00:02 |
++-------+---------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+---------------------+
+| host  | ts                  |
++-------+---------------------+
+| host1 | 1970-01-01 00:00:01 |
+| host2 | 1970-01-01 00:00:02 |
++-------+---------------------+
+
+TRUNCATE TABLE copy_skip_wal;
+
+Affected Rows: 0
+
+-- POSTGRES: COPY TABLE inherits the connection WAL policy.
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = true;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+COPY copy_skip_wal FROM '${SQLNESS_HOME}/copy_skip_wal/copy_skip_wal.csv' WITH (FORMAT='csv');
+
+Affected Rows: 2
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+----------------------------+
+| host  | ts                         |
++-------+----------------------------+
+| host1 | 1970-01-01 00:00:01.000000 |
+| host2 | 1970-01-01 00:00:02.000000 |
++-------+----------------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++------+----+
+| host | ts |
++------+----+
++------+----+
+
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = false;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+COPY copy_skip_wal FROM '${SQLNESS_HOME}/copy_skip_wal/copy_skip_wal.csv' WITH (FORMAT='csv');
+
+Affected Rows: 2
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+----------------------------+
+| host  | ts                         |
++-------+----------------------------+
+| host1 | 1970-01-01 00:00:01.000000 |
+| host2 | 1970-01-01 00:00:02.000000 |
++-------+----------------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+----------------------------+
+| host  | ts                         |
++-------+----------------------------+
+| host1 | 1970-01-01 00:00:01.000000 |
+| host2 | 1970-01-01 00:00:02.000000 |
++-------+----------------------------+
+
+TRUNCATE TABLE copy_skip_wal;
+
+Affected Rows: 0
+
+-- POSTGRES: COPY DATABASE inherits the connection WAL policy.
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = true;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+COPY DATABASE public FROM '${SQLNESS_HOME}/copy_skip_wal/' WITH (FORMAT='csv');
+
+Affected Rows: 2
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+----------------------------+
+| host  | ts                         |
++-------+----------------------------+
+| host1 | 1970-01-01 00:00:01.000000 |
+| host2 | 1970-01-01 00:00:02.000000 |
++-------+----------------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++------+----+
+| host | ts |
++------+----+
++------+----+
+
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = false;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+COPY DATABASE public FROM '${SQLNESS_HOME}/copy_skip_wal/' WITH (FORMAT='csv');
+
+Affected Rows: 2
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+----------------------------+
+| host  | ts                         |
++-------+----------------------------+
+| host1 | 1970-01-01 00:00:01.000000 |
+| host2 | 1970-01-01 00:00:02.000000 |
++-------+----------------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM copy_skip_wal ORDER BY ts;
+
++-------+----------------------------+
+| host  | ts                         |
++-------+----------------------------+
+| host1 | 1970-01-01 00:00:01.000000 |
+| host2 | 1970-01-01 00:00:02.000000 |
++-------+----------------------------+
+
+TRUNCATE TABLE copy_skip_wal;
+
+Affected Rows: 0
+
+DROP TABLE copy_skip_wal;
+
+Affected Rows: 0
+
