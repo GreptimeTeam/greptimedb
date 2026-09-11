@@ -52,7 +52,7 @@ use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{TableInfo, TableInfoRef};
-use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
 use crate::error;
 use crate::error::{Error, Result};
@@ -378,15 +378,7 @@ impl PendingRowsBatcher {
         max_inflight_requests: usize,
         flow_notification_queue_capacity: NonZeroUsize,
     ) -> Option<Arc<Self>> {
-        // Disable the batcher if flush is disabled or configuration is invalid.
-        // Zero values for these knobs either cause panics (e.g., zero-capacity channels)
-        // or deadlocks (e.g., semaphores with no permits).
-        if flush_interval.is_zero()
-            || max_batch_rows == 0
-            || max_concurrent_flushes == 0
-            || worker_channel_capacity == 0
-            || max_inflight_requests == 0
-        {
+        if worker_channel_capacity == 0 || worker_channel_capacity > Semaphore::MAX_PERMITS {
             return None;
         }
 

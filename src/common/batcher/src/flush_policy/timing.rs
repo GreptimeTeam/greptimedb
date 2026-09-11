@@ -33,14 +33,18 @@ pub struct TimingFlushPolicy {
 impl TimingFlushPolicy {
     /// Creates a policy, rejecting zero intervals and unrepresentable deadlines.
     pub fn try_new(flush_interval: Duration, max_batch_rows: NonZeroUsize) -> Option<Self> {
-        if flush_interval.is_zero() {
+        if !Self::validate(flush_interval) {
             return None;
         }
-        Instant::now().checked_add(flush_interval)?;
         Some(Self {
             flush_interval,
             max_batch_rows,
         })
+    }
+
+    /// Checks that the interval is nonzero and its deadline is representable.
+    pub fn validate(flush_interval: Duration) -> bool {
+        !flush_interval.is_zero() && Instant::now().checked_add(flush_interval).is_some()
     }
 
     /// Checks only the row trigger when a caller drives deadline events separately.
@@ -77,6 +81,16 @@ impl FlushPolicy for TimingFlushPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_matches_construction() {
+        for interval in [Duration::ZERO, Duration::from_secs(1), Duration::MAX] {
+            assert_eq!(
+                TimingFlushPolicy::validate(interval),
+                TimingFlushPolicy::try_new(interval, NonZeroUsize::MIN).is_some()
+            );
+        }
+    }
 
     #[test]
     fn test_first_submission_deadline() {

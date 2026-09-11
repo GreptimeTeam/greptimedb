@@ -29,6 +29,7 @@ cache.workspace = true
 catalog.workspace = true
 client.workspace = true
 common-base.workspace = true
+common-batcher.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-datasource.workspace = true
