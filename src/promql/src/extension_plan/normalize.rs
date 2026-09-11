@@ -431,8 +431,10 @@ impl SeriesNormalizeStream {
                             })
                         }
                     })?;
-                // Replace only the start timestamp child to preserve the histogram payload and
-                // null bitmap.
+                // Struct arrays are immutable, so rebuild the physical histogram payload with
+                // only its start-timestamp child replaced. Its logical schema stays unchanged:
+                // the selector offset affects histogram reset/rate metadata, not the native
+                // sample timestamp column consumed by later manipulators.
                 let mut children = histograms.columns().to_vec();
                 children[start_timestamp_index] = Arc::new(start_timestamps);
                 *column = Arc::new(StructArray::new(

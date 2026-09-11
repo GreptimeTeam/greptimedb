@@ -437,6 +437,10 @@ fn single_evaluation_node_allowed(node: &LogicalPlan) -> bool {
 
 /// This whitelist assumes the planner preserves time-index and series identity;
 /// it is not a proof that an arbitrary plan does so.
+///
+/// Identity projections preserve the selected samples. Only the planner's named
+/// seconds/milliseconds-to-milliseconds casts are accepted; a microsecond or
+/// nanosecond cast could collapse a future sample onto the evaluation boundary.
 fn single_evaluation_projection_expr_allowed(
     expr: &Expr,
     projection: &datafusion_expr::logical_plan::Projection,

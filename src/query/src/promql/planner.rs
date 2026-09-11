@@ -2831,6 +2831,9 @@ impl PromPlanner {
                     .lt_eq(DfExpr::Literal(scalar(upper_ms).unwrap(), None))
             });
 
+            // An underflowing lower bound must not discard a representable upper
+            // bound: without it, LastRow could retain a future row and discard the
+            // older eligible sample before the manipulator can check its time.
             match (lower_filter, upper_filter) {
                 (Some(lower), Some(upper)) => Some(lower.and(upper)),
                 (Some(filter), None) | (None, Some(filter)) => Some(filter),
@@ -3021,6 +3024,9 @@ impl PromPlanner {
 
         if is_time_index_second {
             // Promote seconds so millisecond offsets remain exact; retain finer precision.
+            // Later manipulators compare native sample ticks, while PromQL evaluation and
+            // emitted timestamps remain millisecond-based, so this projection must not
+            // silently truncate a finer-grained time index.
             let expr: Vec<_> = self
                 .create_field_column_exprs()?
                 .into_iter()
@@ -3061,6 +3067,9 @@ impl PromPlanner {
         {
             // Drop the internal `__table_id` column after filtering and preserve PromQL's
             // field/tag/timestamp column order for native microsecond/nanosecond timestamps.
+            // Keeping the original time column also lets the existing ordering hints
+            // use PerSeries scans without a cast, repartition, and sort. This benefits
+            // multi-evaluation selectors too; only a single evaluation can use LastRow.
             let project_exprs = self
                 .create_field_column_exprs()?
                 .into_iter()

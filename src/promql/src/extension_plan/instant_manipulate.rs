@@ -473,6 +473,8 @@ impl ExecutionPlan for InstantManipulateExec {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         let input = children[0].clone();
+        // The child may expose native timestamps, but our output schema uses ms.
+        // Retain its execution properties, not its schema equivalences or ordering.
         let input_properties = input.properties();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
@@ -664,6 +666,9 @@ impl InstantManipulateStream {
         };
         let timestamps = native_timestamp_values(ts_column.as_ref())?;
         let len = timestamps.len();
+        // Shift the native-tick timeline in i128 before comparing samples. Doing
+        // this in the Arrow storage unit can overflow even when the shifted
+        // PromQL millisecond evaluation time is representable.
         let to_nanoseconds =
             |timestamp: i64| (timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
         let first_ns = to_nanoseconds(timestamps[0]);
@@ -715,6 +720,10 @@ impl InstantManipulateStream {
                 }
                 cursor += 1;
             }
+            // Keep the first row among exact timestamp ties; otherwise use the
+            // latest preceding row. Zero lookback admits only exact samples.
+            // Test staleness after choosing: a selected stale marker suppresses
+            // this evaluation rather than falling back to an older finite value.
             let Some(candidate) = exact_candidate.or_else(|| cursor.checked_sub(1)) else {
                 continue;
             };

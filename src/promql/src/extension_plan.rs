@@ -54,6 +54,10 @@ pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctO
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
 /// Borrows timestamp values without reducing their Arrow storage precision.
+///
+/// These integers are Arrow's native ticks, not milliseconds. Selector code must
+/// compare samples on that native timeline, then convert only where PromQL's
+/// millisecond evaluation or output ABI requires it.
 pub(crate) fn native_timestamp_values(array: &dyn Array) -> datafusion::error::Result<&[i64]> {
     let value = match array.data_type() {
         DataType::Timestamp(TimeUnit::Second, _) => array

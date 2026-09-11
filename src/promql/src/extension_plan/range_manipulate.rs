@@ -768,7 +768,12 @@ impl RangeManipulateStream {
         let end = end as i64;
         let mut ranges = Vec::new();
 
-        // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
+        // Range membership is decided on shifted native ticks, before the
+        // timestamp-range payload is converted to its millisecond ABI. This
+        // keeps sub-millisecond samples distinct in a range; equal millisecond
+        // payload values are not a reason to deduplicate input samples.
+        //
+        // Calculate for every aligned timestamp (`curr_ts`), assuming ordered timestamps.
         let mut left = 0usize;
         let mut right = 0usize;
         for curr_ts in (start..=end).step_by(self.interval as _) {
