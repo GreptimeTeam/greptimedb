@@ -23,7 +23,6 @@ use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
-use arrow::array::Array;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -44,6 +43,7 @@ use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptim
 use common_runtime::spawn_global;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
+use datatypes::timestamp::append_timestamps;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use partition::partition::PartitionRuleRef;
@@ -1389,21 +1389,13 @@ fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
     let mut timestamps = Vec::with_capacity(table_batch.row_count);
     for batch in &table_batch.batches {
         let timestamp_column = batch.batch.column(batch.timestamp_index);
-        let Some((timestamp_values, _)) =
-            datatypes::timestamp::timestamp_array_to_primitive(timestamp_column)
-        else {
+        let Some(()) = append_timestamps(timestamp_column, &mut timestamps) else {
             error!(
                 "Failed to extract timestamps from record batch, table_id: {}, timestamp_index: {}",
                 table_batch.table_id, batch.timestamp_index
             );
             continue;
         };
-
-        if timestamp_values.null_count() == 0 {
-            timestamps.extend_from_slice(timestamp_values.values());
-        } else {
-            timestamps.extend(timestamp_values.iter().flatten());
-        }
     }
     timestamps
 }

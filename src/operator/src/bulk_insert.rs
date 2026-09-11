@@ -20,7 +20,6 @@ use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::{ArrowIpc, PartitionExprVersion};
-use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use common_base::AffectedRows;
@@ -28,12 +27,13 @@ use common_grpc::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::TableRef;
 use table::metadata::TableInfoRef;
 
 use crate::insert::Inserter;
+use crate::req_convert::insert::extract_timestamps;
 use crate::{error, metrics};
 
 impl Inserter {
@@ -315,23 +315,4 @@ impl Inserter {
             }
         });
     }
-}
-
-/// Calculate the timestamp range of record batch. Return `None` if record batch is empty.
-fn extract_timestamps(rb: &RecordBatch, timestamp_index_name: &str) -> error::Result<Vec<i64>> {
-    let ts_col = rb
-        .column_by_name(timestamp_index_name)
-        .context(error::ColumnNotFoundSnafu {
-            msg: timestamp_index_name,
-        })?;
-    if rb.num_rows() == 0 {
-        return Ok(vec![]);
-    }
-    let (primitive, _) =
-        datatypes::timestamp::timestamp_array_to_primitive(ts_col).with_context(|| {
-            error::InvalidTimeIndexTypeSnafu {
-                ty: ts_col.data_type().clone(),
-            }
-        })?;
-    Ok(primitive.iter().flatten().collect())
 }
