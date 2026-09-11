@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use common_telemetry::{info, warn};
+use common_time::Timestamp;
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{
@@ -84,6 +85,22 @@ fn merge_region_statistic(
         query_scanned_bytes: data_stat.query_scanned_bytes,
         data_topic_latest_entry_id: data_stat.data_topic_latest_entry_id,
         metadata_topic_latest_entry_id: metadata_stat.metadata_topic_latest_entry_id,
+        min_timestamp: merge_min(metadata_stat.min_timestamp, data_stat.min_timestamp),
+        max_timestamp: merge_max(metadata_stat.max_timestamp, data_stat.max_timestamp),
+    }
+}
+
+fn merge_min(a: Option<Timestamp>, b: Option<Timestamp>) -> Option<Timestamp> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (value, None) | (None, value) => value,
+    }
+}
+
+fn merge_max(a: Option<Timestamp>, b: Option<Timestamp>) -> Option<Timestamp> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (value, None) | (None, value) => value,
     }
 }
 
@@ -142,6 +159,45 @@ mod tests {
         let region_id = RegionId::with_group_and_seq(1, 243, 2);
         let expected_region_id = RegionId::with_group_and_seq(1, METRIC_DATA_REGION_GROUP, 2);
         assert_eq!(to_data_region_id(region_id), expected_region_id);
+    }
+
+    #[test]
+    fn merge_region_statistic_unions_the_time_range() {
+        let metadata_stat = RegionStatistic {
+            min_timestamp: Some(Timestamp::new_millisecond(100)),
+            max_timestamp: Some(Timestamp::new_millisecond(200)),
+            ..Default::default()
+        };
+        let data_stat = RegionStatistic {
+            min_timestamp: Some(Timestamp::new_millisecond(50)),
+            max_timestamp: Some(Timestamp::new_millisecond(150)),
+            ..Default::default()
+        };
+
+        let statistic = merge_region_statistic(&metadata_stat, &data_stat);
+
+        assert_eq!(
+            statistic.min_timestamp,
+            Some(Timestamp::new_millisecond(50))
+        );
+        assert_eq!(
+            statistic.max_timestamp,
+            Some(Timestamp::new_millisecond(200))
+        );
+    }
+
+    #[test]
+    fn merge_region_statistic_keeps_the_side_holding_data() {
+        let data_stat = RegionStatistic {
+            min_timestamp: Some(Timestamp::new_millisecond(5)),
+            max_timestamp: Some(Timestamp::new_millisecond(9)),
+            ..Default::default()
+        };
+
+        let statistic = merge_region_statistic(&RegionStatistic::default(), &data_stat);
+
+        assert_eq!(statistic.min_timestamp, Some(Timestamp::new_millisecond(5)));
+        assert_eq!(statistic.max_timestamp, Some(Timestamp::new_millisecond(9)));
     }
 
     #[test]

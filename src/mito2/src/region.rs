@@ -699,6 +699,13 @@ impl MitoRegion {
         let manifest_version = self.stats.manifest_version();
         let file_removed_cnt = self.stats.file_removed_cnt();
 
+        let time_range = match (version.ssts.time_range(), version.memtables.time_range()) {
+            (Some((sst_min, sst_max)), Some((mem_min, mem_max))) => {
+                Some((sst_min.min(mem_min), sst_max.max(mem_max)))
+            }
+            (range, None) | (None, range) => range,
+        };
+
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
         let written_bytes = self.region_stats.written_bytes.load(Ordering::Relaxed);
         let query_cpu_time = self.region_stats.query_cpu_time.load(Ordering::Relaxed);
@@ -725,6 +732,8 @@ impl MitoRegion {
             written_bytes,
             query_cpu_time,
             query_scanned_bytes,
+            min_timestamp: time_range.map(|(min, _)| min),
+            max_timestamp: time_range.map(|(_, max)| max),
         }
     }
 

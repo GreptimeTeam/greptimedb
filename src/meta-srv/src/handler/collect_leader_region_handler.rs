@@ -88,6 +88,8 @@ mod tests {
             index_size: 0,
             data_topic_latest_entry_id: 0,
             metadata_topic_latest_entry_id: 0,
+            min_timestamp: None,
+            max_timestamp: None,
             written_bytes: 0,
             query_cpu_time: 0,
             query_scanned_bytes: 0,
