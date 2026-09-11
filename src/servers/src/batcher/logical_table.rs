@@ -12,20 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod batch_convert;
+mod region_write;
+#[cfg(test)]
+mod test_util;
+
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
-use api::v1::meta::Peer;
-use api::v1::region::{
-    BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
-};
-use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
-use arrow::compute::{concat_batches, filter_record_batch};
-use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
-use arrow::record_batch::RecordBatch;
+use api::v1::{ColumnSchema, RowInsertRequests, Rows};
+use arrow::datatypes::Schema as ArrowSchema;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_batcher::flush_limiter::FlushLimiter;
@@ -35,25 +34,31 @@ use common_batcher::notifier::{Notifier, run_notifier};
 use common_batcher::pending_worker::PendingWorker as PendingCore;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
-use common_grpc::error::Error as GrpcError;
-use common_grpc::flight::record_batch_to_ipc;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
-use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
+use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_runtime::spawn_global;
-use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use datatypes::timestamp::append_timestamps;
-use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
-use partition::partition::PartitionRuleRef;
 use session::context::QueryContextRef;
-use smallvec::SmallVec;
-use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::{RegionId, TableId};
-use table::metadata::{TableInfo, TableInfoRef};
+use snafu::{OptionExt, ResultExt};
+use table::metadata::TableId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
+pub use crate::batcher::logical_table::batch_convert::{RecordBatchWithTsIdx, TableBatch};
+use crate::batcher::logical_table::batch_convert::{
+    concat_modified_batches, transform_logical_batches_to_physical,
+};
+use crate::batcher::logical_table::region_write::{
+    CatalogManagerPhysicalFlushAdapter, NodeManagerPhysicalFlushAdapter,
+    PartitionManagerPhysicalFlushAdapter, encode_region_write_requests,
+    flush_region_writes_concurrently, plan_region_batches, resolve_region_targets,
+};
+pub use crate::batcher::logical_table::region_write::{
+    PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
+    PhysicalTableMetadata,
+};
 use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
@@ -67,6 +72,7 @@ use crate::prom_row_builder::{
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
+
 /// Whether wait for ingestion result before reply to client.
 const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 
@@ -84,12 +90,14 @@ pub fn pending_rows_batch_sync_enabled() -> bool {
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(true)
 }
+
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
-const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
+
 const MAX_CONCURRENT_FLOW_NOTIFICATIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
-    /// Batch-create multiple logical tables that are missing.
+    /// FlushBatch-create multiple logical tables that are missing.
     /// Each entry is `(table_name, request_schema)`.
     async fn create_tables_if_missing_batch(
         &self,
@@ -100,7 +108,7 @@ pub trait PendingRowsSchemaAlterer: Send + Sync {
         ctx: QueryContextRef,
     ) -> Result<()>;
 
-    /// Batch-alter multiple logical tables to add missing tag columns.
+    /// FlushBatch-alter multiple logical tables to add missing tag columns.
     /// Each entry is `(table_name, missing_column_names)`.
     async fn add_missing_prom_tag_columns_batch(
         &self,
@@ -113,174 +121,11 @@ pub trait PendingRowsSchemaAlterer: Send + Sync {
 
 pub type PendingRowsSchemaAltererRef = Arc<dyn PendingRowsSchemaAlterer>;
 
-#[derive(Clone)]
-pub struct PhysicalTableMetadata {
-    pub table_info: TableInfoRef,
-    /// Mapping from column name to column id
-    pub col_name_to_ids: Option<HashMap<String, u32>>,
-}
-
-#[async_trait]
-pub trait PhysicalFlushCatalogProvider: Send + Sync {
-    async fn physical_table(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table_name: &str,
-        query_ctx: &session::context::QueryContext,
-    ) -> catalog::error::Result<Option<PhysicalTableMetadata>>;
-}
-
-#[async_trait]
-pub trait PhysicalFlushPartitionProvider: Send + Sync {
-    async fn find_table_partition_rule(
-        &self,
-        table_info: &TableInfo,
-    ) -> partition::error::Result<PartitionRuleRef>;
-
-    async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer>;
-}
-
-#[async_trait]
-pub trait PhysicalFlushNodeRequester: Send + Sync {
-    async fn handle(
-        &self,
-        peer: &Peer,
-        request: RegionRequest,
-    ) -> Result<api::region::RegionResponse>;
-}
-
-#[derive(Clone)]
-struct CatalogManagerPhysicalFlushAdapter {
-    catalog_manager: CatalogManagerRef,
-}
-
-#[async_trait]
-impl PhysicalFlushCatalogProvider for CatalogManagerPhysicalFlushAdapter {
-    async fn physical_table(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table_name: &str,
-        query_ctx: &session::context::QueryContext,
-    ) -> catalog::error::Result<Option<PhysicalTableMetadata>> {
-        self.catalog_manager
-            .table(catalog, schema, table_name, Some(query_ctx))
-            .await
-            .map(|table| {
-                table.map(|table| {
-                    let table_info = table.table_info();
-                    let name_to_ids = table_info.name_to_ids();
-                    PhysicalTableMetadata {
-                        table_info,
-                        col_name_to_ids: name_to_ids,
-                    }
-                })
-            })
-    }
-}
-
-#[derive(Clone)]
-struct PartitionManagerPhysicalFlushAdapter {
-    partition_manager: PartitionRuleManagerRef,
-}
-
-#[async_trait]
-impl PhysicalFlushPartitionProvider for PartitionManagerPhysicalFlushAdapter {
-    async fn find_table_partition_rule(
-        &self,
-        table_info: &TableInfo,
-    ) -> partition::error::Result<PartitionRuleRef> {
-        self.partition_manager
-            .find_table_partition_rule(table_info)
-            .await
-            .map(|(rule, _)| rule)
-    }
-
-    async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer> {
-        let peer = self.partition_manager.find_region_leader(region_id).await?;
-        Ok(peer)
-    }
-}
-
-#[derive(Clone)]
-struct NodeManagerPhysicalFlushAdapter {
-    node_manager: NodeManagerRef,
-}
-
-#[async_trait]
-impl PhysicalFlushNodeRequester for NodeManagerPhysicalFlushAdapter {
-    async fn handle(
-        &self,
-        peer: &Peer,
-        request: RegionRequest,
-    ) -> error::Result<api::region::RegionResponse> {
-        let datanode = self.node_manager.datanode(peer).await;
-        datanode
-            .handle(request)
-            .await
-            .context(error::CommonMetaSnafu)
-    }
-}
-
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct BatchKey {
     catalog: String,
     schema: String,
     physical_table: String,
-}
-
-/// An aligned logical record batch and its timestamp column index.
-#[derive(Debug, Clone)]
-pub struct RecordBatchWithTsIdx {
-    /// The aligned logical record batch.
-    batch: RecordBatch,
-    /// The timestamp column index in `batch`.
-    timestamp_index: usize,
-}
-
-impl RecordBatchWithTsIdx {
-    /// Creates a record batch with a validated timestamp column index.
-    pub fn try_new(batch: RecordBatch, timestamp_index: usize) -> Result<Self> {
-        let schema = batch.schema();
-        let timestamp_field = schema.fields().get(timestamp_index).with_context(|| {
-            error::InvalidPromRemoteRequestSnafu {
-                msg: format!(
-                    "Timestamp column index {} is out of bounds for record batch with {} columns",
-                    timestamp_index,
-                    batch.num_columns()
-                ),
-            }
-        })?;
-        ensure!(
-            matches!(timestamp_field.data_type(), ArrowDataType::Timestamp(_, _)),
-            error::InvalidPromRemoteRequestSnafu {
-                msg: format!(
-                    "Column at index {} is not a timestamp column: {:?}",
-                    timestamp_index,
-                    timestamp_field.data_type()
-                ),
-            }
-        );
-
-        Ok(Self {
-            batch,
-            timestamp_index,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn into_parts(self) -> (RecordBatch, usize) {
-        (self.batch, self.timestamp_index)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TableBatch {
-    pub table_name: String,
-    pub table_id: TableId,
-    pub batches: Vec<RecordBatchWithTsIdx>,
-    pub row_count: usize,
 }
 
 /// Intermediate planning state for resolving and preparing logical tables
@@ -330,7 +175,7 @@ enum WorkerCommand {
     Ack { ack_tx: oneshot::Sender<()> },
 }
 
-// Batch key is derived from QueryContext; it assumes catalog/schema/physical_table fully
+// FlushBatch key is derived from QueryContext; it assumes catalog/schema/physical_table fully
 // define the write target and must remain consistent across the batch.
 fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
     let physical_table = ctx
@@ -416,7 +261,9 @@ impl LogicalTablePendingRowsBatcher {
             shutdown,
         }))
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     pub async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
         let (table_batches, total_rows) = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
@@ -495,7 +342,9 @@ impl LogicalTablePendingRowsBatcher {
             Ok(total_rows as u64)
         }
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     /// Converts proto `RowInsertRequests` directly into aligned `RecordBatch`es
     /// in a single pass, handling table creation, schema alteration, column
     /// renaming, reordering, and null-filling without building intermediate
@@ -534,7 +383,9 @@ impl LogicalTablePendingRowsBatcher {
 
         Ok((aligned_batches, total_rows))
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     /// Extracts non-empty `(table_name, rows)` pairs and computes total row
     /// count across the retained entries.
     fn collect_non_empty_table_rows(requests: RowInsertRequests) -> (Vec<(String, Rows)>, usize) {
@@ -555,7 +406,9 @@ impl LogicalTablePendingRowsBatcher {
 
         (table_rows, total_rows)
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     /// Returns unique `(table_name, proto_schema)` pairs while keeping the
     /// first-seen schema for duplicate table names.
     fn collect_unique_table_schemas(
@@ -581,7 +434,9 @@ impl LogicalTablePendingRowsBatcher {
 
         Ok(unique_tables)
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     /// Resolves table metadata and classifies each table into existing,
     /// to-create, and to-alter groups used by subsequent DDL steps.
     async fn plan_table_resolution(
@@ -642,8 +497,10 @@ impl LogicalTablePendingRowsBatcher {
 
         Ok(plan)
     }
+}
 
-    /// Batch-creates missing tables, refreshes their schema metadata, and
+impl LogicalTablePendingRowsBatcher {
+    /// FlushBatch-creates missing tables, refreshes their schema metadata, and
     /// enqueues follow-up alters for extra tag columns discovered in later rows.
     async fn create_missing_tables_and_refresh_schemas(
         &self,
@@ -709,7 +566,9 @@ impl LogicalTablePendingRowsBatcher {
 
         Ok(())
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     /// For newly created tables, re-checks all row schemas and appends alter
     /// operations when additional tag columns are still missing.
     fn enqueue_alter_for_new_tables(
@@ -747,8 +606,10 @@ impl LogicalTablePendingRowsBatcher {
 
         Ok(())
     }
+}
 
-    /// Batch-alters tables that have missing tag columns and refreshes the
+impl LogicalTablePendingRowsBatcher {
+    /// FlushBatch-alters tables that have missing tag columns and refreshes the
     /// in-memory schema map used for row alignment.
     async fn alter_tables_and_refresh_schemas(
         &self,
@@ -804,7 +665,9 @@ impl LogicalTablePendingRowsBatcher {
 
         Ok(())
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     /// Converts proto rows to `RecordBatch` values aligned to resolved region
     /// schemas and returns `(table_name, table_id, batch)` tuples.
     fn build_aligned_batches(
@@ -831,7 +694,9 @@ impl LogicalTablePendingRowsBatcher {
 
         Ok(aligned_batches)
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     async fn get_or_spawn_worker(&self, key: BatchKey) -> PendingWorker {
         let (tx, receiver) = self
             .workers
@@ -843,7 +708,9 @@ impl LogicalTablePendingRowsBatcher {
         }
         PendingWorker { tx }
     }
+}
 
+impl LogicalTablePendingRowsBatcher {
     fn spawn_worker(
         &self,
         key: BatchKey,
@@ -1114,186 +981,6 @@ async fn spawn_flush(
             .await;
         }
     }
-}
-
-struct FlushRegionWrite {
-    datanode: Peer,
-    request: RegionRequest,
-}
-
-struct PlannedRegionBatch {
-    region_id: RegionId,
-    batch: RecordBatch,
-}
-
-#[cfg(test)]
-impl PlannedRegionBatch {
-    fn num_rows(&self) -> usize {
-        self.batch.num_rows()
-    }
-}
-
-struct ResolvedRegionBatch {
-    planned: PlannedRegionBatch,
-    datanode: Peer,
-}
-
-fn should_dispatch_concurrently(region_write_count: usize) -> bool {
-    region_write_count > 1
-}
-
-/// Classifies columns in a logical-table batch for sparse primary-key conversion.
-///
-/// Returns:
-/// - `Vec<TagColumnInfo>`: all Utf8 tag columns sorted by tag name, used for
-///   TSID and sparse primary-key encoding.
-/// - `SmallVec<[usize; 3]>`: indices of columns copied into the physical batch
-///   after `__primary_key`, ordered as `[greptime_timestamp, greptime_value,
-///   partition_tag_columns...]`.
-fn columns_taxonomy(
-    batch_schema: &Arc<ArrowSchema>,
-    table_name: &str,
-    name_to_ids: &HashMap<String, u32>,
-    partition_columns: &HashSet<&str>,
-) -> Result<(Vec<TagColumnInfo>, SmallVec<[usize; 3]>)> {
-    let mut tag_columns = Vec::new();
-    let mut essential_column_indices =
-        SmallVec::<[usize; 3]>::with_capacity(2 + partition_columns.len());
-    // Placeholder for greptime_timestamp and greptime_value
-    essential_column_indices.push(0);
-    essential_column_indices.push(0);
-
-    let mut timestamp_index = None;
-    let mut value_index = None;
-
-    for (index, field) in batch_schema.fields().iter().enumerate() {
-        match field.data_type() {
-            ArrowDataType::Utf8 => {
-                let column_id = name_to_ids.get(field.name()).copied().with_context(|| {
-                    error::InvalidPromRemoteRequestSnafu {
-                        msg: format!(
-                            "Column '{}' from logical table '{}' not found in physical table column IDs",
-                            field.name(),
-                            table_name
-                        ),
-                    }
-                })?;
-                tag_columns.push(TagColumnInfo {
-                    name: field.name().clone(),
-                    index,
-                    column_id,
-                });
-
-                if partition_columns.contains(field.name().as_str()) {
-                    essential_column_indices.push(index);
-                }
-            }
-            ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => {
-                ensure!(
-                    timestamp_index.replace(index).is_none(),
-                    error::InvalidPromRemoteRequestSnafu {
-                        msg: format!(
-                            "Duplicated timestamp column in logical table '{}' batch schema",
-                            table_name
-                        ),
-                    }
-                );
-            }
-            ArrowDataType::Float64 => {
-                ensure!(
-                    value_index.replace(index).is_none(),
-                    error::InvalidPromRemoteRequestSnafu {
-                        msg: format!(
-                            "Duplicated value column in logical table '{}' batch schema",
-                            table_name
-                        ),
-                    }
-                );
-            }
-            datatype => {
-                return error::InvalidPromRemoteRequestSnafu {
-                    msg: format!(
-                        "Unexpected data type '{datatype:?}' in logical table '{}' batch schema",
-                        table_name
-                    ),
-                }
-                .fail();
-            }
-        }
-    }
-
-    let timestamp_index =
-        timestamp_index.with_context(|| error::InvalidPromRemoteRequestSnafu {
-            msg: format!(
-                "Missing essential column '{}' in logical table '{}' batch schema",
-                greptime_timestamp(),
-                table_name
-            ),
-        })?;
-    let value_index = value_index.with_context(|| error::InvalidPromRemoteRequestSnafu {
-        msg: format!(
-            "Missing essential column '{}' in logical table '{}' batch schema",
-            greptime_value(),
-            table_name
-        ),
-    })?;
-
-    tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
-
-    essential_column_indices[0] = timestamp_index;
-    essential_column_indices[1] = value_index;
-
-    Ok((tag_columns, essential_column_indices))
-}
-
-fn strip_partition_columns_from_batch(batch: RecordBatch) -> Result<RecordBatch> {
-    ensure!(
-        batch.num_columns() >= PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT,
-        error::InternalSnafu {
-            err_msg: format!(
-                "Expected at least {} columns in physical batch, got {}",
-                PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT,
-                batch.num_columns()
-            ),
-        }
-    );
-    let essential_indices: Vec<usize> = (0..PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT).collect();
-    batch.project(&essential_indices).context(error::ArrowSnafu)
-}
-
-async fn flush_region_writes_concurrently(
-    node_manager: &(impl PhysicalFlushNodeRequester + ?Sized),
-    writes: Vec<FlushRegionWrite>,
-) -> Result<usize> {
-    let mut affected_rows = 0;
-    if !should_dispatch_concurrently(writes.len()) {
-        for write in writes {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_write_region"])
-                .start_timer();
-            affected_rows += node_manager
-                .handle(&write.datanode, write.request)
-                .await?
-                .affected_rows;
-        }
-        return Ok(affected_rows);
-    }
-
-    let write_futures = writes.into_iter().map(|write| async move {
-        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-            .with_label_values(&["flush_write_region"])
-            .start_timer();
-
-        let response = node_manager.handle(&write.datanode, write.request).await?;
-        Ok::<_, Error>(response.affected_rows)
-    });
-
-    // todo(hl): should be bounded.
-    let affected_rows = futures::future::try_join_all(write_futures)
-        .await?
-        .into_iter()
-        .sum();
-    Ok(affected_rows)
 }
 
 async fn flush_batch_with_managers(
@@ -1595,218 +1282,6 @@ pub async fn flush_batch_physical(
     flush_region_writes_concurrently(node_manager, region_writes).await
 }
 
-/// Transforms logical table batches into physical format (sparse primary key encoding).
-///
-/// It identifies tag columns and essential columns (timestamp, value) for each logical batch
-/// and applies sparse primary key modification.
-fn transform_logical_batches_to_physical(
-    table_batches: &[TableBatch],
-    name_to_ids: &HashMap<String, u32>,
-    partition_columns_set: &HashSet<&str>,
-) -> Result<Vec<RecordBatch>> {
-    let mut modified_batches: Vec<RecordBatch> =
-        Vec::with_capacity(table_batches.iter().map(|b| b.batches.len()).sum());
-
-    let mut modify_elapsed = Duration::ZERO;
-    let mut columns_taxonomy_elapsed = Duration::ZERO;
-
-    for table_batch in table_batches {
-        let table_id = table_batch.table_id;
-
-        for batch in &table_batch.batches {
-            let batch = &batch.batch;
-            let batch_schema = batch.schema();
-            let start = Instant::now();
-            let (tag_columns, essential_col_indices) = columns_taxonomy(
-                &batch_schema,
-                &table_batch.table_name,
-                name_to_ids,
-                partition_columns_set,
-            )?;
-
-            columns_taxonomy_elapsed += start.elapsed();
-            if tag_columns.is_empty() && essential_col_indices.is_empty() {
-                continue;
-            }
-
-            let modified = {
-                let start = Instant::now();
-                // The schema of modified batch is: __primary_key, timestamp, value, other partition columns...
-                let batch = modify_batch_sparse(
-                    batch.clone(),
-                    table_id,
-                    &tag_columns,
-                    &essential_col_indices,
-                )?;
-                modify_elapsed += start.elapsed();
-                batch
-            };
-
-            modified_batches.push(modified);
-        }
-    }
-
-    PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-        .with_label_values(&["flush_physical_modify_batch"])
-        .observe(modify_elapsed.as_secs_f64());
-    PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-        .with_label_values(&["flush_physical_columns_taxonomy"])
-        .observe(columns_taxonomy_elapsed.as_secs_f64());
-
-    ensure!(
-        !modified_batches.is_empty(),
-        error::InternalSnafu {
-            err_msg: "No batches can be transformed during pending flush",
-        }
-    );
-    Ok(modified_batches)
-}
-
-/// Concatenates all modified batches into a single large batch.
-///
-/// All modified batches share the same physical schema.
-fn concat_modified_batches(modified_batches: &[RecordBatch]) -> Result<RecordBatch> {
-    let combined_schema = modified_batches[0].schema();
-    let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-        .with_label_values(&["flush_physical_concat_all"])
-        .start_timer();
-    concat_batches(&combined_schema, modified_batches).context(error::ArrowSnafu)
-}
-
-fn split_combined_batch_by_region(
-    combined_batch: &RecordBatch,
-    partition_rule: &dyn partition::partition::PartitionRule,
-) -> Result<HashMap<u32, partition::partition::RegionMask>> {
-    let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-        .with_label_values(&["flush_physical_split_record_batch"])
-        .start_timer();
-    let map = partition_rule.split_record_batch(combined_batch)?;
-    Ok(map)
-}
-
-fn prepare_physical_region_routing_batch(
-    combined_batch: RecordBatch,
-    partition_columns: &[String],
-) -> Result<RecordBatch> {
-    if partition_columns.is_empty() {
-        return Ok(combined_batch);
-    }
-    strip_partition_columns_from_batch(combined_batch)
-}
-
-fn plan_region_batch(
-    stripped_batch: &RecordBatch,
-    physical_table_id: TableId,
-    region_number: u32,
-    mask: &partition::partition::RegionMask,
-) -> Result<Option<PlannedRegionBatch>> {
-    if mask.select_none() {
-        return Ok(None);
-    }
-
-    let region_batch = if mask.select_all() {
-        stripped_batch.clone()
-    } else {
-        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-            .with_label_values(&["flush_physical_filter_record_batch"])
-            .start_timer();
-        filter_record_batch(stripped_batch, mask.array()).context(error::ArrowSnafu)?
-    };
-
-    let row_count = region_batch.num_rows();
-    if row_count == 0 {
-        return Ok(None);
-    }
-
-    Ok(Some(PlannedRegionBatch {
-        region_id: RegionId::new(physical_table_id, region_number),
-        batch: region_batch,
-    }))
-}
-
-fn plan_region_batches(
-    combined_batch: RecordBatch,
-    physical_table_id: TableId,
-    partition_rule: &dyn partition::partition::PartitionRule,
-    partition_columns: &[String],
-) -> Result<Vec<PlannedRegionBatch>> {
-    let region_masks = split_combined_batch_by_region(&combined_batch, partition_rule)?;
-    let stripped_batch = prepare_physical_region_routing_batch(combined_batch, partition_columns)?;
-
-    let mut planned_batches = Vec::new();
-    for (region_number, mask) in region_masks {
-        if let Some(planned_batch) =
-            plan_region_batch(&stripped_batch, physical_table_id, region_number, &mask)?
-        {
-            planned_batches.push(planned_batch);
-        }
-    }
-
-    Ok(planned_batches)
-}
-
-async fn resolve_region_targets(
-    planned_batches: Vec<PlannedRegionBatch>,
-    partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
-) -> Result<Vec<ResolvedRegionBatch>> {
-    let mut resolved_batches = Vec::with_capacity(planned_batches.len());
-    for planned in planned_batches {
-        let datanode = {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_physical_resolve_region_leader"])
-                .start_timer();
-            partition_manager
-                .find_region_leader(planned.region_id)
-                .await?
-        };
-
-        resolved_batches.push(ResolvedRegionBatch { planned, datanode });
-    }
-
-    Ok(resolved_batches)
-}
-
-fn encode_region_write_requests(
-    resolved_batches: Vec<ResolvedRegionBatch>,
-) -> Result<Vec<FlushRegionWrite>> {
-    let mut region_writes = Vec::with_capacity(resolved_batches.len());
-    for resolved in resolved_batches {
-        let region_id = resolved.planned.region_id;
-        let (schema_bytes, data_header, payload) = {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_physical_encode_ipc"])
-                .start_timer();
-            record_batch_to_ipc(resolved.planned.batch).map_err(map_ipc_error)?
-        };
-
-        let request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                tracing_context: TracingContext::from_current_span().to_w3c(),
-                ..Default::default()
-            }),
-            body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
-                region_id: region_id.as_u64(),
-                partition_expr_version: None,
-                // Set aligned_schema_version to None so that datanode will check the batch schema again to see if any
-                // column is missing.
-                aligned_schema_version: None,
-                body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                    schema: schema_bytes,
-                    data_header,
-                    payload,
-                })),
-            })),
-        };
-
-        region_writes.push(FlushRegionWrite {
-            datanode: resolved.datanode,
-            request,
-        });
-    }
-
-    Ok(region_writes)
-}
-
 fn notify_waiters(waiters: Vec<FlushWaiter>, result: Result<()>) {
     let shared_result = result.map_err(Arc::new);
     for waiter in waiters {
@@ -1818,41 +1293,37 @@ fn notify_waiters(waiters: Vec<FlushWaiter>, result: Result<()>) {
     }
 }
 
-fn map_ipc_error(error: GrpcError) -> Error {
-    match error {
-        GrpcError::NotSupported { feat } => Error::NotSupported { feat },
-        GrpcError::InvalidFlightData { reason, .. } => Error::Internal { err_msg: reason },
-        error => Error::Internal {
-            err_msg: error.to_string(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::collections::{HashMap, HashSet};
-    use std::future::{Future, poll_fn};
+    use std::collections::HashMap;
+    use std::future::poll_fn;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
     use std::time::Duration;
 
     use api::region::RegionResponse;
-    use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
     use api::v1::meta::Peer;
-    use api::v1::region::{InsertRequests, RegionRequest, region_request};
+    use api::v1::region::RegionRequest;
     use api::v1::value::ValueData;
     use api::v1::{
         ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
         Value,
     };
-    use arrow::array::{BinaryArray, BooleanArray, StringArray, TimestampMillisecondArray};
+    use arrow::array::{StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
     use catalog::error::Result as CatalogResult;
     use catalog::memory::MemoryCatalogManager;
+    use common_batcher::flush_limiter::FlushLimiter;
+    use common_batcher::flush_policy::FlushTrigger;
+    use common_batcher::flush_policy::timing::TimingFlushPolicy;
+    use common_batcher::notifier::Notifier;
+    use common_batcher::pending_worker::PendingWorker as PendingCore;
+    use common_batcher::request_limiter::RequestLimiter;
+    use common_batcher::worker_registry::WorkerRegistry;
     use common_meta::cache::{
         TableFlownodeSetCacheRef, new_table_flownode_set_cache, new_table_route_cache,
     };
@@ -1860,46 +1331,43 @@ mod tests {
     use common_meta::instruction::{CacheIdent, CreateFlow};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::{KvBackend, TxnService};
-    use common_meta::node_manager::{
-        Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef,
-        NodeManagerRef,
-    };
+    use common_meta::node_manager::NodeManagerRef;
     use common_meta::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
         BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
         PutResponse, RangeRequest, RangeResponse,
     };
-    use common_query::request::QueryRequest;
-    use common_recordbatch::SendableRecordBatchStream;
+    use common_query::prelude::greptime_timestamp;
     use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
     use moka::future::CacheBuilder;
     use partition::cache::new_partition_info_cache;
     use partition::error::Result as PartitionResult;
     use partition::manager::PartitionRuleManager;
     use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
-    use smallvec::SmallVec;
-    use snafu::ResultExt;
     use store_api::storage::RegionId;
     use table::metadata::TableId;
     use table::test_util::table_info::test_table_info;
     use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot};
-    use tokio::time::{advance, sleep};
+    use tokio::time::advance;
 
-    use crate::batcher::logical_table::{
-        BatchKey, Error, FlushBatch, FlushLimiter, FlushRegionWrite, FlushTrigger, FlushWaiter,
-        LogicalTablePendingRowsBatcher, Notifier, PendingBatch, PendingCore,
+    use crate::batcher::logical_table::batch_convert::{RecordBatchWithTsIdx, TableBatch};
+    use crate::batcher::logical_table::region_write::{
         PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
-        PhysicalTableMetadata, PlannedRegionBatch, RecordBatchWithTsIdx, RequestLimiter,
-        ResolvedRegionBatch, TableBatch, TimingFlushPolicy, WorkerCommand, WorkerRegistry,
-        columns_taxonomy, drain_batch, encode_region_write_requests, extract_timestamps,
-        flush_batch, flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
-        notify_flow_dirty_windows_after_flush, notify_waiters, plan_region_batches,
-        remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
-        should_dispatch_concurrently, start_flow_notification_worker, start_worker,
-        strip_partition_columns_from_batch, transform_logical_batches_to_physical,
+        PhysicalTableMetadata,
+    };
+    use crate::batcher::logical_table::test_util::{
+        ConcurrentMockNodeManager, FlowNotificationMockNodeManager, RecordingFlownode,
+        mock_aligned_tag_batch, mock_table_flownode_cache, mock_tag_batch,
+    };
+    use crate::batcher::logical_table::{
+        BatchKey, FlushBatch, FlushWaiter, LogicalTablePendingRowsBatcher, PendingBatch,
+        WorkerCommand, drain_batch, extract_timestamps, flush_batch, flush_batch_physical,
+        notify_flow_dirty_windows_after_flush, notify_waiters, remove_worker_if_same_channel,
+        should_close_worker_on_idle_timeout, start_flow_notification_worker, start_worker,
         try_enqueue_flow_notification,
     };
     use crate::error;
+    use crate::error::Error;
     use crate::metrics::FLOW_NOTIFICATION_DROPPED;
     use crate::prom_row_builder::rows_to_aligned_record_batch;
 
@@ -1911,37 +1379,6 @@ mod tests {
             }],
             rows: (0..row_count).map(|_| Row { values: vec![] }).collect(),
         }
-    }
-
-    fn mock_tag_batch(tag_name: &str, tag_value: &str, ts: i64, val: f64) -> RecordBatch {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("greptime_value", ArrowDataType::Float64, true),
-            Field::new(tag_name, ArrowDataType::Utf8, true),
-        ]));
-
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![ts])),
-                Arc::new(arrow::array::Float64Array::from(vec![val])),
-                Arc::new(StringArray::from(vec![tag_value])),
-            ],
-        )
-        .unwrap()
-    }
-
-    fn mock_aligned_tag_batch(
-        tag_name: &str,
-        tag_value: &str,
-        ts: i64,
-        val: f64,
-    ) -> RecordBatchWithTsIdx {
-        RecordBatchWithTsIdx::try_new(mock_tag_batch(tag_name, tag_value, ts, val), 0).unwrap()
     }
 
     fn mock_timestamp_batch(timestamps: Vec<Option<i64>>) -> RecordBatchWithTsIdx {
@@ -2230,42 +1667,6 @@ mod tests {
         }
     }
 
-    struct TwoRegionPartitionRule {
-        partition_columns: Vec<String>,
-    }
-
-    impl PartitionRule for TwoRegionPartitionRule {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn partition_columns(&self) -> &[String] {
-            &self.partition_columns
-        }
-
-        fn find_region(
-            &self,
-            _values: &[datatypes::prelude::Value],
-        ) -> partition::error::Result<store_api::storage::RegionNumber> {
-            unimplemented!()
-        }
-
-        fn split_record_batch(
-            &self,
-            _record_batch: &RecordBatch,
-        ) -> partition::error::Result<HashMap<store_api::storage::RegionNumber, RegionMask>>
-        {
-            Ok(HashMap::from([
-                (1, RegionMask::new(BooleanArray::from(vec![true, false]), 1)),
-                (2, RegionMask::new(BooleanArray::from(vec![false, true]), 1)),
-                (
-                    3,
-                    RegionMask::new(BooleanArray::from(vec![false, false]), 0),
-                ),
-            ]))
-        }
-    }
-
     struct MockFlushPartitionProvider {
         partition_rule_calls: Arc<AtomicUsize>,
         region_leader_calls: Arc<AtomicUsize>,
@@ -2457,144 +1858,6 @@ mod tests {
         assert_eq!(43, pending_batch.tables[&43].table_id);
         assert_eq!("cpu", pending_batch.tables[&42].table_name);
         assert_eq!("cpu", pending_batch.tables[&43].table_name);
-    }
-
-    #[derive(Clone)]
-    struct ConcurrentMockDatanode {
-        delay: Duration,
-        inflight: Arc<AtomicUsize>,
-        max_inflight: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl Datanode for ConcurrentMockDatanode {
-        async fn handle(&self, _request: RegionRequest) -> MetaResult<RegionResponse> {
-            let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
-            loop {
-                let max = self.max_inflight.load(Ordering::SeqCst);
-                if now <= max {
-                    break;
-                }
-                if self
-                    .max_inflight
-                    .compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-
-            sleep(self.delay).await;
-            self.inflight.fetch_sub(1, Ordering::SeqCst);
-            Ok(RegionResponse::new(0))
-        }
-
-        async fn handle_query(
-            &self,
-            _request: QueryRequest,
-        ) -> MetaResult<SendableRecordBatchStream> {
-            unimplemented!()
-        }
-    }
-
-    #[derive(Clone)]
-    struct ConcurrentMockNodeManager {
-        datanodes: Arc<HashMap<u64, DatanodeRef>>,
-    }
-
-    #[async_trait]
-    impl DatanodeManager for ConcurrentMockNodeManager {
-        async fn datanode(&self, node: &Peer) -> DatanodeRef {
-            self.datanodes
-                .get(&node.id)
-                .expect("datanode not found")
-                .clone()
-        }
-    }
-
-    struct NoopFlownode;
-
-    #[async_trait]
-    impl Flownode for NoopFlownode {
-        async fn handle(&self, _request: FlowRequest) -> MetaResult<FlowResponse> {
-            unimplemented!()
-        }
-
-        async fn handle_inserts(&self, _request: InsertRequests) -> MetaResult<FlowResponse> {
-            unimplemented!()
-        }
-
-        async fn handle_mark_window_dirty(
-            &self,
-            _req: DirtyWindowRequests,
-        ) -> MetaResult<FlowResponse> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl FlownodeManager for ConcurrentMockNodeManager {
-        async fn flownode(&self, _node: &Peer) -> FlownodeRef {
-            Arc::new(NoopFlownode)
-        }
-    }
-
-    struct RecordingFlownode {
-        requests_tx: mpsc::UnboundedSender<DirtyWindowRequests>,
-    }
-
-    #[async_trait]
-    impl Flownode for RecordingFlownode {
-        async fn handle(&self, _request: FlowRequest) -> MetaResult<FlowResponse> {
-            unimplemented!()
-        }
-
-        async fn handle_inserts(&self, _request: InsertRequests) -> MetaResult<FlowResponse> {
-            unimplemented!()
-        }
-
-        async fn handle_mark_window_dirty(
-            &self,
-            req: DirtyWindowRequests,
-        ) -> MetaResult<FlowResponse> {
-            self.requests_tx.send(req).unwrap();
-            Ok(FlowResponse::default())
-        }
-    }
-
-    struct FlowNotificationMockNodeManager {
-        flownode: FlownodeRef,
-    }
-
-    #[async_trait]
-    impl DatanodeManager for FlowNotificationMockNodeManager {
-        async fn datanode(&self, _node: &Peer) -> DatanodeRef {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl FlownodeManager for FlowNotificationMockNodeManager {
-        async fn flownode(&self, _node: &Peer) -> FlownodeRef {
-            self.flownode.clone()
-        }
-    }
-
-    async fn mock_table_flownode_cache(table_id: TableId, peer: Peer) -> TableFlownodeSetCacheRef {
-        let cache = Arc::new(new_table_flownode_set_cache(
-            "test".to_string(),
-            CacheBuilder::new(1).build(),
-            Arc::new(MemoryKvBackend::default()),
-        ));
-        cache
-            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
-                flow_id: 1,
-                source_table_ids: vec![table_id],
-                partition_to_peer_mapping: vec![(0, peer.clone()), (1, peer)],
-            })])
-            .await
-            .unwrap();
-        cache
     }
 
     fn mock_flow_notification_sender(
@@ -2918,21 +2181,6 @@ mod tests {
         );
     }
 
-    #[async_trait]
-    impl PhysicalFlushNodeRequester for ConcurrentMockNodeManager {
-        async fn handle(
-            &self,
-            peer: &Peer,
-            request: RegionRequest,
-        ) -> error::Result<RegionResponse> {
-            let datanode = self.datanode(peer).await;
-            datanode
-                .handle(request)
-                .await
-                .context(error::CommonMetaSnafu)
-        }
-    }
-
     #[tokio::test]
     async fn test_cancelled_waiter_retains_request_slot_until_notification() {
         let limiter = RequestLimiter::try_new(1).unwrap();
@@ -3180,440 +2428,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_flush_region_writes_concurrently_dispatches_multiple_datanodes() {
-        let inflight = Arc::new(AtomicUsize::new(0));
-        let max_inflight = Arc::new(AtomicUsize::new(0));
-        let datanode1: DatanodeRef = Arc::new(ConcurrentMockDatanode {
-            delay: Duration::from_millis(100),
-            inflight: inflight.clone(),
-            max_inflight: max_inflight.clone(),
-        });
-        let datanode2: DatanodeRef = Arc::new(ConcurrentMockDatanode {
-            delay: Duration::from_millis(100),
-            inflight,
-            max_inflight: max_inflight.clone(),
-        });
-
-        let mut datanodes = HashMap::new();
-        datanodes.insert(1, datanode1);
-        datanodes.insert(2, datanode2);
-        let node_manager = Arc::new(ConcurrentMockNodeManager {
-            datanodes: Arc::new(datanodes),
-        });
-
-        let writes = vec![
-            FlushRegionWrite {
-                datanode: Peer {
-                    id: 1,
-                    addr: "node1".to_string(),
-                },
-                request: RegionRequest::default(),
-            },
-            FlushRegionWrite {
-                datanode: Peer {
-                    id: 2,
-                    addr: "node2".to_string(),
-                },
-                request: RegionRequest::default(),
-            },
-        ];
-
-        flush_region_writes_concurrently(node_manager.as_ref(), writes)
-            .await
-            .unwrap();
-        assert!(max_inflight.load(Ordering::SeqCst) >= 2);
-    }
-
-    #[test]
-    fn test_should_dispatch_concurrently_by_region_count() {
-        assert!(!should_dispatch_concurrently(0));
-        assert!(!should_dispatch_concurrently(1));
-        assert!(should_dispatch_concurrently(2));
-    }
-
-    #[test]
-    fn test_strip_partition_columns_from_batch_removes_partition_tags() {
-        let batch = RecordBatch::try_new(
-            Arc::new(ArrowSchema::new(vec![
-                Field::new("__primary_key", ArrowDataType::Binary, false),
-                Field::new(
-                    "greptime_timestamp",
-                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new("greptime_value", ArrowDataType::Float64, true),
-                Field::new("host", ArrowDataType::Utf8, true),
-            ])),
-            vec![
-                Arc::new(BinaryArray::from(vec![b"k1".as_slice()])),
-                Arc::new(TimestampMillisecondArray::from(vec![1000_i64])),
-                Arc::new(arrow::array::Float64Array::from(vec![42.0_f64])),
-                Arc::new(StringArray::from(vec!["node-1"])),
-            ],
-        )
-        .unwrap();
-
-        let stripped = strip_partition_columns_from_batch(batch).unwrap();
-
-        assert_eq!(3, stripped.num_columns());
-        assert_eq!("__primary_key", stripped.schema().field(0).name());
-        assert_eq!("greptime_timestamp", stripped.schema().field(1).name());
-        assert_eq!("greptime_value", stripped.schema().field(2).name());
-    }
-
-    #[test]
-    fn test_strip_partition_columns_from_batch_projects_essential_columns_without_lookup() {
-        let batch = RecordBatch::try_new(
-            Arc::new(ArrowSchema::new(vec![
-                Field::new("__primary_key", ArrowDataType::Binary, false),
-                Field::new(
-                    "greptime_timestamp",
-                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new("greptime_value", ArrowDataType::Float64, true),
-                Field::new("host", ArrowDataType::Utf8, true),
-            ])),
-            vec![
-                Arc::new(BinaryArray::from(vec![b"k1".as_slice()])),
-                Arc::new(TimestampMillisecondArray::from(vec![1000_i64])),
-                Arc::new(arrow::array::Float64Array::from(vec![42.0_f64])),
-                Arc::new(StringArray::from(vec!["node-1"])),
-            ],
-        )
-        .unwrap();
-
-        let stripped = strip_partition_columns_from_batch(batch).unwrap();
-
-        assert_eq!(3, stripped.num_columns());
-        assert_eq!("__primary_key", stripped.schema().field(0).name());
-        assert_eq!("greptime_timestamp", stripped.schema().field(1).name());
-        assert_eq!("greptime_value", stripped.schema().field(2).name());
-    }
-
-    #[test]
-    fn test_collect_tag_columns_and_non_tag_indices_keeps_partition_tag_column() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("greptime_value", ArrowDataType::Float64, true),
-            Field::new("host", ArrowDataType::Utf8, true),
-            Field::new("region", ArrowDataType::Utf8, true),
-        ]));
-        let name_to_ids =
-            HashMap::from([("host".to_string(), 1_u32), ("region".to_string(), 2_u32)]);
-        let partition_columns = HashSet::from(["host"]);
-
-        let (tag_columns, non_tag_indices) =
-            columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns).unwrap();
-
-        assert_eq!(2, tag_columns.len());
-        assert_eq!(&[0, 1, 2], non_tag_indices.as_slice());
-    }
-
-    #[test]
-    fn test_collect_tag_columns_and_non_tag_indices_prioritizes_essential_columns() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("host", ArrowDataType::Utf8, true),
-            Field::new("greptime_value", ArrowDataType::Float64, true),
-            Field::new(
-                "greptime_timestamp",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("region", ArrowDataType::Utf8, true),
-        ]));
-        let name_to_ids =
-            HashMap::from([("host".to_string(), 1_u32), ("region".to_string(), 2_u32)]);
-        let partition_columns = HashSet::from(["host", "region"]);
-
-        let (_tag_columns, non_tag_indices): (_, SmallVec<[usize; 3]>) =
-            columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns).unwrap();
-
-        assert_eq!(&[2, 1, 0, 3], non_tag_indices.as_slice());
-    }
-
-    #[test]
-    fn test_collect_tag_columns_and_non_tag_indices_rejects_unexpected_data_type() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("greptime_value", ArrowDataType::Float64, true),
-            Field::new("host", ArrowDataType::Utf8, true),
-            Field::new("invalid", ArrowDataType::Boolean, true),
-        ]));
-        let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
-        let partition_columns = HashSet::from(["host"]);
-
-        let result = columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns);
-
-        assert!(matches!(
-            result,
-            Err(Error::InvalidPromRemoteRequest { .. })
-        ));
-    }
-
-    #[test]
-    fn test_collect_tag_columns_and_non_tag_indices_rejects_int64_timestamp_column() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("greptime_timestamp", ArrowDataType::Int64, false),
-            Field::new("greptime_value", ArrowDataType::Float64, true),
-            Field::new("host", ArrowDataType::Utf8, true),
-        ]));
-        let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
-        let partition_columns = HashSet::from(["host"]);
-
-        let result = columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns);
-
-        assert!(matches!(
-            result,
-            Err(Error::InvalidPromRemoteRequest { .. })
-        ));
-    }
-
-    #[test]
-    fn test_collect_tag_columns_and_non_tag_indices_rejects_duplicated_timestamp_column() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "ts1",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "ts2",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("greptime_value", ArrowDataType::Float64, true),
-            Field::new("host", ArrowDataType::Utf8, true),
-        ]));
-        let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
-        let partition_columns = HashSet::from(["host"]);
-
-        let result = columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns);
-
-        assert!(matches!(
-            result,
-            Err(Error::InvalidPromRemoteRequest { .. })
-        ));
-    }
-
-    #[test]
-    fn test_collect_tag_columns_and_non_tag_indices_rejects_duplicated_value_column() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("value1", ArrowDataType::Float64, true),
-            Field::new("value2", ArrowDataType::Float64, true),
-            Field::new("host", ArrowDataType::Utf8, true),
-        ]));
-        let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
-        let partition_columns = HashSet::from(["host"]);
-
-        let result = columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns);
-
-        assert!(matches!(
-            result,
-            Err(Error::InvalidPromRemoteRequest { .. })
-        ));
-    }
-
-    #[test]
-    fn test_modify_batch_sparse_with_taxonomy_per_batch() {
-        use arrow::array::BinaryArray;
-        use metric_engine::batch_modifier::modify_batch_sparse;
-
-        let schema1 = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("greptime_value", ArrowDataType::Float64, true),
-            Field::new("tag1", ArrowDataType::Utf8, true),
-        ]));
-
-        let schema2 = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("greptime_value", ArrowDataType::Float64, true),
-            Field::new("tag1", ArrowDataType::Utf8, true),
-            Field::new("tag2", ArrowDataType::Utf8, true),
-        ]));
-        let batch2 = RecordBatch::try_new(
-            schema2.clone(),
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![2000])),
-                Arc::new(arrow::array::Float64Array::from(vec![2.0])),
-                Arc::new(StringArray::from(vec!["v1"])),
-                Arc::new(StringArray::from(vec!["v2"])),
-            ],
-        )
-        .unwrap();
-
-        let name_to_ids = HashMap::from([("tag1".to_string(), 1), ("tag2".to_string(), 2)]);
-        let partition_columns = HashSet::new();
-
-        // A batch that only has tag1, same values as batch2 for ts and val.
-        let batch3 = RecordBatch::try_new(
-            schema1.clone(),
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![2000])),
-                Arc::new(arrow::array::Float64Array::from(vec![2.0])),
-                Arc::new(StringArray::from(vec!["v1"])),
-            ],
-        )
-        .unwrap();
-
-        // Simulate the new loop logic in flush_batch_physical:
-        // Resolve taxonomy FOR EACH BATCH.
-        let (tag_columns2, indices2) =
-            columns_taxonomy(&batch2.schema(), "table", &name_to_ids, &partition_columns).unwrap();
-        let modified2 = modify_batch_sparse(batch2, 123, &tag_columns2, &indices2).unwrap();
-
-        let (tag_columns3, indices3) =
-            columns_taxonomy(&batch3.schema(), "table", &name_to_ids, &partition_columns).unwrap();
-        let modified3 = modify_batch_sparse(batch3, 123, &tag_columns3, &indices3).unwrap();
-
-        let pk2 = modified2
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-        let pk3 = modified3
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-
-        // Now they SHOULD be different because tag2 is included in pk2 but not in pk3.
-        assert_ne!(
-            pk2.value(0),
-            pk3.value(0),
-            "PK should be different because batch2 has tag2!"
-        );
-    }
-
-    #[test]
-    fn test_transform_logical_batches_to_physical_success() {
-        let batch = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
-
-        let table_batches = vec![TableBatch {
-            table_name: "t1".to_string(),
-            table_id: 1,
-            batches: vec![batch],
-            row_count: 1,
-        }];
-
-        let name_to_ids = HashMap::from([("tag1".to_string(), 1)]);
-        let partition_columns = HashSet::new();
-        let modified =
-            transform_logical_batches_to_physical(&table_batches, &name_to_ids, &partition_columns)
-                .unwrap();
-
-        assert_eq!(1, modified.len());
-        assert_eq!(3, modified[0].num_columns());
-        assert_eq!("__primary_key", modified[0].schema().field(0).name());
-        assert_eq!("greptime_timestamp", modified[0].schema().field(1).name());
-        assert_eq!("greptime_value", modified[0].schema().field(2).name());
-    }
-
-    #[test]
-    fn test_transform_logical_batches_to_physical_taxonomy_failure() {
-        let batch = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
-
-        let table_batches = vec![TableBatch {
-            table_name: "t1".to_string(),
-            table_id: 1,
-            batches: vec![batch],
-            row_count: 1,
-        }];
-
-        // tag1 is missing from name_to_ids, causing columns_taxonomy to fail.
-        let name_to_ids = HashMap::new();
-        let partition_columns = HashSet::new();
-        let err =
-            transform_logical_batches_to_physical(&table_batches, &name_to_ids, &partition_columns)
-                .unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("not found in physical table column IDs")
-        );
-    }
-
-    #[test]
-    fn test_transform_logical_batches_to_physical_multiple_batches() {
-        let batch1 = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
-        let batch2 = mock_aligned_tag_batch("tag2", "v2", 2000, 2.0);
-
-        let table_batches = vec![
-            TableBatch {
-                table_name: "t1".to_string(),
-                table_id: 1,
-                batches: vec![batch1],
-                row_count: 1,
-            },
-            TableBatch {
-                table_name: "t2".to_string(),
-                table_id: 2,
-                batches: vec![batch2],
-                row_count: 1,
-            },
-        ];
-
-        let name_to_ids = HashMap::from([("tag1".to_string(), 1), ("tag2".to_string(), 2)]);
-        let partition_columns = HashSet::new();
-        let modified =
-            transform_logical_batches_to_physical(&table_batches, &name_to_ids, &partition_columns)
-                .unwrap();
-
-        assert_eq!(2, modified.len());
-    }
-
-    #[test]
-    fn test_transform_logical_batches_to_physical_mixed_success_failure() {
-        let batch1 = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
-        let batch2 = mock_aligned_tag_batch("tag2", "v2", 2000, 2.0);
-
-        let table_batches = vec![
-            TableBatch {
-                table_name: "t1".to_string(),
-                table_id: 1,
-                batches: vec![batch1],
-                row_count: 1,
-            },
-            TableBatch {
-                table_name: "t2".to_string(),
-                table_id: 2,
-                batches: vec![batch2],
-                row_count: 1,
-            },
-        ];
-
-        // tag1 is missing from name_to_ids, causing batch1 to fail.
-        let name_to_ids = HashMap::from([("tag2".to_string(), 2)]);
-        let partition_columns = HashSet::new();
-        let err =
-            transform_logical_batches_to_physical(&table_batches, &name_to_ids, &partition_columns)
-                .unwrap_err();
-
-        assert!(err.to_string().contains("tag1"));
-    }
-
-    #[tokio::test]
     async fn test_flush_batch_physical_uses_mockable_trait_dependencies() {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
@@ -3769,85 +2583,5 @@ mod tests {
         assert_eq!(1, partition_calls.load(Ordering::SeqCst));
         assert_eq!(0, leader_calls.load(Ordering::SeqCst));
         assert_eq!(0, node.writes.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn test_plan_region_batches_splits_and_strips_partition_columns() {
-        let combined_batch = RecordBatch::try_new(
-            Arc::new(ArrowSchema::new(vec![
-                Field::new("__primary_key", ArrowDataType::Binary, false),
-                Field::new(
-                    "greptime_timestamp",
-                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new("greptime_value", ArrowDataType::Float64, true),
-                Field::new("host", ArrowDataType::Utf8, true),
-            ])),
-            vec![
-                Arc::new(BinaryArray::from(vec![b"k1".as_slice(), b"k2".as_slice()])),
-                Arc::new(TimestampMillisecondArray::from(vec![1000_i64, 2000_i64])),
-                Arc::new(arrow::array::Float64Array::from(vec![1.0_f64, 2.0_f64])),
-                Arc::new(StringArray::from(vec!["node-1", "node-2"])),
-            ],
-        )
-        .unwrap();
-        let mut planned_batches = plan_region_batches(
-            combined_batch,
-            1024,
-            &TwoRegionPartitionRule {
-                partition_columns: vec!["host".to_string()],
-            },
-            &["host".to_string()],
-        )
-        .unwrap();
-        planned_batches.sort_by_key(|planned| planned.region_id.region_number());
-
-        assert_eq!(2, planned_batches.len());
-        assert_eq!(RegionId::new(1024, 1), planned_batches[0].region_id);
-        assert_eq!(1, planned_batches[0].num_rows());
-        assert_eq!(3, planned_batches[0].batch.num_columns());
-        assert_eq!(RegionId::new(1024, 2), planned_batches[1].region_id);
-        assert_eq!(1, planned_batches[1].num_rows());
-        assert_eq!(3, planned_batches[1].batch.num_columns());
-    }
-
-    #[test]
-    fn test_encode_region_write_requests_builds_bulk_insert_requests() {
-        let planned_batch = PlannedRegionBatch {
-            region_id: RegionId::new(1024, 1),
-            batch: RecordBatch::try_new(
-                Arc::new(ArrowSchema::new(vec![
-                    Field::new("__primary_key", ArrowDataType::Binary, false),
-                    Field::new(
-                        "greptime_timestamp",
-                        ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                        false,
-                    ),
-                    Field::new("greptime_value", ArrowDataType::Float64, true),
-                ])),
-                vec![
-                    Arc::new(BinaryArray::from(vec![b"k1".as_slice()])),
-                    Arc::new(TimestampMillisecondArray::from(vec![1000_i64])),
-                    Arc::new(arrow::array::Float64Array::from(vec![1.0_f64])),
-                ],
-            )
-            .unwrap(),
-        };
-        let resolved_batch = ResolvedRegionBatch {
-            planned: planned_batch,
-            datanode: Peer {
-                id: 1,
-                addr: "node-1".to_string(),
-            },
-        };
-        let writes = encode_region_write_requests(vec![resolved_batch]).unwrap();
-
-        assert_eq!(1, writes.len());
-        assert_eq!(1, writes[0].datanode.id);
-        let Some(region_request::Body::BulkInsert(request)) = &writes[0].request.body else {
-            panic!("expected bulk insert request");
-        };
-        assert_eq!(RegionId::new(1024, 1).as_u64(), request.region_id);
     }
 }
