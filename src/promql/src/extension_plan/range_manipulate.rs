@@ -1366,7 +1366,7 @@ mod test {
             1,
             1,
             1,
-            0,
+            1,
             1,
             TIME_INDEX_COLUMN.to_string(),
             vec!["value".to_string()],
