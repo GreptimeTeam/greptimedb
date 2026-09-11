@@ -161,6 +161,7 @@ moka.workspace = true
 mysql_async = { version = "0.37", default-features = false, features = [
     "default-rustls",
 ] }
+operator = { workspace = true, features = ["testing"] }
 permutation = "0.4"
 rand.workspace = true
 serde_json.workspace = true
