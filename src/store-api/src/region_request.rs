@@ -42,7 +42,7 @@ use datatypes::error::time_index_not_widening_error;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use num_enum::TryFromPrimitive;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use strum::{AsRefStr, IntoStaticStr};
 
@@ -1484,9 +1484,9 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 
 /// Region option changes used by ALTER requests.
 ///
-/// This type currently derives serde for request persistence. Keep future changes
-/// backward compatible with previously serialized variants.
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+/// This type is serialized for request persistence. Keep future changes backward
+/// compatible with previously serialized variants.
+#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
 pub enum SetRegionOption {
     WriteBufferSize(Option<ReadableSize>),
     Ttl(Option<TimeToLive>),
@@ -1501,8 +1501,65 @@ pub enum SetRegionOption {
     // Modifying the max number of rows in a parquet row group.
     MaxRowGroupRowCount(Option<usize>),
     PreserveRowSequence(bool),
-    // Stops writing new WAL entries. This operation is irreversible.
+    // Whether to skip writing new WAL entries.
+    SkipWal(bool),
+}
+
+#[derive(Deserialize)]
+enum SetRegionOptionSerde {
+    WriteBufferSize(Option<ReadableSize>),
+    Ttl(Option<TimeToLive>),
+    Twsc(String, String),
+    Format(String),
+    AppendMode(bool),
+    AutoFlushInterval(Option<Duration>),
+    MaxRowGroupRowCount(Option<usize>),
+    PreserveRowSequence(bool),
+    SkipWal(bool),
+}
+
+#[derive(Deserialize)]
+enum LegacySetRegionOption {
     SkipWal,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BackwardCompatibleSetRegionOption {
+    Current(SetRegionOptionSerde),
+    Legacy(LegacySetRegionOption),
+}
+
+impl From<SetRegionOptionSerde> for SetRegionOption {
+    fn from(option: SetRegionOptionSerde) -> Self {
+        match option {
+            SetRegionOptionSerde::WriteBufferSize(value) => Self::WriteBufferSize(value),
+            SetRegionOptionSerde::Ttl(value) => Self::Ttl(value),
+            SetRegionOptionSerde::Twsc(key, value) => Self::Twsc(key, value),
+            SetRegionOptionSerde::Format(value) => Self::Format(value),
+            SetRegionOptionSerde::AppendMode(value) => Self::AppendMode(value),
+            SetRegionOptionSerde::AutoFlushInterval(value) => Self::AutoFlushInterval(value),
+            SetRegionOptionSerde::MaxRowGroupRowCount(value) => Self::MaxRowGroupRowCount(value),
+            SetRegionOptionSerde::PreserveRowSequence(value) => Self::PreserveRowSequence(value),
+            SetRegionOptionSerde::SkipWal(value) => Self::SkipWal(value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SetRegionOption {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(
+            match BackwardCompatibleSetRegionOption::deserialize(deserializer)? {
+                BackwardCompatibleSetRegionOption::Current(option) => option.into(),
+                BackwardCompatibleSetRegionOption::Legacy(LegacySetRegionOption::SkipWal) => {
+                    Self::SkipWal(true)
+                }
+            },
+        )
+    }
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1570,7 +1627,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::PreserveRowSequence(preserve))
             }
-            SKIP_WAL_KEY if value == "true" => Ok(Self::SkipWal),
+            SKIP_WAL_KEY => {
+                let skip_wal = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::SkipWal(skip_wal))
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -2043,11 +2105,20 @@ mod tests {
             value: "true".to_string(),
         };
         assert_eq!(
-            SetRegionOption::SkipWal,
+            SetRegionOption::SkipWal(true),
             SetRegionOption::try_from(&pb).unwrap()
         );
 
-        for value in ["false", "", "invalid"] {
+        let pb = PbOption {
+            key: SKIP_WAL_KEY.to_string(),
+            value: "false".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::SkipWal(false),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        for value in ["", "invalid"] {
             let pb = PbOption {
                 key: SKIP_WAL_KEY.to_string(),
                 value: value.to_string(),
@@ -2056,6 +2127,22 @@ mod tests {
         }
 
         assert!(UnsetRegionOption::try_from(SKIP_WAL_KEY).is_err());
+    }
+
+    #[test]
+    fn test_set_region_option_skip_wal_serde_compatibility() {
+        let legacy = serde_json::from_str::<SetRegionOption>(r#""SkipWal""#).unwrap();
+        assert_eq!(SetRegionOption::SkipWal(true), legacy);
+
+        for skip_wal in [true, false] {
+            let option = SetRegionOption::SkipWal(skip_wal);
+            let serialized = serde_json::to_string(&option).unwrap();
+            assert_eq!(format!(r#"{{"SkipWal":{skip_wal}}}"#), serialized);
+            assert_eq!(
+                option,
+                serde_json::from_str::<SetRegionOption>(&serialized).unwrap()
+            );
+        }
     }
 
     #[test]
