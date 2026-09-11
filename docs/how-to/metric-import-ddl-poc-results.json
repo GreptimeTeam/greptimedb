@@ -1,0 +1,170 @@
+{
+  "date": "2026-09-10",
+  "environment": "Darwin 25.6.0 ARM64, 16 GiB; Rust 1.96.0-nightly (2026-03-20); unoptimized test profile with debug symbols disabled; standalone local raft-engine metadata and file storage",
+  "runs_per_scale_and_mode": 1,
+  "validation": "All nine runs passed complete metadata and typed-row comparison. Source tables use ordinary SQL CREATE independently of the optimized batch entry. Fixture generation, export and validation are outside restore timing.",
+  "records": [
+    {
+      "data_seconds": 0.106226333,
+      "ddl_seconds": 0.355890375,
+      "mixed_schemas": false,
+      "mode": "Sql",
+      "stats": {
+        "logical_calls": 100,
+        "logical_seconds": 0.31801041899999993,
+        "logical_tables": 100,
+        "max_batch_sql_bytes": 259,
+        "max_batch_tables": 1,
+        "other_seconds": 0.001289416,
+        "physical_seconds": 0.014198708,
+        "sql_requests": 102
+      },
+      "tables": 100,
+      "total_seconds": 0.468945291
+    },
+    {
+      "data_seconds": 0.099389958,
+      "ddl_seconds": 0.20941975,
+      "mixed_schemas": false,
+      "mode": "Single",
+      "stats": {
+        "logical_calls": 100,
+        "logical_seconds": 0.177439206,
+        "logical_tables": 100,
+        "max_batch_sql_bytes": 258,
+        "max_batch_tables": 1,
+        "other_seconds": 0.001054833,
+        "physical_seconds": 0.014106625,
+        "sql_requests": 2
+      },
+      "tables": 100,
+      "total_seconds": 0.314314416
+    },
+    {
+      "data_seconds": 0.092456709,
+      "ddl_seconds": 0.084088916,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "stats": {
+        "logical_calls": 1,
+        "logical_seconds": 0.055821041,
+        "logical_tables": 100,
+        "max_batch_sql_bytes": 25800,
+        "max_batch_tables": 100,
+        "other_seconds": 0.001223292,
+        "physical_seconds": 0.013463625,
+        "sql_requests": 2
+      },
+      "tables": 100,
+      "total_seconds": 0.184118666
+    },
+    {
+      "data_seconds": 2.159817,
+      "ddl_seconds": 3.293627334,
+      "mixed_schemas": false,
+      "mode": "Sql",
+      "stats": {
+        "logical_calls": 1000,
+        "logical_seconds": 3.0905625659999973,
+        "logical_tables": 1000,
+        "max_batch_sql_bytes": 259,
+        "max_batch_tables": 1,
+        "other_seconds": 0.001256959,
+        "physical_seconds": 0.035408458,
+        "sql_requests": 1002
+      },
+      "tables": 1000,
+      "total_seconds": 5.487661333
+    },
+    {
+      "data_seconds": 2.00827525,
+      "ddl_seconds": 1.750107167,
+      "mixed_schemas": false,
+      "mode": "Single",
+      "stats": {
+        "logical_calls": 1000,
+        "logical_seconds": 1.6010893769999999,
+        "logical_tables": 1000,
+        "max_batch_sql_bytes": 258,
+        "max_batch_tables": 1,
+        "other_seconds": 0.0011915,
+        "physical_seconds": 0.012913,
+        "sql_requests": 2
+      },
+      "tables": 1000,
+      "total_seconds": 3.7887675
+    },
+    {
+      "data_seconds": 2.301814792,
+      "ddl_seconds": 0.669338583,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "stats": {
+        "logical_calls": 8,
+        "logical_seconds": 0.543666584,
+        "logical_tables": 1000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.001607083,
+        "physical_seconds": 0.013659041,
+        "sql_requests": 2
+      },
+      "tables": 1000,
+      "total_seconds": 2.9988787500000003
+    },
+    {
+      "data_seconds": 156.222455875,
+      "ddl_seconds": 30.752230375,
+      "mixed_schemas": false,
+      "mode": "Sql",
+      "stats": {
+        "logical_calls": 10000,
+        "logical_seconds": 29.181308885999936,
+        "logical_tables": 10000,
+        "max_batch_sql_bytes": 259,
+        "max_batch_tables": 1,
+        "other_seconds": 0.001502708,
+        "physical_seconds": 0.018550083,
+        "sql_requests": 10002
+      },
+      "tables": 10000,
+      "total_seconds": 187.278964417
+    },
+    {
+      "data_seconds": 145.976531833,
+      "ddl_seconds": 21.030303042,
+      "mixed_schemas": false,
+      "mode": "Single",
+      "stats": {
+        "logical_calls": 10000,
+        "logical_seconds": 19.52442624700001,
+        "logical_tables": 10000,
+        "max_batch_sql_bytes": 258,
+        "max_batch_tables": 1,
+        "other_seconds": 0.001692333,
+        "physical_seconds": 0.013416041,
+        "sql_requests": 2
+      },
+      "tables": 10000,
+      "total_seconds": 167.284727292
+    },
+    {
+      "data_seconds": 150.195746292,
+      "ddl_seconds": 7.018993583,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "stats": {
+        "logical_calls": 79,
+        "logical_seconds": 5.775524874999998,
+        "logical_tables": 10000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.001391166,
+        "physical_seconds": 0.024786875,
+        "sql_requests": 2
+      },
+      "tables": 10000,
+      "total_seconds": 157.492093292
+    }
+  ]
+}

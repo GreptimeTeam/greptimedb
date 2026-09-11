@@ -1,0 +1,661 @@
+{
+  "date": "2026-09-11",
+  "environment": "Darwin ARM64, 16 GiB; local standalone raft-engine metadata and file storage; unoptimized profile with debug symbols disabled; warm exported files",
+  "runs_per_variant_and_scale": 1,
+  "validation": "All six profiled runs and three disabled-probe controls passed complete metadata and typed-row comparison. Counts include the empty table. The only data-path optimization is direct stat for an explicit COPY filename.",
+  "records": [
+    {
+      "variant": "before",
+      "data_seconds": 0.093877166,
+      "ddl_seconds": 0.083462875,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": true,
+      "profile_stages": {
+        "client_copy_request": {
+          "calls": 1,
+          "seconds": 0.088151792
+        },
+        "client_state_delete": {
+          "calls": 1,
+          "seconds": 0.00095075
+        },
+        "client_state_save": {
+          "calls": 4,
+          "seconds": 0.009925291999999999
+        },
+        "database_list": {
+          "calls": 1,
+          "seconds": 0.003729833
+        },
+        "database_total": {
+          "calls": 1,
+          "seconds": 0.086656375
+        },
+        "file_metadata": {
+          "calls": 100,
+          "seconds": 0.233078838
+        },
+        "insert_convert": {
+          "calls": 99,
+          "seconds": 0.005464955999999998
+        },
+        "insert_dispatch": {
+          "calls": 99,
+          "seconds": 0.11412604600000001
+        },
+        "insert_lookup": {
+          "calls": 99,
+          "seconds": 0.0019072519999999997
+        },
+        "insert_total": {
+          "calls": 99,
+          "seconds": 0.12201682900000005
+        },
+        "insert_wait": {
+          "calls": 99,
+          "seconds": 0.12270078999999999
+        },
+        "permit_wait": {
+          "calls": 100,
+          "seconds": 3.845397500000001
+        },
+        "schema_mapping": {
+          "calls": 100,
+          "seconds": 0.000445295
+        },
+        "stream_build": {
+          "calls": 100,
+          "seconds": 0.04301270700000002
+        },
+        "stream_next": {
+          "calls": 199,
+          "seconds": 0.15586366400000004
+        },
+        "table_backend_list": {
+          "calls": 100,
+          "seconds": 0.21237654400000003
+        },
+        "table_lookup": {
+          "calls": 100,
+          "seconds": 0.001781957
+        },
+        "table_total": {
+          "calls": 100,
+          "seconds": 0.7722114890000003
+        },
+        "vectors_request": {
+          "calls": 99,
+          "seconds": 0.0008086650000000001
+        }
+      },
+      "stats": {
+        "logical_calls": 1,
+        "logical_seconds": 0.054689917,
+        "logical_tables": 100,
+        "max_batch_sql_bytes": 25800,
+        "max_batch_tables": 100,
+        "other_seconds": 0.001244208,
+        "physical_seconds": 0.013540333,
+        "sql_requests": 2
+      },
+      "tables": 100,
+      "total_seconds": 0.183432375
+    },
+    {
+      "variant": "before",
+      "data_seconds": 2.135022042,
+      "ddl_seconds": 0.687095791,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": true,
+      "profile_stages": {
+        "client_copy_request": {
+          "calls": 1,
+          "seconds": 2.129258042
+        },
+        "client_state_delete": {
+          "calls": 1,
+          "seconds": 0.001025708
+        },
+        "client_state_save": {
+          "calls": 4,
+          "seconds": 0.010013958
+        },
+        "database_list": {
+          "calls": 1,
+          "seconds": 0.010145916
+        },
+        "database_total": {
+          "calls": 1,
+          "seconds": 2.127753167
+        },
+        "file_metadata": {
+          "calls": 1000,
+          "seconds": 2.807624166000004
+        },
+        "insert_convert": {
+          "calls": 999,
+          "seconds": 0.05684556499999999
+        },
+        "insert_dispatch": {
+          "calls": 999,
+          "seconds": 1.8364882839999979
+        },
+        "insert_lookup": {
+          "calls": 999,
+          "seconds": 0.024694772
+        },
+        "insert_total": {
+          "calls": 999,
+          "seconds": 1.9235098959999997
+        },
+        "insert_wait": {
+          "calls": 999,
+          "seconds": 1.9299270179999999
+        },
+        "permit_wait": {
+          "calls": 1000,
+          "seconds": 1074.6358248300003
+        },
+        "schema_mapping": {
+          "calls": 1000,
+          "seconds": 0.005306554000000004
+        },
+        "stream_build": {
+          "calls": 1000,
+          "seconds": 0.43309324499999974
+        },
+        "stream_next": {
+          "calls": 1999,
+          "seconds": 1.9051046249999972
+        },
+        "table_backend_list": {
+          "calls": 1000,
+          "seconds": 13.566225929999993
+        },
+        "table_lookup": {
+          "calls": 1000,
+          "seconds": 0.019937120000000016
+        },
+        "table_total": {
+          "calls": 1000,
+          "seconds": 20.69807338900002
+        },
+        "vectors_request": {
+          "calls": 999,
+          "seconds": 0.007495417999999994
+        }
+      },
+      "stats": {
+        "logical_calls": 8,
+        "logical_seconds": 0.5610996260000001,
+        "logical_tables": 1000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.001185041,
+        "physical_seconds": 0.013022125,
+        "sql_requests": 2
+      },
+      "tables": 1000,
+      "total_seconds": 2.8490388749999997
+    },
+    {
+      "variant": "before",
+      "data_seconds": 146.496043208,
+      "ddl_seconds": 6.868082,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": true,
+      "profile_stages": {
+        "client_copy_request": {
+          "calls": 1,
+          "seconds": 146.484210834
+        },
+        "client_state_delete": {
+          "calls": 1,
+          "seconds": 0.001389041
+        },
+        "client_state_save": {
+          "calls": 4,
+          "seconds": 0.017381876
+        },
+        "database_list": {
+          "calls": 1,
+          "seconds": 0.069368584
+        },
+        "database_total": {
+          "calls": 1,
+          "seconds": 146.482414042
+        },
+        "file_metadata": {
+          "calls": 10000,
+          "seconds": 78.57599938599976
+        },
+        "insert_convert": {
+          "calls": 9999,
+          "seconds": 0.6363570239999979
+        },
+        "insert_dispatch": {
+          "calls": 9999,
+          "seconds": 13.828762497999959
+        },
+        "insert_lookup": {
+          "calls": 9999,
+          "seconds": 0.3370276210000008
+        },
+        "insert_total": {
+          "calls": 9999,
+          "seconds": 14.862652610000008
+        },
+        "insert_wait": {
+          "calls": 9999,
+          "seconds": 14.930183362999946
+        },
+        "permit_wait": {
+          "calls": 10000,
+          "seconds": 710238.2116177517
+        },
+        "schema_mapping": {
+          "calls": 10000,
+          "seconds": 0.06394649600000016
+        },
+        "stream_build": {
+          "calls": 10000,
+          "seconds": 6.681543558999983
+        },
+        "stream_next": {
+          "calls": 19999,
+          "seconds": 19.137927987000023
+        },
+        "table_backend_list": {
+          "calls": 10000,
+          "seconds": 1339.9938999140052
+        },
+        "table_lookup": {
+          "calls": 10000,
+          "seconds": 0.2095950739999999
+        },
+        "table_total": {
+          "calls": 10000,
+          "seconds": 1459.9614170269983
+        },
+        "vectors_request": {
+          "calls": 9999,
+          "seconds": 0.08715573999999994
+        }
+      },
+      "stats": {
+        "logical_calls": 79,
+        "logical_seconds": 5.774629128999999,
+        "logical_tables": 10000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.0014285,
+        "physical_seconds": 0.015468,
+        "sql_requests": 2
+      },
+      "tables": 10000,
+      "total_seconds": 153.647363208
+    },
+    {
+      "variant": "after",
+      "data_seconds": 0.070622833,
+      "ddl_seconds": 0.086262916,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": true,
+      "profile_stages": {
+        "client_copy_request": {
+          "calls": 1,
+          "seconds": 0.064275959
+        },
+        "client_state_delete": {
+          "calls": 1,
+          "seconds": 0.001197375
+        },
+        "client_state_save": {
+          "calls": 4,
+          "seconds": 0.010477125
+        },
+        "database_list": {
+          "calls": 1,
+          "seconds": 0.003518833
+        },
+        "database_total": {
+          "calls": 1,
+          "seconds": 0.062724167
+        },
+        "file_metadata": {
+          "calls": 100,
+          "seconds": 0.209092707
+        },
+        "insert_convert": {
+          "calls": 99,
+          "seconds": 0.004382251000000002
+        },
+        "insert_dispatch": {
+          "calls": 99,
+          "seconds": 0.09819928700000001
+        },
+        "insert_lookup": {
+          "calls": 99,
+          "seconds": 0.0014885359999999997
+        },
+        "insert_total": {
+          "calls": 99,
+          "seconds": 0.10455091899999999
+        },
+        "insert_wait": {
+          "calls": 99,
+          "seconds": 0.10511566800000004
+        },
+        "permit_wait": {
+          "calls": 100,
+          "seconds": 2.827796332
+        },
+        "schema_mapping": {
+          "calls": 100,
+          "seconds": 0.00041841500000000005
+        },
+        "stream_build": {
+          "calls": 100,
+          "seconds": 0.034212539
+        },
+        "stream_next": {
+          "calls": 199,
+          "seconds": 0.12817729000000005
+        },
+        "table_backend_list": {
+          "calls": 100,
+          "seconds": 0.06439662300000003
+        },
+        "table_lookup": {
+          "calls": 100,
+          "seconds": 0.001729878
+        },
+        "table_total": {
+          "calls": 100,
+          "seconds": 0.5456785390000002
+        },
+        "vectors_request": {
+          "calls": 99,
+          "seconds": 0.000619582
+        }
+      },
+      "stats": {
+        "logical_calls": 1,
+        "logical_seconds": 0.057586166,
+        "logical_tables": 100,
+        "max_batch_sql_bytes": 25800,
+        "max_batch_tables": 100,
+        "other_seconds": 0.001284,
+        "physical_seconds": 0.013309,
+        "sql_requests": 2
+      },
+      "tables": 100,
+      "total_seconds": 0.1639135
+    },
+    {
+      "variant": "after",
+      "data_seconds": 0.612389292,
+      "ddl_seconds": 0.645005584,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": true,
+      "profile_stages": {
+        "client_copy_request": {
+          "calls": 1,
+          "seconds": 0.605084125
+        },
+        "client_state_delete": {
+          "calls": 1,
+          "seconds": 0.001134083
+        },
+        "client_state_save": {
+          "calls": 4,
+          "seconds": 0.011862042
+        },
+        "database_list": {
+          "calls": 1,
+          "seconds": 0.009804417
+        },
+        "database_total": {
+          "calls": 1,
+          "seconds": 0.603471042
+        },
+        "file_metadata": {
+          "calls": 1000,
+          "seconds": 2.2385104700000023
+        },
+        "insert_convert": {
+          "calls": 999,
+          "seconds": 0.04173467199999998
+        },
+        "insert_dispatch": {
+          "calls": 999,
+          "seconds": 1.1306291610000019
+        },
+        "insert_lookup": {
+          "calls": 999,
+          "seconds": 0.016440052000000014
+        },
+        "insert_total": {
+          "calls": 999,
+          "seconds": 1.1933772629999992
+        },
+        "insert_wait": {
+          "calls": 999,
+          "seconds": 1.1988755439999985
+        },
+        "permit_wait": {
+          "calls": 1000,
+          "seconds": 316.62384801799976
+        },
+        "schema_mapping": {
+          "calls": 1000,
+          "seconds": 0.004222664000000004
+        },
+        "stream_build": {
+          "calls": 1000,
+          "seconds": 0.3258813789999995
+        },
+        "stream_next": {
+          "calls": 1999,
+          "seconds": 1.044346872
+        },
+        "table_backend_list": {
+          "calls": 1000,
+          "seconds": 0.7350257870000008
+        },
+        "table_lookup": {
+          "calls": 1000,
+          "seconds": 0.017205946999999982
+        },
+        "table_total": {
+          "calls": 1000,
+          "seconds": 5.588716816999993
+        },
+        "vectors_request": {
+          "calls": 999,
+          "seconds": 0.004998824
+        }
+      },
+      "stats": {
+        "logical_calls": 8,
+        "logical_seconds": 0.5255616249999999,
+        "logical_tables": 1000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.001408666,
+        "physical_seconds": 0.013705,
+        "sql_requests": 2
+      },
+      "tables": 1000,
+      "total_seconds": 1.288640917
+    },
+    {
+      "variant": "after",
+      "data_seconds": 5.481291916,
+      "ddl_seconds": 6.543786625,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": true,
+      "profile_stages": {
+        "client_copy_request": {
+          "calls": 1,
+          "seconds": 5.474496666
+        },
+        "client_state_delete": {
+          "calls": 1,
+          "seconds": 0.001483084
+        },
+        "client_state_save": {
+          "calls": 4,
+          "seconds": 0.012042168
+        },
+        "database_list": {
+          "calls": 1,
+          "seconds": 0.066050666
+        },
+        "database_total": {
+          "calls": 1,
+          "seconds": 5.472459959
+        },
+        "file_metadata": {
+          "calls": 10000,
+          "seconds": 21.72358378799995
+        },
+        "insert_convert": {
+          "calls": 9999,
+          "seconds": 0.41031633699999875
+        },
+        "insert_dispatch": {
+          "calls": 9999,
+          "seconds": 8.606138787999974
+        },
+        "insert_lookup": {
+          "calls": 9999,
+          "seconds": 0.15493596300000012
+        },
+        "insert_total": {
+          "calls": 9999,
+          "seconds": 9.212677989
+        },
+        "insert_wait": {
+          "calls": 9999,
+          "seconds": 9.26362075700006
+        },
+        "permit_wait": {
+          "calls": 10000,
+          "seconds": 27924.91631644204
+        },
+        "schema_mapping": {
+          "calls": 10000,
+          "seconds": 0.040566852999999826
+        },
+        "stream_build": {
+          "calls": 10000,
+          "seconds": 3.1027595189999984
+        },
+        "stream_next": {
+          "calls": 19999,
+          "seconds": 9.52862571799996
+        },
+        "table_backend_list": {
+          "calls": 10000,
+          "seconds": 6.938655524000014
+        },
+        "table_lookup": {
+          "calls": 10000,
+          "seconds": 0.16725630500000074
+        },
+        "table_total": {
+          "calls": 10000,
+          "seconds": 50.99561874200005
+        },
+        "vectors_request": {
+          "calls": 9999,
+          "seconds": 0.048107083999999904
+        }
+      },
+      "stats": {
+        "logical_calls": 79,
+        "logical_seconds": 5.486648663,
+        "logical_tables": 10000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.001323792,
+        "physical_seconds": 0.01469375,
+        "sql_requests": 2
+      },
+      "tables": 10000,
+      "total_seconds": 12.299895
+    }
+  ],
+  "disabled_probe_controls": [
+    {
+      "variant": "before",
+      "data_seconds": 2.048297042,
+      "ddl_seconds": 0.664822459,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": false,
+      "profile_stages": {},
+      "stats": {
+        "logical_calls": 8,
+        "logical_seconds": 0.5394048339999999,
+        "logical_tables": 1000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.001425,
+        "physical_seconds": 0.016148375,
+        "sql_requests": 2
+      },
+      "tables": 1000,
+      "total_seconds": 2.744131
+    },
+    {
+      "variant": "after",
+      "data_seconds": 0.607271875,
+      "ddl_seconds": 0.651819458,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": false,
+      "profile_stages": {},
+      "stats": {
+        "logical_calls": 8,
+        "logical_seconds": 0.5310927919999999,
+        "logical_tables": 1000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.001258916,
+        "physical_seconds": 0.015510084,
+        "sql_requests": 2
+      },
+      "tables": 1000,
+      "total_seconds": 1.290875583
+    },
+    {
+      "variant": "after",
+      "data_seconds": 5.448712875,
+      "ddl_seconds": 6.60236525,
+      "mixed_schemas": false,
+      "mode": "Batch",
+      "profile_enabled": false,
+      "profile_stages": {},
+      "stats": {
+        "logical_calls": 79,
+        "logical_seconds": 5.526774037,
+        "logical_tables": 10000,
+        "max_batch_sql_bytes": 33024,
+        "max_batch_tables": 128,
+        "other_seconds": 0.001422,
+        "physical_seconds": 0.016574042,
+        "sql_requests": 2
+      },
+      "tables": 10000,
+      "total_seconds": 12.315129917
+    }
+  ]
+}
