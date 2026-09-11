@@ -41,9 +41,12 @@ use promql::functions::{
 };
 use promql::range_array::RangeArray;
 
+/// A `window_step` below `window_size` makes consecutive windows overlap, which is the normal
+/// PromQL range query shape.
 fn build_sliding_ranges(
     num_points: usize,
     window_size: u32,
+    window_step: usize,
     values: Vec<f64>,
     eval_offset_ms: i64,
 ) -> (RangeArray, RangeArray, Arc<TimestampMillisecondArray>) {
@@ -59,10 +62,12 @@ fn build_sliding_ranges(
         0
     };
 
-    let ranges: Vec<(u32, u32)> = (0..num_windows).map(|i| (i as u32, window_size)).collect();
+    let offsets: Vec<usize> = (0..num_windows).step_by(window_step).collect();
+    let ranges: Vec<(u32, u32)> = offsets.iter().map(|&i| (i as u32, window_size)).collect();
 
-    let eval_ts: Vec<i64> = (0..num_windows)
-        .map(|i| timestamps[i + window_size as usize - 1] + eval_offset_ms)
+    let eval_ts: Vec<i64> = offsets
+        .iter()
+        .map(|&i| timestamps[i + window_size as usize - 1] + eval_offset_ms)
         .collect();
     let eval_ts_array = Arc::new(TimestampMillisecondArray::from(eval_ts));
 
@@ -121,11 +126,12 @@ fn build_changing_values(num_points: usize) -> Vec<f64> {
 fn make_extrapolated_rate_input(
     num_points: usize,
     window_size: u32,
+    window_step: usize,
     values: Vec<f64>,
     eval_offset_ms: i64,
 ) -> Vec<ColumnarValue> {
     let (ts_range, val_range, eval_ts) =
-        build_sliding_ranges(num_points, window_size, values, eval_offset_ms);
+        build_sliding_ranges(num_points, window_size, window_step, values, eval_offset_ms);
     let range_length = window_size as i64 * 1000;
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
@@ -192,8 +198,13 @@ fn make_delta_rate_comparison_input(
 }
 
 fn make_idelta_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) =
-        build_sliding_ranges(num_points, window_size, build_default_values(num_points), 0);
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        1,
+        build_default_values(num_points),
+        0,
+    );
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
@@ -205,7 +216,7 @@ fn make_edge_count_input(
     window_size: u32,
     values: Vec<f64>,
 ) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) = build_sliding_ranges(num_points, window_size, values, 0);
+    let (ts_range, val_range, _) = build_sliding_ranges(num_points, window_size, 1, values, 0);
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
@@ -229,8 +240,13 @@ fn make_edge_count_input_with_ranges(
 }
 
 fn make_quantile_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) =
-        build_sliding_ranges(num_points, window_size, build_default_values(num_points), 0);
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        1,
+        build_default_values(num_points),
+        0,
+    );
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
@@ -239,8 +255,13 @@ fn make_quantile_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue
 }
 
 fn make_predict_linear_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) =
-        build_sliding_ranges(num_points, window_size, build_default_values(num_points), 0);
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        1,
+        build_default_values(num_points),
+        0,
+    );
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
@@ -355,6 +376,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_monotonic_counter_values(n),
             500,
         ));
@@ -370,6 +392,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_resetting_counter_values(n),
             500,
         ));
@@ -386,6 +409,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_monotonic_counter_values(n),
             500,
         ));
@@ -401,6 +425,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_resetting_counter_values(n),
             500,
         ));
@@ -417,6 +442,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_gauge_values(n),
             500,
         ));
@@ -547,6 +573,43 @@ fn bench_delta_rate_comparison(c: &mut Criterion) {
             &(),
             |b, _| b.iter(|| invoke_prepared(&cumulative_udf, &cumulative)),
         );
+    }
+
+    group.finish();
+}
+
+/// Counter-reset correction is reduced per window, so its cost follows how much the windows
+/// overlap and how many resets each one covers. `range_fn` fixes the query step at one sample
+/// and `delta_rate_comparison` at four and twenty, so sweep both dimensions here.
+fn bench_rate_window_steps(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rate_window_steps");
+    let rate_udf = Rate::scalar_udf();
+    let num_points = 20_280;
+    let window_size = 120u32;
+
+    // No resets, one reset per 24 window widths, and roughly three resets per window.
+    for reset_period in [0usize, 2_880, 37] {
+        let values: Vec<f64> = match reset_period {
+            0 => (0..num_points).map(|i| i as f64).collect(),
+            period => (0..num_points).map(|i| (i % period) as f64).collect(),
+        };
+        for window_step in [1usize, 10, 120] {
+            let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
+                num_points,
+                window_size,
+                window_step,
+                values.clone(),
+                500,
+            ));
+            group.bench_with_input(
+                BenchmarkId::new(
+                    "rate_counter",
+                    format!("reset{reset_period}_step{window_step}"),
+                ),
+                &(),
+                |b, _| b.iter(|| invoke_prepared(&rate_udf, &prepared)),
+            );
+        }
     }
 
     group.finish();
@@ -881,6 +944,7 @@ criterion_group!(
     benches,
     bench_range_functions,
     bench_delta_rate_comparison,
+    bench_rate_window_steps,
     bench_edge_count_functions,
     bench_range_manipulate_wall_time
 );

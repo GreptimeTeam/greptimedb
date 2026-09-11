@@ -200,6 +200,11 @@ impl SeriesNormalize {
         "SeriesNormalize"
     }
 
+    /// Returns whether this plan removes Prometheus stale markers.
+    pub const fn filter_stale_markers(&self) -> bool {
+        self.filter_stale_markers
+    }
+
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(SeriesNormalizeExec {
             offset: self.offset,

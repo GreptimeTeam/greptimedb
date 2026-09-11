@@ -71,7 +71,7 @@ impl UserProvider for StaticUserProvider {
         authenticate_with_credential(&self.users, id, pwd)
     }
 
-    async fn postgres_auth_info(&self, id: Identity<'_>) -> Result<PgAuthInfo> {
+    async fn postgres_auth_info(&self, id: Identity<'_>, _catalog: &str) -> Result<PgAuthInfo> {
         postgres_auth_info_with_credential(&self.users, id)
     }
 

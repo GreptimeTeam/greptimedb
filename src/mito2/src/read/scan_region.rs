@@ -2242,6 +2242,12 @@ impl PredicateGroup {
         self.predicate_without_region.add_dyn_filters(dyn_filters);
     }
 
+    /// Removes dynamic filters while preserving the static and region predicates.
+    pub(crate) fn clear_dyn_filters(&self) {
+        self.predicate_all.clear_dyn_filters();
+        self.predicate_without_region.clear_dyn_filters();
+    }
+
     /// Returns the region partition expr from metadata, if any.
     pub(crate) fn region_partition_expr(&self) -> Option<&PartitionExpr> {
         self.region_partition_expr.as_ref()
@@ -2503,7 +2509,7 @@ mod tests {
         )
         .await
         .with_distribution(Some(TimeSeriesDistribution::PerSeries))
-        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
+        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow { after_merge: true }))
         .with_merge_mode(MergeMode::LastNonNull)
         .with_filter_deleted(false)
         .build();
@@ -2528,7 +2534,7 @@ mod tests {
                 col("v0").gt(lit(1)).to_string(),
             ],
             time_filters: vec![col("ts").gt_eq(ts_lit(1000)).to_string()],
-            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             append_mode: false,
             filter_deleted: false,
             merge_mode: MergeMode::LastNonNull,
@@ -2537,6 +2543,10 @@ mod tests {
         }
         .build();
         assert_eq!(&expected, fingerprint);
+        assert_eq!(
+            input.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
     }
 
     #[tokio::test]
@@ -2793,6 +2803,27 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_dyn_filters_preserves_predicate_group_static_filters() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let static_filters = vec![col("k0").eq(lit("foo"))];
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &static_filters).unwrap();
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(true)));
+        predicate_group.add_dyn_filters(vec![dynamic_filter.clone()]);
+
+        predicate_group.clear_dyn_filters();
+        // Updating the old producer cannot add its wrapper to a new execution.
+        dynamic_filter.update(physical_lit(false)).unwrap();
+
+        for predicate in [
+            predicate_group.predicate().unwrap(),
+            predicate_group.predicate_without_region().unwrap(),
+        ] {
+            assert_eq!(predicate.exprs(), static_filters);
+            assert!(predicate.dyn_filters().is_empty());
+        }
+    }
+
+    #[test]
     fn test_file_level_pruning_stats_prunes_old_file() {
         let ts_col_name = "ts";
         let predicate = Predicate::new(vec![col(ts_col_name).gt(ts_lit(1000))]);
@@ -2963,6 +2994,8 @@ mod tests {
         dyn_filter.update(updated).unwrap();
 
         assert!(input.can_manifest_prune_file(&file));
+        input.predicate.clear_dyn_filters();
+        assert!(!input.can_manifest_prune_file(&file));
     }
 
     #[tokio::test]

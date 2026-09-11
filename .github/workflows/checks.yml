@@ -87,6 +87,7 @@ jobs:
           python3 tests/perf/test_query_regression_summary_otlp.py
           python3 tests/perf/test_query_regression_case_selection.py
           python3 tests/perf/test_query_regression_nightly_refs.py
+          python3 tests/perf/test_query_regression_slash.py
           python3 tests/perf/test_aliyun_ecs_runner_scripts.py
 
   check:

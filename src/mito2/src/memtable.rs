@@ -14,7 +14,7 @@
 
 //! Memtables are write buffers for regions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,12 +31,12 @@ use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
+use store_api::storage::{ColumnId, RegionId, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
 use crate::error::{InvalidRegionOptionsSnafu, Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
-use crate::memtable::bulk::{BulkMemtableBuilder, CompactDispatcher};
+use crate::memtable::bulk::{BulkMemtableBuilder, BulkMemtableConfig, CompactDispatcher};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
@@ -398,6 +398,7 @@ impl Drop for AllocTracker {
 pub(crate) struct MemtableBuilderProvider {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     config: Arc<MitoConfig>,
+    default_bulk_memtable_config: BulkMemtableConfig,
     compact_dispatcher: Arc<CompactDispatcher>,
 }
 
@@ -428,12 +429,29 @@ impl MemtableBuilderProvider {
     ) -> Self {
         let compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
+        let default_bulk_memtable_config = BulkMemtableConfig::default_for_write_buffer_size(
+            config.global_write_buffer_size.as_bytes() as usize,
+        );
 
         Self {
             write_buffer_manager,
             config,
+            default_bulk_memtable_config,
             compact_dispatcher,
         }
+    }
+
+    /// Parses region options with this provider's default bulk memtable config.
+    pub(crate) fn parse_options(
+        &self,
+        region_id: RegionId,
+        options: &HashMap<String, String>,
+    ) -> Result<RegionOptions> {
+        RegionOptions::try_from_options_with_bulk_config(
+            region_id,
+            options,
+            &self.default_bulk_memtable_config,
+        )
     }
 
     pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
@@ -496,6 +514,7 @@ impl MemtableBuilderProvider {
             !dedup, // append_mode: true if not dedup, false if dedup
             merge_mode,
         )
+        .with_config(self.default_bulk_memtable_config.clone())
         .with_row_group_size(options.row_group_size())
         .with_float_field_encoding(options.float_field_encoding)
         .with_compact_dispatcher(self.compact_dispatcher.clone());
@@ -792,12 +811,15 @@ impl MemtableRange {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
+    use common_base::readable_size::ReadableSize;
     use common_error::ext::WhateverResult;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use store_api::metadata::RegionMetadataBuilder;
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
@@ -875,6 +897,65 @@ mod tests {
             provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
 
         assert_eq!(&config, builder.config());
+    }
+
+    #[test]
+    fn test_provider_uses_adaptive_config_for_implicit_bulk_builder() {
+        let config = MitoConfig {
+            global_write_buffer_size: ReadableSize::gb(8),
+            ..Default::default()
+        };
+        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let options = RegionOptions::default();
+
+        let builder =
+            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
+
+        assert_eq!(256 * 1024 * 1024, builder.config().encode_bytes_threshold);
+    }
+
+    #[test]
+    fn test_provider_parses_bulk_memtable_with_adaptive_config() {
+        let config = MitoConfig {
+            global_write_buffer_size: ReadableSize::gb(8),
+            ..Default::default()
+        };
+        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let options = HashMap::from([("memtable.type".to_string(), "bulk".to_string())]);
+
+        let options = provider
+            .parse_options(RegionId::new(0, 0), &options)
+            .unwrap();
+
+        let Some(MemtableOptions::Bulk(config)) = options.memtable else {
+            panic!("expected bulk memtable options");
+        };
+        assert_eq!(256 * 1024 * 1024, config.encode_bytes_threshold);
+    }
+
+    #[test]
+    fn test_provider_preserves_explicit_bulk_encode_bytes_threshold() {
+        let config = MitoConfig {
+            global_write_buffer_size: ReadableSize::gb(8),
+            ..Default::default()
+        };
+        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let options = HashMap::from([
+            ("memtable.type".to_string(), "bulk".to_string()),
+            (
+                "memtable.bulk.encode_bytes_threshold".to_string(),
+                "13".to_string(),
+            ),
+        ]);
+
+        let options = provider
+            .parse_options(RegionId::new(0, 0), &options)
+            .unwrap();
+
+        let Some(MemtableOptions::Bulk(config)) = options.memtable else {
+            panic!("expected bulk memtable options");
+        };
+        assert_eq!(13, config.encode_bytes_threshold);
     }
 
     #[test]

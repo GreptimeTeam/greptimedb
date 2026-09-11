@@ -283,7 +283,7 @@ mod tests {
         let parquet_bytes = build_test_parquet_bytes(false, &[], &[4], EnabledStatistics::Page);
         let file_size = parquet_bytes.len() as u64;
         let file_path = "test.parquet";
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         object_store.write(file_path, parquet_bytes).await.unwrap();
 
         let mut loader = MetadataLoader::new(object_store, file_path, file_size);

@@ -61,3 +61,15 @@ iterations = 3
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 50
+
+# The VALUES join keeps the join and final TopK on the frontend. Its runtime
+# membership filter can reach the datanode scan before rows cross MergeScan.
+[[scenario.queries]]
+name = "topk_frontend_join"
+kind = "sql"
+query = "SELECT t.host, t.instance, t.value, t.ts FROM sql_topk_order_by t JOIN (VALUES ('host1'), ('host3'), ('host5')) AS h(host) ON t.host = h.host WHERE t.ts >= '2024-01-01 00:10:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 02:00:00+0000'::TIMESTAMP ORDER BY t.value DESC LIMIT 20"
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50

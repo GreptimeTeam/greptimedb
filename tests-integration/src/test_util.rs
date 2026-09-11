@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
@@ -26,7 +29,10 @@ use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
 use client::{Client, Database};
 use common_base::Plugins;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::Configurable;
+#[cfg(test)]
+use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
@@ -38,8 +44,13 @@ use common_test_util::ports;
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
+#[cfg(test)]
+use datanode::datanode::Datanode;
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
+#[cfg(test)]
+use meta_srv::metasrv::Metasrv;
+use mito2::engine::MitoEngine;
 use mito2::gc::GcConfig;
 use object_store::config::{
     AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
@@ -62,8 +73,177 @@ use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
 use session::context::QueryContext;
+use store_api::metric_engine_consts::METRIC_METADATA_REGION_GROUP;
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::{RegionFlushRequest, RegionRequest};
+use store_api::storage::RegionId;
 
+use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+
+/// Maps `(node_id, region_id)` to `(written_bytes, flushed_entry_id)`.
+pub type WalSnapshot = BTreeMap<(u64, RegionId), (u64, u64)>;
+
+/// Flush user data regions before observing their persisted WAL watermarks.
+/// Metadata regions write WAL independently and are excluded from this check.
+async fn flush_and_snapshot_region_wal(engine: &MitoEngine) -> WalSnapshot {
+    let mut snapshot = BTreeMap::new();
+    for region in engine.regions() {
+        let id = region.region_id();
+        if id.table_id() < MIN_USER_TABLE_ID || id.region_group() == METRIC_METADATA_REGION_GROUP {
+            continue;
+        }
+        engine
+            .handle_request(id, RegionRequest::Flush(RegionFlushRequest::default()))
+            .await
+            .unwrap();
+        let statistic = engine.region_statistic(id).unwrap();
+        snapshot.insert(
+            (0, id),
+            (
+                statistic.written_bytes,
+                statistic.manifest.data_flushed_entry_id(),
+            ),
+        );
+    }
+    snapshot
+}
+
+/// Require a real write, then check WAL policy independently of row deduplication.
+pub fn assert_wal_delta(before: &WalSnapshot, after: &WalSnapshot, skip_wal: bool) {
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>(),
+        "warm up table creation before taking the snapshot"
+    );
+    let mut written = 0;
+    for (id, &(written_bytes, flushed_entry_id)) in after {
+        let (previous_written_bytes, previous_flushed_entry_id) = before[id];
+        if written_bytes > previous_written_bytes {
+            written += 1;
+            if skip_wal {
+                assert_eq!(
+                    flushed_entry_id, previous_flushed_entry_id,
+                    "region {id:?} wrote WAL despite the request policy"
+                );
+            } else {
+                assert!(
+                    flushed_entry_id > previous_flushed_entry_id,
+                    "region {id:?} did not write WAL"
+                );
+            }
+        }
+    }
+    assert!(
+        written > 0,
+        "request must reach a data region, not merely return success"
+    );
+}
+
+/// A test instance backed by embedded storage or a distributed cluster.
+pub enum MockInstanceImpl {
+    Standalone(GreptimeDbStandalone),
+    Distributed(GreptimeDbCluster),
+}
+
+impl MockInstanceImpl {
+    /// Returns the metasrv of a distributed instance.
+    ///
+    /// # Panics
+    /// Panics if this is a standalone instance.
+    #[cfg(test)]
+    pub(crate) fn metasrv(&self) -> &Arc<Metasrv> {
+        match self {
+            Self::Standalone(_) => unreachable!(),
+            Self::Distributed(instance) => &instance.metasrv,
+        }
+    }
+
+    /// Returns the datanodes of a distributed instance.
+    ///
+    /// # Panics
+    /// Panics if this is a standalone instance.
+    #[cfg(test)]
+    pub(crate) fn datanodes(&self) -> &HashMap<DatanodeId, Datanode> {
+        match self {
+            Self::Standalone(_) => unreachable!(),
+            Self::Distributed(instance) => &instance.datanode_instances,
+        }
+    }
+
+    /// Creates a standalone instance or a three-datanode cluster using local storage.
+    pub async fn new(name: &str, distributed: bool) -> Self {
+        let name = format!(
+            "{name}_{}",
+            if distributed {
+                "distributed"
+            } else {
+                "standalone"
+            }
+        );
+        if distributed {
+            // The repository cluster harness uses real tonic/protobuf services
+            // over duplex transports between FE and datanodes, not direct calls.
+            Self::Distributed(
+                GreptimeDbClusterBuilder::new(&name)
+                    .await
+                    .with_datanodes(3)
+                    .build(false)
+                    .await,
+            )
+        } else {
+            Self::Standalone(GreptimeDbStandaloneBuilder::new(&name).build().await)
+        }
+    }
+
+    /// Returns the frontend instance.
+    pub fn frontend(&self) -> Arc<Instance> {
+        match self {
+            Self::Standalone(instance) => instance.fe_instance().clone(),
+            Self::Distributed(cluster) => cluster.fe_instance().clone(),
+        }
+    }
+
+    /// Flushes user data regions and returns their write and WAL watermarks.
+    pub async fn flush_and_snapshot_wal(&self) -> WalSnapshot {
+        match self {
+            Self::Standalone(instance) => {
+                flush_and_snapshot_region_wal(&instance.mito_engine).await
+            }
+            Self::Distributed(cluster) => {
+                let mut result = BTreeMap::new();
+                for (node_id, datanode) in &cluster.datanode_instances {
+                    let engine = datanode.region_server().mito_engine().unwrap();
+                    result.extend(
+                        flush_and_snapshot_region_wal(&engine)
+                            .await
+                            .into_iter()
+                            .map(|((_, region_id), watermarks)| {
+                                ((*node_id, region_id), watermarks)
+                            }),
+                    );
+                }
+                result
+            }
+        }
+    }
+
+    /// Shuts down cluster services and removes the test storage.
+    pub async fn shutdown(&mut self) {
+        match self {
+            Self::Standalone(instance) => instance.guard.remove_all().await,
+            Self::Distributed(cluster) => {
+                cluster.metasrv.shutdown().await.unwrap();
+                for datanode in cluster.datanode_instances.values_mut() {
+                    datanode.shutdown().await.unwrap();
+                }
+                for guard in &mut cluster.guards {
+                    guard.remove_all().await;
+                }
+            }
+        }
+    }
+}
 
 pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";
 
@@ -182,7 +362,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Gcs::from(&gcs_config.connection);
             let config = ObjectStoreConfig::Gcs(gcs_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
+            let store = ObjectStore::new(builder).unwrap();
             (config, TempDirGuard::Gcs(TempFolder::new(&store, "/")))
         }
         StorageType::Azblob => {
@@ -200,7 +380,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Azblob::from(&azblob_config.connection);
             let config = ObjectStoreConfig::Azblob(azblob_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
+            let store = ObjectStore::new(builder).unwrap();
             (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
         }
         StorageType::Oss => {
@@ -217,7 +397,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Oss::from(&oss_config.connection);
             let config = ObjectStoreConfig::Oss(oss_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
+            let store = ObjectStore::new(builder).unwrap();
             (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
@@ -231,7 +411,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = S3::from(&s3_config.connection);
             let config = ObjectStoreConfig::S3(s3_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
+            let store = ObjectStore::new(builder).unwrap();
             (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
         }
         StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),

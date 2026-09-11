@@ -61,6 +61,98 @@ SHOW CREATE TABLE alter_hint_table;
 
 DROP TABLE alter_hint_table;
 
+CREATE TABLE partition_num_hint_table (
+  host STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX
+)
+PARTITION ON COLUMNS (host) (
+  host < 'm',
+  host >= 'm'
+)
+WITH ('repartition.partition.num.hint' = ' 8 ');
+
+SHOW CREATE TABLE partition_num_hint_table;
+
+ALTER TABLE partition_num_hint_table SET 'repartition.partition.num.hint' = 16;
+
+SHOW CREATE TABLE partition_num_hint_table;
+
+ALTER TABLE partition_num_hint_table SET 'repartition.partition.num.hint' = '0';
+
+ALTER TABLE partition_num_hint_table UNSET 'repartition.partition.num.hint';
+
+ALTER TABLE partition_num_hint_table UNSET 'repartition.partition.num.hint';
+
+SHOW CREATE TABLE partition_num_hint_table;
+
+DROP TABLE partition_num_hint_table;
+
+CREATE TABLE partition_num_hint_table (
+  host STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX
+)
+WITH ('repartition.partition.num.hint' = '10');
+
+SHOW CREATE TABLE partition_num_hint_table;
+
+DROP TABLE partition_num_hint_table;
+
+CREATE TABLE partition_num_hint_table (
+  host STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX
+)
+WITH ('repartition.partition.num.hint' = 10);
+
+SHOW CREATE TABLE partition_num_hint_table;
+
+DROP TABLE partition_num_hint_table;
+
+CREATE TABLE combined_hint_table (
+  host STRING PRIMARY KEY,
+  `service` STRING,
+  ts TIMESTAMP TIME INDEX
+);
+
+ALTER TABLE combined_hint_table SET
+  'repartition.column.hint' = 'host',
+  'repartition.partition.num.hint' = 10;
+
+SHOW CREATE TABLE combined_hint_table;
+
+ALTER TABLE combined_hint_table SET
+  'repartition.column.hint' = 'service',
+  'repartition.partition.num.hint' = 0;
+
+SHOW CREATE TABLE combined_hint_table;
+
+ALTER TABLE combined_hint_table SET
+  'repartition.partition.num.hint' = 20,
+  'repartition.column.hint' = 'missing';
+
+SHOW CREATE TABLE combined_hint_table;
+
+ALTER TABLE combined_hint_table SET
+  'repartition.partition.num.hint' = 20,
+  'repartition.column.hint' = 'service';
+
+SHOW CREATE TABLE combined_hint_table;
+
+ALTER TABLE combined_hint_table SET
+  'repartition.partition.num.hint' = 30,
+  'repartition.partition.num.hint' = 40;
+
+ALTER TABLE combined_hint_table SET
+  'repartition.partition.num.hint' = 30,
+  'ttl' = '7d';
+
+ALTER TABLE combined_hint_table UNSET
+  'repartition.column.hint',
+  'repartition.partition.num.hint';
+
+SHOW CREATE TABLE combined_hint_table;
+
+DROP TABLE combined_hint_table;
+
 CREATE TABLE not_supported_table_storage_option (
   `id` INT UNSIGNED,
   host STRING,

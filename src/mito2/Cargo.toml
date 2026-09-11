@@ -93,6 +93,7 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+winner_tree.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
@@ -127,6 +128,11 @@ required-features = ["test"]
 
 [[bench]]
 name = "bench_compaction_picker"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
+name = "bench_flat_merge"
 harness = false
 required-features = ["testing"]
 

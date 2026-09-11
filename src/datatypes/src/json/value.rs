@@ -162,7 +162,8 @@ impl JsonVariant {
         }
     }
 
-    fn contains_empty_object(&self) -> bool {
+    /// Returns whether this value recursively contains an empty object.
+    pub(crate) fn contains_empty_object(&self) -> bool {
         match self {
             JsonVariant::Array(array) => array.iter().any(JsonVariant::contains_empty_object),
             JsonVariant::Object(object) => {

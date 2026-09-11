@@ -122,3 +122,29 @@ OK packet (rows affected: 0)
     guard.remove_all().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mysql_connect_system_schema_ignores_case() -> sqlx::Result<()> {
+    let (mut guard, server) = setup_mysql_server(
+        StorageType::File,
+        "test_mysql_connect_system_schema_ignores_case",
+    )
+    .await;
+    let addr = server.bind_addr().unwrap();
+
+    // The handshake database goes through the same `on_init` as `COM_INIT_DB`, which is
+    // what a MySQL client turns `USE <db>` into. Neither reaches the SQL parser.
+    let mut conn = MySqlConnection::connect(&format!("mysql://{addr}/INFORMATION_SCHEMA")).await?;
+
+    // Unqualified: resolves only if the session really switched to the system schema.
+    let schema: String =
+        sqlx::query("select table_schema from tables where table_name = 'columns'")
+            .fetch_one(&mut conn)
+            .await?
+            .get(0);
+    assert_eq!(schema, "information_schema");
+
+    let _ = server.shutdown().await;
+    guard.remove_all().await;
+    Ok(())
+}

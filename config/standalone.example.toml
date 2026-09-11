@@ -305,9 +305,9 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## **It's only used when the provider is `kafka`**.
 #+ connect_timeout = "3s"
 
-## The timeout for kafka client.
+## The total request timeout for kafka client.
 ## **It's only used when the provider is `kafka`**.
-#+ timeout = "3s"
+#+ timeout = "5s"
 
 ## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
@@ -913,6 +913,10 @@ log_format = "text"
 ## The maximum amount of log files.
 max_log_files = 720
 
+## The maximum total size of managed log files in `dir`.
+## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+max_log_dir_size = "0B"
+
 ## Whether to enable per-region metrics.
 ## Default to false.
 enable_per_region_metrics = false
@@ -969,7 +973,8 @@ ttl = "90d"
 ## `alter_database`, `drop_database`, `create_flow`, `drop_flow`,
 ## `create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,
 ## `drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,
-## `create_view`, `drop_view`, `admin_function`, `reconcile_table`.
+## `create_view`, `drop_view`, `admin_function`, `reconcile_catalog`,
+## `reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
 #+ event_types = ["create_database"]

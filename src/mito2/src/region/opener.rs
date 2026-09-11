@@ -61,6 +61,7 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
 use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_memtable};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
+use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -70,6 +71,7 @@ use crate::region::{
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
+use crate::series_index::{IndexFilePurger, load_version_control};
 use crate::sst::FormatType;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
@@ -79,6 +81,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
+use crate::sst::range_index::RangeIndexDeleter;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -163,6 +166,8 @@ pub(crate) struct RegionOpener {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     hook: Option<RegionHookRef>,
+    series_index_store: Option<ObjectStore>,
+    series_index_purger: Option<IndexFilePurger>,
 }
 
 impl RegionOpener {
@@ -202,7 +207,21 @@ impl RegionOpener {
             file_ref_manager,
             partition_expr_fetcher,
             hook: None,
+            series_index_store: None,
+            series_index_purger: None,
         }
+    }
+
+    /// Sets the store for companion range indexes.
+    pub(crate) fn series_index_store(mut self, store: Option<ObjectStore>) -> Self {
+        self.series_index_store = store;
+        self
+    }
+
+    /// Sets the purger shared with the worker's series-index maintenance task.
+    pub(crate) fn series_index_purger(mut self, purger: Option<IndexFilePurger>) -> Self {
+        self.series_index_purger = purger;
+        self
     }
 
     /// Sets the region hook for observing manifest mutations.
@@ -237,7 +256,10 @@ impl RegionOpener {
     /// Parses and sets options for the region.
     pub(crate) fn parse_options(self, options: HashMap<String, String>) -> Result<Self> {
         let region_id = self.region_id;
-        self.options(RegionOptions::try_from_options(region_id, &options)?)
+        let options = self
+            .memtable_builder_provider
+            .parse_options(region_id, &options)?;
+        self.options(options)
     }
 
     /// Sets the replay checkpoint for the region.
@@ -417,6 +439,7 @@ impl RegionOpener {
         Ok(Arc::new(MitoRegion {
             region_id,
             version_control,
+            series_index_version_control: Default::default(),
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
@@ -431,6 +454,8 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
                 self.file_ref_manager.clone(),
+                self.series_index_store
+                    .map(|store| RangeIndexDeleter::new(store, region_id)),
             ),
             provider,
             last_flush_millis: AtomicI64::new(now),
@@ -546,6 +571,9 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
+            self.series_index_store
+                .clone()
+                .map(|store| RangeIndexDeleter::new(store, region_id)),
         );
         // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
@@ -644,9 +672,20 @@ impl RegionOpener {
 
         let now = self.time_provider.current_time_millis();
 
+        let series_index_version_control =
+            match (&self.series_index_store, &self.series_index_purger) {
+                (Some(store), Some(purger))
+                    if is_sparse_metric_metadata(&version_control.current().version.metadata) =>
+                {
+                    load_version_control(store, self.region_id, purger).await
+                }
+                _ => Default::default(),
+            };
+
         let region = MitoRegion {
             region_id: self.region_id,
             version_control: version_control.clone(),
+            series_index_version_control,
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
@@ -914,6 +953,7 @@ where
                 OptionOutputTx::none(),
                 // We should respect the sequence in WAL during replay.
                 Some(mutation.sequence),
+                false,
             );
         }
 
@@ -1413,9 +1453,7 @@ mod tests {
     }
 
     fn build_fs_object_store() -> ObjectStore {
-        ObjectStore::new(Fs::default().root("/tmp"))
-            .unwrap()
-            .finish()
+        ObjectStore::new(Fs::default().root("/tmp")).unwrap()
     }
 
     #[test]
@@ -1497,8 +1535,7 @@ mod tests {
                 .region("us-east-1")
                 .disable_ec2_metadata(),
         )
-        .unwrap()
-        .finish();
+        .unwrap();
 
         assert!(supports_open_region_object_storage_requirement(
             &object_store
@@ -1553,7 +1590,7 @@ mod tests {
     async fn test_preload_parquet_meta_cache_uses_file_cache() {
         let env = TestEnv::new().await;
 
-        let local_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let local_store = ObjectStore::new(Memory::default()).unwrap();
         let write_cache = env
             .create_write_cache(local_store, ReadableSize::mb(1024))
             .await;
@@ -1604,7 +1641,7 @@ mod tests {
         let path_type = PathType::Bare;
         let remote_path = file_handle.file_path(table_dir, path_type);
 
-        let source_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let source_store = ObjectStore::new(Memory::default()).unwrap();
         source_store
             .write(&remote_path, parquet_bytes)
             .await
@@ -1688,7 +1725,7 @@ mod tests {
         let remote_path = file_handle.file_path(table_dir, path_type);
 
         // Even if the remote object store has the file, we should not preload from it.
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         object_store
             .write(&remote_path, b"noop".as_slice())
             .await
@@ -1763,9 +1800,8 @@ mod tests {
         let file_path = file_handle.file_path(table_dir, path_type);
 
         let root = create_temp_dir("parquet-meta-preload");
-        let object_store = ObjectStore::new(Fs::default().root(root.path().to_str().unwrap()))
-            .unwrap()
-            .finish();
+        let object_store =
+            ObjectStore::new(Fs::default().root(root.path().to_str().unwrap())).unwrap();
         object_store.write(&file_path, parquet_bytes).await.unwrap();
 
         let region_file_id = file_handle.file_id();

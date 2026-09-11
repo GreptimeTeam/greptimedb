@@ -198,7 +198,7 @@ pub struct KafkaConnectionConfig {
     /// The connect timeout for kafka client.
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
-    /// The timeout for kafka client.
+    /// The total request timeout for kafka client.
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
 }
@@ -210,7 +210,7 @@ impl Default for KafkaConnectionConfig {
             sasl: None,
             tls: None,
             connect_timeout: Duration::from_secs(3),
-            timeout: Duration::from_secs(3),
+            timeout: Duration::from_secs(5),
         }
     }
 }

@@ -775,6 +775,7 @@ async fn test_region_write_buffer_does_not_stall_follower_write() {
         engine.handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: Rows {
                     schema,
                     rows: build_rows_for_key("follower", 2, 4, 0),
@@ -970,6 +971,7 @@ async fn test_region_write_buffer_rejects_only_full_region_queue() {
             .handle_request(
                 hot_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: stalled_schema,
                         rows: build_rows_for_key("hot", 2, 1026, 2),

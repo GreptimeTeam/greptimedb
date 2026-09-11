@@ -319,6 +319,12 @@ lazy_static! {
 // Index metrics.
 lazy_static! {
     // Index metrics.
+    /// Series and range index file operations.
+    pub static ref SERIES_INDEX_FILE_OPERATION_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_series_index_file_operation_total",
+        "series-index file operations",
+        &["index_type", "operation", "result"],
+    ).unwrap();
     /// Number of stale index publications rejected at each publication stage.
     pub static ref INDEX_PUBLICATION_STALE_TOTAL: IntCounterVec =
         register_int_counter_vec!(

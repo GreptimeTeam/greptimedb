@@ -39,12 +39,14 @@ use store_api::mito_engine_options::{
     APPEND_MODE_KEY, COMPACTION_TYPE, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, FloatFieldEncoding,
     MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD, MEMTABLE_BULK_ENCODE_ROW_THRESHOLD,
     MEMTABLE_BULK_MAX_MERGE_GROUPS, MEMTABLE_BULK_MERGE_THRESHOLD, MEMTABLE_TYPE, MERGE_MODE_KEY,
-    SST_FORMAT_KEY, TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
-    TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key,
+    SST_FORMAT_KEY, TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_FALLBACK_TO_LOCAL, TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
+    TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key, normalize_twcs_trigger_options,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
-use crate::error::{ParseTableOptionSnafu, Result};
+use crate::error::{ConflictingTableOptionsSnafu, ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
 use crate::table_reference::TableReference;
 
@@ -75,7 +77,7 @@ pub fn is_trace_v1_table(table_info: &crate::metadata::TableInfo) -> bool {
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
-pub const VALID_TABLE_OPTION_KEYS: [&str; 14] = [
+pub const VALID_TABLE_OPTION_KEYS: [&str; 15] = [
     // common keys:
     WRITE_BUFFER_SIZE_KEY,
     TTL_KEY,
@@ -94,6 +96,7 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 14] = [
     TABLE_DATA_MODEL,
     OTLP_METRIC_COMPAT_KEY,
     REPARTITION_COLUMN_HINT_KEY,
+    REPARTITION_PARTITION_NUM_HINT_KEY,
 ];
 
 pub const DDL_TIMEOUT: &str = "timeout";
@@ -118,6 +121,10 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     set.insert(TWCS_FALLBACK_TO_LOCAL);
     set.insert(TWCS_TIME_WINDOW);
     set.insert(TWCS_TRIGGER_FILE_NUM);
+    set.insert(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
+    set.insert(TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER);
+    set.insert(TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM);
+    set.insert(TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER);
     set.insert(TWCS_MAX_OUTPUT_FILE_SIZE);
     set.insert(SST_FORMAT_KEY);
     set
@@ -126,6 +133,32 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
 /// Returns true if the `key` is a valid key for database.
 pub fn validate_database_option(key: &str) -> bool {
     VALID_DB_OPT_KEYS.contains(&key)
+}
+
+/// Validates a database option value, returning the violated constraint on error.
+pub fn validate_database_option_value(
+    key: &str,
+    value: Option<&str>,
+) -> std::result::Result<(), &'static str> {
+    let (minimum, constraint) = match key {
+        TWCS_TRIGGER_FILE_NUM
+        | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
+        | TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM => {
+            (0, "expected a non-negative integer fitting in usize")
+        }
+        TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER | TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER => {
+            (2, "expected an integer greater than or equal to 2")
+        }
+        _ => return Ok(()),
+    };
+    if value
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|files| files >= minimum)
+    {
+        Ok(())
+    } else {
+        Err(constraint)
+    }
 }
 
 /// Returns true if the `key` is a valid key for any engine or storage.
@@ -177,16 +210,29 @@ pub const SKIP_WAL_KEY: &str = store_api::mito_engine_options::SKIP_WAL_KEY;
 pub const TRACE_TABLE_PARTITIONS_HINT_KEY: &str = "trace_table_partitions";
 pub const REPARTITION_COLUMN_HINT_KEY: &str = "repartition.column.hint";
 
+/// Table-level partition count hint consumed by the auto-repartition planner.
+pub const REPARTITION_PARTITION_NUM_HINT_KEY: &str = "repartition.partition.num.hint";
+
 impl TableOptions {
     pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
         iter: U,
     ) -> Result<TableOptions> {
         let mut options = TableOptions::default();
 
-        let kvs: HashMap<String, String> = iter
+        let mut kvs: HashMap<String, String> = iter
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+
+        normalize_twcs_trigger_options(&mut kvs).map_err(|conflict| {
+            ConflictingTableOptionsSnafu {
+                first_key: TWCS_TRIGGER_FILE_NUM,
+                first_value: conflict.legacy_value,
+                second_key: TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+                second_value: conflict.canonical_value,
+            }
+            .build()
+        })?;
 
         if let Some(write_buffer_size) = kvs.get(WRITE_BUFFER_SIZE_KEY) {
             let size = ReadableSize::from_str(write_buffer_size).map_err(|_| {
@@ -318,24 +364,26 @@ pub struct ModifyColumnTypeRequest {
 pub enum AnnotationFamily {
     /// `greptime.semantic.*` options (see the [`semantic`] module).
     Semantic,
-    /// `repartition.column.hint`, consumed by the auto-repartition planner.
+    /// Column and partition count hints consumed by the auto-repartition planner.
     RepartitionHint,
 }
 
 impl AnnotationFamily {
-    /// The key namespace: a prefix for [`Self::Semantic`], the exact key for
-    /// [`Self::RepartitionHint`].
+    /// The key namespace used in diagnostics; accepted keys are classified by [`Self::of_key`].
     pub fn namespace(self) -> &'static str {
         match self {
             Self::Semantic => SEMANTIC_PREFIX,
-            Self::RepartitionHint => REPARTITION_COLUMN_HINT_KEY,
+            Self::RepartitionHint => "repartition.",
         }
     }
 
     pub fn of_key(key: &str) -> Option<Self> {
         if key.starts_with(SEMANTIC_PREFIX) {
             Some(Self::Semantic)
-        } else if key == REPARTITION_COLUMN_HINT_KEY {
+        } else if matches!(
+            key,
+            REPARTITION_COLUMN_HINT_KEY | REPARTITION_PARTITION_NUM_HINT_KEY
+        ) {
             Some(Self::RepartitionHint)
         } else {
             None
@@ -352,10 +400,8 @@ impl AnnotationFamily {
         }
     }
 
-    /// Whether this family's SET/UNSET batch must contain exactly one key.
-    /// The repartition hint is a single marker; a batch with several hint
-    /// entries (duplicates included) has no meaningful order.
-    pub fn requires_single_key(self) -> bool {
+    /// Whether duplicate keys are rejected in this family's SET/UNSET batch.
+    pub fn requires_unique_keys(self) -> bool {
         matches!(self, Self::RepartitionHint)
     }
 
@@ -366,10 +412,58 @@ impl AnnotationFamily {
                 "`{SEMANTIC_PREFIX}*` options must be altered separately from other table options"
             ),
             Self::RepartitionHint => {
-                format!("{REPARTITION_COLUMN_HINT_KEY} must be altered separately")
+                "repartition hints must be altered separately from other table options".to_string()
             }
         }
     }
+}
+
+/// Why an annotation SET/UNSET key batch was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationKeyError {
+    MixedFamilies { family: AnnotationFamily },
+    DuplicateKey,
+}
+
+impl fmt::Display for AnnotationKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MixedFamilies { family } => f.write_str(&family.mixed_batch_error()),
+            Self::DuplicateKey => f.write_str("duplicate repartition hint keys"),
+        }
+    }
+}
+
+/// Validates a SET/UNSET batch and returns its annotation family.
+///
+/// Empty batches and batches containing only non-annotation keys return `None`.
+/// Annotation keys cannot share a batch with another family or region options.
+/// Duplicate keys are rejected only for families that require unique keys.
+pub fn validate_annotation_keys<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+) -> std::result::Result<Option<AnnotationFamily>, AnnotationKeyError> {
+    let mut keys = keys.into_iter();
+    let Some(first) = keys.next() else {
+        return Ok(None);
+    };
+    let family = AnnotationFamily::of_key(first);
+    let reject_duplicates = family.is_some_and(|family| family.requires_unique_keys());
+    let mut seen = HashSet::new();
+    if reject_duplicates {
+        seen.insert(first);
+    }
+    for key in keys {
+        let this = AnnotationFamily::of_key(key);
+        if this != family
+            && let Some(family) = family.or(this)
+        {
+            return Err(AnnotationKeyError::MixedFamilies { family });
+        }
+        if reject_duplicates && !seen.insert(key) {
+            return Err(AnnotationKeyError::DuplicateKey);
+        }
+    }
+    Ok(family)
 }
 
 /// Table shape an annotation option is validated against.
@@ -399,6 +493,9 @@ pub enum AnnotationValidationError {
         column: String,
         ty: ConcreteDataType,
     },
+    InvalidPartitionNumHint {
+        value: String,
+    },
     NotSingleColumn,
     PartitionMetadataConflict,
     TimeIndexConflict,
@@ -417,6 +514,10 @@ impl fmt::Display for AnnotationValidationError {
                 "entity column `{column}` (option `{key}`) has type `{ty}`, \
                  which cannot render as a string"
             ),
+            Self::InvalidPartitionNumHint { value } => write!(
+                f,
+                "{REPARTITION_PARTITION_NUM_HINT_KEY} expects a positive integer within u32 range, got `{value}`"
+            ),
             Self::NotSingleColumn => write!(
                 f,
                 "{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"
@@ -434,7 +535,7 @@ impl fmt::Display for AnnotationValidationError {
 }
 
 /// Validates one annotation option and returns the value to store — the
-/// repartition hint is trimmed to the bare column name, semantic values pass
+/// repartition hints are trimmed, semantic values pass
 /// through unchanged.
 pub(crate) fn validate_and_normalize_annotation(
     family: AnnotationFamily,
@@ -470,6 +571,15 @@ pub(crate) fn validate_and_normalize_annotation(
                         });
                     }
                 }
+            }
+            Ok(value.to_string())
+        }
+        AnnotationFamily::RepartitionHint if key == REPARTITION_PARTITION_NUM_HINT_KEY => {
+            let value = value.trim();
+            if !matches!(value.parse::<u32>(), Ok(1..)) {
+                return Err(AnnotationValidationError::InvalidPartitionNumHint {
+                    value: value.to_string(),
+                });
             }
             Ok(value.to_string())
         }
@@ -614,6 +724,8 @@ pub struct InsertRequest {
     pub schema_name: String,
     pub table_name: String,
     pub columns_values: HashMap<String, VectorRef>,
+    /// Whether this insert should skip WAL.
+    pub skip_wal: bool,
 }
 
 /// Delete (by primary key) request
@@ -726,7 +838,53 @@ pub struct CopyQueryToRequest {
 mod tests {
     use std::time::Duration;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+
     use super::*;
+
+    #[test]
+    fn test_validate_annotation_keys() {
+        let column = REPARTITION_COLUMN_HINT_KEY;
+        let count = REPARTITION_PARTITION_NUM_HINT_KEY;
+        for (keys, expected) in [
+            (vec![], None),
+            (vec![TTL_KEY, TTL_KEY], None),
+            (vec!["repartition.unknown.hint"], None),
+            (vec![column], Some(AnnotationFamily::RepartitionHint)),
+            (vec![count], Some(AnnotationFamily::RepartitionHint)),
+            (vec![column, count], Some(AnnotationFamily::RepartitionHint)),
+            (vec![count, column], Some(AnnotationFamily::RepartitionHint)),
+            (
+                vec!["greptime.semantic.source", "greptime.semantic.source"],
+                Some(AnnotationFamily::Semantic),
+            ),
+        ] {
+            assert_eq!(validate_annotation_keys(keys), Ok(expected));
+        }
+        for keys in [
+            vec![column, column],
+            vec![count, count],
+            vec![column, count, column],
+        ] {
+            assert_eq!(
+                validate_annotation_keys(keys),
+                Err(AnnotationKeyError::DuplicateKey)
+            );
+        }
+        for keys in [
+            vec![column, TTL_KEY],
+            vec![TTL_KEY, count],
+            vec![column, "greptime.semantic.source"],
+        ] {
+            assert_eq!(
+                validate_annotation_keys(keys),
+                Err(AnnotationKeyError::MixedFamilies {
+                    family: AnnotationFamily::RepartitionHint,
+                })
+            );
+        }
+    }
 
     #[test]
     fn test_validate_table_option() {
@@ -739,6 +897,8 @@ mod tests {
         assert!(validate_table_option(MEMTABLE_BULK_MERGE_THRESHOLD));
         assert!(validate_table_option(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING));
         assert!(validate_table_option(REPARTITION_COLUMN_HINT_KEY));
+        assert!(validate_table_option(REPARTITION_PARTITION_NUM_HINT_KEY));
+        assert_eq!(AnnotationFamily::of_key("repartition.unknown.hint"), None);
         assert!(!validate_table_option("foo"));
 
         // Only whitelisted semantic keys are accepted.
@@ -759,6 +919,18 @@ mod tests {
             MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD
         ));
         assert!(validate_database_option(MEMTABLE_BULK_MAX_MERGE_GROUPS));
+        assert!(validate_database_option(
+            "compaction.twcs.active_window.trigger_file_num"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.active_window.l1_merge_trigger"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.inactive_window.trigger_file_num"
+        ));
+        assert!(validate_database_option(
+            "compaction.twcs.inactive_window.l1_merge_trigger"
+        ));
         assert!(!validate_database_option("foo"));
     }
 
@@ -779,6 +951,45 @@ mod tests {
             TableOptions::try_from_iter([(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "invalid",)])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_database_trigger_value_boundaries() {
+        let maximum = usize::MAX.to_string();
+        let overflow = format!("{maximum}0");
+        for (key, minimum) in [
+            (TWCS_TRIGGER_FILE_NUM, 0),
+            (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, 0),
+            (TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, 0),
+            (TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, 2),
+            (TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER, 2),
+        ] {
+            for invalid in [
+                None,
+                Some(""),
+                Some("invalid"),
+                Some("-1"),
+                Some(overflow.as_str()),
+            ] {
+                assert!(
+                    validate_database_option_value(key, invalid).is_err(),
+                    "{key}: {invalid:?}"
+                );
+            }
+            for valid in ["2", maximum.as_str()] {
+                assert!(
+                    validate_database_option_value(key, Some(valid)).is_ok(),
+                    "{key}: {valid}"
+                );
+            }
+            for boundary in ["0", "1"] {
+                assert_eq!(
+                    validate_database_option_value(key, Some(boundary)).is_ok(),
+                    minimum == 0,
+                    "{key}: {boundary}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -848,6 +1059,37 @@ mod tests {
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
+    }
+
+    #[test]
+    fn test_table_options_normalizes_twcs_trigger_aliases() {
+        for options in [
+            vec![(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "4")],
+            vec![
+                (TWCS_TRIGGER_FILE_NUM, "4"),
+                (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "4"),
+            ],
+        ] {
+            let table_options = TableOptions::try_from_iter(options).unwrap();
+            assert_eq!(
+                HashMap::from([(TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string())]),
+                table_options.extra_options
+            );
+        }
+    }
+
+    #[test]
+    fn test_table_options_rejects_conflicting_twcs_trigger_aliases() {
+        let error = TableOptions::try_from_iter([
+            (TWCS_TRIGGER_FILE_NUM, "4"),
+            (TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, "8"),
+        ])
+        .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!(
+            "Conflicting table options: compaction.twcs.trigger_file_num=4 and compaction.twcs.active_window.trigger_file_num=8",
+            error.to_string()
+        );
     }
 
     #[test]

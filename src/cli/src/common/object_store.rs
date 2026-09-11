@@ -389,8 +389,7 @@ pub fn new_fs_object_store(root: &str) -> std::result::Result<ObjectStore, Boxed
     let builder = Fs::default().root(root);
     let object_store = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)
-        .map_err(BoxedError::new)?
-        .finish();
+        .map_err(BoxedError::new)?;
 
     Ok(with_instrument_layers(object_store, false))
 }
@@ -406,8 +405,7 @@ macro_rules! gen_object_store_builder {
             );
             let object_store = ObjectStore::new(<$service_type>::from(&config))
                 .context(error::InitBackendSnafu)
-                .map_err(BoxedError::new)?
-                .finish();
+                .map_err(BoxedError::new)?;
             Ok(with_instrument_layers(
                 with_retry_layers(object_store),
                 false,

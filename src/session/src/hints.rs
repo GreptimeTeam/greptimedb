@@ -23,6 +23,9 @@ pub const SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY: &str =
     "query.support_flight_metrics_before_batch";
 pub const LIVE_ANALYZE_METRICS_EXTENSION_KEY: &str = "query.live_analyze_metrics";
 
+/// Skip WAL for this insert only; never persisted as a table option.
+pub const INSERT_SKIP_WAL_HINT: &str = "insert_skip_wal";
+
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
 pub const RESERVED_EXTENSION_KEYS: [&str; 4] = [
     REMOTE_QUERY_ID_EXTENSION_KEY,

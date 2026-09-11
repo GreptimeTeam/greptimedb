@@ -147,6 +147,7 @@ impl SstRangeIndexWriter {
             path,
             &schema,
             options.index_row_group_size,
+            None,
         )
         .await?;
         let codec = SparsePrimaryKeyCodec::new(&metadata);
@@ -537,7 +538,7 @@ mod tests {
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn object_store() -> ObjectStore {
-        ObjectStore::new(Memory::default()).unwrap().finish()
+        ObjectStore::new(Memory::default()).unwrap()
     }
 
     fn pk_schema(primary_key_type: DataType) -> SchemaRef {

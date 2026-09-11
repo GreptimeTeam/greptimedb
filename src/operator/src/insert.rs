@@ -265,6 +265,8 @@ impl Inserter {
         accommodate_existing_schema: bool,
         is_single_value: bool,
     ) -> Result<Output> {
+        let skip_wal = ctx.skip_wal();
+
         // remove empty requests
         requests.inserts.retain(|req| {
             req.rows
@@ -297,7 +299,7 @@ impl Inserter {
             instant_table_ids,
             self.partition_manager.as_ref(),
         )
-        .convert(requests)
+        .convert(requests, skip_wal)
         .await?;
 
         self.do_request(inserts, &table_infos, &ctx).await
@@ -311,6 +313,8 @@ impl Inserter {
         statement_executor: &StatementExecutor,
         physical_table: String,
     ) -> Result<Output> {
+        let skip_wal = ctx.skip_wal();
+
         // remove empty requests
         requests.inserts.retain(|req| {
             req.rows
@@ -343,7 +347,7 @@ impl Inserter {
             .map(|info| (info.name.clone(), info.clone()))
             .collect::<HashMap<_, _>>();
         let inserts = RowToRegion::new(name_to_info, instant_table_ids, &self.partition_manager)
-            .convert(requests)
+            .convert(requests, skip_wal)
             .await?;
 
         self.do_request(inserts, &table_infos, &ctx).await
@@ -1741,6 +1745,24 @@ mod tests {
 
         assert!(request_is_native_histogram(&request_schema));
         assert!(table_is_native_histogram(&table));
+    }
+
+    #[test]
+    fn test_skip_wal_does_not_change_table_options() {
+        check_skip_wal_does_not_change_table_options(false);
+        check_skip_wal_does_not_change_table_options(true);
+    }
+
+    fn check_skip_wal_does_not_change_table_options(skip_wal: bool) {
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+        ctx.set_skip_wal(skip_wal);
+        let mut options = Default::default();
+        fill_table_options_for_create(&mut options, &AutoCreateTableType::Physical, &ctx);
+        assert!(!options.contains_key(session::hints::INSERT_SKIP_WAL_HINT));
+        assert!(!options.contains_key("skip_wal"));
     }
 
     #[test]

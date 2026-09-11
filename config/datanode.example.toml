@@ -186,9 +186,9 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## **It's only used when the provider is `kafka`**.
 #+ connect_timeout = "3s"
 
-## The timeout for kafka client.
+## The total request timeout for kafka client.
 ## **It's only used when the provider is `kafka`**.
-#+ timeout = "3s"
+#+ timeout = "5s"
 
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
@@ -770,6 +770,10 @@ log_format = "text"
 
 ## The maximum amount of log files.
 max_log_files = 720
+
+## The maximum total size of managed log files in `dir`.
+## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+max_log_dir_size = "0B"
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"

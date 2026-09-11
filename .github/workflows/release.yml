@@ -2,7 +2,9 @@ name: Release
 
 # There are two kinds of formal release:
 # 1. The tag('v*.*.*') push release: the release workflow will be triggered by the tag push event.
-# 2. The scheduled release(the version will be '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD'): the release workflow will be triggered by the schedule event.
+# 2. The scheduled release(the version will be '<base-version>-nightly-YYYYMMDD', any pre-release
+#    extension in the next release version like '-alpha.1' is stripped, so 'nightly' is the extension):
+#    the release workflow will be triggered by the schedule event.
 # A failed tag push release can be manually dispatched on the same tag to recover it without changing the formal release version.
 on:
   push:
@@ -94,7 +96,8 @@ env:
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
   DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST }}
 
-  # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nightly-20230313;
+  # The scheduled version is '<base-version>-nightly-YYYYMMDD', like v0.2.0-nightly-20230313;
+  # the pre-release extension of the next release version is stripped, e.g. v0.2.0-alpha.1 -> v0.2.0-nightly-20230313.
   NIGHTLY_RELEASE_PREFIX: nightly
 
 jobs:
@@ -134,7 +137,7 @@ jobs:
 
       # The create-version will create a global variable named 'version' in the global workflows.
       # - If it's a tag push release or manual dispatch on a tag with REUSE_EXISTING_RELEASE_TAG=true, the version is the tag name(${{ github.ref_name }});
-      # - If it's a scheduled release, the version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-$buildTime', like v0.2.0-nightly-20230313;
+      # - If it's a scheduled release, the version is '<base-version>-nightly-$buildTime', like v0.2.0-nightly-20230313 (pre-release extensions like '-alpha.1' are stripped);
       # - If it's a manual non-tag release, the version is '${{ env.NEXT_RELEASE_VERSION }}-<short-git-sha>-YYYYMMDDSS', like v0.2.0-e5b243c-2023071245;
       - name: Create version
         id: create-version
@@ -715,7 +718,7 @@ jobs:
 
   bump-downstream-repo-versions:
     name: Bump downstream repo versions
-    if: ${{ github.event_name == 'schedule' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly')) }}
+    if: ${{ github.event_name == 'schedule' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly')) && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
@@ -741,7 +744,7 @@ jobs:
 
   bump-helm-charts-version:
     name: Bump helm charts version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && (needs.allocate-runners.outputs.is-current-version-stable != 'true' || needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     permissions:
@@ -762,7 +765,7 @@ jobs:
 
   bump-homebrew-greptime-version:
     name: Bump homebrew greptime version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && (needs.allocate-runners.outputs.is-current-version-stable != 'true' || needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     permissions:

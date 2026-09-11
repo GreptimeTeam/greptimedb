@@ -106,7 +106,7 @@
 | `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.timeout` | String | `3s` | The timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_create_topics` | Bool | `true` | Automatically create topics for WAL.<br/>Set to `true` to automatically create topics for WAL.<br/>Otherwise, use topics named `topic_name_prefix_[0..num_topics)` |
 | `wal.num_topics` | Integer | `64` | Number of topics.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.selector_type` | String | `round_robin` | Topic selector type.<br/>Available selector types:<br/>- `round_robin` (default)<br/>**It's only used when the provider is `kafka`**. |
@@ -232,6 +232,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
@@ -248,7 +249,7 @@
 | `pipeline.cache_ttl` | String | `10s` | Time to live of the local pipeline cache. Default is `10s`. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`, `reconcile_table`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`, `reconcile_catalog`,<br/>`reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 
@@ -375,6 +376,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
@@ -460,6 +462,8 @@
 | `wal` | -- | -- | -- |
 | `wal.provider` | String | `raft_engine` | -- |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster.<br/><br/>**It's only used when the provider is `kafka`**. |
+| `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_create_topics` | Bool | `true` | Automatically create topics for WAL.<br/>Set to `true` to automatically create topics for WAL.<br/>Otherwise, use topics named `topic_name_prefix_[0..num_topics)`<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_prune_interval` | String | `30m` | Interval of automatically WAL pruning.<br/>Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_prune_logical_delete` | Bool | `false` | Whether automatically WAL pruning only updates the metadata marker and skips Kafka DeleteRecords.<br/>Set to `true` for Kafka deployments that do not support DeleteRecords.<br/>**It's only used when the provider is `kafka`**. |
@@ -473,7 +477,7 @@
 | `wal.create_topic_timeout` | String | `30s` | The timeout for creating a Kafka topic.<br/>**It's only used when the provider is `kafka`**. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`, `create_table`, `create_logical_tables`, `alter_table`,<br/>`alter_logical_tables`, `drop_table`, `undrop_table`, `purge_dropped_table`,<br/>`truncate_table`, `create_view`, `drop_view`, `repartition`,<br/>`repartition_group`, `wal_prune`, `batch_gc`, `reconcile_table`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`, `create_table`, `create_logical_tables`, `alter_table`,<br/>`alter_logical_tables`, `drop_table`, `undrop_table`, `purge_dropped_table`,<br/>`truncate_table`, `create_view`, `drop_view`, `repartition`,<br/>`repartition_group`, `wal_prune`, `batch_gc`, `reconcile_catalog`,<br/>`reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `stats_persistence` | -- | -- | Configuration options for the stats persistence. |
 | `stats_persistence.ttl` | String | `0s` | TTL for the stats table that will be used to store the stats.<br/>Set to `0s` to disable stats persistence.<br/>Default is `0s`.<br/>If you want to enable stats persistence, set the TTL to a value greater than 0.<br/>It is recommended to set a small value, e.g., `3h`. |
 | `stats_persistence.interval` | String | `10m` | The interval to persist the stats. Default is `10m`.<br/>The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`. |
@@ -489,6 +493,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
@@ -561,7 +566,7 @@
 | `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.timeout` | String | `3s` | The timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.create_index` | Bool | `false` | Whether to enable WAL index creation.<br/>**It's only used when the provider is `kafka`**. |
@@ -678,6 +683,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
@@ -739,6 +745,7 @@
 | `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
+| `logging.max_log_dir_size` | String | `0B` | The maximum total size of managed log files in `dir`.<br/>Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
 | `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |

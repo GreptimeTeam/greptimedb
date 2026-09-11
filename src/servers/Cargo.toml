@@ -88,7 +88,7 @@ notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
 # Wait for https://github.com/databendlabs/opensrv/pull/81
-opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "6c5a451544194b7bb60a8318d155d4f892b49f2c" }
+opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "f3135e5f00401e06075cf241c0cc26489e45b20a" }
 opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
@@ -146,7 +146,7 @@ vrl.workspace = true
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
-tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
+tikv-jemalloc-ctl = { version = "0.7", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
@@ -167,11 +167,15 @@ servers = { workspace = true, features = ["testing"] }
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
+tokio = { workspace = true, features = ["test-util"] }
 tokio-postgres.workspace = true
 tokio-postgres-rustls = "0.14"
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
+
+[target.'cfg(not(windows))'.dev-dependencies]
+tikv-jemallocator = "0.7"
 
 [build-dependencies]
 common-version.workspace = true
@@ -187,6 +191,10 @@ required-features = ["testing"]
 
 [[bench]]
 name = "to_http_output"
+harness = false
+
+[[bench]]
+name = "prometheus_response"
 harness = false
 
 [[bench]]

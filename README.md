@@ -20,10 +20,10 @@ One engine, on your infrastructure.</h2>
 </h3>
 
 <a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
-<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?filter=!*-*&label=stable&color=brightgreen" alt="Stable"/>
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?filter=!*-*&sort=semver&label=stable&color=brightgreen" alt="Stable"/>
 </a>
 <a href="https://github.com/GreptimeTeam/greptimedb/releases">
-<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=!*-*-*&label=canary&color=blueviolet" alt="Canary"/>
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=!*-*-*&sort=semver&label=canary&color=blueviolet" alt="Canary"/>
 </a>
 <a href="https://github.com/GreptimeTeam/greptimedb/releases">
 <img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=*-nightly-*&label=nightly&color=orange" alt="Nightly"/>

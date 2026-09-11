@@ -657,6 +657,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: api::v1::Rows { schema, rows },
                     hint: None,
                     partition_expr_version: None,

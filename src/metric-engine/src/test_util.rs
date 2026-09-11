@@ -492,7 +492,7 @@ mod test {
         let region_id = to_metadata_region_id(env.default_physical_region_id());
 
         let builder = Fs::default().root(&env.data_home());
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
 
         let table_dir = TestEnv::default_table_dir();
         let region_dir = join_dir(&table_dir, "1_0000000002");

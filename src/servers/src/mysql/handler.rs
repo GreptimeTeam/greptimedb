@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use ::auth::{Identity, Password, UserProviderRef};
+use ::auth::{BEARER_TOKEN_USER, Identity, MysqlAuthMethod, Password, UserProviderRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
@@ -57,9 +57,6 @@ use crate::mysql::helper::{self, format_placeholder, transform_placeholders_with
 use crate::mysql::writer;
 use crate::mysql::writer::{create_mysql_column, handle_err};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-
-const MYSQL_NATIVE_PASSWORD: &str = "mysql_native_password";
-const MYSQL_CLEAR_PASSWORD: &str = "mysql_clear_password";
 
 /// Parameters for the prepared statement
 enum Params<'a> {
@@ -349,16 +346,11 @@ impl MysqlInstanceShim {
     }
 
     fn auth_plugin(&self) -> &'static str {
-        if self
-            .user_provider
+        self.user_provider
             .as_ref()
-            .map(|x| x.external())
-            .unwrap_or(false)
-        {
-            MYSQL_CLEAR_PASSWORD
-        } else {
-            MYSQL_NATIVE_PASSWORD
-        }
+            .map(|provider| provider.mysql_auth_method())
+            .unwrap_or(MysqlAuthMethod::NativePassword)
+            .plugin_name()
     }
 }
 
@@ -378,7 +370,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         self.auth_plugin()
     }
 
-    async fn auth_plugin_for_username(&self, _user: &[u8]) -> &'static str {
+    async fn auth_plugin_for_username(&self, user: &[u8]) -> &'static str {
+        if user == BEARER_TOKEN_USER.as_bytes() {
+            return MysqlAuthMethod::ClearPassword.plugin_name();
+        }
+        if let Some(provider) = &self.user_provider {
+            let username = String::from_utf8_lossy(user);
+            match provider.mysql_auth_method_for_user(&username).await {
+                Ok(method) => return method.plugin_name(),
+                // This hook cannot return an error. Keep the default challenge;
+                // authentication still validates the credentials separately.
+                Err(e) => warn!(e; "Failed to select MySQL authentication method"),
+            }
+        }
         self.auth_plugin()
     }
 
@@ -393,6 +397,25 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         salt: &[u8],
         auth_data: &[u8],
     ) -> bool {
+        <Self as AsyncMysqlShim<W>>::authenticate_with_database(
+            self,
+            auth_plugin,
+            username,
+            salt,
+            auth_data,
+            None,
+        )
+        .await
+    }
+
+    async fn authenticate_with_database(
+        &self,
+        auth_plugin: &str,
+        username: &[u8],
+        salt: &[u8],
+        auth_data: &[u8],
+        database: Option<&[u8]>,
+    ) -> bool {
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
 
@@ -403,26 +426,50 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .client_addr
             .map(|addr| addr.to_string());
         if let Some(user_provider) = &self.user_provider {
-            let user_id = Identity::UserId(&username, addr.as_deref());
-
-            let password = match auth_plugin {
-                MYSQL_NATIVE_PASSWORD => Password::MysqlNativePassword(auth_data, salt),
-                MYSQL_CLEAR_PASSWORD => {
-                    // The raw bytes received could be represented in C-like string, ended in '\0'.
-                    // We must "trim" it to get the real password string.
-                    let password = if let &[password @ .., 0] = &auth_data {
-                        password
-                    } else {
-                        auth_data
-                    };
-                    Password::PlainText(String::from_utf8_lossy(password).to_string().into())
-                }
-                other => {
-                    error!("Unsupported mysql auth plugin: {}", other);
+            let result = if username.as_ref() == BEARER_TOKEN_USER {
+                if auth_plugin != MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN {
+                    warn!("Bearer-token MySQL authentication requires mysql_clear_password");
                     return false;
                 }
+                let token = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);
+                let Ok(token) = std::str::from_utf8(token) else {
+                    warn!("Bearer token is not valid UTF-8");
+                    return false;
+                };
+                let catalog = if let Some(database) = database {
+                    let Ok(database) = std::str::from_utf8(database) else {
+                        warn!("MySQL database is not valid UTF-8");
+                        return false;
+                    };
+                    parse_optional_catalog_and_schema_from_db_string(database)
+                        .0
+                        .unwrap_or_else(|| self.session.catalog())
+                } else {
+                    self.session.catalog()
+                };
+                user_provider
+                    .authenticate_bearer_token(token, &catalog)
+                    .await
+            } else {
+                let user_id = Identity::UserId(&username, addr.as_deref());
+                let password = match auth_plugin {
+                    MysqlAuthMethod::NATIVE_PASSWORD_PLUGIN => {
+                        Password::MysqlNativePassword(auth_data, salt)
+                    }
+                    MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN => {
+                        // The raw bytes received could be represented in C-like string, ended in '\0'.
+                        // We must "trim" it to get the real password string.
+                        let password = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);
+                        Password::PlainText(String::from_utf8_lossy(password).to_string().into())
+                    }
+                    other => {
+                        error!("Unsupported mysql auth plugin: {}", other);
+                        return false;
+                    }
+                };
+                user_provider.authenticate(user_id, password).await
             };
-            match user_provider.authenticate(user_id, password).await {
+            match result {
                 Ok(userinfo) => {
                     user_info = Some(userinfo);
                 }

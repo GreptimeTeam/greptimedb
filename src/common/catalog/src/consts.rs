@@ -151,6 +151,23 @@ pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";
 pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";
 pub const SEMANTIC_TYPE_TIME_INDEX: &str = "TIMESTAMP";
 
+const SYSTEM_SCHEMA_NAMES: [&str; 3] = [
+    INFORMATION_SCHEMA_NAME,
+    PG_CATALOG_NAME,
+    DEFAULT_PRIVATE_SCHEMA_NAME,
+];
+
+/// Returns the canonical name of the system schema `schema` refers to, ignoring ASCII
+/// case, or `None` if it is not one.
+///
+/// Only system schemas are matched case-insensitively, as MySQL does; user schema names
+/// keep the case they were created with.
+pub fn system_schema_name(schema: &str) -> Option<&'static str> {
+    SYSTEM_SCHEMA_NAMES
+        .into_iter()
+        .find(|name| schema.eq_ignore_ascii_case(name))
+}
+
 pub fn is_readonly_schema(schema: &str) -> bool {
     matches!(schema, INFORMATION_SCHEMA_NAME)
 }

@@ -32,6 +32,7 @@ use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
     MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY,
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -39,9 +40,10 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 use crate::error::{self, Result};
 use crate::requests::{
     AddColumnRequest, AlterKind, AnnotationContext, AnnotationFamily, AnnotationValidationError,
-    ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption,
-    TableOptions, UnsetIndexOption, has_stable_string_form, parse_entity_columns,
-    parse_entity_option_key, validate_and_normalize_annotation,
+    ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, REPARTITION_PARTITION_NUM_HINT_KEY,
+    SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption, has_stable_string_form,
+    parse_entity_columns, parse_entity_option_key, validate_and_normalize_annotation,
+    validate_annotation_keys,
 };
 use crate::table_reference::TableReference;
 
@@ -362,8 +364,22 @@ impl TableMeta {
                     new_options.ttl = *new_ttl;
                 }
                 SetRegionOption::Twsc(key, value) => {
+                    let persisted_key = if matches!(
+                        key.as_str(),
+                        TWCS_TRIGGER_FILE_NUM | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
+                    ) {
+                        new_options.extra_options.remove(TWCS_TRIGGER_FILE_NUM);
+                        new_options
+                            .extra_options
+                            .remove(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
+                        TWCS_TRIGGER_FILE_NUM
+                    } else {
+                        key
+                    };
                     if !value.is_empty() {
-                        new_options.extra_options.insert(key.clone(), value.clone());
+                        new_options
+                            .extra_options
+                            .insert(persisted_key.to_string(), value.clone());
                         // Ensure node restart correctly.
                         new_options.extra_options.insert(
                             COMPACTION_TYPE.to_string(),
@@ -371,7 +387,7 @@ impl TableMeta {
                         );
                     } else {
                         // Invalidate the previous change option if an empty value has been set.
-                        new_options.extra_options.remove(key.as_str());
+                        new_options.extra_options.remove(persisted_key);
                     }
                 }
                 SetRegionOption::Format(value) => {
@@ -446,13 +462,13 @@ impl TableMeta {
         family: AnnotationFamily,
         options: &[(String, String)],
     ) -> Result<TableMetaBuilder> {
-        ensure!(
-            !family.requires_single_key() || options.len() == 1,
+        validate_annotation_keys(options.iter().map(|(key, _)| key.as_str())).map_err(|err| {
             error::InvalidAlterRequestSnafu {
                 table: table_name,
-                err: family.mixed_batch_error(),
+                err: err.to_string(),
             }
-        );
+            .build()
+        })?;
         let cx = AnnotationContext {
             schema: &self.schema,
             partition_key_indices: &self.partition_key_indices,
@@ -501,13 +517,13 @@ impl TableMeta {
         family: AnnotationFamily,
         keys: &[String],
     ) -> Result<TableMetaBuilder> {
-        ensure!(
-            !family.requires_single_key() || keys.len() == 1,
+        validate_annotation_keys(keys.iter().map(String::as_str)).map_err(|err| {
             error::InvalidAlterRequestSnafu {
                 table: table_name,
-                err: family.mixed_batch_error(),
+                err: err.to_string(),
             }
-        );
+            .build()
+        })?;
         let mut new_options = self.options.clone();
         for key in keys {
             ensure!(
@@ -1476,6 +1492,7 @@ impl TableInfo {
     pub fn to_region_options(&self) -> HashMap<String, String> {
         let mut options = HashMap::from(&self.meta.options);
         options.remove(REPARTITION_COLUMN_HINT_KEY);
+        options.remove(REPARTITION_PARTITION_NUM_HINT_KEY);
         options
     }
 
@@ -1929,6 +1946,160 @@ mod tests {
     }
 
     #[test]
+    fn test_set_unset_repartition_hints_together() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let options = vec![
+            (REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string()),
+            (
+                REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+                "10".to_string(),
+            ),
+        ];
+        for reverse in [false, true] {
+            let mut options = options.clone();
+            if reverse {
+                options.reverse();
+            }
+            let updated = meta
+                .builder_with_alter_kind(
+                    "t",
+                    &AlterKind::SetAnnotations {
+                        family: AnnotationFamily::RepartitionHint,
+                        options: options.clone(),
+                    },
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(
+                updated.options.extra_options,
+                options.iter().cloned().collect()
+            );
+            for (key, value) in [
+                (REPARTITION_COLUMN_HINT_KEY, "missing"),
+                (REPARTITION_PARTITION_NUM_HINT_KEY, "0"),
+            ] {
+                let invalid = options
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            if k == key {
+                                value.to_string()
+                            } else {
+                                v.clone()
+                            },
+                        )
+                    })
+                    .collect();
+                assert!(
+                    updated
+                        .builder_with_alter_kind(
+                            "t",
+                            &AlterKind::SetAnnotations {
+                                family: AnnotationFamily::RepartitionHint,
+                                options: invalid,
+                            }
+                        )
+                        .is_err()
+                );
+                assert_eq!(
+                    updated.options.extra_options,
+                    options.iter().cloned().collect()
+                );
+            }
+            let cleared = updated
+                .builder_with_alter_kind(
+                    "t",
+                    &AlterKind::UnsetAnnotations {
+                        family: AnnotationFamily::RepartitionHint,
+                        keys: options.into_iter().map(|(key, _)| key).collect(),
+                    },
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            assert!(cleared.options.extra_options.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_repartition_partition_num_hint() {
+        for partition_key_indices in [vec![], vec![0]] {
+            let mut meta = TableMetaBuilder::empty()
+                .schema(Arc::new(new_test_schema()))
+                .primary_key_indices(vec![0])
+                .partition_key_indices(partition_key_indices)
+                .engine("engine")
+                .next_column_id(3)
+                .build()
+                .unwrap();
+            for value in ["", " ", "0", "-1", "1.5", "abc", "4294967296"] {
+                let err = meta
+                    .builder_with_alter_kind(
+                        "t",
+                        &AlterKind::SetAnnotations {
+                            family: AnnotationFamily::RepartitionHint,
+                            options: vec![(
+                                REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+                                value.to_string(),
+                            )],
+                        },
+                    )
+                    .err()
+                    .unwrap();
+                assert!(
+                    err.to_string().contains("expects a positive integer"),
+                    "{err}"
+                );
+            }
+            for (value, expected) in [(" 8 ", "8"), ("1", "1"), ("4294967295", "4294967295")] {
+                meta = meta
+                    .builder_with_alter_kind(
+                        "t",
+                        &AlterKind::SetAnnotations {
+                            family: AnnotationFamily::RepartitionHint,
+                            options: vec![(
+                                REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+                                value.to_string(),
+                            )],
+                        },
+                    )
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                assert_eq!(
+                    meta.options.extra_options,
+                    HashMap::from([(
+                        REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+                        expected.to_string()
+                    )])
+                );
+            }
+            for _ in 0..2 {
+                meta = meta
+                    .builder_with_alter_kind(
+                        "t",
+                        &AlterKind::UnsetAnnotations {
+                            family: AnnotationFamily::RepartitionHint,
+                            keys: vec![REPARTITION_PARTITION_NUM_HINT_KEY.to_string()],
+                        },
+                    )
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                assert!(meta.options.extra_options.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn test_set_repartition_column_hint() {
         let meta = TableMetaBuilder::empty()
             .schema(Arc::new(new_test_schema()))
@@ -2126,11 +2297,15 @@ mod tests {
     }
 
     #[test]
-    fn test_repartition_column_hint_is_not_region_option() {
+    fn test_repartition_hints_are_not_region_options() {
         let mut table_options = TableOptions::default();
         table_options
             .extra_options
             .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string());
+        table_options.extra_options.insert(
+            REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+            "8".to_string(),
+        );
         let table_info = TableInfoBuilder::default()
             .table_id(1)
             .table_version(0)
@@ -2150,6 +2325,11 @@ mod tests {
             .build()
             .unwrap();
 
+        assert!(
+            !table_info
+                .to_region_options()
+                .contains_key(REPARTITION_PARTITION_NUM_HINT_KEY)
+        );
         assert!(
             !table_info
                 .to_region_options()
@@ -2222,6 +2402,49 @@ mod tests {
                 .extra_options
                 .contains_key(AUTO_FLUSH_INTERVAL_KEY)
         );
+    }
+
+    #[test]
+    fn test_set_twcs_trigger_persists_legacy_key() {
+        for key in [TWCS_TRIGGER_FILE_NUM, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM] {
+            let mut table_options = TableOptions::default();
+            table_options.extra_options.insert(
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "4".to_string(),
+            );
+            let meta = TableMetaBuilder::empty()
+                .schema(Arc::new(new_test_schema()))
+                .primary_key_indices(vec![0])
+                .engine("engine")
+                .next_column_id(3)
+                .options(table_options)
+                .build()
+                .unwrap();
+            let alter_kind = AlterKind::SetTableOptions {
+                options: vec![SetRegionOption::Twsc(key.to_string(), "8".to_string())],
+            };
+
+            let new_meta = meta
+                .builder_with_alter_kind("my_table", &alter_kind)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            assert_eq!(
+                Some("8"),
+                new_meta
+                    .options
+                    .extra_options
+                    .get(TWCS_TRIGGER_FILE_NUM)
+                    .map(String::as_str)
+            );
+            assert!(
+                !new_meta
+                    .options
+                    .extra_options
+                    .contains_key(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM)
+            );
+        }
     }
 
     #[test]
@@ -2914,7 +3137,7 @@ mod tests {
     }
 
     #[test]
-    fn test_repartition_hint_batch_must_be_single_key() {
+    fn test_repartition_hint_batch_rejects_duplicate_keys() {
         let meta = TableMetaBuilder::empty()
             .schema(Arc::new(new_test_schema()))
             .primary_key_indices(vec![0])
@@ -2937,7 +3160,7 @@ mod tests {
             .err()
             .unwrap();
         assert!(
-            err.to_string().contains("must be altered separately"),
+            err.to_string().contains("duplicate repartition hint keys"),
             "{err}"
         );
 
@@ -2953,7 +3176,7 @@ mod tests {
             .err()
             .unwrap();
         assert!(
-            err.to_string().contains("must be altered separately"),
+            err.to_string().contains("duplicate repartition hint keys"),
             "{err}"
         );
     }

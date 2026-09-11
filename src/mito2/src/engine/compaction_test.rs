@@ -1423,7 +1423,7 @@ async fn env_for_manual_compaction(
     (engine, column_schemas)
 }
 
-/// The picker caps a compaction at 32 input files and drops the largest file groups to get
+/// The picker caps a compaction at 16 input files and drops the largest file groups to get
 /// there. A deletion marker among the picked files must not be filtered out while the file
 /// holding the rows it masks stays behind, otherwise those rows become visible again.
 async fn test_compaction_input_limit_keeps_rows_deleted_with_format(flat_format: bool) {
@@ -1437,9 +1437,9 @@ async fn test_compaction_input_limit_keeps_rows_deleted_with_format(flat_format:
     put_and_flush(&engine, region_id, &column_schemas, 0..3000).await;
     // Deletes 6 rows of that file. The markers land in a tiny file that overlaps it.
     delete_and_flush(&engine, region_id, &column_schemas, 10..16).await;
-    // 31 more tiny files that overlap the large one but not each other, so the window holds
-    // 33 file groups forming 2 runs.
-    for i in 2..33 {
+    // 15 more tiny files that overlap the large one but not each other, so the window holds
+    // 17 file groups forming 2 runs.
+    for i in 2..17 {
         put_and_flush(&engine, region_id, &column_schemas, i * 10..i * 10 + 6).await;
     }
 
@@ -1448,7 +1448,7 @@ async fn test_compaction_input_limit_keeps_rows_deleted_with_format(flat_format:
         .await
         .unwrap();
     assert_eq!(
-        33,
+        17,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()
@@ -1460,7 +1460,7 @@ async fn test_compaction_input_limit_keeps_rows_deleted_with_format(flat_format:
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    // The 32 tiny files are merged into one; the large file exceeds the input file num limit
+    // The 16 tiny files are merged into one; the large file exceeds the input file num limit
     // and is left behind.
     assert_eq!(
         2,

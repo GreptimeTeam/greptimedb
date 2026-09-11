@@ -487,6 +487,7 @@ impl StatementExecutor {
                         schema_name: req.schema_name.clone(),
                         table_name: req.table_name.clone(),
                         columns_values,
+                        skip_wal: query_ctx.skip_wal(),
                     },
                     query_ctx.clone(),
                 ));

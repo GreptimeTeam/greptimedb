@@ -58,6 +58,7 @@ use crate::manifest::action::{
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
+use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
@@ -150,6 +151,8 @@ pub struct MitoRegion {
     ///
     /// We MUST update the version control inside the write lock of the region manifest manager.
     pub(crate) version_control: VersionControlRef,
+    /// Snapshot controller for range and series indexes.
+    pub(crate) series_index_version_control: SeriesIndexVersionControl,
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Context to maintain manifest for this region.
@@ -238,6 +241,12 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
+    /// Returns the current immutable series-index snapshot.
+    #[allow(dead_code)] // Used by the upcoming query integration.
+    pub(crate) fn series_index_version(&self) -> Arc<SeriesIndexVersion> {
+        self.series_index_version_control.current()
+    }
+
     fn remove_region_metrics(&self) {
         let region_id = self.region_id.as_u64().to_string();
         let labels = &[region_id.as_str()];
@@ -2040,6 +2049,7 @@ mod tests {
         MitoRegion {
             region_id: metadata.region_id,
             version_control,
+            series_index_version_control: Default::default(),
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             file_purger: crate::test_util::new_noop_file_purger(),
@@ -2499,7 +2509,7 @@ mod tests {
         let temp_dir = create_temp_dir("");
         let path_str = temp_dir.path().display().to_string();
         let fs_builder = Fs::default().root(&path_str);
-        let object_store = ObjectStore::new(fs_builder).unwrap().finish();
+        let object_store = ObjectStore::new(fs_builder).unwrap();
 
         let index_aux_path = temp_dir.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
@@ -2543,6 +2553,7 @@ mod tests {
         let region = MitoRegion {
             region_id: metadata.region_id,
             version_control,
+            series_index_version_control: Default::default(),
             access_layer,
             manifest_ctx: manifest_ctx.clone(),
             file_purger: crate::test_util::new_noop_file_purger(),
