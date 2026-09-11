@@ -840,16 +840,10 @@ impl PendingRowsBatcher {
 
         Ok(aligned_batches)
     }
-
     async fn get_or_spawn_worker(&self, key: BatchKey) -> PendingWorker {
-        let mut receiver = None;
-        let tx = self
+        let (tx, receiver) = self
             .workers
-            .get_or_insert_with(key.clone(), || {
-                let (tx, rx) = mpsc::channel(self.worker_channel_capacity);
-                receiver = Some(rx);
-                tx
-            })
+            .get_or_create(key.clone(), self.worker_channel_capacity)
             .await;
         if let Some(rx) = receiver {
             self.spawn_worker(key, tx.clone(), rx);
