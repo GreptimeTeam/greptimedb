@@ -1,0 +1,27 @@
+src/datatypes/src/timestamp.rs
+  s_c8f343c7af25c4::t_8720f109fae06f 16,182-194,197-199,232-273
+src/operator/src/bulk_insert.rs
+  s_c8f343c7af25c4::t_7717c694f5df76 30,36
+src/operator/src/req_convert/insert.rs
+  s_c8f343c7af25c4::t_1ea57565c71d9e 20,30
+src/operator/src/req_convert/insert/timestamps.rs
+  s_c8f343c7af25c4::t_252174c1db63b9 1-38
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_c8f343c7af25c4::t_f60895857a9afc 24,38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "71fabb1414bafadbd7f30dcece8cc035d8fda87b",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
