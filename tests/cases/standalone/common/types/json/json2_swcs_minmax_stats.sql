@@ -65,7 +65,7 @@ select count(*) from json2_swcs_minmax_stats;
 select count(*) from json2_swcs_minmax_stats
 where event_time >= 1788998400000000000 and event_time < 1789084800000000000;
 
-select seq, event_time, payload
+select workspace_id, session_id, seq, event_time, entry_kind, payload, schema_version, is_error
 from json2_swcs_minmax_stats
 order by seq;
 

@@ -116,25 +116,25 @@ where event_time >= 1788998400000000000 and event_time < 1789084800000000000;
 | 9        |
 +----------+
 
-select seq, event_time, payload
+select workspace_id, session_id, seq, event_time, entry_kind, payload, schema_version, is_error
 from json2_swcs_minmax_stats
 order by seq;
 
-+-----+-------------------------------+--------------------------------------------------------------------------------------+
-| seq | event_time                    | payload                                                                              |
-+-----+-------------------------------+--------------------------------------------------------------------------------------+
-| 1   | 2026-09-10T00:00:00.000000001 | {"case":"swcs-repro","nested":[1,true],"ns_edge":0,"ordinal":1,"synthetic":true}     |
-| 2   | 2026-09-10T00:00:00.000000002 | {"case":"swcs-repro","nested":[2,false],"ns_edge":1,"ordinal":2,"synthetic":true}    |
-| 3   | 2026-09-10T00:00:00.000000003 | {"case":"swcs-repro","nested":[3,null],"ns_edge":2,"ordinal":3,"synthetic":true}     |
-| 4   | 2026-09-10T00:00:00.000000004 | {"case":"swcs-repro","nested":[4,true],"ns_edge":3,"ordinal":4,"synthetic":true}     |
-| 5   | 2026-09-10T00:00:00.000000005 | {"case":"swcs-repro","nested":[5,false],"ns_edge":4,"ordinal":5,"synthetic":true}    |
-| 6   | 2026-09-10T00:00:00.000000006 | {"case":"swcs-repro","nested":[6,null],"ns_edge":5,"ordinal":6,"synthetic":true}     |
-| 7   | 2026-09-10T00:00:00.000000007 | {"case":"swcs-repro","nested":[7,true],"ns_edge":6,"ordinal":7,"synthetic":true}     |
-| 8   | 2026-09-10T00:00:00.000000008 | {"case":"swcs-repro","nested":[8,false],"ns_edge":7,"ordinal":8,"synthetic":true}    |
-| 9   | 2026-09-10T00:00:00.000000009 | {"case":"swcs-repro","nested":[9,null],"ns_edge":8,"ordinal":9,"synthetic":true}     |
-| 10  | 2026-09-11T00:00:00.000000001 | {"case":"swcs-repro","nested":[10,true],"ns_edge":9,"ordinal":10,"synthetic":true}   |
-| 11  | 2026-09-11T00:00:00.000000002 | {"case":"swcs-repro","nested":[11,false],"ns_edge":10,"ordinal":11,"synthetic":true} |
-+-----+-------------------------------+--------------------------------------------------------------------------------------+
++--------------+------------+-----+-------------------------------+------------+--------------------------------------------------------------------------------------+----------------+----------+
+| workspace_id | session_id | seq | event_time                    | entry_kind | payload                                                                              | schema_version | is_error |
++--------------+------------+-----+-------------------------------+------------+--------------------------------------------------------------------------------------+----------------+----------+
+| ws           | s1         | 1   | 2026-09-10T00:00:00.000000001 | synthetic  | {"case":"swcs-repro","nested":[1,true],"ns_edge":0,"ordinal":1,"synthetic":true}     | 1              | false    |
+| ws           | s2         | 2   | 2026-09-10T00:00:00.000000002 | synthetic  | {"case":"swcs-repro","nested":[2,false],"ns_edge":1,"ordinal":2,"synthetic":true}    | 1              | false    |
+| ws           | s3         | 3   | 2026-09-10T00:00:00.000000003 | synthetic  | {"case":"swcs-repro","nested":[3,null],"ns_edge":2,"ordinal":3,"synthetic":true}     | 1              | false    |
+| ws           | s1         | 4   | 2026-09-10T00:00:00.000000004 | synthetic  | {"case":"swcs-repro","nested":[4,true],"ns_edge":3,"ordinal":4,"synthetic":true}     | 1              | false    |
+| ws           | s2         | 5   | 2026-09-10T00:00:00.000000005 | synthetic  | {"case":"swcs-repro","nested":[5,false],"ns_edge":4,"ordinal":5,"synthetic":true}    | 1              | false    |
+| ws           | s3         | 6   | 2026-09-10T00:00:00.000000006 | synthetic  | {"case":"swcs-repro","nested":[6,null],"ns_edge":5,"ordinal":6,"synthetic":true}     | 1              | false    |
+| ws           | s1         | 7   | 2026-09-10T00:00:00.000000007 | synthetic  | {"case":"swcs-repro","nested":[7,true],"ns_edge":6,"ordinal":7,"synthetic":true}     | 1              | false    |
+| ws           | s2         | 8   | 2026-09-10T00:00:00.000000008 | synthetic  | {"case":"swcs-repro","nested":[8,false],"ns_edge":7,"ordinal":8,"synthetic":true}    | 1              | false    |
+| ws           | s3         | 9   | 2026-09-10T00:00:00.000000009 | synthetic  | {"case":"swcs-repro","nested":[9,null],"ns_edge":8,"ordinal":9,"synthetic":true}     | 1              | false    |
+| ws           | s1         | 10  | 2026-09-11T00:00:00.000000001 | synthetic  | {"case":"swcs-repro","nested":[10,true],"ns_edge":9,"ordinal":10,"synthetic":true}   | 1              | false    |
+| ws           | s2         | 11  | 2026-09-11T00:00:00.000000002 | synthetic  | {"case":"swcs-repro","nested":[11,false],"ns_edge":10,"ordinal":11,"synthetic":true} | 1              | false    |
++--------------+------------+-----+-------------------------------+------------+--------------------------------------------------------------------------------------+----------------+----------+
 
 drop table json2_swcs_minmax_stats;
 
