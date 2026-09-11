@@ -29,7 +29,7 @@ cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 clap.workspace = true
-client = { workspace = true, features = ["testing"] }
+client.workspace = true
 cmd.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
@@ -40,7 +40,7 @@ common-event-recorder.workspace = true
 common-frontend.workspace = true
 common-grpc.workspace = true
 common-memory-manager.workspace = true
-common-meta = { workspace = true, features = ["testing"] }
+common-meta.workspace = true
 common-options.workspace = true
 common-procedure.workspace = true
 common-query.workspace = true
@@ -56,7 +56,7 @@ datatypes.workspace = true
 dotenv.workspace = true
 flate2 = "1.0"
 flow.workspace = true
-frontend = { workspace = true, features = ["testing"] }
+frontend.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 http.workspace = true
@@ -64,16 +64,16 @@ hyper-util = { workspace = true, features = ["tokio"] }
 log-query = { workspace = true }
 loki-proto.workspace = true
 meta-client.workspace = true
-meta-srv = { workspace = true, features = ["mock"] }
-mito2 = { workspace = true, features = ["test-shared-fs-region-migration"] }
+meta-srv.workspace = true
+mito2.workspace = true
 object-store.workspace = true
-operator = { workspace = true, features = ["testing"] }
+operator.workspace = true
 plugins.workspace = true
 prost.workspace = true
 query.workspace = true
 rand.workspace = true
 serde_json.workspace = true
-servers = { workspace = true, features = ["testing"] }
+servers.workspace = true
 session.workspace = true
 snafu.workspace = true
 sql.workspace = true
@@ -97,20 +97,26 @@ zstd.workspace = true
 
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
+client = { workspace = true, features = ["testing"] }
+common-meta = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datafusion.workspace = true
 datafusion-expr.workspace = true
 either.workspace = true
+frontend = { workspace = true, features = ["testing"] }
 hex.workspace = true
 http.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
+meta-srv = { workspace = true, features = ["mock"] }
+mito2 = { workspace = true, features = ["test-shared-fs-region-migration"] }
 mysql_async = { version = "0.37", default-features = false, features = [
     "time",
     "default-rustls-ring",
 ] }
 opentelemetry-proto.workspace = true
+operator = { workspace = true, features = ["testing"] }
 otel-arrow-rust.workspace = true
 partition.workspace = true
 paste.workspace = true
@@ -121,6 +127,7 @@ rskafka.workspace = true
 rstest.workspace = true
 rstest_reuse.workspace = true
 sea-query.workspace = true
+servers = { workspace = true, features = ["testing"] }
 session = { workspace = true, features = ["testing"] }
 similar-asserts.workspace = true
 store-api.workspace = true
