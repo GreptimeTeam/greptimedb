@@ -2,7 +2,7 @@
 
 Tracking issue: [#9120](https://github.com/GreptimeTeam/greptimedb/issues/9120).
 
-Implementation plan for the proposed RFC: [Metric Export and Import Optimization](../rfcs/2026-09-11-metric-export-import.md).
+Implementation plan for the proposed RFC: [Metric Export and Import Optimization](../2026-09-11-metric-export-import.md).
 
 ## Problem and target behavior
 

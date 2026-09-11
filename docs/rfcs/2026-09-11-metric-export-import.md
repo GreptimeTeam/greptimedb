@@ -28,9 +28,9 @@ Three local PoC slices establish different improvements:
 
 | Change | Experiment | Observation | Evidence |
 | --- | --- | --- | --- |
-| Physical scan and logical projection | 64 populated logical tables, 1,000 rows each; narrow/wide physical unions; two execution orders | Data export 2.82–3.39x faster | [Export report](../how-to/metric-export-poc.md) |
-| Batch logical DDL | 10,000 logical tables; SQL HTTP, in-process single, in-process batch | Logical CREATE: 29.181 / 19.524 / 5.776 s; calls: 10,000 / 10,000 / 79 | [DDL report](../how-to/metric-import-ddl-poc.md) |
-| Remove repeated directory scans | 10,000 files; batch DDL in both variants | Data COPY: 146.496 → 5.481 s; total restore: 153.647 → 12.300 s | [COPY report](../how-to/metric-import-copy-profile.md) |
+| Physical scan and logical projection | 64 populated logical tables, 1,000 rows each; narrow/wide physical unions; two execution orders | Data export 2.82–3.39x faster | [Export report](2026-09-11-metric-export-import/metric-export-poc.md) |
+| Batch logical DDL | 10,000 logical tables; SQL HTTP, in-process single, in-process batch | Logical CREATE: 29.181 / 19.524 / 5.776 s; calls: 10,000 / 10,000 / 79 | [DDL report](2026-09-11-metric-export-import/metric-import-ddl-poc.md) |
+| Remove repeated directory scans | 10,000 files; batch DDL in both variants | Data COPY: 146.496 → 5.481 s; total restore: 153.647 → 12.300 s | [COPY report](2026-09-11-metric-export-import/metric-import-copy-profile.md) |
 
 The restore fixture has two rows per populated table and one empty table:
 19,998 rows at the 10,000-table scale. These are local standalone, warm-cache,
@@ -243,7 +243,7 @@ recovery complexity; otherwise record the evidence and defer them explicitly.
 
 # Delivery and acceptance
 
-The [implementation plan](../how-to/metric-export-import-tracking.md) defines
+The [implementation plan](2026-09-11-metric-export-import/metric-export-import-tracking.md) defines
 seven required PRs and one conditional merged-write PR. Production integration
 remains pending. The three experiment reports and two restore-results JSON files
 are included as supporting evidence.
