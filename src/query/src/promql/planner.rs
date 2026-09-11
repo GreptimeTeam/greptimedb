@@ -2142,8 +2142,6 @@ impl PromPlanner {
                 ),
             })
         };
-        let preserve_any_value =
-            Self::field_columns_are_alternative_samples(input.schema(), &self.ctx.field_columns);
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
             args.literals.clone(),
@@ -2158,10 +2156,15 @@ impl PromPlanner {
             func_exprs.push(tsid_col);
         }
 
+        // A row survives as long as one field column produced a sample, and the fields without
+        // one stay NULL, which is the shape a selector already emits. Requiring every field to
+        // be non-NULL would drop one field's samples because another field has none in the same
+        // window — the reason alternative float/histogram columns already needed this form. A
+        // single field column reduces to the same predicate either way.
         let builder = LogicalPlanBuilder::from(input)
             .project(func_exprs)
             .context(DataFusionPlanningSnafu)?
-            .filter(self.create_empty_values_filter_expr(preserve_any_value)?)
+            .filter(self.create_empty_values_filter_expr(true)?)
             .context(DataFusionPlanningSnafu)?;
 
         let builder = match func.name {

@@ -81,7 +81,11 @@ fn calc(
         .unwrap();
     let requested_edges = validate_windows(&timestamp_ranges, &value_ranges, name)?;
     let raw_values = values.values();
-    let direct = should_scan_direct(requested_edges, raw_values.len());
+    // A NULL field value means the series has no sample at that timestamp. The prefix sums
+    // encode edges between physically adjacent slots, which no longer holds once nulls are
+    // skipped, so a null-bearing input falls back to scanning each window.
+    let has_nulls = values.null_count() > 0;
+    let direct = has_nulls || should_scan_direct(requested_edges, raw_values.len());
     let prefix = (!direct).then(|| build_prefix(raw_values.as_ref(), kind));
 
     let mut result = Vec::with_capacity(value_ranges.len());
@@ -90,6 +94,7 @@ fn calc(
         let end = checked_end(offset, len, index, name)?;
         let count = match len {
             0 => None,
+            _ if has_nulls => count_edges_skipping_nulls(values, offset, end, kind),
             1 => Some(0),
             _ if direct => Some(count_edges(raw_values.as_ref(), offset, end, kind)),
             _ => {
@@ -170,6 +175,29 @@ fn count_edges(values: &[f64], offset: usize, end: usize, kind: EdgeKind) -> u64
         count += u64::from(is_edge(values[index - 1], values[index], kind));
     }
     count
+}
+
+/// Counts edges between consecutive samples in `[offset, end)`, treating null slots as
+/// absent. Returns `None` when the window holds no sample.
+fn count_edges_skipping_nulls(
+    values: &Float64Array,
+    offset: usize,
+    end: usize,
+    kind: EdgeKind,
+) -> Option<u64> {
+    let raw_values = values.values();
+    let mut count = 0;
+    let mut previous = None;
+    for index in offset..end {
+        if values.is_null(index) {
+            continue;
+        }
+        let current = raw_values[index];
+        if let Some(previous) = previous.replace(current) {
+            count += u64::from(is_edge(previous, current, kind));
+        }
+    }
+    previous.is_some().then_some(count)
 }
 
 fn is_edge(previous: f64, current: f64, kind: EdgeKind) -> bool {
