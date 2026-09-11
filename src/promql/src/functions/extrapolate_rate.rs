@@ -181,12 +181,16 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             .downcast_ref::<TimestampMillisecondArray>()
             .expect("validated by extract_range_dict")
             .values();
-        let all_values = value_dict
+        let value_array = value_dict
             .values()
             .as_any()
             .downcast_ref::<Float64Array>()
-            .expect("validated by extract_range_dict")
-            .values();
+            .expect("validated by extract_range_dict");
+        // A NULL field value means the series has no sample at that timestamp, so the padding
+        // under a null slot must not be read. Skip the per-window null scan when the whole
+        // backing array is null-free, which is the common case.
+        let has_nulls = value_array.null_count() > 0;
+        let all_values = value_array.values();
         let eval_ts = eval_ts_array.values();
 
         let mut result_builder = Float64Builder::with_capacity(num_windows);
@@ -198,7 +202,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         // cheaper side, and stop counting as soon as the requested pairs pass that budget,
         // which heavy overlap does within the first few windows. A short lookback with a long
         // step is the shape that never reaches it, and there the per-window scans do win.
-        let mut reset_index = if IS_COUNTER {
+        let mut reset_index = if IS_COUNTER && !has_nulls {
             let budget = all_values.len().saturating_sub(1);
             let mut scanned_pairs = 0usize;
             keys.iter()
@@ -217,29 +221,50 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let offset = raw_offset as usize;
             let length = raw_length as usize;
 
-            if length < 2 {
+            let end = offset + length;
+            let (first_index, last_index, sample_count) = if has_nulls {
+                match valid_window_bounds(value_array, offset, length) {
+                    Some(bounds) => bounds,
+                    None => {
+                        result_builder.append_null();
+                        continue;
+                    }
+                }
+            } else {
+                (offset, end.saturating_sub(1), length)
+            };
+
+            if sample_count < 2 {
                 result_builder.append_null();
                 continue;
             }
 
-            let end = offset + length;
-            let first_value = all_values[offset];
-            let last_value = all_values[end - 1];
+            let first_value = all_values[first_index];
+            let last_value = all_values[last_index];
 
             let mut result_value = last_value - first_value;
             if IS_COUNTER {
-                result_value = match &mut reset_index {
-                    Some(reset_index) => reset_index.add_resets(result_value, offset, end),
-                    None => add_counter_resets(result_value, &all_values[offset..end]),
+                result_value = if has_nulls {
+                    add_counter_resets_between_samples(
+                        result_value,
+                        value_array,
+                        first_index,
+                        last_index,
+                    )
+                } else {
+                    match &mut reset_index {
+                        Some(reset_index) => reset_index.add_resets(result_value, offset, end),
+                        None => add_counter_resets(result_value, &all_values[offset..end]),
+                    }
                 };
             }
 
-            let first_ts = all_timestamps[offset];
-            let last_ts = all_timestamps[end - 1];
+            let first_ts = all_timestamps[first_index];
+            let last_ts = all_timestamps[last_index];
             let range_end = eval_ts[index];
             let range_start = range_end - range_length;
             let sampled_interval_ms = (last_ts - first_ts) as f64;
-            let average_interval_ms = sampled_interval_ms / (length - 1) as f64;
+            let average_interval_ms = sampled_interval_ms / (sample_count - 1) as f64;
             let mut duration_to_start_ms = (first_ts - range_start) as f64;
             let duration_to_end_ms = (range_end - last_ts) as f64;
 
@@ -381,6 +406,52 @@ impl<'a> CounterResetIndex<'a> {
     }
 }
 
+/// Same additions [`add_counter_resets`] performs, over the samples in `[first, last]` instead
+/// of over every slot.
+fn add_counter_resets_between_samples(
+    result: f64,
+    values: &Float64Array,
+    first: usize,
+    last: usize,
+) -> f64 {
+    let raw_values = values.values();
+    let mut result = result;
+    let mut previous = raw_values[first];
+    for index in first + 1..=last {
+        if values.is_null(index) {
+            continue;
+        }
+        let current = raw_values[index];
+        if current < previous {
+            result += previous;
+        }
+        previous = current;
+    }
+    result
+}
+
+/// Locates the samples inside `[offset, offset + length)`, returning the first and last
+/// non-null index together with the number of non-null slots. Returns `None` when the
+/// window holds no sample.
+fn valid_window_bounds(
+    values: &Float64Array,
+    offset: usize,
+    length: usize,
+) -> Option<(usize, usize, usize)> {
+    let mut first = None;
+    let mut last = 0;
+    let mut count = 0;
+    for index in offset..offset + length {
+        if values.is_null(index) {
+            continue;
+        }
+        first.get_or_insert(index);
+        last = index;
+        count += 1;
+    }
+    first.map(|first| (first, last, count))
+}
+
 fn extract_eval_timestamps(
     columnar_value: &ColumnarValue,
     func_name: &str,
@@ -453,6 +524,7 @@ impl Display for ExtrapolatedRate<true, false> {
 mod test {
 
     use datafusion::arrow::array::ArrayRef;
+    use datafusion::arrow::buffer::NullBuffer;
     use datafusion_common::ScalarValue;
 
     use super::*;
@@ -605,6 +677,106 @@ mod test {
         ranges.extend((0..390).rev().step_by(10).map(|i| (i, 120)));
 
         assert_counter_windows_match_single(&values, &ranges);
+    }
+
+    /// Builds a value array whose null slots keep a distinguishable raw payload, so a
+    /// function that reads the padding instead of the samples produces a different result.
+    fn values_with_nulls(values: Vec<Option<f64>>, padding: f64) -> Arc<Float64Array> {
+        let raw = values
+            .iter()
+            .map(|value| value.unwrap_or(padding))
+            .collect::<Vec<_>>();
+        Arc::new(Float64Array::new(
+            raw.into(),
+            Some(NullBuffer::from_iter(
+                values.iter().map(|value| value.is_some()),
+            )),
+        ))
+    }
+
+    fn nullable_rate_runner<const IS_COUNTER: bool, const IS_RATE: bool>(
+        timestamps: Vec<i64>,
+        values: Arc<Float64Array>,
+        ranges: Vec<(u32, u32)>,
+        eval_timestamps: Vec<i64>,
+        range_length: i64,
+    ) -> Vec<Option<f64>> {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values(timestamps));
+        let ts_range = RangeArray::from_ranges(ts_array, ranges.clone()).unwrap();
+        let value_range = RangeArray::from_ranges(values, ranges).unwrap();
+        let input = vec![
+            ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+            ColumnarValue::Array(Arc::new(value_range.into_dict())),
+            ColumnarValue::Array(Arc::new(TimestampMillisecondArray::from_iter_values(
+                eval_timestamps,
+            ))),
+            ColumnarValue::Array(Arc::new(Int64Array::from(vec![range_length]))),
+        ];
+        let output = extract_array(
+            &ExtrapolatedRate::<IS_COUNTER, IS_RATE>::new(range_length)
+                .calc(&input)
+                .unwrap(),
+        )
+        .unwrap();
+        let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+        output.iter().collect()
+    }
+
+    #[test]
+    fn rate_uses_samples_not_null_padding() {
+        // Samples are 1.0@0 and 4.0@3000; the padding under the null slots would add two more.
+        let output = nullable_rate_runner::<true, true>(
+            vec![0, 1000, 2000, 3000],
+            values_with_nulls(vec![Some(1.0), None, None, Some(4.0)], 99.0),
+            vec![(0, 4)],
+            vec![3000],
+            4000,
+        );
+
+        assert_eq!(output, vec![Some(1.0)]);
+    }
+
+    #[test]
+    fn rate_returns_null_for_windows_without_enough_samples() {
+        let output = nullable_rate_runner::<true, true>(
+            vec![0, 1000, 2000],
+            values_with_nulls(vec![None, Some(2.0), None], 7.0),
+            vec![(0, 3), (0, 2), (2, 1)],
+            vec![2000, 2000, 2000],
+            4000,
+        );
+
+        assert_eq!(output, vec![None, None, None]);
+    }
+
+    #[test]
+    fn increase_corrects_counter_reset_between_samples() {
+        // The sample sequence is 5.0 -> 3.0, one reset. Reading the padding would see
+        // 5.0 -> 100.0 -> 3.0 and charge the correction against the wrong value.
+        let output = nullable_rate_runner::<true, false>(
+            vec![0, 1000, 2000],
+            values_with_nulls(vec![Some(5.0), None, Some(3.0)], 100.0),
+            vec![(0, 3)],
+            vec![2000],
+            2000,
+        );
+
+        assert_eq!(output, vec![Some(3.0)]);
+    }
+
+    #[test]
+    fn delta_extrapolates_from_sample_timestamps() {
+        // The window spans (-1000, 3000] but its samples only cover 1000..2000, so the
+        // extrapolation adds half an average interval on the leading side.
+        let output = nullable_rate_runner::<false, false>(
+            vec![0, 1000, 2000, 3000],
+            values_with_nulls(vec![None, Some(2.0), Some(5.0), None], 42.0),
+            vec![(0, 4)],
+            vec![3000],
+            4000,
+        );
+
+        assert_eq!(output, vec![Some(7.5)]);
     }
 
     #[test]

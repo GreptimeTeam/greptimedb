@@ -93,14 +93,14 @@ impl QuantileOverTime {
             )),
         )?;
 
-        let all_values = value_range
-            .values()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .values();
+        let value_array = value_range.values();
+        let value_array = value_array.as_any().downcast_ref::<Float64Array>().unwrap();
+        // A NULL field value means the series has no sample at that timestamp. A window holding
+        // only nulls then behaves like an empty one.
+        let has_nulls = value_array.null_count() > 0;
         let mut result_builder = Float64Builder::with_capacity(ts_range.len());
         let mut scratch = Vec::new();
+        let mut samples = Vec::new();
 
         match quantile_col {
             ColumnarValue::Scalar(quantile_scalar) => {
@@ -125,11 +125,14 @@ impl QuantileOverTime {
                         )),
                     )?;
 
-                    match quantile_with_scratch(
-                        &all_values[value_offset..value_offset + value_len],
-                        quantile,
-                        &mut scratch,
-                    ) {
+                    let window = window_samples(
+                        value_array,
+                        has_nulls,
+                        value_offset,
+                        value_len,
+                        &mut samples,
+                    );
+                    match quantile_with_scratch(window, quantile, &mut scratch) {
                         Some(value) => result_builder.append_value(value),
                         None => result_builder.append_null(),
                     }
@@ -173,11 +176,14 @@ impl QuantileOverTime {
                     } else {
                         quantile_array.value(index)
                     };
-                    match quantile_with_scratch(
-                        &all_values[value_offset..value_offset + value_len],
-                        quantile,
-                        &mut scratch,
-                    ) {
+                    let window = window_samples(
+                        value_array,
+                        has_nulls,
+                        value_offset,
+                        value_len,
+                        &mut samples,
+                    );
+                    match quantile_with_scratch(window, quantile, &mut scratch) {
                         Some(value) => result_builder.append_value(value),
                         None => result_builder.append_null(),
                     }
@@ -188,6 +194,28 @@ impl QuantileOverTime {
         let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
+}
+
+/// Returns the samples of the window `[offset, offset + len)`, collecting the non-null ones
+/// into `samples` when the backing array has nulls and borrowing the slice otherwise.
+fn window_samples<'a>(
+    values: &'a Float64Array,
+    has_nulls: bool,
+    offset: usize,
+    len: usize,
+    samples: &'a mut Vec<f64>,
+) -> &'a [f64] {
+    let raw_values = values.values();
+    if !has_nulls {
+        return &raw_values[offset..offset + len];
+    }
+    samples.clear();
+    samples.extend(
+        (offset..offset + len)
+            .filter(|index| values.is_valid(*index))
+            .map(|index| raw_values[index]),
+    );
+    samples
 }
 
 /// Refer to <https://github.com/prometheus/prometheus/blob/6e2905a4d4ff9b47b1f6d201333f5bd53633f921/promql/quantile.go#L357-L386>
@@ -226,6 +254,9 @@ fn quantile_with_scratch(values: &[f64], quantile: f64, scratch: &mut Vec<f64>) 
 
 #[cfg(test)]
 mod tests {
+    use datafusion::arrow::array::TimestampMillisecondArray;
+    use datafusion::arrow::buffer::NullBuffer;
+
     use super::*;
 
     #[test]
@@ -275,5 +306,39 @@ mod tests {
         let values = &[4.0, 1.0, 3.0, 2.0, 5.0];
         let q = 0.25;
         assert_eq!(quantile_impl(values, q).unwrap(), 2.0);
+    }
+
+    #[test]
+    fn quantile_over_time_ranks_samples_only() {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values([
+            0i64, 1000, 2000,
+        ]));
+        // Samples are 1.0 and 4.0; ranking the padding too would pull the median down.
+        let values_array = Arc::new(Float64Array::new(
+            vec![1.0, -100.0, 4.0].into(),
+            Some(NullBuffer::from_iter([true, false, true])),
+        ));
+        // The second window holds no sample, the third holds no slot at all.
+        let ranges = [(0, 3), (1, 1), (3, 0)];
+
+        let input = vec![
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(ts_array, ranges)
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(values_array, ranges)
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(0.5))),
+        ];
+        let output = extract_array(&QuantileOverTime::quantile_over_time(&input).unwrap()).unwrap();
+        let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+
+        assert_eq!(output.value(0), 2.5);
+        assert!(output.value(1).is_nan());
+        assert!(output.value(2).is_nan());
     }
 }
