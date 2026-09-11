@@ -46,6 +46,7 @@ use mito_codec::row_converter::{
 };
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
+use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, NestedPath, SequenceNumber};
@@ -144,13 +145,16 @@ pub(crate) fn column_values(
     )
 }
 
-/// Returns min/max values of a parquet column with the given Arrow data type.
+/// Returns min/max values for a top-level column with the given Arrow data type.
+/// Resolves its leaf from the actual Parquet schema, not an inferred Arrow layout.
 pub(crate) fn column_values_by_type(
     row_groups: &[impl Borrow<RowGroupMetaData>],
     data_type: &ArrowDataType,
     column_index: usize,
     is_min: bool,
 ) -> Option<ArrayRef> {
+    let column_index =
+        scalar_leaf_index(row_groups.first()?.borrow().schema_descr(), column_index)?;
     let null_scalar: ScalarValue = data_type.try_into().ok()?;
     let scalar_values = row_groups
         .iter()
@@ -207,18 +211,35 @@ pub(crate) fn column_values_by_type(
     ScalarValue::iter_to_array(scalar_values).ok()
 }
 
-/// Returns null counts of specific columns.
+/// Returns null counts of a top-level column.
 /// The column should not be encoded as a part of a primary key.
 pub(crate) fn column_null_counts(
     row_groups: &[impl Borrow<RowGroupMetaData>],
     column_index: usize,
 ) -> Option<ArrayRef> {
+    let column_index =
+        scalar_leaf_index(row_groups.first()?.borrow().schema_descr(), column_index)?;
     let values = row_groups.iter().map(|meta| {
         let col = meta.borrow().column(column_index);
         let stat = col.statistics()?;
         stat.null_count_opt()
     });
     Some(Arc::new(UInt64Array::from_iter(values)))
+}
+
+/// Maps a scalar root to its physical leaf. Nested roots have no root-level
+/// statistics, even with one leaf: child null counts do not describe parents.
+/// All row groups of a file share the same schema.
+fn scalar_leaf_index(schema: &SchemaDescriptor, root_index: usize) -> Option<usize> {
+    if !schema
+        .root_schema()
+        .get_fields()
+        .get(root_index)?
+        .is_primitive()
+    {
+        return None;
+    }
+    (0..schema.num_columns()).find(|&leaf| schema.get_column_root_idx(leaf) == root_index)
 }
 
 /// Helper for reading the SST format.
@@ -539,11 +560,12 @@ impl PrimaryKeyReadFormat {
             .into_iter(),
         );
 
+        let primary_key_leaf = scalar_leaf_index(
+            row_groups.first()?.borrow().schema_descr(),
+            self.primary_key_position(),
+        )?;
         let values = row_groups.iter().map(|meta| {
-            let stats = meta
-                .borrow()
-                .column(self.primary_key_position())
-                .statistics()?;
+            let stats = meta.borrow().column(primary_key_leaf).statistics()?;
             match stats {
                 Statistics::Boolean(_) => None,
                 Statistics::Int32(_) => None,

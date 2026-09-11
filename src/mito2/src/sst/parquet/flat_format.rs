@@ -37,7 +37,7 @@ use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::kernels::take::take;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
+use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
@@ -560,14 +560,9 @@ struct ParquetFlat {
     arrow_schema: SchemaRef,
     /// Projection computed for the flat format.
     format_projection: FormatProjection,
-    /// Column id to the index of its leaf column in the parquet schema.
-    ///
-    /// A logical column may expand to multiple parquet leaf columns (e.g. a
-    /// JSON2 struct stores the remainder and one leaf per promoted path), so
-    /// the logical column index in the SST schema cannot be used to look up
-    /// row group statistics directly. Nested columns map to `None` even when
-    /// they have one leaf: child statistics do not describe the parent value.
-    column_id_to_leaf_index: HashMap<ColumnId, Option<usize>>,
+    /// Column id to top-level SST index. Shared statistics helpers resolve
+    /// physical leaves from each file's actual Parquet schema.
+    column_id_to_sst_index: HashMap<ColumnId, usize>,
 }
 
 impl ParquetFlat {
@@ -579,7 +574,6 @@ impl ParquetFlat {
     ) -> ParquetFlat {
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
-        let column_id_to_leaf_index = leaf_column_indices(&arrow_schema, &id_to_index);
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
         let format_projection = FormatProjection::compute_format_projection(
@@ -593,7 +587,7 @@ impl ParquetFlat {
             metadata,
             arrow_schema,
             format_projection,
-            column_id_to_leaf_index,
+            column_id_to_sst_index: id_to_index,
         }
     }
 
@@ -621,16 +615,11 @@ impl ParquetFlat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        let Some(leaf_index) = self.column_id_to_leaf_index.get(&column_id) else {
+        let Some(index) = self.column_id_to_sst_index.get(&column_id) else {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
-        let Some(leaf_index) = leaf_index else {
-            // Child/element null counts do not describe a nested parent.
-            return StatValues::NoStats;
-        };
-
-        let stats = column_null_counts(row_groups, *leaf_index);
+        let stats = column_null_counts(row_groups, *index);
         StatValues::from_stats_opt(stats)
     }
 
@@ -644,17 +633,11 @@ impl ParquetFlat {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
-        let Some(leaf_index) = self
-            .column_id_to_leaf_index
-            .get(&column_id)
-            .copied()
-            .flatten()
-        else {
-            // Nested columns do not have scalar column statistics.
+        let Some(index) = self.column_id_to_sst_index.get(&column_id) else {
             return StatValues::NoStats;
         };
 
-        let stats = column_values(row_groups, column, leaf_index, is_min);
+        let stats = column_values(row_groups, column, *index, is_min);
         StatValues::from_stats_opt(stats)
     }
 }
@@ -681,54 +664,6 @@ pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<Column
     id_to_index.insert(metadata.time_index_column().column_id, column_index);
 
     id_to_index
-}
-
-/// Maps each column to the index of its leaf column in the parquet schema.
-///
-/// Row group statistics are indexed by parquet leaf column. A logical column
-/// in the flat SST schema may expand to multiple leaf columns (e.g. a JSON2
-/// struct stores the remainder and one leaf per promoted path), so the logical
-/// column index in the SST schema cannot be used to look up statistics
-/// directly. Nested columns map to `None` regardless of their leaf count:
-/// a child's null count or min/max is not a statistic of the parent value.
-fn leaf_column_indices(
-    arrow_schema: &Schema,
-    id_to_sst_index: &HashMap<ColumnId, usize>,
-) -> HashMap<ColumnId, Option<usize>> {
-    // Leaf column offset of each top-level field in the schema.
-    let mut leaf_offsets = Vec::with_capacity(arrow_schema.fields().len());
-    let mut offset = 0;
-    for field in arrow_schema.fields() {
-        leaf_offsets.push(offset);
-        offset += num_leaf_columns(field.data_type());
-    }
-
-    id_to_sst_index
-        .iter()
-        .map(|(column_id, sst_index)| {
-            let leaf_index = arrow_schema
-                .fields()
-                .get(*sst_index)
-                .filter(|field| !field.data_type().is_nested())
-                .map(|_| leaf_offsets[*sst_index]);
-            (*column_id, leaf_index)
-        })
-        .collect()
-}
-
-/// Returns the number of parquet leaf columns an arrow data type expands to.
-fn num_leaf_columns(data_type: &ArrowDataType) -> usize {
-    match data_type {
-        ArrowDataType::Struct(fields) => fields
-            .iter()
-            .map(|field| num_leaf_columns(field.data_type()))
-            .sum(),
-        ArrowDataType::List(field)
-        | ArrowDataType::LargeList(field)
-        | ArrowDataType::FixedSizeList(field, _)
-        | ArrowDataType::Map(field, _) => num_leaf_columns(field.data_type()),
-        _ => 1,
-    }
 }
 
 /// Decodes primary keys from a batch and returns decoded primary key information.
@@ -969,6 +904,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+    use parquet::arrow::ArrowSchemaConverter;
     use parquet::basic::{Repetition, Type as PhysicalType};
     use parquet::file::metadata::{ColumnChunkMetaData, RowGroupMetaData};
     use parquet::file::statistics::Statistics;
@@ -1087,8 +1023,8 @@ mod tests {
     /// Builds a file schema and a row group in which the `payload` struct
     /// column expands to three leaf columns. The `ns_edge` leaf carries small
     /// Int64 statistics that must not be mistaken for the statistics of `ts`.
-    fn struct_column_file_and_row_group() -> (SchemaRef, RowGroupMetaData) {
-        let file_schema = Arc::new(Schema::new(vec![
+    fn struct_column_file_and_row_group(raw_pk_columns: bool) -> (SchemaRef, RowGroupMetaData) {
+        let mut arrow_fields = vec![
             Field::new("tag_0", ArrowDataType::Utf8, true),
             Field::new("field_0", ArrowDataType::Int64, true),
             Field::new(
@@ -1111,7 +1047,11 @@ mod tests {
             Field::new(PRIMARY_KEY_COLUMN_NAME, ArrowDataType::Binary, false),
             Field::new(SEQUENCE_COLUMN_NAME, ArrowDataType::UInt64, false),
             Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false),
-        ]));
+        ];
+        if !raw_pk_columns {
+            arrow_fields.remove(0);
+        }
+        let file_schema = Arc::new(Schema::new(arrow_fields));
 
         let leaf = |name: &str, physical: PhysicalType| {
             Arc::new(
@@ -1132,28 +1072,32 @@ mod tests {
                 .build()
                 .unwrap(),
         );
+        let mut parquet_fields = vec![
+            leaf("tag_0", PhysicalType::BYTE_ARRAY),
+            leaf("field_0", PhysicalType::INT64),
+            payload,
+            leaf("ts", PhysicalType::INT64),
+            leaf(PRIMARY_KEY_COLUMN_NAME, PhysicalType::BYTE_ARRAY),
+            leaf(SEQUENCE_COLUMN_NAME, PhysicalType::INT64),
+            leaf(OP_TYPE_COLUMN_NAME, PhysicalType::INT32),
+        ];
+        if !raw_pk_columns {
+            parquet_fields.remove(0);
+        }
         let schema_descr = Arc::new(SchemaDescriptor::new(Arc::new(
             Type::group_type_builder("schema")
-                .with_fields(vec![
-                    leaf("tag_0", PhysicalType::BYTE_ARRAY),
-                    leaf("field_0", PhysicalType::INT64),
-                    payload,
-                    leaf("ts", PhysicalType::INT64),
-                    leaf(PRIMARY_KEY_COLUMN_NAME, PhysicalType::BYTE_ARRAY),
-                    leaf(SEQUENCE_COLUMN_NAME, PhysicalType::INT64),
-                    leaf(OP_TYPE_COLUMN_NAME, PhysicalType::INT32),
-                ])
+                .with_fields(parquet_fields)
                 .build()
                 .unwrap(),
         )));
 
         // Leaf column indices: tag_0=0, field_0=1, payload leaves=2..=4, ts=5.
-        const NS_EDGE_LEAF: usize = 4;
-        const TS_LEAF: usize = 5;
+        let ns_edge_leaf = if raw_pk_columns { 4 } else { 3 };
+        let ts_leaf = ns_edge_leaf + 1;
         let chunks: Vec<_> = (0..schema_descr.num_columns())
             .map(|i| {
                 let mut builder = ColumnChunkMetaData::builder(schema_descr.column(i));
-                if i == NS_EDGE_LEAF {
+                if i == ns_edge_leaf {
                     // Small values from the JSON payload, not timestamps.
                     builder = builder.set_statistics(Statistics::int64(
                         Some(0),
@@ -1162,7 +1106,7 @@ mod tests {
                         Some(65),
                         true,
                     ));
-                } else if i == TS_LEAF {
+                } else if i == ts_leaf {
                     builder = builder.set_statistics(Statistics::int64(
                         Some(1_788_998_400_000_000_000),
                         Some(1_789_084_800_000_000_000),
@@ -1192,52 +1136,85 @@ mod tests {
     /// which caused data loss during SWCS compaction.
     #[test]
     fn test_stats_with_struct_field_column() {
-        let metadata = Arc::new(metadata_with_struct_field());
-        let (file_schema, row_group) = struct_column_file_and_row_group();
-        let read_format = FlatReadFormat::new(
-            metadata,
-            ReadColumns::new([0, 1, 2, 3]),
-            Some(file_schema),
-            "test",
-            false,
-        )
-        .unwrap();
-        let row_groups = [&row_group];
+        for (encoding, raw_pk_columns) in [
+            (PrimaryKeyEncoding::Dense, true),
+            (PrimaryKeyEncoding::Dense, false),
+            (PrimaryKeyEncoding::Sparse, false),
+        ] {
+            let mut metadata = metadata_with_struct_field();
+            metadata.primary_key_encoding = encoding;
+            let metadata = Arc::new(metadata);
+            let (file_schema, row_group) = struct_column_file_and_row_group(raw_pk_columns);
+            let read_format = FlatReadFormat::new(
+                metadata,
+                ReadColumns::new([0, 1, 2, 3]),
+                Some(file_schema),
+                "test",
+                false,
+            )
+            .unwrap();
+            let row_groups = [&row_group];
 
-        // Statistics of `ts` come from the `ts` leaf column, not the leaves of
-        // the payload struct.
-        let StatValues::Values(min) = read_format.min_values(&row_groups, 3) else {
-            panic!("expected ts min values")
-        };
-        let min = min.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(1_788_998_400_000_000_000, min.value(0));
-        let StatValues::Values(max) = read_format.max_values(&row_groups, 3) else {
-            panic!("expected ts max values")
-        };
-        let max = max.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(1_789_084_800_000_000_000, max.value(0));
+            // Statistics of `ts` come from the `ts` leaf column, not the leaves of
+            // the payload struct.
+            let StatValues::Values(min) = read_format.min_values(&row_groups, 3) else {
+                panic!("expected ts min values")
+            };
+            let min = min.as_any().downcast_ref::<Int64Array>().unwrap();
+            assert_eq!(1_788_998_400_000_000_000, min.value(0));
+            let StatValues::Values(max) = read_format.max_values(&row_groups, 3) else {
+                panic!("expected ts max values")
+            };
+            let max = max.as_any().downcast_ref::<Int64Array>().unwrap();
+            assert_eq!(1_789_084_800_000_000_000, max.value(0));
 
-        // Null counts of `ts` also read the correct leaf column.
-        let StatValues::Values(nulls) = read_format.null_counts(&row_groups, 3) else {
-            panic!("expected ts null counts")
-        };
-        let nulls = nulls.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(0, nulls.value(0));
+            let stats = crate::sst::parquet::stats::RowGroupPruningStats::new(
+                &row_groups,
+                &read_format,
+                None,
+                false,
+            );
+            for (start, end, keep) in [
+                (1_788_998_400_000_000_000, 1_789_084_800_000_000_000, true),
+                (1_789_084_800_000_000_001, 1_789_171_200_000_000_000, false),
+            ] {
+                let predicate = table::predicate::Predicate::new(vec![
+                    datafusion_expr::col("ts").gt_eq(datafusion_expr::lit(
+                        datafusion_common::ScalarValue::TimestampNanosecond(Some(start), None),
+                    )),
+                    datafusion_expr::col("ts").lt(datafusion_expr::lit(
+                        datafusion_common::ScalarValue::TimestampNanosecond(Some(end), None),
+                    )),
+                ]);
+                assert_eq!(
+                    vec![keep],
+                    predicate
+                        .prune_with_stats(&stats, read_format.metadata().schema.arrow_schema(),)
+                );
+            }
 
-        // A column that expands to multiple leaf columns has no single column
-        // statistics.
-        assert!(matches!(
-            read_format.min_values(&row_groups, 2),
-            StatValues::NoStats
-        ));
-        assert!(matches!(
-            read_format.max_values(&row_groups, 2),
-            StatValues::NoStats
-        ));
-        assert!(matches!(
-            read_format.null_counts(&row_groups, 2),
-            StatValues::NoStats
-        ));
+            // Null counts of `ts` also read the correct leaf column.
+            let StatValues::Values(nulls) = read_format.null_counts(&row_groups, 3) else {
+                panic!("expected ts null counts")
+            };
+            let nulls = nulls.as_any().downcast_ref::<UInt64Array>().unwrap();
+            assert_eq!(0, nulls.value(0));
+
+            // A column that expands to multiple leaf columns has no single column
+            // statistics.
+            assert!(matches!(
+                read_format.min_values(&row_groups, 2),
+                StatValues::NoStats
+            ));
+            assert!(matches!(
+                read_format.max_values(&row_groups, 2),
+                StatValues::NoStats
+            ));
+            assert!(matches!(
+                read_format.null_counts(&row_groups, 2),
+                StatValues::NoStats
+            ));
+        }
     }
 
     /// Even one leaf cannot supply the null count of a nested parent:
@@ -1252,18 +1229,31 @@ mod tests {
             ArrowDataType::FixedSizeList(child, 1),
         ] {
             let metadata = Arc::new(metadata_with_struct_field());
-            let (schema, _) = struct_column_file_and_row_group();
+            let (schema, _) = struct_column_file_and_row_group(true);
             let mut fields = schema.fields().to_vec();
             fields[2] = Arc::new(Field::new("payload", nested_type.clone(), true));
-            let format = ParquetFlat::new(
-                metadata,
-                ReadColumns::new([0, 1, 2, 3]),
-                Arc::new(Schema::new(fields)),
-            );
+            let schema = Arc::new(Schema::new(fields));
+            let descriptor = Arc::new(ArrowSchemaConverter::new().convert(&schema).unwrap());
+            let chunks = descriptor
+                .columns()
+                .iter()
+                .map(|column| {
+                    ColumnChunkMetaData::builder(column.clone())
+                        .build()
+                        .unwrap()
+                })
+                .collect();
+            let row_group = RowGroupMetaData::builder(descriptor)
+                .set_num_rows(1)
+                .set_total_byte_size(0)
+                .set_column_metadata(chunks)
+                .build()
+                .unwrap();
+            let format = ParquetFlat::new(metadata, ReadColumns::new([0, 1, 2, 3]), schema);
 
             // The nested root has no usable statistics, independently of the
             // values stored in any row group. Its leaf still occupies a slot.
-            let groups: &[RowGroupMetaData] = &[];
+            let groups = &[row_group];
             assert!(
                 matches!(format.min_values(groups, 2), StatValues::NoStats),
                 "{nested_type:?}"
