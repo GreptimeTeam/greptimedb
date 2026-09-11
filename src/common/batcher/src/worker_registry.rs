@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 /// Registers worker senders by key, without owning workers or their execution.
 ///
@@ -50,6 +50,23 @@ impl<K: Eq + Hash, T> WorkerRegistry<K, T> {
             .get(key)
             .filter(|tx| !tx.is_closed())
             .cloned()
+    }
+
+    /// Returns the registered sender and, only when created, its receiver.
+    ///
+    /// Start the new worker before the next await so cancellation cannot leave
+    /// a registered channel without a consumer. Existing channels retain their
+    /// original capacity. New channel capacity must satisfy `mpsc::channel`.
+    pub async fn get_or_create(&self, key: K, capacity: usize) -> (Sender<T>, Option<Receiver<T>>) {
+        let mut receiver = None;
+        let sender = self
+            .get_or_insert_with(key, || {
+                let (sender, rx) = mpsc::channel(capacity);
+                receiver = Some(rx);
+                sender
+            })
+            .await;
+        (sender, receiver)
     }
 
     /// Reuses a live sender or atomically creates its replacement.
@@ -183,6 +200,50 @@ mod tests {
         let second = tasks.remove(0).await.unwrap();
         assert!(first.0.same_channel(&second.0));
         assert_eq!(1, count.load(Ordering::Relaxed));
+        assert_eq!(1, registry.len().await);
+    }
+    #[tokio::test]
+    async fn test_channel_creation_replacement_and_cleanup() {
+        let registry = WorkerRegistry::<_, usize>::new();
+        let (first, receiver) = registry.get_or_create(1, 2).await;
+        let mut receiver = receiver.unwrap();
+        let (reused, absent) = registry.get_or_create(1, 3).await;
+        assert!(absent.is_none());
+        assert!(first.same_channel(&reused));
+        assert_eq!(2, reused.max_capacity());
+        first.send(7).await.unwrap();
+        assert_eq!(Some(7), receiver.recv().await);
+        receiver.close();
+        let (replacement, receiver) = registry.get_or_create(1, 3).await;
+        assert!(receiver.is_some());
+        assert_eq!(3, replacement.max_capacity());
+        assert!(!first.same_channel(&replacement));
+        assert!(!registry.remove_if_same(&1, &first).await);
+        assert!(registry.get(&1).await.unwrap().same_channel(&replacement));
+        assert!(registry.remove_if_same(&1, &replacement).await);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_channel_creation_returns_one_receiver() {
+        let registry = Arc::new(WorkerRegistry::<_, ()>::new());
+        let barrier = Arc::new(Barrier::new(3));
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let channel = registry.get_or_create(1, 2).await;
+                barrier.wait().await;
+                channel
+            }));
+        }
+        barrier.wait().await;
+        barrier.wait().await;
+        let first = tasks.remove(0).await.unwrap();
+        let second = tasks.remove(0).await.unwrap();
+        assert!(first.0.same_channel(&second.0));
+        assert_ne!(first.1.is_some(), second.1.is_some());
         assert_eq!(1, registry.len().await);
     }
 }
