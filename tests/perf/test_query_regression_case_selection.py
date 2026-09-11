@@ -41,8 +41,13 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
                 "tests/perf/query_cases/prom_remote_write_integer_counter/case.toml",
                 "tests/perf/query_cases/promql_range_boundary/case.toml",
                 "tests/perf/query_cases/promql_instant_last_row_9034/case.toml",
+                "tests/perf/query_cases/mito_prefilter_all_match/case.toml",
             ],
         )
+
+    def test_implicit_selection_has_eight_routine_cases(self) -> None:
+        self.assertEqual(len(runner.DEFAULT_CASES), 8)
+        self.assertEqual(runner.split_cases([]), runner.DEFAULT_CASES)
 
     def test_heavy_selects_only_remote_write_7913(self) -> None:
         self.assertEqual(
