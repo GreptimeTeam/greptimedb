@@ -681,6 +681,55 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_shared_batching_preserves_prom_store_options() {
+        type KnobMutator = fn(&mut FrontendOptions);
+        let cases: [KnobMutator; 5] = [
+            |opts| {
+                opts.experimental_pending_rows_batcher
+                    .max_concurrent_flushes = usize::MAX
+            },
+            |opts| {
+                opts.experimental_pending_rows_batcher
+                    .worker_channel_capacity = usize::MAX
+            },
+            |opts| opts.experimental_pending_rows_batcher.max_inflight_requests = usize::MAX,
+            |opts| {
+                opts.experimental_pending_rows_batcher
+                    .flow_notification_queue_capacity = NonZeroUsize::new(usize::MAX).unwrap()
+            },
+            |opts| {
+                opts.experimental_pending_rows_batcher
+                    .pending_rows_flush_interval = Duration::MAX
+            },
+        ];
+        for invalidate in cases {
+            let mut opts = FrontendOptions::default();
+            opts.http.timeout = Duration::from_secs(1);
+            opts.prom_store.pending_rows_flush_interval = Duration::from_secs(5);
+            opts.experimental_pending_rows_batcher.protocols =
+                vec![BatchingProtocol::Prom, BatchingProtocol::Influxdb];
+            opts.experimental_pending_rows_batcher
+                .pending_rows_flush_interval = Duration::from_secs(10);
+            invalidate(&mut opts);
+            assert!(
+                !opts
+                    .experimental_pending_rows_batcher
+                    .pending_rows_batching_enabled()
+            );
+            assert_eq!(opts.prom_store, effective_prom_store_options(&opts));
+            assert_eq!(
+                Duration::from_secs(6),
+                effective_http_options_with_sync(&opts, true).timeout
+            );
+            opts.prom_store.pending_rows_flush_interval = Duration::ZERO;
+            assert_eq!(
+                Duration::from_secs(1),
+                effective_http_options_with_sync(&opts, true).timeout
+            );
+        }
+    }
+
+    #[test]
     fn test_effective_http_timeout_skips_fallback_when_batcher_disabled() {
         // Mirrors the conditions under which `LogicalTablePendingRowsBatcher::try_new`
         // returns `None`; in these cases no request can wait for a pending-row

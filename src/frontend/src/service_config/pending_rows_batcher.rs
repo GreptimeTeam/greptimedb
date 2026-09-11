@@ -15,8 +15,10 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use serde::{Deserialize, Serialize};
 use servers::http::BatchingProtocol;
+use tokio::sync::Semaphore;
 
 /// Experimental table write batching options shared by HTTP ingestion protocols.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,14 +42,19 @@ pub struct PendingRowsBatcherOptions {
 }
 
 impl PendingRowsBatcherOptions {
-    /// Returns whether at least one protocol opts in and batching controls are nonzero.
+    /// Returns whether a protocol opts in and its controls pass construction validation.
     pub fn pending_rows_batching_enabled(&self) -> bool {
         !self.protocols.is_empty()
-            && !self.pending_rows_flush_interval.is_zero()
+            && TimingFlushPolicy::validate(self.pending_rows_flush_interval)
             && self.max_batch_rows > 0
-            && self.max_concurrent_flushes > 0
-            && self.worker_channel_capacity > 0
-            && self.max_inflight_requests > 0
+            && [
+                self.max_concurrent_flushes,
+                self.worker_channel_capacity,
+                self.max_inflight_requests,
+                self.flow_notification_queue_capacity.get(),
+            ]
+            .into_iter()
+            .all(|capacity| (1..=Semaphore::MAX_PERMITS).contains(&capacity))
     }
 }
 
