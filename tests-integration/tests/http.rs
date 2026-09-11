@@ -2403,6 +2403,7 @@ ttl = "2months 29days 2h 52m 48s"
 [query]
 parallelism = 0
 allow_query_fallback = false
+enable_promql_series_aggregate = true
 experimental_spill_mode = "default"
 experimental_spill_max_temp_directory_size = "1GiB"
 experimental_spill_compression = "uncompressed"
