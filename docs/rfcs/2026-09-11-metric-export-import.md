@@ -7,10 +7,11 @@ Status: Draft for discussion
 
 # Summary
 
-Export every selected Metric physical group, including multi-region tables,
-through an ordered physical-table query, route rows by `__table_id`, and write the existing logical-table Parquet
-files. Restore the same V2 snapshot with batched logical-table DDL and the existing
-data COPY path. A separate generic COPY fix removes repeated directory scans.
+Group the selected Metric logical tables by physical table. Query each physical
+table across all its regions, order the rows by `__table_id`, and project each
+logical schema into the existing logical-table Parquet files. Restore the same
+V2 snapshot with batched logical-table DDL and the existing data COPY path. A
+separate generic COPY fix removes repeated directory scans.
 
 The design preserves `manifest.version = 1` and the current V2 layout. It does
 not introduce physical backup files or require importing source table IDs.
@@ -24,38 +25,38 @@ includes reports of exports taking days for roughly 100,000 logical tables with
 only several GiB of data. Table count, physical schema width and data volume must
 be measured separately; total database bytes do not describe the transfer cost.
 
-Three local PoC slices establish different improvements:
+Local experiments support three independent optimizations: shared physical scans,
+batched logical CREATE, and removal of repeated file lookup. The
+[experiment results](2026-09-11-metric-export-import/experiment-results.md)
+contain the measurements, controls and coverage limits. The COPY improvement
+uses per-table writes; merged-write benefits remain unmeasured.
 
-| Change | Experiment | Observation | Evidence |
-| --- | --- | --- | --- |
-| Physical scan and logical projection | 64 populated logical tables, 1,000 rows each; narrow/wide physical unions; two execution orders | Data export 2.82–3.39x faster | [Export results](2026-09-11-metric-export-import/experiment-results.md#physical-group-export) |
-| Batch logical DDL | 10,000 logical tables; SQL HTTP, in-process single, in-process batch | Logical CREATE: 29.181 / 19.524 / 5.776 s; calls: 10,000 / 10,000 / 79 | [DDL results](2026-09-11-metric-export-import/experiment-results.md#batched-logical-ddl) |
-| Remove repeated directory scans | 10,000 files; batch DDL in both variants | Data COPY: 146.496 → 5.481 s; total restore: 153.647 → 12.300 s | [COPY results](2026-09-11-metric-export-import/experiment-results.md#copy-file-lookup) |
+# Terminology
 
-The restore fixture has two rows per populated table and one empty table:
-19,998 rows at the 10,000-table scale. These are local standalone, warm-cache,
-unoptimized builds on an ARM64 machine with 16 GiB RAM. Each restore variant/scale
-has one measured run. The comparisons are separate experiments; their speedups
-must not be multiplied or presented as one controlled end-to-end result.
-
-The 5.481 s result still writes each logical table separately. A disabled-probe
-control took 5.449 s. It is evidence about small-file overhead, not merged writes
-or production ingestion throughput.
+| Term | Meaning in this proposal |
+| --- | --- |
+| Physical table | A Metric Engine table whose data regions store rows for multiple logical tables; its schema includes their column union. |
+| Logical table | A user-facing Metric table with its own schema and an association with a physical table. |
+| Region | A storage partition of a physical table. A logical table's rows may span regions. |
+| Export unit | The selected logical tables sharing one physical table, within one schema and V2 time chunk. This is an export grouping, not a storage object or completion checkpoint. |
+| Query execution partition | A stream of work in the query plan. Frontend `target_partitions` influences the partition count; execution partitions are distinct from storage regions and export units. |
+| Logical-table descriptor | Captured catalog metadata: source ID, name, physical association, column names/types/order, time index and primary key. Capturing and reusing it provides no snapshot or locking guarantee. |
+| Parquet writer | The writer for one logical table's output file in an export unit. |
+| Merged writes | Combining insert requests for multiple target logical tables into a region batch dispatch while retaining each table's identity, schema and routing. |
 
 # Physical export and logical files
 
 ## Query and routing
 
-A physical group consists of one physical table and the logical tables selected
-for export that share it.
+Capture the selected logical-table descriptors and reuse them for schema DDL
+and data export. For each schema and V2 time chunk, group the selected logical
+tables by physical table to form export units. Source schemas, selected data and
+TTL effects must stay stable during export; this proposal does not provide a
+transactionally consistent online backup.
 
-For each selected schema and V2 time chunk, freeze the logical-table descriptors
-and group them by physical table. Resolve each descriptor from the catalog:
-source table ID, name, physical association, column names/types/order, time index
-and primary key. Use the same descriptor set to produce schema DDL and data.
 The server must authorize every selected logical table and the destination
-before accessing the physical group; routing filters are not an authorization
-boundary. The current internal PoC assumes a trusted caller.
+before querying the physical table. Routing filters are not an authorization
+boundary.
 
 For example, suppose `cpu` has `(ts, host, cpu)` and `requests` has
 `(ts, host, service, requests)`, sharing `public.phy`. The physical query is
@@ -75,17 +76,17 @@ physical table directly; it does not first write and reread `phy.parquet`.
 
 ```text
 physical table query: selected column union + __table_id, ordered by ID
-  → reject rows whose IDs are absent from the frozen logical descriptor set
+  → reject rows whose IDs are absent from the captured descriptor set
   → contiguous rows for cpu      → project (ts, host, cpu)             → cpu.parquet
   → contiguous rows for requests → project (ts, host, service, requests) → requests.parquet
 ```
 
-Only one logical writer is active per group. At an ID transition, close the
+Only one Parquet writer is active per export unit. At an ID transition, close the
 previous writer and open the next. Verify non-null UInt32 IDs and monotonic order
 across input batches. Create a valid zero-row file for every selected empty table.
 Never put `__table_id`, `__tsid`, or another table's columns into logical files.
 
-The frozen catalog IDs are the routing whitelist; physical rows are not the
+The captured catalog IDs are the routing whitelist; physical rows are not the
 source of table membership. Dropped tables can leave residual rows. Predicate
 pushdown for selected IDs/ranges is an optional optimization to evaluate against
 residual density and index effectiveness; it does not replace routing checks.
@@ -97,41 +98,39 @@ Project the scan to `__table_id` plus the union needed by the selected tables.
 For each ID run, project again to that logical schema **before** expanding Arrow
 dictionary columns. Preserve field order, types, NULLs and empty strings.
 
-This reduces output conversion but does not eliminate wide incoming batches.
-The PoC's narrow/wide comparison kept expanded output near 0.148 MiB while input
-array estimates grew from 0.267 to about 2.4 MiB. Account separately for retained
-scan buffers, merge inputs, conversion, codec reservations, row-group metadata
-and object-store buffers. Bound concurrent groups as well as per-group work.
+Logical projection reduces output conversion but does not eliminate wide scan
+batches or upstream sorting. Account separately for retained scan and merge
+buffers, conversion, codec reservations, row-group metadata and object-store
+buffers. Bound concurrent export units as well as each unit's work.
 
-Input checks after a scan batch arrives cannot cap the scan's allocation peak.
-Likewise, a writer flush threshold is not a hard allocation limit: the measured
-timestamp encoder can reserve about 1 MiB even for a small batch. Production
-resource control must combine schema validation with query memory accounting,
-bounded conversion slices, row-group limits and cancellation. Reject an oversized row
-explicitly. Do not advertise these limits as a process RSS guarantee.
+Input checks after a batch arrives cannot cap the scan's allocation peak, and a
+writer flush threshold does not cap codec allocations. Combine schema validation
+with query memory accounting, bounded conversion slices, row-group limits and
+cancellation. Reject an oversized row explicitly. These controls do not provide
+a hard process RSS guarantee.
 
 ## Ordering and multiple regions
 
-The first release must export every selected Metric physical table, regardless
-of its region count. Issue one query per physical group and time chunk covering
-all its regions. The query engine provides globally ordered results through
-`ORDER BY __table_id`, including any sorting and merging needed across datanodes.
-The exporter consumes that ordered result stream; it does not concatenate
-independently read region streams or implement its own region scheduler.
+The first release covers every selected Metric physical table, any region count,
+and the Metric column types supported by existing Parquet COPY. Issue one query
+per export unit covering all regions of its physical table. The query engine
+provides globally ordered results through `ORDER BY __table_id`, including any
+sorting and merging needed across datanodes. The exporter consumes that stream
+without implementing its own region scheduler.
 
-The implementation constructs the SQL-equivalent logical plan on the server.
-The contract is SQL ordering semantics, not a whitelist of physical operators.
-Keep the runtime ID-monotonicity check as a defensive assertion, but do not
-reject a valid query because its plan contains `SortExec`. If query resources
-are exhausted, fail the chunk and retain retry semantics; do not silently switch
-to per-logical-table export. Performance and resource behavior still require
-multi-region measurement before release.
+In the current implementation, `MergeScanExec` declares the requested ordering
+only when `output_partition_count >= regions.len()`. When the region count
+exceeds frontend `target_partitions`, the frontend may need an additional sort
+to satisfy SQL ordering. That sort operates on the selected column union before
+per-logical-table projection. Parquet writer limits and downstream conversion
+slices cannot bound its memory or spill cost.
 
-The existing PoC has only validated one physical region and Float64 fields,
-string tags and timestamps. These are evidence limits, not first-release scope.
-Extend implementation and tests to multiple physical groups, multiple regions,
-distributed execution and the Metric column types supported by existing Parquet
-COPY. A per-logical-table fallback does not satisfy physical-export acceptance.
+SQL ordering is the contract. Keep the runtime ID-monotonicity check, but do not
+reject a valid plan because it contains `SortExec`. If query resources are
+exhausted, cancel the query, fail the chunk and retain retry semantics. Region
+count or resource exhaustion must not silently switch an enabled physical
+export to per-logical-table queries. The
+[ordering acceptance gate](#ordering-acceptance-gate) is required before release.
 
 # Snapshot and metadata contract
 
@@ -158,12 +157,6 @@ reconstruct Metric data/metadata regions and logical metadata with newly allocat
 IDs. Do not copy hidden metadata-region records or source IDs as restore data.
 Verify effective options, column mappings and physical routes after recreation.
 
-The unmodified import-v2 command used in the experiment restored PoC files into a fresh target
-with different IDs. This proves compatibility with that code path, not with all
-released binaries. Pin and test actual supported release versions before claiming
-cross-version compatibility. The older V2 RFC describes some structures that
-differ from today's code; this RFC follows the current DDL-based implementation.
-
 # Restore path
 
 ## Batched logical DDL
@@ -173,19 +166,16 @@ catalog, schema and the literal `on_physical_table` value. A dot in that option
 does not make it a qualified identifier. Database, physical, ordinary and view
 statements are barriers and retain their order.
 
-Use the existing logical-table batch procedure. The PoC limits each call to 128
-tables and 1 MiB of rendered SQL, processes batches sequentially, and validates
-the group before submission. Preserve normal CREATE validation, schema-option
-inheritance and target metadata resolution. These request bounds do not bound
-the importer's whole DDL list in memory.
+Use the existing logical-table batch procedure. Process bounded batches
+sequentially and validate each batch before submission. Preserve normal CREATE
+validation, schema-option inheritance and target metadata resolution. Bound the
+request size and the importer's DDL buffering separately.
 
-The current fast executor is in-process and test-only. A production CLI needs an
-authenticated, bounded server operation that checks CREATE authorization for
-every member and reuses the ordinary DDL path. The SQL-versus-in-process control
-separates transport savings from procedure batching; the measured in-process
-latency is not a promised batch HTTP latency. Exact transport/capability discovery
-must be agreed before this part of the RFC is accepted. An older server uses
-ordinary DDL; do not retry an ambiguously completed batch through another path.
+The production CLI needs an authenticated server operation that checks CREATE
+authorization for every member and reuses the ordinary DDL path. Transport,
+capability discovery and request limits must be agreed before accepting this
+interface. An older server uses ordinary DDL; do not retry an ambiguously
+completed batch through another path.
 
 ## Data COPY and generic directory fix
 
@@ -194,98 +184,97 @@ normal target logical-table routing. No source-ID remapping belongs in these
 files, and batch DDL does not imply batched data insertion.
 
 The generic fix changes explicit-file lookup from `stat → list parent → find`
-to `stat → use path`. Directory COPY retains listing, pattern matching and
-file-type filtering. Backend authorization and error handling remain in place.
-With N files in one directory, this removes roughly N² directory-entry work.
+to `stat → use path`, with a sandboxed file-type check for explicit local
+inputs to preserve symlink filtering. Directory COPY retains listing, pattern
+matching and file-type filtering. Backend authorization and error handling
+remain in place. With N files in one directory, this removes roughly N²
+directory-entry work.
 COPY bypasses the common Lister's filename branch; the branch itself is unchanged.
 This fix can ship independently of the Metric design.
 
 ## Completion, interruption and retry
-
-Source schemas, selected data and TTL effects must stay stable during export.
-This proposal does not provide a transactionally consistent online backup.
 
 Keep V2 completion units: export chunk completion and import `(chunk, schema)`
 data tasks, with the existing DDL-completed flag. Finish and close every required
 file before recording completion. A closed subset of files is not a completed
 chunk. On export retry, replace only the unfinished attempt's owned outputs;
 never touch completed chunks. Cancellation must close/abort writers and leave
-the chunk incomplete. Local and object-store failure tests must establish this
-behavior before production integration; the PoC currently leaves a partial
-directory and does not implement publication or resume.
+the chunk incomplete.
 
 Batch DDL is not a transaction across the restore. A later failure can leave
 earlier batches created. Keep DDL completion false until all statements succeed,
-then use the current durable state update. The PoC verifies failure after a
-successful 128-table batch and retry of the original DDL. Data retries retain
-existing COPY semantics and may replay an incomplete task; there is no new
-exactly-once guarantee or per-file checkpoint in this proposal.
+then use the current durable state update. Data retries retain existing COPY
+semantics and may replay an incomplete task; there is no new exactly-once
+guarantee or per-file checkpoint in this proposal.
 
-# Merged writes: first-release decision
+# Rationale and alternatives
 
-A candidate importer could decode several logical files under row/byte/in-flight
-bounds, resolve each target table and send multiple logical insert requests in
-one existing region batch dispatch. Each request must preserve its target logical
-identity, schema and routing; bypassing logical validation with raw physical
-writes is not proposed. The data files can remain unchanged.
-
-This may reduce dispatch/WAL overhead, but the present profile does not isolate
-WAL, locks or RPC counts and cannot predict that benefit. Partial batch success,
-ambiguous completion, retries and checkpoint advancement need explicit tests.
-
-Before deciding first-release scope, compare the corrected per-table path with
-a bounded merged-write PoC under the same batch DDL and concurrency. Include
-small files, larger files, wide schemas and distributed/multi-region targets.
-Report repeated total-restore and data-phase measurements, rows/s, bytes/s,
-request counts and memory. Agree a minimum useful gain and memory ceiling before
-running the comparison. Include merged writes only if gains justify the added
-recovery complexity; otherwise record the evidence and defer them explicitly.
-
-# Delivery and acceptance
-
-The [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120) defines
-seven required PRs and one conditional merged-write PR. Production integration
-remains pending. The [experiment summary](2026-09-11-metric-export-import/experiment-results.md)
-contains the supporting comparisons and conclusions.
-
-| Slice | Acceptance boundary |
+| Choice | Reason and trade-off |
 | --- | --- |
-| Generic COPY fix | Isolated change; explicit-file and directory semantics; local and object-store regression coverage |
-| Physical export | All selected Metric physical groups; logical schema/value equivalence, dense/sparse keys, empty/residual tables, existing Metric Parquet types and memory controls; production COPY integration and authorization |
-| Batch DDL | Agreed transport, per-table authorization, remote CLI round trip, dependency order, batch failure/retry |
-| V2 lifecycle | Real release-reader compatibility, interrupted export cleanup/retry, import replay, local and object-store verification |
-| Multi-region and scale | Multiple physical groups and regions, including distributed execution; global ordering and complete logical files below/at/above partition budget; resource measurements and failure/retry |
-| Merged-write decision | Controlled comparison and documented include/defer decision with retry semantics |
+| Keep logical-table Parquet files | Reuses V2 DDL, file lookup and normal target CREATE/routing with fresh IDs. Physical backup files would need a new restore contract for mixed schemas and source metadata. The retained format still has one file per logical table per time chunk. |
+| Scan by physical table | Shares query and scan work among logical tables. Per-logical-table COPY is simpler but retains the table-count overhead; physical scans instead pay for the selected column union and ID routing. |
+| Global ID ordering and one Parquet writer per export unit | Contiguous IDs allow a file to be closed at each table transition. Unordered routing would require many open writers or intermediate buffering/files. Ordering bounds writer state, but query sorting and merging need separate resource controls. |
+| Use query-engine ordering across regions | Reuses distributed planning and SQL semantics. An exporter-owned region scheduler would add merge, cancellation and retry coordination. The chosen approach must handle both streaming merge and additional-sort plans. |
+| Batch DDL while retaining per-table data COPY | Reuses logical CREATE procedures and current data-task replay semantics. Merged writes may reduce dispatch/WAL overhead, but introduce partial-success and checkpoint questions and require a separate benefit comparison. |
 
-Proposed integration uses existing COPY DATABASE orchestration to group Metric
-tables and retain ordinary COPY for non-Metric tables and other formats.
-Keep direct COPY TABLE behavior unchanged. Gate the unfinished Metric fast path
-behind an `experimental_` configuration option, with its exact name and defaults
-reviewed alongside the integration. Disable it to select the existing path.
-With Metric Parquet export enabled, every selected physical group uses the
-physical-query path. Region count is not a fallback condition.
+# Unresolved questions
 
-Benchmarks must vary table count (including a scale near the discussion's 100,000),
-rows/file, physical union width, regions and backend independently. Use release
-builds and repeated runs, report median and spread, control execution order/cache,
-and verify all schemas and typed rows outside timing. Measure schema export and
-metadata discovery too: they still perform per-table work and are excluded from
-the current data-export timings.
+- Which authenticated batch-DDL operation and capability-discovery mechanism
+  should the CLI use? Agree request byte/table limits and DDL buffering bounds.
+- What are the query memory, spill-space, writer and export-unit concurrency
+  limits? Agree the test workloads and resource/performance thresholds before
+  running the ordering acceptance benchmark.
+- Which released import-v2 versions and object-store backends are compatibility
+  targets? Test those readers against the retained V2 format.
+- What name and defaults should the `experimental_` export option use?
+- Should merged writes ship in the first release? Compare a bounded merged-write
+  PoC against corrected per-table COPY with the same batch DDL and concurrency.
+  Bound decoded rows/bytes and in-flight requests, preserving normal logical
+  validation and target routing through the existing region batch dispatch.
+  Cover small/larger files, wide schemas and distributed/multi-region targets;
+  report repeated total/data times, rows/s, bytes/s, request counts and memory.
+  Agree a minimum useful gain and memory ceiling before the comparison. Validate
+  partial success, ambiguous completion and checkpoint advancement, then record
+  an explicit include/defer decision.
 
-Remote API, object-store, failure/recovery and distributed acceptance, together
-with the transport decision, remain required before the Metric path is presented
-as production-ready.
+# Integration and release acceptance
 
-# Appendix: observed query plans
+Use existing COPY DATABASE orchestration to form Metric export units. Retain
+ordinary COPY for non-Metric tables and other formats, and direct COPY TABLE
+behavior. Gate the unfinished Metric fast path behind an `experimental_`
+configuration option; disabling it selects the existing path.
 
-The measured single-region plans use `SeriesScan` and
-`SortPreservingMergeExec`, with no `SortExec`: `__table_id` matches a physical
-primary-key prefix. This explains the PoC behavior without assuming an external
-sort on every export.
+The [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120) owns
+the PR breakdown and implementation dependencies. Each implementation slice
+must verify its own correctness and failure behavior. Release acceptance requires:
 
-In the inspected code, `MergeScanExec` declares ordering only when
-`output_partition_count >= regions.len()`. Outside that condition the frontend
-may need additional sorting to satisfy SQL ordering. Use this distinction to
-design performance experiments and investigate resource costs, not to limit
-which physical tables can be exported. These operator details describe current
-implementation behavior and are not part of the export interface contract.
+| Area | Required evidence |
+| --- | --- |
+| Export | Actual CLI export with authorization, multiple physical tables and regions, dense/sparse keys, empty/residual tables, supported Metric Parquet types, and logical schema/value equivalence. |
+| Restore | Authenticated remote batch DDL, per-table authorization, fresh target IDs and reconstructed metadata, dependency ordering, older-server behavior and batch failure/retry. |
+| V2 lifecycle | Supported released readers; local and object-store interruption, owned-output cleanup, durable completion state and import replay. |
+| Scale | Repeated release-build measurements varying table count up to approximately 100,000, rows/file, physical union width, regions and backend. Report median/spread, control execution order/cache, and include schema export and metadata discovery in end-to-end timing. |
+| Open decisions | Agreed batch-DDL interface, resource limits, compatibility targets and experimental option; documented merged-write include/defer decision. |
+
+## Ordering acceptance gate
+
+The first release must pass a distributed export benchmark with region counts
+**below, equal to and above frontend `target_partitions`**, using representative
+row counts and narrow/wide selected column unions. Record actual execution
+partition counts rather than assuming the configured target determines the plan.
+Include multiple physical tables and a logical table whose rows span regions.
+Exercise both streaming-merge and additional-sort plans.
+
+For each case, report frontend and datanode execution plans, peak memory,
+query memory-accounting metrics, spill volume and elapsed time. Run with the
+agreed query memory, spill-space, writer and concurrency limits. Verify global
+ID order and exactly one complete file per selected logical table in each export
+unit, checking schemas and typed rows outside the timed interval.
+
+Passing requires correct exports within the agreed resource/performance
+thresholds on both plan paths. Also force resource exhaustion: cancellation
+must leave the chunk incomplete, and retry with sufficient resources must
+produce complete files without altering completed chunks. Writer-only memory
+measurements and single-region runs cannot satisfy this gate. Until both the
+normal and failure/retry cases pass, multi-region resource acceptance remains
+open.
