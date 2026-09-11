@@ -375,7 +375,7 @@ sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2
 # enabling it"), fixing the TSD/tcache enable-before-init reentrancy
 # window. Remove once tikv/jemallocator ships a jemalloc snapshot that
 # includes the fix. See GreptimeTeam/jemalloc#1.
-tikv-jemalloc-sys = { git = "https://github.com/GreptimeTeam/jemallocator", rev = "ff444d44ddc0084712f3db34977cf7c9f21f16fe" }
+tikv-jemalloc-sys = { git = "https://github.com/GreptimeTeam/jemallocator", rev = "e254a7eaf13a9ede04953ddefd173b5303018530" }
 
 [profile.release]
 debug = 1
