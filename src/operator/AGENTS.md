@@ -38,3 +38,8 @@ cargo sqlness bare -t <case>
 ```
 
 Check standalone and distributed routing when changing region dispatch.
+
+Write admission uses fallible `write_meter!` calls in `Inserter::do_request`
+and `handle_bulk_insert`, before flow side effects and datanode dispatch. Bulk
+records carry row counts and the request channel with zero WCU. Validate both
+the default `meter-macros/noop` build and active metering when changing this path.

@@ -35,7 +35,7 @@ use dashmap::DashMap;
 use operator::batcher::PendingRowsBatcher;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
-use operator::insert::{InsertLimitInterceptorRef, Inserter};
+use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
 #[cfg(feature = "enterprise")]
@@ -261,8 +261,7 @@ impl FrontendBuilder {
             };
         let inserter = Arc::new(
             create_inserter()
-                .with_pending_rows_batcher(build_batcher(&self.options.pending_rows_batcher))
-                .with_insert_limit_interceptor(plugins.get::<InsertLimitInterceptorRef>()),
+                .with_pending_rows_batcher(build_batcher(&self.options.pending_rows_batcher)),
         );
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),

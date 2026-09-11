@@ -178,7 +178,7 @@ jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "dd1e2341e3df35e9
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "f69c8924c4babe516373e26a4118be82d976629c" }
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "5618e779cf2bb4755b499c630fba4c35e91898cb" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "e991995eb161b2e3415b387e13c79c80ee8224cf" }
 mockall = "0.13"
 moka = "0.12"
 nalgebra = "0.33"
@@ -357,7 +357,7 @@ table = { path = "src/table" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
+rev = "e991995eb161b2e3415b387e13c79c80ee8224cf"
 
 [patch.crates-io]
 substrait = { git = "https://github.com/GreptimeTeam/substrait-rs.git", rev = "91ec978b0649417ad3da8390e7a515baec723b1b" }
