@@ -171,7 +171,7 @@ tokio-postgres.workspace = true
 tokio-postgres-rustls = "0.14"
 
 [target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
+pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [build-dependencies]
 common-version.workspace = true
