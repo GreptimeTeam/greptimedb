@@ -52,6 +52,7 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::elasticsearch;
 use crate::error::{
     AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
@@ -73,7 +74,6 @@ use crate::http::result::null_result::NullResponse;
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
-use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -683,7 +683,7 @@ impl HttpServerBuilder {
         prom_store_with_metric_engine: bool,
         prom_validation_mode: PromValidationMode,
         experimental_enable_prometheus_native_histogram: bool,
-        pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+        pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     ) -> Self {
         let state = PromStoreState {
             prom_store_handler: handler,

@@ -345,7 +345,7 @@ fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
 }
 
 /// Prometheus remote write pending rows batcher.
-pub struct PendingRowsBatcher {
+pub struct LogicalTablePendingRowsBatcher {
     workers: Arc<WorkerRegistry<BatchKey, WorkerCommand>>,
     flush_interval: Duration,
     flush_policy: TimingFlushPolicy,
@@ -362,7 +362,7 @@ pub struct PendingRowsBatcher {
     shutdown: broadcast::Sender<()>,
 }
 
-impl PendingRowsBatcher {
+impl LogicalTablePendingRowsBatcher {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         partition_manager: PartitionRuleManagerRef,
@@ -831,6 +831,7 @@ impl PendingRowsBatcher {
 
         Ok(aligned_batches)
     }
+
     async fn get_or_spawn_worker(&self, key: BatchKey) -> PendingWorker {
         let (tx, receiver) = self
             .workers
@@ -871,7 +872,7 @@ impl PendingRowsBatcher {
     }
 }
 
-impl Drop for PendingRowsBatcher {
+impl Drop for LogicalTablePendingRowsBatcher {
     fn drop(&mut self) {
         let _ = self.shutdown.send(());
     }
@@ -1884,22 +1885,22 @@ mod tests {
     use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot};
     use tokio::time::{advance, sleep};
 
-    use crate::error;
-    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
-    use crate::pending_rows_batcher::{
+    use crate::batcher::logical_table::{
         BatchKey, Error, FlushBatch, FlushLimiter, FlushRegionWrite, FlushTrigger, FlushWaiter,
-        Notifier, PendingBatch, PendingCore, PendingRowsBatcher, PhysicalFlushCatalogProvider,
-        PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
-        PlannedRegionBatch, RecordBatchWithTsIdx, RequestLimiter, ResolvedRegionBatch, TableBatch,
-        TimingFlushPolicy, WorkerCommand, WorkerRegistry, columns_taxonomy, drain_batch,
-        encode_region_write_requests, extract_timestamps, flush_batch, flush_batch_physical,
-        flush_region_writes_concurrently, greptime_timestamp,
+        LogicalTablePendingRowsBatcher, Notifier, PendingBatch, PendingCore,
+        PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
+        PhysicalTableMetadata, PlannedRegionBatch, RecordBatchWithTsIdx, RequestLimiter,
+        ResolvedRegionBatch, TableBatch, TimingFlushPolicy, WorkerCommand, WorkerRegistry,
+        columns_taxonomy, drain_batch, encode_region_write_requests, extract_timestamps,
+        flush_batch, flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
         notify_flow_dirty_windows_after_flush, notify_waiters, plan_region_batches,
         remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
         should_dispatch_concurrently, start_flow_notification_worker, start_worker,
         strip_partition_columns_from_batch, transform_logical_batches_to_physical,
         try_enqueue_flow_notification,
     };
+    use crate::error;
+    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
     use crate::prom_row_builder::rows_to_aligned_record_batch;
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
@@ -2124,7 +2125,7 @@ mod tests {
     #[test]
     fn test_flow_notification_queue_drops_when_full() {
         let (tx, mut rx) = Notifier::try_new(1).unwrap();
-        let notification = |table_id| crate::pending_rows_batcher::FlowNotification {
+        let notification = |table_id| crate::batcher::logical_table::FlowNotification {
             table_id,
             timestamps: vec![table_id as i64],
         };
@@ -2331,7 +2332,8 @@ mod tests {
             ],
         };
 
-        let (table_rows, total_rows) = PendingRowsBatcher::collect_non_empty_table_rows(requests);
+        let (table_rows, total_rows) =
+            LogicalTablePendingRowsBatcher::collect_non_empty_table_rows(requests);
 
         assert_eq!(2, total_rows);
         assert_eq!(1, table_rows.len());
@@ -2598,7 +2600,7 @@ mod tests {
     fn mock_flow_notification_sender(
         cache: TableFlownodeSetCacheRef,
         node_manager: NodeManagerRef,
-    ) -> Notifier<crate::pending_rows_batcher::FlowNotification> {
+    ) -> Notifier<crate::batcher::logical_table::FlowNotification> {
         let (tx, rx) = Notifier::try_new(16).unwrap();
         start_flow_notification_worker(rx, cache, node_manager);
         tx
