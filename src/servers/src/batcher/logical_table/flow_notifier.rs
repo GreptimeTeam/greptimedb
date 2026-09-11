@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
-use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use common_batcher::notifier::{Notifier, run_notifier};
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_runtime::spawn_global;
 use common_telemetry::{error, warn};
 use datatypes::timestamp::append_timestamps;
-use table::metadata::TableId;
 use tokio::sync::mpsc;
 
+pub(in crate::batcher::logical_table) use crate::batcher::flow_sender::FlowNotification;
+use crate::batcher::flow_sender::FlowSender;
 use crate::batcher::logical_table::batch_convert::TableBatch;
 use crate::metrics::FLOW_NOTIFICATION_DROPPED;
 
@@ -44,11 +43,6 @@ pub(in crate::batcher::logical_table) fn extract_timestamps(table_batch: &TableB
         };
     }
     timestamps
-}
-
-pub(in crate::batcher::logical_table) struct FlowNotification {
-    pub(in crate::batcher::logical_table) table_id: TableId,
-    pub(in crate::batcher::logical_table) timestamps: Vec<i64>,
 }
 
 pub(in crate::batcher::logical_table) fn try_enqueue_flow_notification(
@@ -99,63 +93,20 @@ pub(in crate::batcher::logical_table) fn enqueue_flow_notifications(
     }
 }
 
-pub(in crate::batcher::logical_table) async fn handle_flow_notification(
-    notification: FlowNotification,
-    table_flownode_set_cache: TableFlownodeSetCacheRef,
-    node_manager: NodeManagerRef,
-) {
-    let table_id = notification.table_id;
-    let flownodes = match table_flownode_set_cache.get(table_id).await {
-        Ok(Some(flownodes)) => flownodes,
-        Ok(None) => return,
-        Err(e) => {
-            error!(e; "Failed to get flownodes for table id: {}", table_id);
-            return;
-        }
-    };
-    let peers = flownodes.values().cloned().collect::<HashSet<_>>();
-
-    for peer in peers {
-        if let Err(e) = node_manager
-            .flownode(&peer)
-            .await
-            .handle_mark_window_dirty(DirtyWindowRequests {
-                requests: vec![DirtyWindowRequest {
-                    table_id,
-                    timestamps: notification.timestamps.clone(),
-                    time_ranges: Vec::new(),
-                }],
-            })
-            .await
-        {
-            error!(
-                e;
-                "Failed to mark timestamps as dirty, table_id: {}, peer_id: {}, peer_addr: {}",
-                table_id,
-                peer.id,
-                peer.addr
-            );
-        }
-    }
-}
-
 pub(in crate::batcher::logical_table) fn start_flow_notification_worker(
     notification_rx: mpsc::Receiver<FlowNotification>,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
-    spawn_global(async move {
-        run_notifier(
-            notification_rx,
-            MAX_CONCURRENT_FLOW_NOTIFICATIONS,
-            |notification| {
-                let table_flownode_set_cache = table_flownode_set_cache.clone();
-                let node_manager = node_manager.clone();
-                handle_flow_notification(notification, table_flownode_set_cache, node_manager)
-            },
-        )
-        .await;
-    });
+    let sender = FlowSender::new(table_flownode_set_cache, node_manager);
+    spawn_global(run_notifier(
+        notification_rx,
+        MAX_CONCURRENT_FLOW_NOTIFICATIONS,
+        move |notification| {
+            let sender = sender.clone();
+            async move { sender.send(notification).await }
+        },
+    ));
 }
 
 #[cfg(test)]
