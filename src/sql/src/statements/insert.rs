@@ -14,8 +14,8 @@
 
 use serde::Serialize;
 use sqlparser::ast::{
-    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, TableObject, UnaryOperator,
-    ValueWithSpan, Values,
+    Insert as SpInsert, ObjectName, ObjectNamePart, Parens, Query, SetExpr, Statement, TableObject,
+    UnaryOperator, ValueWithSpan, Values,
 };
 use sqlparser::parser::ParserError;
 use sqlparser_derive::{Visit, VisitMut};
@@ -57,7 +57,12 @@ impl Insert {
 
     pub fn columns(&self) -> Vec<&String> {
         match &self.inner {
-            Statement::Insert(insert) => insert.columns.iter().map(|ident| &ident.value).collect(),
+            Statement::Insert(insert) => insert
+                .columns
+                .iter()
+                .filter_map(single_part_column_ident)
+                .map(|ident| &ident.value)
+                .collect(),
             _ => unreachable!(),
         }
     }
@@ -137,7 +142,7 @@ impl Insert {
     }
 }
 
-fn sql_exprs_to_values(exprs: &[Vec<Expr>]) -> Result<Vec<Vec<Value>>> {
+fn sql_exprs_to_values(exprs: &[Parens<Vec<Expr>>]) -> Result<Vec<Vec<Value>>> {
     let mut values = Vec::with_capacity(exprs.len());
     for es in exprs.iter() {
         let mut vs = Vec::with_capacity(es.len());
@@ -188,16 +193,34 @@ fn sql_exprs_to_values(exprs: &[Vec<Expr>]) -> Result<Vec<Vec<Value>>> {
     Ok(values)
 }
 
+fn single_part_column_ident(name: &ObjectName) -> Option<&sqlparser::ast::Ident> {
+    let [ObjectNamePart::Identifier(ident)] = name.0.as_slice() else {
+        return None;
+    };
+    Some(ident)
+}
+
 impl TryFrom<Statement> for Insert {
     type Error = ParserError;
 
     fn try_from(value: Statement) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Statement::Insert { .. } => Ok(Insert { inner: value }),
-            unexp => Err(ParserError::ParserError(format!(
-                "Not expected to be {unexp}"
-            ))),
+        let Statement::Insert(insert) = &value else {
+            return Err(ParserError::ParserError(format!(
+                "Not expected to be {value}"
+            )));
+        };
+
+        if let Some(column) = insert
+            .columns
+            .iter()
+            .find(|column| single_part_column_ident(column).is_none())
+        {
+            return Err(ParserError::ParserError(format!(
+                "Expected a single-part insert column name, found {column}"
+            )));
         }
+
+        Ok(Insert { inner: value })
     }
 }
 
@@ -237,6 +260,32 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_insert_column_names_are_single_identifiers() {
+        let stmt = ParserContext::create_with_dialect(
+            "INSERT INTO my_table (host, \"value\") VALUES (1, 2)",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+        let Statement::Insert(insert) = stmt else {
+            unreachable!()
+        };
+        assert_eq!(insert.columns(), vec!["host", "value"]);
+
+        let result = ParserContext::create_with_dialect(
+            "INSERT INTO my_table (metric.host) VALUES (1)",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("Expected a single-part insert column name, found metric.host"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

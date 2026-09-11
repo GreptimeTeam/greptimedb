@@ -18,7 +18,6 @@
 //! partition ([`PartitionRange`]) independently based on the provided physical
 //! sort expressions.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -38,7 +37,9 @@ use datafusion::physical_plan::filter_pushdown::{
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
+    apply_expression_roots,
 };
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{DataFusionError, ScalarValue, internal_err};
 use datafusion_expr::Operator;
 use datafusion_physical_expr::expressions::{
@@ -208,10 +209,6 @@ impl ExecutionPlan for PartSortExec {
         "PartSortExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.input.schema()
     }
@@ -222,6 +219,20 @@ impl ExecutionPlan for PartSortExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
+        let dynamic_filter = self
+            .dynamic_filter
+            .as_ref()
+            .map(|filter| filter.clone() as Arc<dyn PhysicalExpr>);
+        apply_expression_roots(
+            std::iter::once(&self.expression.expr).chain(dynamic_filter.as_ref()),
+            f,
+        )
     }
 
     fn with_new_children(

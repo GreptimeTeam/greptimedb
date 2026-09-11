@@ -72,18 +72,24 @@ TQL EVAL (2, 7, '1s') absent_over_time(range_presence_null{host="a"}[4s]);
 -- All-NULL windows have no samples: only absent_over_time returns 1.
 TQL EVAL (3, 3, '1s') count_over_time(range_presence_null{host="b"}[4s]);
 
-++
-++
++----+------------------------------------+------+
+| ts | prom_count_over_time(ts_range,val) | host |
++----+------------------------------------+------+
++----+------------------------------------+------+
 
 TQL EVAL (3, 3, '1s') last_over_time(range_presence_null{host="b"}[4s]);
 
-++
-++
++----+-----------------------------------+------+
+| ts | prom_last_over_time(ts_range,val) | host |
++----+-----------------------------------+------+
++----+-----------------------------------+------+
 
 TQL EVAL (3, 3, '1s') present_over_time(range_presence_null{host="b"}[4s]);
 
-++
-++
++----+--------------------------------------+------+
+| ts | prom_present_over_time(ts_range,val) | host |
++----+--------------------------------------+------+
++----+--------------------------------------+------+
 
 TQL EVAL (3, 3, '1s') absent_over_time(range_presence_null{host="b"}[4s]);
 

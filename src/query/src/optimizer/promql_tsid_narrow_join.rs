@@ -55,7 +55,7 @@ impl PhysicalOptimizerRule for PromqlTsidNarrowJoin {
 
 impl PromqlTsidNarrowJoin {
     fn rewrite_join(plan: Arc<dyn ExecutionPlan>) -> DfResult<Transformed<Arc<dyn ExecutionPlan>>> {
-        let Some(hash_join) = plan.as_any().downcast_ref::<HashJoinExec>() else {
+        let Some(hash_join) = plan.downcast_ref::<HashJoinExec>() else {
             return Ok(Transformed::no(plan));
         };
 
@@ -103,8 +103,8 @@ impl PromqlTsidNarrowJoin {
 
         for (left, right) in hash_join.on() {
             let (Some(left_col), Some(right_col)) = (
-                left.as_any().downcast_ref::<Column>(),
-                right.as_any().downcast_ref::<Column>(),
+                left.downcast_ref::<Column>(),
+                right.downcast_ref::<Column>(),
             ) else {
                 return false;
             };
@@ -199,7 +199,7 @@ mod tests {
         let optimized = PromqlTsidNarrowJoin
             .optimize(join, &ConfigOptions::default())
             .unwrap();
-        let optimized_join = optimized.as_any().downcast_ref::<HashJoinExec>().unwrap();
+        let optimized_join = optimized.downcast_ref::<HashJoinExec>().unwrap();
 
         assert_eq!(optimized_join.partition_mode(), &PartitionMode::CollectLeft);
         assert_eq!(optimized.schema(), original_schema);
@@ -262,7 +262,7 @@ mod tests {
         let optimized = PromqlTsidNarrowJoin
             .optimize(join, &ConfigOptions::default())
             .unwrap();
-        let optimized_join = optimized.as_any().downcast_ref::<HashJoinExec>().unwrap();
+        let optimized_join = optimized.downcast_ref::<HashJoinExec>().unwrap();
 
         assert_eq!(optimized_join.partition_mode(), &PartitionMode::CollectLeft);
     }
@@ -317,7 +317,7 @@ mod tests {
         let optimized = PromqlTsidNarrowJoin
             .optimize(join, &ConfigOptions::default())
             .unwrap();
-        let optimized_join = optimized.as_any().downcast_ref::<HashJoinExec>().unwrap();
+        let optimized_join = optimized.downcast_ref::<HashJoinExec>().unwrap();
 
         assert_eq!(optimized_join.partition_mode(), &PartitionMode::Partitioned);
     }

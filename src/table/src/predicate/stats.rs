@@ -113,7 +113,7 @@ impl PruningStatistics for RowGroupPruningStatistics<'_> {
         Some(Arc::new(UInt64Array::from(values)))
     }
 
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         // TODO(LFC): Impl it.
         None
     }

@@ -14,9 +14,9 @@ EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM t_analyze_verbose_remote_metrics_ex
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[count(Int64(1))@0 as count(*)] REDACTED
-|_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[__count_merge(__count_state(t_analyze_verbose_remote_REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_merge(__count_state(t_analyze_verbose_remote_REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|

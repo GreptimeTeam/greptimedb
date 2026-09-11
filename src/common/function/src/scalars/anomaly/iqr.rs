@@ -24,7 +24,6 @@
 //! When IQR = 0 (constant quartiles), returns 0.0 if value is on the fence,
 //! or +inf if value is outside.
 
-use std::any::Any;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
@@ -32,11 +31,11 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::{DataFusionError, Result, ScalarValue};
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
+use crate::helper::NUMERICS;
 use crate::scalars::anomaly::utils::{cast_to_f64, collect_window_values, percentile_sorted};
 
 /// Minimum valid samples for IQR (linear-interpolated Q1 != Q3 is possible at n >= 3).
@@ -56,10 +55,6 @@ impl AnomalyScoreIqr {
 }
 
 impl WindowUDFImpl for AnomalyScoreIqr {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "anomaly_score_iqr"
     }

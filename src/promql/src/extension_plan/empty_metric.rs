@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Div;
 use std::pin::Pin;
@@ -21,21 +20,24 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
+use datafusion::catalog::Session;
 use datafusion::common::arrow::datatypes::Field;
 use datafusion::common::stats::Precision;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{
     DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics, TableReference,
 };
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::error::DataFusionError;
-use datafusion::execution::context::{SessionState, TaskContext};
+use datafusion::execution::context::TaskContext;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{EquivalenceProperties, PhysicalExprRef};
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr, PhysicalExprRef};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    SendableRecordBatchStream, StatisticsArgs,
 };
 use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::prelude::{Expr, col, lit};
@@ -113,14 +115,20 @@ impl EmptyMetric {
 
     pub fn to_execution_plan(
         &self,
-        session_state: &SessionState,
+        session: &dyn Session,
         physical_planner: &dyn PhysicalPlanner,
+        planning_ctx: &PhysicalPlanningContext,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let physical_expr = self
             .expr
             .as_ref()
             .map(|expr| {
-                physical_planner.create_physical_expr(expr, &self.time_index_schema, session_state)
+                physical_planner.create_physical_expr(
+                    expr,
+                    &self.time_index_schema,
+                    session,
+                    planning_ctx,
+                )
             })
             .transpose()?;
         let result_schema: SchemaRef = self.result_schema.inner().clone();
@@ -224,8 +232,11 @@ pub struct EmptyMetricExec {
 }
 
 impl ExecutionPlan for EmptyMetricExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        datafusion::physical_plan::apply_expression_roots(self.expr.iter(), f)
     }
 
     fn schema(&self) -> SchemaRef {
@@ -273,9 +284,14 @@ impl ExecutionPlan for EmptyMetricExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> DataFusionResult<Arc<Statistics>> {
+        let partition = args.partition();
         if partition.is_some() {
-            return Ok(Statistics::new_unknown(self.schema().as_ref()));
+            return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
         }
 
         let estimated_row_num = if self.end > self.start {
@@ -285,11 +301,11 @@ impl ExecutionPlan for EmptyMetricExec {
         };
         let total_byte_size = estimated_row_num * std::mem::size_of::<Millisecond>() as f64;
 
-        Ok(Statistics {
+        Ok(Arc::new(Statistics {
             num_rows: Precision::Inexact(estimated_row_num.floor() as _),
             total_byte_size: Precision::Inexact(total_byte_size.floor() as _),
             column_statistics: Statistics::unknown_column(&self.schema()),
-        })
+        }))
     }
 
     fn name(&self) -> &str {
@@ -429,7 +445,11 @@ mod test {
         )
         .unwrap();
         let empty_metric_exec = empty_metric
-            .to_execution_plan(&session_context.state(), &df_default_physical_planner)
+            .to_execution_plan(
+                &session_context.state(),
+                &df_default_physical_planner,
+                &PhysicalPlanningContext::default(),
+            )
             .unwrap();
 
         let result =
@@ -544,7 +564,11 @@ mod test {
         let empty_metric =
             EmptyMetric::new(0, 200, 1000, "time".to_string(), "value".to_string(), None).unwrap();
         let empty_metric_exec = empty_metric
-            .to_execution_plan(&session_context.state(), &df_default_physical_planner)
+            .to_execution_plan(
+                &session_context.state(),
+                &df_default_physical_planner,
+                &PhysicalPlanningContext::default(),
+            )
             .unwrap();
 
         let result =

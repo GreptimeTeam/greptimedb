@@ -48,15 +48,14 @@ use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
-use datafusion::sql::TableReference;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_common::{DFSchema, NullEquality};
+use datafusion_common::{DFSchema, NullEquality, TableReference};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::expr_fn::when;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
-    ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
+    ExprSchemable, Literal, Projection, SortExpr, TableScanBuilder, TableSource, col, lit,
 };
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
@@ -1336,10 +1335,8 @@ impl PromPlanner {
                 let mut field_expr = field_expr_builder(lhs, rhs)?;
 
                 if is_comparison_op && should_return_bool {
-                    field_expr = DfExpr::Cast(Cast {
-                        expr: Box::new(field_expr),
-                        data_type: ArrowDataType::Float64,
-                    });
+                    field_expr =
+                        DfExpr::Cast(Cast::new(Box::new(field_expr), ArrowDataType::Float64));
                 }
 
                 Ok(LogicalPlan::Extension(Extension {
@@ -1405,10 +1402,8 @@ impl PromPlanner {
                     };
 
                     if is_comparison_op && should_return_bool {
-                        binary_expr = DfExpr::Cast(Cast {
-                            expr: Box::new(binary_expr),
-                            data_type: ArrowDataType::Float64,
-                        });
+                        binary_expr =
+                            DfExpr::Cast(Cast::new(Box::new(binary_expr), ArrowDataType::Float64));
                     }
                     Ok(binary_expr)
                 };
@@ -1474,10 +1469,8 @@ impl PromPlanner {
                     };
 
                     if is_comparison_op && should_return_bool {
-                        binary_expr = DfExpr::Cast(Cast {
-                            expr: Box::new(binary_expr),
-                            data_type: ArrowDataType::Float64,
-                        });
+                        binary_expr =
+                            DfExpr::Cast(Cast::new(Box::new(binary_expr), ArrowDataType::Float64));
                     }
                     Ok(binary_expr)
                 };
@@ -1696,10 +1689,10 @@ impl PromPlanner {
                                 None => binary_expr_builder(lhs, rhs)?,
                             };
                             if is_comparison_op && should_return_bool {
-                                binary_expr = DfExpr::Cast(Cast {
-                                    expr: Box::new(binary_expr),
-                                    data_type: ArrowDataType::Float64,
-                                });
+                                binary_expr = DfExpr::Cast(Cast::new(
+                                    Box::new(binary_expr),
+                                    ArrowDataType::Float64,
+                                ));
                             }
                             Ok(binary_expr)
                         })
@@ -2691,11 +2684,9 @@ impl PromPlanner {
 
     fn table_from_source(&self, source: &Arc<dyn TableSource>) -> Result<table::TableRef> {
         Ok(source
-            .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
             .table_provider
-            .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table())
@@ -2959,10 +2950,10 @@ impl PromPlanner {
                     DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
                 ))))
                 .chain(Some(DfExpr::Alias(Alias {
-                    expr: Box::new(DfExpr::Cast(Cast {
-                        expr: Box::new(self.create_time_index_column_expr()?),
-                        data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                    })),
+                    expr: Box::new(DfExpr::Cast(Cast::new(
+                        Box::new(self.create_time_index_column_expr()?),
+                        ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    ))),
                     relation: Some(table_ref.clone()),
                     name: self
                         .ctx
@@ -3099,13 +3090,12 @@ impl PromPlanner {
                         projection.sort_unstable();
                         projection.dedup();
 
-                        let new_scan = TableScan::try_new(
-                            scan.table_name.clone(),
-                            scan.source.clone(),
-                            Some(projection),
-                            scan.filters,
-                            scan.fetch,
-                        )?;
+                        let new_scan =
+                            TableScanBuilder::new(scan.table_name.clone(), scan.source.clone())
+                                .with_projection(Some(projection))
+                                .with_filters(scan.filters)
+                                .with_fetch(scan.fetch)
+                                .build()?;
                         Ok(Transformed::yes(LogicalPlan::TableScan(new_scan)))
                     }
                     LogicalPlan::Projection(proj) => {
@@ -3328,10 +3318,10 @@ impl PromPlanner {
         }
 
         if func.name == "predict_linear" {
-            other_input_exprs[0] = DfExpr::Cast(Cast {
-                expr: Box::new(other_input_exprs[0].clone()),
-                data_type: ArrowDataType::Int64,
-            });
+            other_input_exprs[0] = DfExpr::Cast(Cast::new(
+                Box::new(other_input_exprs[0].clone()),
+                ArrowDataType::Int64,
+            ));
         }
 
         let timestamp_range = DfExpr::Column(Column::from_name(
@@ -3617,10 +3607,10 @@ impl PromPlanner {
                 if all_field_columns_are_native_histogram_ranges {
                     ScalarFunc::Udf(native_histogram_drop_udf(func.name))
                 } else {
-                    other_input_exprs[0] = DfExpr::Cast(Cast {
-                        expr: Box::new(other_input_exprs[0].clone()),
-                        data_type: ArrowDataType::Int64,
-                    });
+                    other_input_exprs[0] = DfExpr::Cast(Cast::new(
+                        Box::new(other_input_exprs[0].clone()),
+                        ArrowDataType::Int64,
+                    ));
                     ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
                 }
             }
@@ -5279,10 +5269,10 @@ impl PromPlanner {
                     false
                 };
                 if is_comparison_op && should_return_bool {
-                    Some(DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: ArrowDataType::Float64,
-                    }))
+                    Some(DfExpr::Cast(Cast::new(
+                        Box::new(expr),
+                        ArrowDataType::Float64,
+                    )))
                 } else {
                     Some(expr)
                 }
@@ -5377,18 +5367,12 @@ impl PromPlanner {
         let cast_float = |expr| {
             if matches!(
                 &expr,
-                DfExpr::Cast(Cast {
-                    data_type: ArrowDataType::Float64,
-                    ..
-                })
+                DfExpr::Cast(Cast { field, .. }) if field.data_type() == &ArrowDataType::Float64
             ) || matches!(&expr, DfExpr::Literal(ScalarValue::Float64(_), _))
             {
                 expr
             } else {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(expr),
-                    data_type: ArrowDataType::Float64,
-                })
+                DfExpr::Cast(Cast::new(Box::new(expr), ArrowDataType::Float64))
             }
         };
         match token.id() {
@@ -5983,21 +5967,29 @@ impl PromPlanner {
     ) -> Result<(LogicalPlan, LogicalPlan, bool)> {
         let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
         let left_has_marker = left_context.tag_columns.iter().any(|tag| tag == marker);
-        let (present, add_to_left) = if left_has_marker {
-            (&left, false)
-        } else {
-            (&right, true)
+        let (data_type, value_type, add_to_left) = {
+            let (present, add_to_left) = if left_has_marker {
+                (&left, false)
+            } else {
+                (&right, true)
+            };
+            let data_type = present
+                .schema()
+                .fields()
+                .iter()
+                .find(|field| field.name() == marker)
+                .map(|field| field.data_type().clone())
+                .with_context(|| ColumnNotFoundSnafu {
+                    col: marker.to_string(),
+                })?;
+            let value_type = Self::string_value_data_type(&data_type)
+                .cloned()
+                .with_context(|| UnexpectedPlanExprSnafu {
+                    desc: format!("temporality match label {marker} must be a string"),
+                })?;
+            (data_type, value_type, add_to_left)
         };
-        let data_type = present
-            .schema()
-            .fields()
-            .iter()
-            .find(|field| field.name() == marker)
-            .map(|field| field.data_type().clone())
-            .with_context(|| ColumnNotFoundSnafu {
-                col: marker.to_string(),
-            })?;
-        let null = Self::string_scalar_value(&data_type, None).with_context(|| {
+        let null = Self::string_scalar_value(&value_type, None).with_context(|| {
             UnexpectedPlanExprSnafu {
                 desc: format!("temporality match label {marker} must be a string"),
             }
@@ -6020,7 +6012,28 @@ impl PromPlanner {
                 .build()
                 .context(DataFusionPlanningSnafu)
         };
-
+        if data_type != value_type {
+            let present = if add_to_left { &mut right } else { &mut left };
+            let visible = present
+                .schema()
+                .iter()
+                .map(|(qualifier, field)| {
+                    let column =
+                        DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()));
+                    if field.name() == marker {
+                        DfExpr::Cast(Cast::new(Box::new(column), value_type.clone()))
+                            .alias_qualified(qualifier.cloned(), field.name().clone())
+                    } else {
+                        column
+                    }
+                })
+                .collect::<Vec<_>>();
+            *present = LogicalPlanBuilder::from(present.clone())
+                .project(visible)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
         if add_to_left {
             left = add_marker(left)?;
             left_context.tag_columns.push(marker.to_string());
@@ -6044,10 +6057,7 @@ impl PromPlanner {
             let column = if &data_type == value_type {
                 column
             } else {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(column),
-                    data_type: value_type.clone(),
-                })
+                DfExpr::Cast(Cast::new(Box::new(column), value_type.clone()))
             };
             DfExpr::ScalarFunction(ScalarFunction {
                 func: coalesce(),
@@ -6256,7 +6266,8 @@ impl PromPlanner {
             result
         };
 
-        // AND/UNLESS preserve the complete left operand schema and metadata.
+        // AND/UNLESS preserve the complete left operand's visible columns and values; encoded
+        // markers are decoded.
         self.ctx = output_context;
         Ok(result)
     }
@@ -6617,11 +6628,7 @@ impl PromPlanner {
                 if source_type == target_type {
                     expr
                 } else {
-                    DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: target_type.clone(),
-                    })
-                    .alias(col.clone())
+                    DfExpr::Cast(Cast::new(Box::new(expr), target_type.clone())).alias(col.clone())
                 }
             } else {
                 DfExpr::Literal(
@@ -6645,11 +6652,8 @@ impl PromPlanner {
                     if data_type == &ArrowDataType::Float64 {
                         expr.alias(output_col)
                     } else {
-                        DfExpr::Cast(Cast {
-                            expr: Box::new(expr),
-                            data_type: ArrowDataType::Float64,
-                        })
-                        .alias(output_col)
+                        DfExpr::Cast(Cast::new(Box::new(expr), ArrowDataType::Float64))
+                            .alias(output_col)
                     }
                 } else {
                     DfExpr::Literal(ScalarValue::Float64(None), None).alias(output_col)
@@ -6675,13 +6679,13 @@ impl PromPlanner {
                 && col == left_field_col
                 && left_field.2 != target_field_type
             {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(DfExpr::Column(Column::new(
+                DfExpr::Cast(Cast::new(
+                    Box::new(DfExpr::Column(Column::new(
                         left_field.1.clone(),
                         left_field_col,
                     ))),
-                    data_type: target_field_type.clone(),
-                })
+                    target_field_type.clone(),
+                ))
                 .alias(left_field_col.clone())
             } else if target_tag_types.contains_key(col) {
                 aligned_label_expr(col, &left_tag_types)
@@ -6706,11 +6710,8 @@ impl PromPlanner {
             } else if !mixed_sample_types && col == left_field_col {
                 let expr = DfExpr::Column(Column::new(right_field.1.clone(), right_field_col));
                 if right_field.2 != target_field_type {
-                    DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: target_field_type.clone(),
-                    })
-                    .alias(left_field_col.clone())
+                    DfExpr::Cast(Cast::new(Box::new(expr), target_field_type.clone()))
+                        .alias(left_field_col.clone())
                 } else if left_field_col != right_field_col {
                     expr.alias(left_field_col.clone())
                 } else {

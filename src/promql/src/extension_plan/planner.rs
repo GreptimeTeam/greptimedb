@@ -15,8 +15,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::SessionState;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
@@ -36,7 +37,8 @@ impl ExtensionPlanner for PromExtensionPlanner {
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
-        session_state: &SessionState,
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
     ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
         if let Some(node) = node.as_any().downcast_ref::<SeriesNormalize>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
@@ -47,7 +49,11 @@ impl ExtensionPlanner for PromExtensionPlanner {
         } else if let Some(node) = node.as_any().downcast_ref::<SeriesDivide>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
         } else if let Some(node) = node.as_any().downcast_ref::<EmptyMetric>() {
-            Ok(Some(node.to_execution_plan(session_state, planner)?))
+            Ok(Some(node.to_execution_plan(
+                session,
+                planner,
+                planning_ctx,
+            )?))
         } else if let Some(node) = node.as_any().downcast_ref::<ScalarCalculate>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else if let Some(node) = node.as_any().downcast_ref::<HistogramFold>() {

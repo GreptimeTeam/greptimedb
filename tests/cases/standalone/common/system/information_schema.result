@@ -700,8 +700,10 @@ Affected Rows: 0
 -- test query filter for key_column_usage --
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX' and TABLE_SCHEMA != 'greptime_private';
 
-++
-++
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX' and TABLE_SCHEMA != 'greptime_private';
 
@@ -713,8 +715,10 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX' and TABLE_S
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX' and TABLE_SCHEMA != 'greptime_private';
 
-++
-++
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX' and TABLE_SCHEMA != 'greptime_private';
 
@@ -726,8 +730,10 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX' and TABLE
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db' and TABLE_SCHEMA != 'greptime_private';
 
-++
-++
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
++--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 
 -- schemata --
 desc table schemata;
@@ -828,8 +834,10 @@ DESC TABLE COLUMN_PRIVILEGES;
 
 SELECT * FROM COLUMN_PRIVILEGES;
 
-++
-++
++---------+---------------+--------------+------------+-------------+----------------+--------------+
+| grantee | table_catalog | table_schema | table_name | column_name | privilege_type | is_grantable |
++---------+---------------+--------------+------------+-------------+----------------+--------------+
++---------+---------------+--------------+------------+-------------+----------------+--------------+
 
 DESC TABLE COLUMN_STATISTICS;
 
@@ -844,8 +852,10 @@ DESC TABLE COLUMN_STATISTICS;
 
 SELECT * FROM COLUMN_STATISTICS;
 
-++
-++
++-------------+------------+-------------+-----------+
+| schema_name | table_name | column_name | histogram |
++-------------+------------+-------------+-----------+
++-------------+------------+-------------+-----------+
 
 SELECT * FROM CHARACTER_SETS;
 
@@ -884,8 +894,10 @@ DESC TABLE CHECK_CONSTRAINTS;
 
 SELECT * FROM CHECK_CONSTRAINTS;
 
-++
-++
++--------------------+-------------------+-----------------+--------------+
+| constraint_catalog | constraint_schema | constraint_name | check_clause |
++--------------------+-------------------+-----------------+--------------+
++--------------------+-------------------+-----------------+--------------+
 
 DESC TABLE REGION_PEERS;
 

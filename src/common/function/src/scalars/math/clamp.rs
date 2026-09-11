@@ -19,10 +19,10 @@ use datafusion::arrow::array::{Array, ArrayRef, AsArray, PrimitiveArray};
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::logical_expr::{ColumnarValue, Volatility};
 use datafusion_common::{DataFusionError, ScalarValue, utils};
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 
 use crate::function::Function;
+use crate::helper::NUMERICS;
 
 #[derive(Clone, Debug)]
 pub struct ClampFunction {
@@ -338,7 +338,9 @@ mod test {
 
     use arrow_schema::Field;
     use datafusion_common::config::ConfigOptions;
-    use datatypes::arrow::array::{ArrayRef, Float64Array, Int64Array, UInt64Array};
+    use datatypes::arrow::array::{
+        ArrayRef, Decimal128Array, Float64Array, Int64Array, UInt64Array,
+    };
     use datatypes::arrow_array::StringArray;
 
     use super::*;
@@ -369,6 +371,79 @@ mod test {
     impl_test_eval!(ClampFunction);
     impl_test_eval!(ClampMinFunction);
     impl_test_eval!(ClampMaxFunction);
+
+    fn decimal_array(values: Vec<i128>) -> ColumnarValue {
+        ColumnarValue::Array(Arc::new(
+            Decimal128Array::from(values)
+                .with_precision_and_scale(10, 2)
+                .unwrap(),
+        ))
+    }
+
+    fn decimal_scalar(value: i128) -> ColumnarValue {
+        ColumnarValue::Scalar(ScalarValue::Decimal128(Some(value), 10, 2))
+    }
+
+    #[allow(deprecated)]
+    fn evaluate_decimal(
+        function: &dyn Function,
+        args: Vec<ColumnarValue>,
+    ) -> datafusion_common::Result<ArrayRef> {
+        let input_types = args
+            .iter()
+            .map(ColumnarValue::data_type)
+            .collect::<Vec<_>>();
+        let planned_types = datafusion_expr::type_coercion::functions::data_types(
+            function.name(),
+            &input_types,
+            function.signature(),
+        )?;
+        let args = args
+            .into_iter()
+            .zip(planned_types)
+            .map(|(arg, planned_type)| arg.cast_to(&planned_type, None))
+            .collect::<datafusion_common::Result<Vec<_>>>()?;
+        function
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("x", ArrowDataType::Float64, false)),
+                config_options: Arc::new(ConfigOptions::new()),
+            })
+            .and_then(|value| value.to_array(3))
+    }
+
+    #[test]
+    fn clamp_decimal_coercion_executes_as_float64() {
+        let test_cases = [
+            (
+                Box::new(ClampFunction::default()) as Box<dyn Function>,
+                vec![
+                    decimal_array(vec![100, 300, 500]),
+                    decimal_scalar(200),
+                    decimal_scalar(400),
+                ],
+                vec![2.0, 3.0, 4.0],
+            ),
+            (
+                Box::new(ClampMinFunction::default()),
+                vec![decimal_array(vec![100, 300, 500]), decimal_scalar(200)],
+                vec![2.0, 3.0, 5.0],
+            ),
+            (
+                Box::new(ClampMaxFunction::default()),
+                vec![decimal_array(vec![100, 300, 500]), decimal_scalar(200)],
+                vec![1.0, 2.0, 2.0],
+            ),
+        ];
+
+        for (function, args, expected) in test_cases {
+            let result = evaluate_decimal(function.as_ref(), args).unwrap();
+            let expected: ArrayRef = Arc::new(Float64Array::from(expected));
+            assert_eq!(expected.as_ref(), result.as_ref());
+        }
+    }
 
     #[test]
     fn clamp_i64() {

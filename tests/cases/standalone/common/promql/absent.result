@@ -23,14 +23,18 @@ Affected Rows: 8
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 15, '5s') absent(t{job="job1"});
 
-++
-++
++----+-----+-----+
+| ts | val | job |
++----+-----+-----+
++----+-----+-----+
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 15, '5s') absent(t{job="job2"});
 
-++
-++
++----+-----+-----+
+| ts | val | job |
++----+-----+-----+
++----+-----+-----+
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 15, '5s') absent(t{job="job3"});

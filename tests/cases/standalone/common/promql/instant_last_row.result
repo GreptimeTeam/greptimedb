@@ -52,8 +52,10 @@ Affected Rows: 0
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (1000, 1000, '1s') instant_last_empty;
 
-++
-++
++----+-----+--------+
+| ts | val | series |
++----+-----+--------+
++----+-----+--------+
 
 DROP TABLE instant_last_empty;
 
@@ -444,8 +446,10 @@ Affected Rows: 1
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (1, 1, '1s') instant_last_field_filter{__field__="val"} > 5;
 
-++
-++
++-----+------+----------+----+
+| val | host | instance | ts |
++-----+------+----------+----+
++-----+------+----------+----+
 
 -- A value matcher filters the scan before selecting a sample: the older 10
 -- remains eligible, unlike the post-selection comparison above.

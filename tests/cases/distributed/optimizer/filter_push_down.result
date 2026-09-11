@@ -57,20 +57,26 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=1 WHERE i1.i>
 -- Align the result to PostgreSQL: empty.
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i IS NOT NULL ORDER BY 2;
 
-++
-++
++---+---+
+| i | i |
++---+---+
++---+---+
 
 -- Align the result to PostgreSQL: empty.
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i>1 ORDER BY 2;
 
-++
-++
++---+---+
+| i | i |
++---+---+
++---+---+
 
 -- Align the result to PostgreSQL: empty.
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE CASE WHEN i2.i IS NULL THEN False ELSE True END ORDER BY 2;
 
-++
-++
++---+---+
+| i | i |
++---+---+
++---+---+
 
 SELECT DISTINCT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i IS NULL ORDER BY 1;
 
@@ -213,8 +219,10 @@ EXPLAIN SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHER
 -- Align the result to PostgreSQL: empty.
 SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2 GROUP BY 1) a1 WHERE cond ORDER BY 1;
 
-++
-++
++------+
+| cond |
++------+
++------+
 
 DROP TABLE integers;
 

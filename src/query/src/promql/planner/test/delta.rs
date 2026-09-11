@@ -14,6 +14,8 @@
 
 use common_query::logical_plan::SubstraitPlanDecoder;
 use common_query::prelude::set_default_prefix;
+use datafusion::arrow::array::{DictionaryArray, UInt32Array};
+use datafusion::arrow::datatypes::UInt32Type;
 use datafusion::catalog::SchemaProvider;
 
 use super::*;
@@ -756,4 +758,277 @@ async fn binary_joins_align_only_the_temporality_marker() {
     assert!(set.schema().field_with_unqualified_name(marker).is_err());
     let (_, batches) = execute(set, &build_query_engine_state()).await;
     assert_eq!(1, batches.iter().map(RecordBatch::num_rows).sum::<usize>());
+}
+
+#[tokio::test]
+async fn binary_joins_align_dictionary_temporality_marker_with_tagless_vector() {
+    let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
+    let marker_schema = Arc::new(ArrowSchema::new(vec![
+        Field::new(
+            "ts",
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("job", ArrowDataType::Utf8, true),
+        Field::new(
+            marker,
+            ArrowDataType::Dictionary(
+                Box::new(ArrowDataType::UInt32),
+                Box::new(ArrowDataType::Utf8),
+            ),
+            true,
+        ),
+        Field::new("v", ArrowDataType::Float64, true),
+    ]));
+    let tagless_schema = Arc::new(ArrowSchema::new(vec![
+        Field::new(
+            "ts",
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("job", ArrowDataType::Utf8, true),
+        Field::new("v", ArrowDataType::Float64, true),
+    ]));
+    let tagless_batch = RecordBatch::try_new(
+        tagless_schema.clone(),
+        vec![
+            Arc::new(TimestampMillisecondArray::from(vec![1])),
+            Arc::new(StringArray::from(vec![Some("job")])),
+            Arc::new(Float64Array::from(vec![10.0])),
+        ],
+    )
+    .unwrap();
+    for (marker_on_left, null_key) in [(true, true), (true, false), (false, true), (false, false)] {
+        let marker_values: Arc<dyn Array> = Arc::new(
+            DictionaryArray::<UInt32Type>::try_new(
+                UInt32Array::from(if null_key {
+                    vec![Some(0), None]
+                } else {
+                    vec![Some(0), Some(1)]
+                }),
+                Arc::new(StringArray::from(vec![
+                    Some(GREPTIME_TEMPORALITY_DELTA),
+                    None,
+                ])),
+            )
+            .unwrap(),
+        );
+        let marker_batch = RecordBatch::try_new(
+            marker_schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1, 1])),
+                Arc::new(StringArray::from(vec![Some("job"), Some("job")])),
+                marker_values,
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let marker_table = Arc::new(
+            MemTable::try_new(marker_schema.clone(), vec![vec![marker_batch], vec![]]).unwrap(),
+        );
+        let tagless_table = Arc::new(
+            MemTable::try_new(
+                tagless_schema.clone(),
+                vec![vec![tagless_batch.clone()], vec![]],
+            )
+            .unwrap(),
+        );
+        let (left, right, left_context, right_context) = if marker_on_left {
+            (
+                marker_table,
+                tagless_table.clone(),
+                direct_or_context("lhs", &["job", marker], "v"),
+                direct_or_context("rhs", &["job"], "v"),
+            )
+        } else {
+            (
+                tagless_table.clone(),
+                marker_table,
+                direct_or_context("lhs", &["job"], "v"),
+                direct_or_context("rhs", &["job", marker], "v"),
+            )
+        };
+        let mut planner = PromPlanner {
+            table_provider: build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                &[],
+            )
+            .await,
+            ctx: PromPlannerContext::default(),
+            promql_annotations: None,
+        };
+        let scan = |name, table: Arc<MemTable>| {
+            LogicalPlanBuilder::scan(name, provider_as_source(table), None)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let joined = planner
+            .join_on_non_field_columns(
+                scan("lhs", left.clone()),
+                scan("rhs", right.clone()),
+                TableReference::bare("lhs"),
+                TableReference::bare("rhs"),
+                Some("ts".to_string()),
+                Some("ts".to_string()),
+                false,
+                &None,
+                &left_context,
+                &right_context,
+            )
+            .unwrap();
+        let marker_side = if marker_on_left { "lhs" } else { "rhs" };
+        assert!(
+            joined
+                .schema()
+                .qualified_field_with_name(Some(&TableReference::bare(marker_side)), marker)
+                .is_ok(),
+            "marker_on_left={marker_on_left}, null_key={null_key}: {joined:?}"
+        );
+        let arithmetic = LogicalPlanBuilder::from(joined)
+            .project(vec![
+                DfExpr::Column(Column::new(Some(TableReference::bare("lhs")), "ts")).alias("ts"),
+                DfExpr::Column(Column::new(Some(TableReference::bare("lhs")), "job")).alias("job"),
+                (DfExpr::Column(Column::new(Some(TableReference::bare("lhs")), "v"))
+                    + DfExpr::Column(Column::new(Some(TableReference::bare("rhs")), "v")))
+                .alias("v"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        let values = |batches: &[RecordBatch]| {
+            batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column_by_name("v")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .values()
+                        .iter()
+                        .copied()
+                })
+                .collect::<Vec<_>>()
+        };
+        let (_, batches) = execute(arithmetic.clone(), &build_query_engine_state()).await;
+        assert_eq!(
+            values(&batches),
+            &[12.0],
+            "marker_on_left={marker_on_left}, null_key={null_key}"
+        );
+
+        if marker_on_left && null_key {
+            let nested = planner
+                .join_on_non_field_columns(
+                    arithmetic,
+                    scan("rhs", tagless_table.clone()),
+                    TableReference::bare("nested"),
+                    TableReference::bare("rhs"),
+                    Some("ts".to_string()),
+                    Some("ts".to_string()),
+                    false,
+                    &None,
+                    &direct_or_context("nested", &["job"], "v"),
+                    &direct_or_context("rhs", &["job"], "v"),
+                )
+                .unwrap();
+            assert!(
+                nested
+                    .schema()
+                    .qualified_field_with_name(Some(&TableReference::bare("nested")), "v")
+                    .is_ok(),
+                "{nested:?}"
+            );
+            let nested = LogicalPlanBuilder::from(nested)
+                .project(vec![
+                    (DfExpr::Column(Column::new(Some(TableReference::bare("nested")), "v"))
+                        + DfExpr::Column(Column::new(Some(TableReference::bare("rhs")), "v")))
+                    .alias("v"),
+                ])
+                .unwrap()
+                .build()
+                .unwrap();
+            let (_, batches) = execute(nested, &build_query_engine_state()).await;
+            assert_eq!(values(&batches), &[22.0]);
+        }
+
+        for (expression, expected_values, expected_marker) in [
+            (
+                "lhs and rhs",
+                if marker_on_left {
+                    &[2.0][..]
+                } else {
+                    &[10.0][..]
+                },
+                marker_on_left.then_some(None),
+            ),
+            (
+                "lhs unless rhs",
+                if marker_on_left { &[1.0][..] } else { &[] },
+                marker_on_left.then_some(Some(GREPTIME_TEMPORALITY_DELTA)),
+            ),
+        ] {
+            let PromExpr::Binary(binary) = parser::parse(expression).unwrap() else {
+                unreachable!()
+            };
+            let set = planner
+                .set_op_on_non_field_columns(
+                    scan("lhs", left.clone()),
+                    scan("rhs", right.clone()),
+                    left_context.clone(),
+                    right_context.clone(),
+                    binary.op,
+                    &binary.modifier,
+                )
+                .unwrap();
+            assert_eq!(
+                expected_marker.is_some(),
+                set.schema().field_with_unqualified_name(marker).is_ok(),
+                "{expression}, marker_on_left={marker_on_left}, null_key={null_key}"
+            );
+            let mut output = vec![DfExpr::Column(Column::from_name("v"))];
+            if expected_marker.is_some() {
+                output.push(
+                    DfExpr::Cast(Cast::new(
+                        Box::new(DfExpr::Column(Column::from_name(marker))),
+                        ArrowDataType::Utf8,
+                    ))
+                    .alias(marker),
+                );
+            }
+            let output = LogicalPlanBuilder::from(set)
+                .project(output)
+                .unwrap()
+                .build()
+                .unwrap();
+            let (_, batches) = execute(output, &build_query_engine_state()).await;
+            assert_eq!(
+                expected_values,
+                values(&batches),
+                "{expression}, marker_on_left={marker_on_left}, null_key={null_key}"
+            );
+            if let Some(expected_marker) = expected_marker {
+                let markers = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column_by_name(marker)
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .iter()
+                            .map(|value| value.map(str::to_string))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    vec![expected_marker.map(str::to_string)],
+                    markers,
+                    "{expression}, marker_on_left={marker_on_left}, null_key={null_key}"
+                );
+            }
+        }
+    }
 }
