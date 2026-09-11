@@ -1,0 +1,32 @@
+src/operator/src/batcher.rs
+  h_623774b620da8e 1-41
+src/operator/src/lib.rs
+  h_623774b620da8e 15
+src/servers/Cargo.toml
+  h_623774b620da8e 164
+src/servers/src/batcher.rs
+  h_623774b620da8e 20
+src/servers/src/batcher/table.rs
+  h_623774b620da8e 1-706
+src/servers/src/batcher/table/batch.rs
+  h_623774b620da8e 1-150
+src/servers/src/batcher/table/flow_notifier.rs
+  h_623774b620da8e 1-174
+src/servers/src/batcher/table/metrics.rs
+  h_623774b620da8e 1-64
+src/servers/src/batcher/table/pending_batch.rs
+  h_623774b620da8e 1-96
+src/servers/src/batcher/table/pending_worker.rs
+  h_623774b620da8e 1-166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "3c76b25c8cc845769532325da97ce634908f5d4d",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
