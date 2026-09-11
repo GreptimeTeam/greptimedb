@@ -24,6 +24,9 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::{info, warn};
 use meta_client::MetaClientOptions;
+use servers::batcher::logical_table::{
+    LogicalTablePendingRowsBatcher, pending_rows_batch_sync_enabled,
+};
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::flight::FlightCraftRef;
@@ -38,7 +41,6 @@ use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
-use servers::pending_rows_batcher::{PendingRowsBatcher, pending_rows_batch_sync_enabled};
 use servers::postgres::PostgresServer;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::{Server, ServerHandlers};
@@ -129,7 +131,7 @@ where
 
         if opts.prom_store.enable {
             let pending_rows_batcher = if opts.prom_store.with_metric_engine {
-                PendingRowsBatcher::try_new(
+                LogicalTablePendingRowsBatcher::try_new(
                     self.instance.partition_manager().clone(),
                     self.instance.node_manager().clone(),
                     self.instance.catalog_manager().clone(),
@@ -563,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_effective_http_timeout_skips_fallback_when_batcher_disabled() {
-        // Mirrors the conditions under which `PendingRowsBatcher::try_new`
+        // Mirrors the conditions under which `LogicalTablePendingRowsBatcher::try_new`
         // returns `None`; in these cases no request can wait for a pending-row
         // flush, so the timeout must not be raised.
         type KnobMutator = fn(&mut FrontendOptions);

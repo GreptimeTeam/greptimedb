@@ -27,6 +27,7 @@ pub(crate) mod elasticsearch;
 pub mod error;
 pub mod grpc;
 
+pub mod batcher;
 mod hint_headers;
 pub mod http;
 pub mod influxdb;
@@ -37,7 +38,6 @@ pub mod mysql;
 pub mod opentsdb;
 pub mod otel_arrow;
 pub mod otlp;
-pub mod pending_rows_batcher;
 mod pipeline;
 pub mod postgres;
 pub mod prom_remote_write;
