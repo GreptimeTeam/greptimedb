@@ -323,10 +323,23 @@ impl Inserter {
                 .unwrap_or_default()
         });
         validate_column_count_match(&requests)?;
+        if requests.inserts.is_empty() {
+            return Ok(Output::new_with_affected_rows(0));
+        }
+        let timestamp_datatype =
+            metric_timestamp_datatype(requests.inserts.iter().map(|request| {
+                let rows = request.rows.as_ref().unwrap();
+                (request.table_name.as_str(), rows.schema.as_slice())
+            }))?;
 
         // check and create physical table
-        self.create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
-            .await?;
+        self.create_physical_table_on_demand(
+            &ctx,
+            physical_table.clone(),
+            timestamp_datatype,
+            statement_executor,
+        )
+        .await?;
 
         // check and create logical tables
         let CreateAlterTableResult {
@@ -519,6 +532,17 @@ impl Inserter {
         } else {
             None
         })
+    }
+
+    /// Ensures automatic table creation and schema evolution are allowed for the request.
+    pub fn ensure_auto_create_allowed(&self, ctx: &QueryContextRef) -> Result<()> {
+        if let Some(reason) = self.auto_create_disabled_reason(ctx)? {
+            return InvalidInsertRequestSnafu {
+                reason: reason.to_string(),
+            }
+            .fail();
+        }
+        Ok(())
     }
 
     /// Returns whether a private system table may infer and reconcile its schema
@@ -893,6 +917,7 @@ impl Inserter {
         &self,
         ctx: &QueryContextRef,
         physical_table: String,
+        timestamp_datatype: ColumnDataType,
         statement_executor: &StatementExecutor,
     ) -> Result<()> {
         let catalog_name = ctx.current_catalog();
@@ -924,7 +949,7 @@ impl Inserter {
         let default_schema = vec![
             ColumnSchema {
                 column_name: greptime_timestamp().to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as _,
+                datatype: timestamp_datatype as _,
                 semantic_type: SemanticType::Timestamp as _,
                 datatype_extension: None,
                 options: None,
@@ -1278,6 +1303,70 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     Ok(())
 }
 
+fn metric_table_timestamp_datatype(
+    table_name: &str,
+    schema: &[ColumnSchema],
+) -> Result<ColumnDataType> {
+    let mut timestamp_columns = schema
+        .iter()
+        .filter(|column| column.semantic_type == SemanticType::Timestamp as i32);
+    let timestamp_column = timestamp_columns
+        .next()
+        .with_context(|| InvalidInsertRequestSnafu {
+            reason: format!("Metric table `{table_name}` must have exactly one timestamp column"),
+        })?;
+    ensure!(
+        timestamp_columns.next().is_none(),
+        InvalidInsertRequestSnafu {
+            reason: format!("Metric table `{table_name}` must have exactly one timestamp column"),
+        }
+    );
+
+    let datatype = ColumnDataType::try_from(timestamp_column.datatype)
+        .ok()
+        .with_context(|| InvalidInsertRequestSnafu {
+            reason: format!(
+                "Metric table `{table_name}` has unsupported timestamp datatype {}",
+                timestamp_column.datatype
+            ),
+        })?;
+    ensure!(
+        matches!(
+            datatype,
+            ColumnDataType::TimestampMillisecond | ColumnDataType::TimestampNanosecond
+        ),
+        InvalidInsertRequestSnafu {
+            reason: format!(
+                "Metric table `{table_name}` has unsupported timestamp datatype {}",
+                timestamp_column.datatype
+            ),
+        }
+    );
+    Ok(datatype)
+}
+
+/// Validates metric table timestamp schemas and returns their common datatype.
+pub fn metric_timestamp_datatype<'a>(
+    tables: impl IntoIterator<Item = (&'a str, &'a [ColumnSchema])>,
+) -> Result<ColumnDataType> {
+    let mut operation_datatype = None;
+    for (table_name, schema) in tables {
+        let datatype = metric_table_timestamp_datatype(table_name, schema)?;
+        ensure!(
+            operation_datatype.is_none_or(|expected| expected == datatype),
+            InvalidInsertRequestSnafu {
+                reason: "Metric tables in one batch must use the same timestamp datatype"
+                    .to_string(),
+            }
+        );
+        operation_datatype = Some(datatype);
+    }
+
+    operation_datatype.with_context(|| InvalidInsertRequestSnafu {
+        reason: "Metric table batch has no schemas".to_string(),
+    })
+}
+
 /// Fill table options for a new table by create type.
 pub fn fill_table_options_for_create(
     table_options: &mut std::collections::HashMap<String, String>,
@@ -1560,6 +1649,65 @@ mod tests {
 
     use super::*;
     use crate::tests::{create_partition_rule_manager, prepare_mocked_backend};
+
+    fn metric_schema(timestamp_datatype: ColumnDataType) -> Vec<api::v1::ColumnSchema> {
+        vec![time_index_column_schema("ts", timestamp_datatype)]
+    }
+
+    #[test]
+    fn test_metric_timestamp_datatype_derivation() {
+        for datatype in [
+            ColumnDataType::TimestampNanosecond,
+            ColumnDataType::TimestampMillisecond,
+        ] {
+            let first = metric_schema(datatype);
+            let second = metric_schema(datatype);
+            assert_eq!(
+                datatype,
+                metric_timestamp_datatype([
+                    ("metric_0", first.as_slice()),
+                    ("metric_1", second.as_slice()),
+                ])
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_metric_timestamp_datatype_rejects_mixed_units() {
+        let milliseconds = metric_schema(ColumnDataType::TimestampMillisecond);
+        let nanoseconds = metric_schema(ColumnDataType::TimestampNanosecond);
+
+        assert!(matches!(
+            metric_timestamp_datatype([
+                ("milliseconds", milliseconds.as_slice()),
+                ("nanoseconds", nanoseconds.as_slice()),
+            ]),
+            Err(crate::error::Error::InvalidInsertRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn test_metric_timestamp_datatype_rejects_malformed_schemas() {
+        let missing = vec![];
+        let mut multiple = metric_schema(ColumnDataType::TimestampMillisecond);
+        multiple.push(time_index_column_schema(
+            "another_ts",
+            ColumnDataType::TimestampMillisecond,
+        ));
+        let unsupported = metric_schema(ColumnDataType::TimestampMicrosecond);
+
+        for (table_name, schema) in [
+            ("missing", missing.as_slice()),
+            ("multiple", multiple.as_slice()),
+            ("unsupported", unsupported.as_slice()),
+        ] {
+            assert!(matches!(
+                metric_timestamp_datatype([(table_name, schema)]),
+                Err(crate::error::Error::InvalidInsertRequest { .. })
+            ));
+        }
+    }
 
     fn make_table_ref_with_schema(
         ts_name: &str,

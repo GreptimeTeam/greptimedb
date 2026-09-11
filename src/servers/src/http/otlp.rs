@@ -46,6 +46,7 @@ use crate::http::extractor::{
 };
 use crate::http::header::{CONTENT_TYPE_PROTOBUF, write_cost_header_map};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
+use crate::pending_rows_batcher::MetricRowBatcherRef;
 use crate::query_handler::{
     MetricsIngestOutcome, OpenTelemetryProtocolHandlerRef, PipelineHandler, TraceIngestOutcome,
 };
@@ -79,6 +80,7 @@ pub struct OtlpState {
     pub with_metric_engine: bool,
     pub experimental_enable_exponential_histogram: bool,
     pub handler: OpenTelemetryProtocolHandlerRef,
+    pub metric_row_batcher: Option<MetricRowBatcherRef>,
 }
 
 #[axum_macros::debug_handler]
@@ -110,6 +112,7 @@ pub async fn metrics(
         with_metric_engine,
         experimental_enable_exponential_histogram,
         handler,
+        metric_row_batcher,
     } = state;
 
     query_ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
@@ -126,7 +129,10 @@ pub async fn metrics(
     }));
     let query_ctx = Arc::new(query_ctx);
 
-    match handler.metrics(request, query_ctx).await {
+    match handler
+        .metrics(request, metric_row_batcher, query_ctx)
+        .await
+    {
         Ok(outcome) => {
             if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
                 Ok(OtlpMetricsResponse::Failure(outcome))

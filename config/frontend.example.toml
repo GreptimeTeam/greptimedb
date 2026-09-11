@@ -52,8 +52,9 @@ default_column_prefix = "greptime"
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
-## When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the
-## `prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value.
+## When synchronous pending-row batching serves an enabled Prometheus or OTLP HTTP endpoint,
+## a nonzero timeout less than or equal to `prom_store.pending_rows_flush_interval` plus 1 second
+## is adjusted to that value.
 timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
@@ -235,6 +236,14 @@ enable = true
 [otlp]
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
+## Enable pending-row batching for eligible OTLP metrics over HTTP and OTel Arrow.
+## Disabled by default. Requires Metric Engine, valid nonzero `prom_store.pending_rows_*` tuning,
+## and `PENDING_ROWS_BATCH_SYNC=true`; otherwise requests use the original Inserter path.
+## Legacy OTLP metric tables and ineligible converted request shapes, such as native histograms or
+## mixed scalar/histogram requests, fall back to the Inserter.
+## This startup option requires a restart. Before disabling it, drain pending rows and inflight
+## requests. A failed multi-region flush may partially write rows, so retries can create duplicates.
+enable_metrics_batching = false
 ## Experimental: enable cumulative OTLP exponential histogram ingestion.
 experimental_enable_exponential_histogram = false
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
@@ -258,7 +267,7 @@ prom_validation_mode = "strict"
 ## Experimental: enable Prometheus remote write v2 native histogram ingestion.
 experimental_enable_prometheus_native_histogram = false
 ## Interval to flush pending rows batcher.
-## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
+## Set to "0s" to disable batching for Prometheus Remote Write and force OTLP to use its Inserter.
 #+pending_rows_flush_interval = "0s"
 ## Max rows per pending batch before triggering a flush.
 #+max_batch_rows = 100000

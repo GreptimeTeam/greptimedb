@@ -72,9 +72,11 @@ fn test_raw_delta_sum_identity_and_stale_marker() {
         })),
         ..Default::default()
     };
-    let conversion =
-        to_grpc_insert_requests(metrics_request(vec![metric]), &mut OtlpMetricCtx::default())
-            .unwrap();
+    let request = metrics_request(vec![metric]);
+    let direct = try_to_scalar_record_batches(&request, &OtlpMetricCtx::default())
+        .unwrap()
+        .unwrap();
+    let conversion = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
 
     assert_eq!(3, conversion.outcome.accepted_data_points);
     assert_eq!(0, conversion.outcome.rejected_data_points);
@@ -105,6 +107,33 @@ fn test_raw_delta_sum_identity_and_stale_marker() {
             row.values[host].value_data.as_ref()
         );
     }
+
+    let (_, direct_schema, direct_batch) = direct
+        .batches
+        .into_iter()
+        .find(|batch| batch.table_name() == "requests_total")
+        .unwrap()
+        .into_parts();
+    assert_eq!(rows.schema, direct_schema);
+    let values = direct_batch
+        .column_by_name(greptime_value())
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(10.0, values.value(0));
+    assert_eq!(20.5, values.value(1));
+    assert_eq!(PROMETHEUS_STALE_NAN_BITS, values.value(2).to_bits());
+    let temporalities = direct_batch
+        .column_by_name(OTLP_AGGREGATION_TEMPORALITY_LABEL)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(
+        vec![GREPTIME_TEMPORALITY_DELTA; 3],
+        temporalities.iter().map(Option::unwrap).collect::<Vec<_>>()
+    );
 
     for temporality in [
         AggregationTemporality::Cumulative as i32,

@@ -33,7 +33,7 @@
 | `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous pending-row batching serves an enabled Prometheus or OTLP HTTP endpoint,<br/>a nonzero timeout less than or equal to `prom_store.pending_rows_flush_interval` plus 1 second<br/>is adjusted to that value. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -78,6 +78,7 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
+| `otlp.enable_metrics_batching` | Bool | `false` | Enable pending-row batching for eligible OTLP metrics over HTTP and OTel Arrow.<br/>Disabled by default. Requires Metric Engine, valid nonzero `prom_store.pending_rows_*` tuning,<br/>and `PENDING_ROWS_BATCH_SYNC=true`; otherwise requests use the original Inserter path.<br/>Legacy OTLP metric tables and ineligible converted request shapes, such as native histograms or<br/>mixed scalar/histogram requests, fall back to the Inserter.<br/>This startup option requires a restart. Before disabling it, drain pending rows and inflight<br/>requests. A failed multi-region flush may partially write rows, so retries can create duplicates. |
 | `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
@@ -86,7 +87,7 @@
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
 | `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
-| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
+| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching for Prometheus Remote Write and force OTLP to use its Inserter. |
 | `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
 | `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
 | `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
@@ -272,7 +273,7 @@
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous pending-row batching serves an enabled Prometheus or OTLP HTTP endpoint,<br/>a nonzero timeout less than or equal to `prom_store.pending_rows_flush_interval` plus 1 second<br/>is adjusted to that value. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -329,6 +330,7 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
+| `otlp.enable_metrics_batching` | Bool | `false` | Enable pending-row batching for eligible OTLP metrics over HTTP and OTel Arrow.<br/>Disabled by default. Requires Metric Engine, valid nonzero `prom_store.pending_rows_*` tuning,<br/>and `PENDING_ROWS_BATCH_SYNC=true`; otherwise requests use the original Inserter path.<br/>Legacy OTLP metric tables and ineligible converted request shapes, such as native histograms or<br/>mixed scalar/histogram requests, fall back to the Inserter.<br/>This startup option requires a restart. Before disabling it, drain pending rows and inflight<br/>requests. A failed multi-region flush may partially write rows, so retries can create duplicates. |
 | `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
@@ -337,7 +339,7 @@
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
 | `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
-| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
+| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching for Prometheus Remote Write and force OTLP to use its Inserter. |
 | `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
 | `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
 | `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |

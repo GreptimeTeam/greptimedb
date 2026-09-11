@@ -65,7 +65,7 @@ mod test {
         let mut output = instance
             .do_query(
                 "CREATE TABLE fixed_delta_total (\
-                 \"stream\" STRING, greptime_timestamp TIMESTAMP(3) NOT NULL, \
+                 \"stream\" STRING, greptime_timestamp TIMESTAMP(9) NOT NULL, \
                  greptime_value DOUBLE, TIME INDEX (greptime_timestamp), \
                  PRIMARY KEY (\"stream\")) ENGINE=mito",
                 ctx.clone(),
@@ -77,6 +77,7 @@ mod test {
         let error = instance
             .metrics(
                 build_sum_request("fixed.delta", AggregationTemporality::Delta, &[(60, 10)]),
+                None,
                 ctx.clone(),
             )
             .await
@@ -116,13 +117,13 @@ mod test {
             .is_ok()
         );
 
-        let resp = instance.metrics(req, ctx.clone()).await;
+        let resp = instance.metrics(req, None, ctx.clone()).await;
         assert!(resp.is_ok());
 
         let mut output = instance
             .do_query(
                 "CREATE TABLE raw_delta_mito_total (\
-                 \"stream\" STRING, greptime_timestamp TIMESTAMP(3) NOT NULL, \
+                 \"stream\" STRING, greptime_timestamp TIMESTAMP(9) NOT NULL, \
                  greptime_value DOUBLE, TIME INDEX (greptime_timestamp), \
                  PRIMARY KEY (\"stream\")) ENGINE=mito",
                 ctx.clone(),
@@ -144,7 +145,7 @@ mod test {
                 ),
                 build_sum_request(metric, AggregationTemporality::Cumulative, &[(180, 30)]),
             ] {
-                let result = instance.metrics(request, ctx.clone()).await;
+                let result = instance.metrics(request, None, ctx.clone()).await;
                 assert!(result.is_ok(), "{metric}: {result:?}");
             }
 
@@ -203,7 +204,7 @@ mod test {
                 unreachable!()
             };
             sum.data_points[0].flags = DataPointFlags::NoRecordedValueMask as u32;
-            assert!(instance.metrics(stale, ctx.clone()).await.is_ok());
+            assert!(instance.metrics(stale, None, ctx.clone()).await.is_ok());
 
             for (matcher, expected_rows) in [
                 ("otlp_aggregation_temporality=\"delta\"", 0),
@@ -250,7 +251,10 @@ mod test {
                 ..Default::default()
             }],
         };
-        let outcome = instance.metrics(malformed, ctx.clone()).await.unwrap();
+        let outcome = instance
+            .metrics(malformed, None, ctx.clone())
+            .await
+            .unwrap();
         assert_eq!(0, outcome.accepted_data_points);
         assert_eq!(1, outcome.rejected_data_points);
         assert!(
@@ -311,6 +315,7 @@ mod test {
             let outcome = instance
                 .metrics(
                     build_histogram_request("raw.delta.histogram", points),
+                    None,
                     ctx.clone(),
                 )
                 .await
@@ -399,12 +404,12 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+----------------+---------------------+----------------+
-| container_name | greptime_timestamp  | greptime_value |
-+----------------+---------------------+----------------+
-| testserver     | 1970-01-01T00:00:00 | 105.0          |
-| testsevrer     | 1970-01-01T00:00:00 | 100.0          |
-+----------------+---------------------+----------------+",
++----------------+-------------------------------+----------------+
+| container_name | greptime_timestamp            | greptime_value |
++----------------+-------------------------------+----------------+
+| testsevrer     | 1970-01-01T00:00:00.000000100 | 100.0          |
+| testserver     | 1970-01-01T00:00:00.000000105 | 105.0          |
++----------------+-------------------------------+----------------+",
         );
 
         let mut output = instance
@@ -444,11 +449,11 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+---------------------+----------------+
-| host       | greptime_timestamp  | greptime_value |
-+------------+---------------------+----------------+
-| testserver | 1970-01-01T00:00:00 | 51.0           |
-+------------+---------------------+----------------+",
++------------+-------------------------------+----------------+
+| host       | greptime_timestamp            | greptime_value |
++------------+-------------------------------+----------------+
+| testserver | 1970-01-01T00:00:00.000000100 | 51.0           |
++------------+-------------------------------+----------------+",
         );
 
         let mut output = instance
@@ -465,11 +470,11 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+------------+---------------------+----------------+
-| host       | greptime_timestamp  | greptime_value |
-+------------+---------------------+----------------+
-| testserver | 1970-01-01T00:00:00 | 4.0            |
-+------------+---------------------+----------------+",
++------------+-------------------------------+----------------+
+| host       | greptime_timestamp            | greptime_value |
++------------+-------------------------------+----------------+
+| testserver | 1970-01-01T00:00:00.000000100 | 4.0            |
++------------+-------------------------------+----------------+",
         );
     }
 

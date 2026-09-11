@@ -37,7 +37,8 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
-    build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
+    build_create_table_expr, fill_table_options_for_create, metric_timestamp_datatype,
+    parse_per_table_semantic_index,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -293,13 +294,19 @@ impl PendingRowsSchemaAlterer for Instance {
         if tables.is_empty() {
             return Ok(());
         }
+        self.inserter
+            .ensure_auto_create_allowed(&ctx)
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
 
         let create_type = auto_create_table_type_for_prom_remote_write(&ctx, with_metric_engine);
         if let Some(physical_table) = required_physical_table_for_create_type(&create_type) {
+            let timestamp_datatype = metric_timestamp_datatype_for_server(tables.iter().copied())?;
             self.create_metric_physical_table_if_missing(
                 catalog,
                 schema,
                 physical_table,
+                timestamp_datatype,
                 ctx.clone(),
             )
             .await?;
@@ -387,7 +394,7 @@ impl PendingRowsSchemaAlterer for Instance {
         Ok(())
     }
 
-    async fn add_missing_prom_tag_columns_batch(
+    async fn add_missing_metric_tag_columns_batch(
         &self,
         catalog: &str,
         schema: &str,
@@ -397,6 +404,10 @@ impl PendingRowsSchemaAlterer for Instance {
         if tables.is_empty() {
             return Ok(());
         }
+        self.inserter
+            .ensure_auto_create_allowed(&ctx)
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
 
         let alter_exprs: Vec<AlterTableExpr> = tables
             .iter()
@@ -656,6 +667,7 @@ impl Instance {
         catalog: &str,
         schema: &str,
         physical_table: &str,
+        timestamp_datatype: ColumnDataType,
         ctx: QueryContextRef,
     ) -> ServerResult<()> {
         let table = self
@@ -669,22 +681,7 @@ impl Instance {
         }
 
         let table_ref = TableReference::full(catalog, schema, physical_table);
-        let default_schema = vec![
-            api::v1::ColumnSchema {
-                column_name: common_query::prelude::greptime_timestamp().to_string(),
-                datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
-                semantic_type: api::v1::SemanticType::Timestamp as i32,
-                datatype_extension: None,
-                options: None,
-            },
-            api::v1::ColumnSchema {
-                column_name: common_query::prelude::greptime_value().to_string(),
-                datatype: api::v1::ColumnDataType::Float64 as i32,
-                semantic_type: api::v1::SemanticType::Field as i32,
-                datatype_extension: None,
-                options: None,
-            },
-        ];
+        let default_schema = metric_physical_table_schema(timestamp_datatype);
         let mut create_table_expr = build_create_table_expr(
             &table_ref,
             &default_schema,
@@ -703,6 +700,33 @@ impl Instance {
 
         Ok(())
     }
+}
+
+fn metric_timestamp_datatype_for_server<'a>(
+    tables: impl IntoIterator<Item = (&'a str, &'a [api::v1::ColumnSchema])>,
+) -> ServerResult<ColumnDataType> {
+    metric_timestamp_datatype(tables)
+        .map_err(BoxedError::new)
+        .context(error::ExecuteGrpcQuerySnafu)
+}
+
+fn metric_physical_table_schema(timestamp_datatype: ColumnDataType) -> Vec<api::v1::ColumnSchema> {
+    vec![
+        api::v1::ColumnSchema {
+            column_name: common_query::prelude::greptime_timestamp().to_string(),
+            datatype: timestamp_datatype as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            datatype_extension: None,
+            options: None,
+        },
+        api::v1::ColumnSchema {
+            column_name: common_query::prelude::greptime_value().to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            datatype_extension: None,
+            options: None,
+        },
+    ]
 }
 
 /// This handler is mainly used for `frontend` or `standalone` to directly import
@@ -794,9 +818,50 @@ mod tests {
     use std::sync::Arc;
 
     use api::prom_store::remote::LabelMatcher;
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use session::context::QueryContext;
 
     use super::*;
+
+    fn metric_schema(timestamp_datatype: ColumnDataType) -> Vec<api::v1::ColumnSchema> {
+        vec![api::v1::ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: timestamp_datatype as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            datatype_extension: None,
+            options: None,
+        }]
+    }
+
+    #[test]
+    fn test_metric_physical_schema_uses_derived_nanosecond_timestamp() {
+        let first = metric_schema(ColumnDataType::TimestampNanosecond);
+        let second = metric_schema(ColumnDataType::TimestampNanosecond);
+        let tables = [("first", first.as_slice()), ("second", second.as_slice())];
+
+        let datatype = metric_timestamp_datatype_for_server(tables).unwrap();
+        let physical_schema = metric_physical_table_schema(datatype);
+
+        assert_eq!(ColumnDataType::TimestampNanosecond, datatype);
+        assert_eq!(
+            ColumnDataType::TimestampNanosecond as i32,
+            physical_schema[0].datatype
+        );
+    }
+
+    #[test]
+    fn test_invalid_metric_timestamp_schema_preserves_client_error() {
+        let error =
+            metric_timestamp_datatype_for_server([("missing_timestamp", &[][..])]).unwrap_err();
+
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert!(
+            error.output_msg().contains(
+                "Metric table `missing_timestamp` must have exactly one timestamp column"
+            )
+        );
+    }
 
     #[test]
     fn test_auto_create_table_type_for_prom_remote_write_metric_engine() {

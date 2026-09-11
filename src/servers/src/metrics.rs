@@ -48,6 +48,7 @@ pub(crate) const METRIC_VERSION_LABEL: &str = "version";
 
 pub(crate) const METRIC_SUCCESS_VALUE: &str = "success";
 pub(crate) const METRIC_FAILURE_VALUE: &str = "failure";
+pub(crate) const METRIC_CANCELLED_VALUE: &str = "cancelled";
 
 lazy_static! {
 
@@ -192,6 +193,27 @@ lazy_static! {
         vec![0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
     )
     .unwrap();
+    pub static ref METRIC_ROW_BATCH_SUBMISSIONS: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_metric_row_batch_submissions_total",
+        "Total metric row batch submissions",
+        &[METRIC_PROTOCOL_LABEL]
+    )
+    .unwrap();
+    pub static ref METRIC_ROW_BATCH_ELIGIBILITY_FALLBACKS: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_servers_metric_row_batch_eligibility_fallbacks_total",
+            "Total metric requests that fell back because their rows were not batchable",
+            &[METRIC_PROTOCOL_LABEL]
+        )
+        .unwrap();
+    pub static ref METRIC_ROW_BATCH_WAIT_FLUSH_RESULT_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_metric_row_batch_wait_flush_result_elapsed",
+            "Elapsed time waiting for metric row batch flush results in seconds by result",
+            &[METRIC_PROTOCOL_LABEL, METRIC_RESULT_LABEL],
+            vec![0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+        )
+        .unwrap();
     /// Http prometheus read duration per database.
     pub static ref METRIC_HTTP_PROM_STORE_READ_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_prometheus_read_elapsed",

@@ -73,7 +73,7 @@ use crate::http::result::null_result::NullResponse;
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
-use crate::pending_rows_batcher::PendingRowsBatcher;
+use crate::pending_rows_batcher::MetricRowBatcherRef;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -683,7 +683,7 @@ impl HttpServerBuilder {
         prom_store_with_metric_engine: bool,
         prom_validation_mode: PromValidationMode,
         experimental_enable_prometheus_native_histogram: bool,
-        pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+        pending_rows_batcher: Option<MetricRowBatcherRef>,
     ) -> Self {
         let state = PromStoreState {
             prom_store_handler: handler,
@@ -718,15 +718,40 @@ impl HttpServerBuilder {
         handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
         experimental_enable_exponential_histogram: bool,
+        metric_row_batcher: Option<MetricRowBatcherRef>,
     ) -> Self {
+        let state = OtlpState {
+            with_metric_engine,
+            experimental_enable_exponential_histogram,
+            handler,
+            metric_row_batcher,
+        };
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                HttpServer::route_otlp(
-                    handler,
-                    with_metric_engine,
-                    experimental_enable_exponential_histogram,
-                ),
+                HttpServer::route_otlp(state),
+            ),
+            ..self
+        }
+    }
+
+    pub fn with_otlp_metrics_handler(
+        self,
+        handler: OpenTelemetryProtocolHandlerRef,
+        with_metric_engine: bool,
+        experimental_enable_exponential_histogram: bool,
+        metric_row_batcher: Option<MetricRowBatcherRef>,
+    ) -> Self {
+        let state = OtlpState {
+            with_metric_engine,
+            experimental_enable_exponential_histogram,
+            handler,
+            metric_row_batcher,
+        };
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/otlp"),
+                HttpServer::route_otlp_metrics(state),
             ),
             ..self
         }
@@ -1390,11 +1415,7 @@ impl HttpServer {
             .with_state(opentsdb_handler)
     }
 
-    fn route_otlp<S>(
-        otlp_handler: OpenTelemetryProtocolHandlerRef,
-        with_metric_engine: bool,
-        experimental_enable_exponential_histogram: bool,
-    ) -> Router<S> {
+    fn route_otlp<S>(state: OtlpState) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
@@ -1403,11 +1424,17 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
-            .with_state(OtlpState {
-                with_metric_engine,
-                experimental_enable_exponential_histogram,
-                handler: otlp_handler,
-            })
+            .with_state(state)
+    }
+
+    fn route_otlp_metrics<S>(state: OtlpState) -> Router<S> {
+        Router::new()
+            .route("/v1/metrics", routing::post(otlp::metrics))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(state)
     }
 
     fn route_config<S>(state: GreptimeOptionsConfigState) -> Router<S> {
