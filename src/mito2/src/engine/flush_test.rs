@@ -27,6 +27,7 @@ use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use parquet::basic::{Encoding, Type as PhysicalType};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::ManifestVersion;
@@ -279,7 +280,9 @@ async fn test_manual_flush_with_format(flat_format: bool) {
         )
         .await;
 
-    let request = CreateRequestBuilder::new().build();
+    let request = CreateRequestBuilder::new()
+        .insert_option("experimental_sst_float_field_encoding", "byte_stream_split")
+        .build();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -294,6 +297,38 @@ async fn test_manual_flush_with_format(flat_format: bool) {
     put_rows(&engine, region_id, rows).await;
 
     flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let file = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("flushed SST")
+        .clone();
+    let reader = region
+        .access_layer
+        .read_sst(file)
+        .build()
+        .await
+        .unwrap()
+        .expect("flushed SST reader");
+    assert!(
+        reader
+            .parquet_metadata()
+            .row_groups()
+            .iter()
+            .flat_map(|row_group| row_group.columns())
+            .any(|column| {
+                column.column_path().string() == "field_0"
+                    && column.column_type() == PhysicalType::DOUBLE
+                    && column
+                        .encodings()
+                        .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+            })
+    );
 
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).await.unwrap();

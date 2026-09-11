@@ -16,6 +16,7 @@
 """Coverage for query-regression case group selection."""
 
 import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -35,6 +36,7 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
             runner.split_cases(["all"]),
             [
                 "tests/perf/query_cases/smoke_direct_sst/case.toml",
+                "tests/perf/query_cases/sst_float_bss/case.toml",
                 "tests/perf/query_cases/prom_remote_write_seeded_random/case.toml",
                 "tests/perf/query_cases/prom_remote_write_run_heavy/case.toml",
                 "tests/perf/query_cases/prom_remote_write_mixed_every/case.toml",
@@ -45,8 +47,8 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
             ],
         )
 
-    def test_implicit_selection_has_eight_routine_cases(self) -> None:
-        self.assertEqual(len(runner.DEFAULT_CASES), 8)
+    def test_implicit_selection_has_nine_routine_cases(self) -> None:
+        self.assertEqual(len(runner.DEFAULT_CASES), 9)
         self.assertEqual(runner.split_cases([]), runner.DEFAULT_CASES)
 
     def test_heavy_selects_only_remote_write_7913(self) -> None:
@@ -58,6 +60,23 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
     def test_explicit_paths_remain_selectable(self) -> None:
         case = "tests/perf/query_cases/sql_topk_order_by/case.toml"
         self.assertEqual(runner.split_cases([case]), [case])
+
+    def test_sst_float_bss_omits_base_encoding_for_older_binaries(self) -> None:
+        case_path = Path(__file__).parent / "query_cases/sst_float_bss/case.toml"
+        setup_sql = dict(re.findall(
+            r'(base|candidate)_setup_sql = \[\s*"([^"\n]+)"',
+            case_path.read_text(),
+        ))
+        base_setup = setup_sql["base"]
+        candidate_setup = setup_sql["candidate"]
+        candidate_option = "'experimental_sst_float_field_encoding'='byte_stream_split'"
+
+        self.assertNotIn("experimental_sst_float_field_encoding", base_setup)
+        self.assertIn(candidate_option, candidate_setup)
+        self.assertEqual(
+            base_setup,
+            candidate_setup.replace(f", {candidate_option}", ""),
+        )
 
 
 if __name__ == "__main__":

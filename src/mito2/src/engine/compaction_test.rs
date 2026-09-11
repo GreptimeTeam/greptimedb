@@ -26,6 +26,7 @@ use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
+use parquet::basic::{Encoding, Type as PhysicalType};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
@@ -954,6 +955,7 @@ async fn test_compaction_region_with_format(flat_format: bool) {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
+        .insert_option("experimental_sst_float_field_encoding", "byte_stream_split")
         .build();
 
     let column_schemas = request
@@ -973,6 +975,35 @@ async fn test_compaction_region_with_format(flat_format: bool) {
     put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
 
     compact(&engine, region_id).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let file = region.version().ssts.levels()[1]
+        .files
+        .values()
+        .next()
+        .expect("compaction output SST")
+        .clone();
+    let reader = region
+        .access_layer
+        .read_sst(file)
+        .build()
+        .await
+        .unwrap()
+        .expect("compaction output SST reader");
+    assert!(
+        reader
+            .parquet_metadata()
+            .row_groups()
+            .iter()
+            .flat_map(|row_group| row_group.columns())
+            .any(|column| {
+                column.column_path().string() == "field_0"
+                    && column.column_type() == PhysicalType::DOUBLE
+                    && column
+                        .encodings()
+                        .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+            })
+    );
 
     let scanner = engine
         .scanner(region_id, ScanRequest::default())

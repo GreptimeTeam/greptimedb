@@ -86,15 +86,19 @@ sample values without changing label cardinality or the runner lifecycle:
 [scenario.remote_write.value]
 pattern = "quantized_signal" # linear, constant, modulo, unique, seeded_random,
                               # run_length, quantized_signal,
-                              # signal_with_sporadic_stalls, mixed_signal_repeated
+                              # signal_with_sporadic_stalls, mixed_signal_repeated,
+                              # bounded_mixed
 base = 0.0
 step = 0.125
-cardinality = 4096           # buckets for modulo/seeded_random/quantized_signal/run_length
-seed = 12345                 # deterministic seeded_random input
-run_length = 8               # adjacent samples per bucket for run_length/quantized_signal
+cardinality = 4096           # buckets for modulo/seeded_random/quantized_signal/run_length;
+                              # baseline buckets for bounded_mixed
+seed = 12345                 # deterministic seeded_random input and bounded_mixed series hash
+run_length = 8               # adjacent samples per bucket for run_length/quantized_signal;
+                              # interpolation interval for bounded_mixed
 stall_every = 100            # interval for signal_with_sporadic_stalls
 stall_length = 16            # held samples inside each stall interval
-mixed_every = 5              # every Nth sample becomes the repeated base value
+mixed_every = 5              # every Nth sample becomes the repeated base value;
+                              # one fractional bounded_mixed series per N series
 ```
 
 The default `linear` pattern preserves the helper's historical formula. Use
@@ -103,12 +107,29 @@ data shapes, `run_length` for run-heavy low-cardinality series, `quantized_signa
 for signal-like values collapsed into a finite bucket set, `signal_with_sporadic_stalls`
 for mostly continuous signals with periodic flat spots, and `mixed_signal_repeated`
 for signal-plus-periodic-default mixtures. `unique` or high-cardinality buckets
-still work for broad sample-value distributions. This is a generic sample-value
-control for query/ingestion cases; it does not inspect or assert storage
-encoding, Parquet footers, or storage policy choices. For chunked remote-write
-ingestion, the runner passes the sample offset and total sample count to the
-helper so non-linear value patterns use a stable global/per-series ordinal across
-chunks.
+still work for broad sample-value distributions.
+
+`bounded_mixed` is synthetic rather than an empirical workload. For series `s`,
+`h = splitmix64(s ^ seed)` selects a span from `[10, 1_000, 100_000, 10_000_000]`
+using its top two bits, multiplied by `1 + ((h >> 32) % 10)`. Its baseline is
+`(h % max(cardinality, 1)) * span / 10`. Ranges can overlap. At local sample
+`l = sample_offset + sample_idx`, it linearly interpolates hash-derived anchors
+in `[-span + 1, span - 1]`, changing anchors every `max(run_length, 1)` samples.
+It applies `base + step * signal`, then rounds to an integer. Every
+`max(mixed_every, 1)`-th series adds a hash-derived fraction from `1/1000` to
+`999/1000`. The 95/5 finite, nonintegral guarantee applies to the case's bounded
+parameters, not arbitrary huge or nonfinite base/step inputs. With `base = 0`
+and `step = 1`, output lies within `baseline ± span`, allowing one unit for
+rounding and the fractional addition. The explicit case uses 1,000 equal-length
+series and `mixed_every = 20`, giving exactly 95% integer-valued and 5%
+fractional Float64 samples. Its ranges and temporal shape are synthetic design
+parameters, not measured properties from the survey.
+
+This is a generic sample-value control for query/ingestion cases; it does not
+inspect or assert storage encoding, Parquet footers, or storage policy choices.
+For chunked remote-write ingestion, the runner passes the sample offset and total
+sample count to the helper so non-linear value patterns use a stable global/per-series
+ordinal across chunks.
 
 Case schema, value distribution defaults, storage defaults, and read-bench
 defaults are owned by Rust. The outer CI driver calls
@@ -162,12 +183,15 @@ measures region scan cost, and query measurements still exercise the SQL/TQL
 frontend path. Treat all performance conclusions as release-only; debug builds
 are suitable only for command wiring and correctness checks.
 
-`prepare-remote` creates the configured database if needed. The outer driver writes a per-target
-frontend config enabling `[prom_store]` with metric engine storage and a non-zero
-`pending_rows_flush_interval`, and validates that the logical metric table reaches
-`series_count * samples_per_series` rows before trusting the query measurements.
-Use `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper
-to the outer driver.
+`prepare-remote` creates the configured database if needed. A remote-write case
+can provide `base_setup_sql` and `candidate_setup_sql` lists; each target runs its
+own complete statements in order after database creation and before ingestion.
+The outer driver writes a per-target frontend config enabling `[prom_store]` with
+metric engine storage and a non-zero `pending_rows_flush_interval`, and validates
+that the logical metric table reaches `series_count * samples_per_series` rows
+before trusting the query measurements. Use
+`--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper to
+the outer driver.
 
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
 time. For each chunk, `prepare-remote` invokes `query_perf_fixture prom-remote-write` with the
@@ -204,7 +228,9 @@ case for issue #7913. It writes 8192 series × 20160 samples through remote-writ
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
 TQL selectors. It is not included in the default `all` case set because ingestion
 cost dominates routine CI validation. Commenting `/query-regression heavy` runs
-only this case; `/query-regression` runs the eight routine default cases. Manual
+only this case; `/query-regression` runs the nine routine default cases, including
+`sst_float_bss`, `promql_instant_last_row_9034`, and
+`mito_prefilter_all_match`. Manual
 workflow dispatch accepts the `heavy` token to select this case.
 
 The routine default set also includes
@@ -371,6 +397,89 @@ uv run --no-project python .github/scripts/query-regression-run.py \
   --work-dir /tmp/query-regression-work
 ```
 
+### SST float BSS comparison
+
+`tests/perf/query_cases/sst_float_bss/case.toml` is included in the routine
+`all` default case group and compares a default empty physical metric table with
+a candidate byte-stream-split (BSS) physical table. It writes 1,000 series × 4,320 samples
+(4,320,000 rows) using synthetic `bounded_mixed` values: 95% integral series and
+5% nonintegral series, with bounded per-series fluctuation rather than globally
+unique values. This deliberately matches a 95/5 design; it is not an empirical
+claim about any production population. A separate survey sample found 94.79%
+integral values, but that observation does not make its values globally unique.
+Current mixed-data evidence, including SST inspection, exact-bit row verification,
+warmed endpoint SQL, and both warm-reader projections, is recorded in
+[`query_cases/sst_float_bss/RESULTS.md`](query_cases/sst_float_bss/RESULTS.md).
+Timing observations were collected while other builds saturated the shared host;
+they are not performance acceptance evidence. Before rerunning timings, ensure
+the host is idle (not merely this agent), record load throughout, and avoid
+concurrent builds. CPU affinity alone does not isolate memory or I/O contention.
+The historical unique-integer workload is preserved only in Git history and does
+not apply to this case.
+Both targets must use the exact same release `greptime` binary; only the
+per-target table setup SQL differs. Run the existing driver from a checkout
+containing that binary, with absolute paths and fresh data directories for every
+run:
+
+```bash
+REPO="$(pwd -P)"
+RELEASE_GREPTIME="/absolute/path/to/release/greptime"
+FIXTURE_GENERATOR="/absolute/path/to/release/query_perf_fixture"
+RUNNER="/absolute/path/to/release/query_regression_runner"
+WORK_DIR="/absolute/path/to/fresh/sst-float-bss-run-1"
+cd "$REPO"
+uv run --no-project python "$REPO/.github/scripts/query-regression-run.py" \
+  --cases "$REPO/tests/perf/query_cases/sst_float_bss/case.toml" \
+  --base-src "$REPO" \
+  --candidate-src . \
+  --base-bin "$RELEASE_GREPTIME" \
+  --candidate-bin "$RELEASE_GREPTIME" \
+  --fixture-generator "$FIXTURE_GENERATOR" \
+  --runner "$RUNNER" \
+  --work-dir "$WORK_DIR" \
+  --summary-script "$REPO/.github/scripts/query-regression-summary.py"
+```
+
+Repeat the command three times with a different fresh absolute `WORK_DIR` each
+run. In each `query-regression-report.json`, compare base and candidate
+`targets[].storage_inspection.summary.summary.total_file_size`, and each query's
+`targets[].measurements[].latency_ms_median`. Storage percentage is
+`(candidate_total_file_size - base_total_file_size) / base_total_file_size * 100`;
+query latency percentage is
+`(candidate_latency_ms_median - base_latency_ms_median) / base_latency_ms_median * 100`.
+The configured three warmups occur after the initial query validation and before
+that query's 15 measured endpoint requests, so query latency is a warmed
+frontend/cache measurement. The case restricts storage inspection to
+`data/greptime/public`, excluding `greptime_private` SSTs. After the datanodes
+stop, it also runs seven iterations of value-only `parquetbench` for all
+inspected SST files and sequential `scanbench` over the corresponding regions,
+with parallelism one. The three explicit flushes yielded six SSTs in the observed
+mixed runs—three 1,105,920-row files and three 334,080-row files—because storage split each
+flush; this is an observation, not a guaranteed file layout. Their per-run
+output and aggregate `parquetbench_median_average_ms` and
+`scanbench_median_average_ms` are under
+`targets[].read_bench`; they are quiescent local-file read/scan diagnostics, not
+warmed frontend-query latency measurements. Bench averages include iteration one;
+no OS cache is dropped, and the driver runs base before candidate.
+
+Historical [PR #8548](https://github.com/GreptimeTeam/greptimedb/pull/8548)
+reported storage savings alongside warm-read slowdowns for a different mixed
+counter/gauge study. It used value-only and all-column projections, discarded the
+first iteration, and alternated target order. This case reuses that reader
+measurement approach, not its dataset or results. For the supplementary warm
+comparison, reuse recorded commands against stopped data directories with eight
+iterations, discard iteration one, and alternate target order for eight rounds.
+For parquetbench, sum all per-file warm medians before taking the outer median;
+for scanbench, take the outer median of whole-region warm medians. Keep
+post-flush and post-compaction measurements separate.
+
+The case's `-5.0` storage target and `25` query-latency guardrail are experimental
+acceptance targets, not observed-benefit claims; do not relax them if a run
+fails. Its three periodic flushes and shared high TWCS trigger avoid the normal
+four-file compaction trigger from confounding the layout. Check footer encodings
+(BSS on candidate and no BSS on base) and data equality from the artifacts rather
+than through a new harness framework.
+
 For a focused manual reproduction of the Mito prefilter all-match optimization, use the existing lifecycle command above with `--cases tests/perf/query_cases/mito_prefilter_all_match/case.toml`. Its four count probes require explicit result inspection rather than automatic validation: expect `262144`, `131072`, `16896`, and `16896` in query order. The default lifecycle retains caches, so the optimization remains exercised but its timing includes warm-cache effects; use an explicitly configured cold environment when a cold comparison is required.
 
 The Rust runner subcommands are also useful for focused diagnostics:
@@ -400,8 +509,8 @@ parquetbench/scanbench` as the read-bench tool against each target's data direct
 
 The workflow runs when an allowlisted repository admin comments
 `/query-regression` on a non-draft PR. It does not rerun on pushes,
-ready-for-review, or reopen events. `/query-regression` runs the eight routine
-default cases, including `promql_instant_last_row_9034` and
+ready-for-review, or reopen events. `/query-regression` runs the nine routine
+default cases, including `sst_float_bss`, `promql_instant_last_row_9034`, and
 `mito_prefilter_all_match`; `/query-regression heavy` runs only the
 high-cardinality remote-write #7913 case. PR runs build base/candidate once and
 use `--allow-large-fixture`. Manual `workflow_dispatch` runs can pass `all`,

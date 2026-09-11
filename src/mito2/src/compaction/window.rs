@@ -337,6 +337,7 @@ mod tests {
                 primary_key_encoding: None,
                 write_buffer_size: None,
                 preserve_row_sequence: false,
+                float_field_encoding: Default::default(),
             },
             compaction_time_window: None,
         }

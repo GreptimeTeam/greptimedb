@@ -32,7 +32,9 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
-use store_api::mito_engine_options::{COMPACTION_OVERRIDE, MAX_ROW_GROUP_ROW_COUNT_LIMIT};
+use store_api::mito_engine_options::{
+    COMPACTION_OVERRIDE, FloatFieldEncoding, MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+};
 use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
 
@@ -128,6 +130,9 @@ pub struct RegionOptions {
     /// sequence metadata.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
+    /// Encoding for direct floating-point field columns in Parquet SSTs.
+    #[serde(default)]
+    pub float_field_encoding: FloatFieldEncoding,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -287,6 +292,8 @@ impl RegionOptions {
             sst_format = Some(FormatType::Flat);
         }
 
+        let float_field_encoding = options.float_field_encoding.unwrap_or_default();
+
         let compaction_override_flag = options_map
             .get(COMPACTION_OVERRIDE)
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
@@ -322,6 +329,7 @@ impl RegionOptions {
             primary_key_encoding,
             write_buffer_size: options.write_buffer_size,
             preserve_row_sequence: options.preserve_row_sequence,
+            float_field_encoding,
         };
         opts.validate()?;
 
@@ -469,6 +477,9 @@ struct RegionOptionsWithoutEnum {
     max_row_group_row_count: Option<usize>,
     #[serde_as(as = "DisplayFromStr")]
     preserve_row_sequence: bool,
+    #[serde(rename = "experimental_sst_float_field_encoding")]
+    #[serde_as(as = "NoneAsEmptyString")]
+    float_field_encoding: Option<FloatFieldEncoding>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -485,6 +496,7 @@ impl Default for RegionOptionsWithoutEnum {
             sst_format: options.sst_format,
             max_row_group_row_count: options.max_row_group_row_count,
             preserve_row_sequence: options.preserve_row_sequence,
+            float_field_encoding: Some(options.float_field_encoding),
         }
     }
 }
@@ -628,7 +640,9 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_wal::options::KafkaWalOptions;
-    use store_api::mito_engine_options::{SKIP_WAL_KEY, WRITE_BUFFER_SIZE_KEY};
+    use store_api::mito_engine_options::{
+        EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, SKIP_WAL_KEY, WRITE_BUFFER_SIZE_KEY,
+    };
 
     use super::*;
 
@@ -644,6 +658,26 @@ mod tests {
         let map = make_map(&[]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
+    }
+
+    #[test]
+    fn test_float_field_encoding_defaults_and_parses() {
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &make_map(&[])).unwrap();
+        assert_eq!(FloatFieldEncoding::Default, options.float_field_encoding);
+
+        let map = make_map(&[(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "default")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert_eq!(FloatFieldEncoding::Default, options.float_field_encoding);
+
+        let map = make_map(&[(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "byte_stream_split")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert_eq!(
+            FloatFieldEncoding::ByteStreamSplit,
+            options.float_field_encoding
+        );
+
+        let map = make_map(&[(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "invalid")]);
+        assert!(RegionOptions::try_from_options(RegionId::new(0, 0), &map).is_err());
     }
 
     #[test]
@@ -1103,6 +1137,7 @@ mod tests {
             primary_key_encoding: None,
             write_buffer_size: None,
             preserve_row_sequence: false,
+            float_field_encoding: FloatFieldEncoding::default(),
         };
         assert_eq!(expect, options);
     }
@@ -1161,6 +1196,7 @@ mod tests {
             primary_key_encoding: None,
             write_buffer_size: Some(ReadableSize::mb(128)),
             preserve_row_sequence: true,
+            float_field_encoding: FloatFieldEncoding::default(),
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         assert!(region_options_json_str.contains("preserve_row_sequence"));
@@ -1172,6 +1208,7 @@ mod tests {
         let got: RegionOptions = serde_json::from_str(old_region_options_json_str).unwrap();
         assert_eq!(None, got.write_buffer_size);
         assert!(!got.preserve_row_sequence);
+        assert_eq!(FloatFieldEncoding::Default, got.float_field_encoding);
         let CompactionOptions::Twcs(twcs) = got.compaction;
         assert_eq!(16, twcs.active_window_l1_merge_trigger);
         assert_eq!(8, twcs.inactive_window_l1_merge_trigger);
@@ -1238,6 +1275,7 @@ mod tests {
             primary_key_encoding: None,
             write_buffer_size: None,
             preserve_row_sequence: false,
+            float_field_encoding: FloatFieldEncoding::default(),
         };
         assert_eq!(options, got);
     }

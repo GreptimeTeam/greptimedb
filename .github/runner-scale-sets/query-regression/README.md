@@ -108,7 +108,7 @@ agent, which Aliyun public Ubuntu images include.
 
 An allowlisted repository admin commenting `/query-regression` on the PR is
 **trust admission for that exact PR revision**. `/query-regression` runs the
-six routine default cases; `/query-regression heavy` runs only the
+nine routine default cases; `/query-regression heavy` runs only the
 high-cardinality `prom_remote_write_7913` remote-write case.
 `slash-command-dispatch.yml` (`issue_comment` on the default branch) parses
 the command and `repository_dispatch`es; `query-regression-slash.yml` admits
