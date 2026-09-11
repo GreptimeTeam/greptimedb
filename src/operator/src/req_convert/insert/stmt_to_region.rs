@@ -64,6 +64,41 @@ impl<'a> StatementToRegion<'a> {
         stmt: &Insert,
         query_ctx: &QueryContextRef,
     ) -> Result<(InstantAndNormalInsertRequests, TableInfoRef)> {
+        let (rows, table_info) = self.prepare(stmt, query_ctx).await?;
+        let requests = self.partition(rows, table_info.clone(), query_ctx).await?;
+        Ok((requests, table_info))
+    }
+
+    /// Routes already prepared rows while retaining TTL and WAL behavior.
+    pub async fn partition(
+        &self,
+        rows: Rows,
+        table_info: TableInfoRef,
+        query_ctx: &QueryContextRef,
+    ) -> Result<InstantAndNormalInsertRequests> {
+        let requests = Partitioner::new(self.partition_manager)
+            .partition_insert_requests(&table_info, rows, query_ctx.skip_wal())
+            .await?;
+        let requests = RegionInsertRequests { requests };
+        if table_info.is_ttl_instant_table() {
+            Ok(InstantAndNormalInsertRequests {
+                normal_requests: Default::default(),
+                instant_requests: requests,
+            })
+        } else {
+            Ok(InstantAndNormalInsertRequests {
+                normal_requests: requests,
+                instant_requests: Default::default(),
+            })
+        }
+    }
+
+    /// Resolves SQL values and their table schema without partition routing.
+    pub async fn prepare(
+        &self,
+        stmt: &Insert,
+        query_ctx: &QueryContextRef,
+    ) -> Result<(Rows, TableInfoRef)> {
         let name = stmt.table_name().context(ParseSqlSnafu)?;
         let (catalog, schema, table_name) = self.get_full_name(name)?;
         let table = self.get_table(&catalog, &schema, &table_name).await?;
@@ -153,27 +188,7 @@ impl<'a> StatementToRegion<'a> {
             schema.push(grpc_column_schema);
         }
 
-        let requests = Partitioner::new(self.partition_manager)
-            .partition_insert_requests(&table_info, Rows { schema, rows }, query_ctx.skip_wal())
-            .await?;
-        let requests = RegionInsertRequests { requests };
-        if table_info.is_ttl_instant_table() {
-            Ok((
-                InstantAndNormalInsertRequests {
-                    normal_requests: Default::default(),
-                    instant_requests: requests,
-                },
-                table_info,
-            ))
-        } else {
-            Ok((
-                InstantAndNormalInsertRequests {
-                    normal_requests: requests,
-                    instant_requests: Default::default(),
-                },
-                table_info,
-            ))
-        }
+        Ok((Rows { schema, rows }, table_info))
     }
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
