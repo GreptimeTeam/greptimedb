@@ -11328,7 +11328,7 @@ async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: boo
                 if let Some(expected_written_nodes) = case.expected_written_nodes {
                     let written_nodes = after
                         .iter()
-                        .filter(|(key, (written_bytes, _))| *written_bytes > before[*key].0)
+                        .filter(|(key, (flushed_sequence, _))| *flushed_sequence > before[*key].0)
                         .map(|((node_id, _), _)| *node_id)
                         .collect::<std::collections::BTreeSet<_>>();
                     assert_eq!(
