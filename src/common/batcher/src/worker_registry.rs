@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::hash::Hash;
 
-use tokio::sync::Mutex;
+use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 /// Registers worker senders by key, without owning workers or their execution.
@@ -24,13 +24,13 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 /// identity under the same lock as replacement, so an old worker cannot remove
 /// a replacement registered under its key.
 pub struct WorkerRegistry<K, T> {
-    workers: Mutex<HashMap<K, Sender<T>>>,
+    workers: DashMap<K, Sender<T>>,
 }
 
-impl<K, T> Default for WorkerRegistry<K, T> {
+impl<K: Eq + Hash, T> Default for WorkerRegistry<K, T> {
     fn default() -> Self {
         Self {
-            workers: Mutex::new(HashMap::new()),
+            workers: DashMap::new(),
         }
     }
 }
@@ -45,11 +45,9 @@ impl<K: Eq + Hash, T> WorkerRegistry<K, T> {
     /// failed send and retry worker lookup without discarding the unsent item.
     pub async fn get(&self, key: &K) -> Option<Sender<T>> {
         self.workers
-            .lock()
-            .await
             .get(key)
             .filter(|tx| !tx.is_closed())
-            .cloned()
+            .map(|tx| tx.value().clone())
     }
 
     /// Returns the registered sender and, only when created, its receiver.
@@ -71,7 +69,7 @@ impl<K: Eq + Hash, T> WorkerRegistry<K, T> {
 
     /// Reuses a live sender or atomically creates its replacement.
     ///
-    /// `create` runs synchronously under the registry lock. It should only
+    /// `create` runs synchronously under the registry shard lock. It should only
     /// prepare the sender and capture any initialization state (such as the
     /// receiver) for the caller; start the worker after this method returns.
     /// Do not block or reenter the registry from `create`.
@@ -79,38 +77,31 @@ impl<K: Eq + Hash, T> WorkerRegistry<K, T> {
     where
         F: FnOnce() -> Sender<T>,
     {
-        let mut workers = self.workers.lock().await;
-        if let Some(tx) = workers.get(&key)
-            && !tx.is_closed()
-        {
-            return tx.clone();
+        match self.workers.entry(key) {
+            Entry::Occupied(mut entry) => {
+                if entry.get().is_closed() {
+                    entry.insert(create());
+                }
+                entry.get().clone()
+            }
+            Entry::Vacant(entry) => entry.insert(create()).value().clone(),
         }
-        let tx = create();
-        workers.insert(key, tx.clone());
-        tx
     }
 
     /// Removes the key only if it still points to this worker's channel.
     pub async fn remove_if_same(&self, key: &K, tx: &Sender<T>) -> bool {
-        let mut workers = self.workers.lock().await;
-        if workers
-            .get(key)
-            .is_some_and(|current| current.same_channel(tx))
-        {
-            workers.remove(key);
-            true
-        } else {
-            false
-        }
+        self.workers
+            .remove_if(key, |_, current| current.same_channel(tx))
+            .is_some()
     }
 
     /// Number of registered entries, including senders whose receivers closed.
     pub async fn len(&self) -> usize {
-        self.workers.lock().await.len()
+        self.workers.len()
     }
 
     pub async fn is_empty(&self) -> bool {
-        self.workers.lock().await.is_empty()
+        self.workers.is_empty()
     }
 }
 
@@ -168,7 +159,7 @@ mod tests {
         assert!(registry.remove_if_same(&"table", &second).await);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_concurrent_lookup_initializes_once() {
         let registry = Arc::new(WorkerRegistry::<_, ()>::new());
         let barrier = Arc::new(Barrier::new(3));
@@ -223,7 +214,7 @@ mod tests {
         assert!(registry.remove_if_same(&1, &replacement).await);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_concurrent_channel_creation_returns_one_receiver() {
         let registry = Arc::new(WorkerRegistry::<_, ()>::new());
         let barrier = Arc::new(Barrier::new(3));

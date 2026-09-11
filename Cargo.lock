@@ -2320,6 +2320,7 @@ dependencies = [
 name = "common-batcher"
 version = "1.3.0-alpha.1"
 dependencies = [
+ "dashmap",
  "futures",
  "tokio",
 ]
