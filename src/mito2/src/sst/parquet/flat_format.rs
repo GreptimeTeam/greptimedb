@@ -37,7 +37,7 @@ use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::kernels::take::take;
-use datatypes::arrow::datatypes::{Schema, SchemaRef};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
@@ -560,8 +560,14 @@ struct ParquetFlat {
     arrow_schema: SchemaRef,
     /// Projection computed for the flat format.
     format_projection: FormatProjection,
-    /// Column id to index in SST.
-    column_id_to_sst_index: HashMap<ColumnId, usize>,
+    /// Column id to the index of its leaf column in the parquet schema.
+    ///
+    /// A logical column may expand to multiple parquet leaf columns (e.g. a
+    /// JSON2 struct stores the remainder and one leaf per promoted path), so
+    /// the logical column index in the SST schema cannot be used to look up
+    /// row group statistics directly. The value is `None` for such columns
+    /// because they don't have single column statistics.
+    column_id_to_leaf_index: HashMap<ColumnId, Option<usize>>,
 }
 
 impl ParquetFlat {
@@ -573,6 +579,7 @@ impl ParquetFlat {
     ) -> ParquetFlat {
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
+        let column_id_to_leaf_index = leaf_column_indices(&arrow_schema, &id_to_index);
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
         let format_projection = FormatProjection::compute_format_projection(
@@ -586,7 +593,7 @@ impl ParquetFlat {
             metadata,
             arrow_schema,
             format_projection,
-            column_id_to_sst_index: id_to_index,
+            column_id_to_leaf_index,
         }
     }
 
@@ -614,12 +621,17 @@ impl ParquetFlat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        let Some(index) = self.column_id_to_sst_index.get(&column_id) else {
+        let Some(leaf_index) = self.column_id_to_leaf_index.get(&column_id) else {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
+        let Some(leaf_index) = leaf_index else {
+            // The column expands to multiple parquet leaf columns, so it
+            // doesn't have a single column null count.
+            return StatValues::NoStats;
+        };
 
-        let stats = column_null_counts(row_groups, *index);
+        let stats = column_null_counts(row_groups, *leaf_index);
         StatValues::from_stats_opt(stats)
     }
 
@@ -633,10 +645,20 @@ impl ParquetFlat {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
-        // Safety: `column_id_to_sst_index` is built from `metadata`.
-        let index = self.column_id_to_sst_index.get(&column_id).unwrap();
+        // Safety: `column_id_to_leaf_index` is built from the same map as
+        // `column_id_to_sst_index`.
+        let Some(leaf_index) = self
+            .column_id_to_leaf_index
+            .get(&column_id)
+            .copied()
+            .flatten()
+        else {
+            // The column expands to multiple parquet leaf columns, so it
+            // doesn't have single column statistics.
+            return StatValues::NoStats;
+        };
 
-        let stats = column_values(row_groups, column, *index, is_min);
+        let stats = column_values(row_groups, column, leaf_index, is_min);
         StatValues::from_stats_opt(stats)
     }
 }
@@ -663,6 +685,54 @@ pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<Column
     id_to_index.insert(metadata.time_index_column().column_id, column_index);
 
     id_to_index
+}
+
+/// Maps each column to the index of its leaf column in the parquet schema.
+///
+/// Row group statistics are indexed by parquet leaf column. A logical column
+/// in the flat SST schema may expand to multiple leaf columns (e.g. a JSON2
+/// struct stores the remainder and one leaf per promoted path), so the logical
+/// column index in the SST schema cannot be used to look up statistics
+/// directly. Columns that expand to multiple leaves map to `None` because they
+/// don't have single column statistics.
+fn leaf_column_indices(
+    arrow_schema: &Schema,
+    id_to_sst_index: &HashMap<ColumnId, usize>,
+) -> HashMap<ColumnId, Option<usize>> {
+    // Leaf column offset of each top-level field in the schema.
+    let mut leaf_offsets = Vec::with_capacity(arrow_schema.fields().len());
+    let mut offset = 0;
+    for field in arrow_schema.fields() {
+        leaf_offsets.push(offset);
+        offset += num_leaf_columns(field.data_type());
+    }
+
+    id_to_sst_index
+        .iter()
+        .map(|(column_id, sst_index)| {
+            let leaf_index = arrow_schema
+                .fields()
+                .get(*sst_index)
+                .filter(|field| num_leaf_columns(field.data_type()) == 1)
+                .map(|_| leaf_offsets[*sst_index]);
+            (*column_id, leaf_index)
+        })
+        .collect()
+}
+
+/// Returns the number of parquet leaf columns an arrow data type expands to.
+fn num_leaf_columns(data_type: &ArrowDataType) -> usize {
+    match data_type {
+        ArrowDataType::Struct(fields) => fields
+            .iter()
+            .map(|field| num_leaf_columns(field.data_type()))
+            .sum(),
+        ArrowDataType::List(field)
+        | ArrowDataType::LargeList(field)
+        | ArrowDataType::FixedSizeList(field, _)
+        | ArrowDataType::Map(field, _) => num_leaf_columns(field.data_type()),
+        _ => 1,
+    }
 }
 
 /// Decodes primary keys from a batch and returns decoded primary key information.
@@ -895,16 +965,24 @@ mod tests {
 
     use api::v1::SemanticType;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+        ArrayRef, BinaryArray, Int64Array, TimestampMillisecondArray, UInt8Array, UInt32Array,
+        UInt64Array,
     };
-    use datatypes::arrow::datatypes::DataType as ArrowDataType;
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+    use parquet::basic::{Repetition, Type as PhysicalType};
+    use parquet::file::metadata::{ColumnChunkMetaData, RowGroupMetaData};
+    use parquet::file::statistics::Statistics;
+    use parquet::schema::types::{SchemaDescriptor, Type};
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
-    use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+    use store_api::storage::consts::{
+        OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
+    };
 
     use super::*;
     use crate::read::read_columns::ReadColumns;
@@ -962,6 +1040,208 @@ mod tests {
         builder.primary_key(primary_key);
         builder.primary_key_encoding(encoding);
         builder.build().unwrap()
+    }
+
+    /// Builds the metadata of a table with a JSON2 struct field column:
+    /// `[tag_0, field_0, payload, ts]` with primary key `tag_0`.
+    fn metadata_with_struct_field() -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(0, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_0".to_string(),
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "payload".to_string(),
+                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_nanosecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            });
+        builder.primary_key(vec![0]);
+        builder.primary_key_encoding(PrimaryKeyEncoding::Dense);
+        builder.build().unwrap()
+    }
+
+    /// Builds a file schema and a row group in which the `payload` struct
+    /// column expands to three leaf columns. The `ns_edge` leaf carries small
+    /// Int64 statistics that must not be mistaken for the statistics of `ts`.
+    fn struct_column_file_and_row_group() -> (SchemaRef, RowGroupMetaData) {
+        let file_schema = Arc::new(Schema::new(vec![
+            Field::new("tag_0", ArrowDataType::Utf8, true),
+            Field::new("field_0", ArrowDataType::Int64, true),
+            Field::new(
+                "payload",
+                ArrowDataType::Struct(
+                    vec![
+                        Field::new("metadata", ArrowDataType::Binary, false),
+                        Field::new("value", ArrowDataType::Binary, false),
+                        Field::new("ns_edge", ArrowDataType::Int64, true),
+                    ]
+                    .into(),
+                ),
+                false,
+            ),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                false,
+            ),
+            Field::new(PRIMARY_KEY_COLUMN_NAME, ArrowDataType::Binary, false),
+            Field::new(SEQUENCE_COLUMN_NAME, ArrowDataType::UInt64, false),
+            Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false),
+        ]));
+
+        let leaf = |name: &str, physical: PhysicalType| {
+            Arc::new(
+                Type::primitive_type_builder(name, physical)
+                    .with_repetition(Repetition::OPTIONAL)
+                    .build()
+                    .unwrap(),
+            )
+        };
+        let payload = Arc::new(
+            Type::group_type_builder("payload")
+                .with_repetition(Repetition::OPTIONAL)
+                .with_fields(vec![
+                    leaf("metadata", PhysicalType::BYTE_ARRAY),
+                    leaf("value", PhysicalType::BYTE_ARRAY),
+                    leaf("ns_edge", PhysicalType::INT64),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let schema_descr = Arc::new(SchemaDescriptor::new(Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![
+                    leaf("tag_0", PhysicalType::BYTE_ARRAY),
+                    leaf("field_0", PhysicalType::INT64),
+                    payload,
+                    leaf("ts", PhysicalType::INT64),
+                    leaf(PRIMARY_KEY_COLUMN_NAME, PhysicalType::BYTE_ARRAY),
+                    leaf(SEQUENCE_COLUMN_NAME, PhysicalType::INT64),
+                    leaf(OP_TYPE_COLUMN_NAME, PhysicalType::INT32),
+                ])
+                .build()
+                .unwrap(),
+        )));
+
+        // Leaf column indices: tag_0=0, field_0=1, payload leaves=2..=4, ts=5.
+        const NS_EDGE_LEAF: usize = 4;
+        const TS_LEAF: usize = 5;
+        let chunks: Vec<_> = (0..schema_descr.num_columns())
+            .map(|i| {
+                let mut builder = ColumnChunkMetaData::builder(schema_descr.column(i));
+                if i == NS_EDGE_LEAF {
+                    // Small values from the JSON payload, not timestamps.
+                    builder = builder.set_statistics(Statistics::int64(
+                        Some(0),
+                        Some(86_400_000_000_000),
+                        None,
+                        Some(65),
+                        true,
+                    ));
+                } else if i == TS_LEAF {
+                    builder = builder.set_statistics(Statistics::int64(
+                        Some(1_788_998_400_000_000_000),
+                        Some(1_789_084_800_000_000_000),
+                        None,
+                        Some(0),
+                        true,
+                    ));
+                }
+                builder.build().unwrap()
+            })
+            .collect();
+        let row_group = RowGroupMetaData::builder(schema_descr)
+            .set_num_rows(69)
+            .set_total_byte_size(0)
+            .set_column_metadata(chunks)
+            .build()
+            .unwrap();
+
+        (file_schema, row_group)
+    }
+
+    /// Regression test: row group statistics must be looked up by parquet leaf
+    /// column index. A struct field column (e.g. JSON2) expands to multiple
+    /// leaf columns, so statistics of columns after it must not be read from
+    /// the struct's leaves. Otherwise min-max pruning can drop a whole row
+    /// group by mistake (e.g. pruning `ts` with the small `ns_edge` stats),
+    /// which caused data loss during SWCS compaction.
+    #[test]
+    fn test_stats_with_struct_field_column() {
+        let metadata = Arc::new(metadata_with_struct_field());
+        let (file_schema, row_group) = struct_column_file_and_row_group();
+        let read_format = FlatReadFormat::new(
+            metadata,
+            ReadColumns::new([0, 1, 2, 3]),
+            Some(file_schema),
+            "test",
+            false,
+        )
+        .unwrap();
+        let row_groups = [&row_group];
+
+        // Statistics of `ts` come from the `ts` leaf column, not the leaves of
+        // the payload struct.
+        let StatValues::Values(min) = read_format.min_values(&row_groups, 3) else {
+            panic!("expected ts min values")
+        };
+        let min = min.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(1_788_998_400_000_000_000, min.value(0));
+        let StatValues::Values(max) = read_format.max_values(&row_groups, 3) else {
+            panic!("expected ts max values")
+        };
+        let max = max.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(1_789_084_800_000_000_000, max.value(0));
+
+        // Null counts of `ts` also read the correct leaf column.
+        let StatValues::Values(nulls) = read_format.null_counts(&row_groups, 3) else {
+            panic!("expected ts null counts")
+        };
+        let nulls = nulls.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(0, nulls.value(0));
+
+        // A column that expands to multiple leaf columns has no single column
+        // statistics.
+        assert!(matches!(
+            read_format.min_values(&row_groups, 2),
+            StatValues::NoStats
+        ));
+        assert!(matches!(
+            read_format.max_values(&row_groups, 2),
+            StatValues::NoStats
+        ));
+        assert!(matches!(
+            read_format.null_counts(&row_groups, 2),
+            StatValues::NoStats
+        ));
     }
 
     #[test]
