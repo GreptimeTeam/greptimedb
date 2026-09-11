@@ -45,6 +45,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           AUTHOR: ${{ github.event.pull_request.merged_by.login }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
         run: |
           git config user.name "github-actions[bot]"
@@ -76,6 +77,7 @@ jobs:
               git branch -D "${head_branch}"
               gh issue create \
                 --title "Backport failure: PR #${PR_NUMBER} to ${release_branch}" \
+                --assignee "${PR_AUTHOR}" \
                 --body "Cherry-pick of ${MERGE_COMMIT} (PR #${PR_NUMBER}) failed on ${release_branch}. Manual backport required." \
                 || true
               continue
