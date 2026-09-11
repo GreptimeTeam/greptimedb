@@ -1559,7 +1559,7 @@ mod tests {
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 
     use super::*;
-    use crate::tests::{create_partition_rule_manager, prepare_mocked_backend};
+    use crate::test_util::{create_partition_rule_manager, prepare_mocked_backend};
 
     fn make_table_ref_with_schema(
         ts_name: &str,

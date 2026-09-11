@@ -92,7 +92,7 @@ mod tests {
     use api::v1::{ColumnDataType, Row, RowInsertRequest, Rows, Value};
 
     use super::*;
-    use crate::tests::{
+    use crate::test_util::{
         create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
     };
 
