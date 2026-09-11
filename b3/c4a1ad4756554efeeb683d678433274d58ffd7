@@ -1,0 +1,27 @@
+src/operator/src/insert.rs
+  s_c8f343c7af25c4::t_639dfee48b9389 27,68,76,85-86,99,169,173-181,283-287,311-323,339-412,461-490,505-511,523-531,1705
+src/operator/src/req_convert/insert.rs
+  s_c8f343c7af25c4::t_c935e3c3afb367 25
+src/operator/src/req_convert/insert/stmt_to_region.rs
+  s_c8f343c7af25c4::t_b80e52a3d01bc7 67-101,191
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_c8f343c7af25c4::t_874f970d5295ba 15,40-47,52-55,57-62,64,90,94,96,101-112
+src/session/src/context.rs
+  s_c8f343c7af25c4::t_70d340e47b6872 82-84,436-445,610,727,876-889
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "b3c4a1ad4756554efeeb683d678433274d58ffd7",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

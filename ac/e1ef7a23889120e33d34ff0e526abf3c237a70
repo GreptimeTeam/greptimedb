@@ -1,0 +1,30 @@
+config/config.md
+  h_623774b620da8e 77-83,335-341
+config/frontend.example.toml
+  h_623774b620da8e 229-259
+config/standalone.example.toml
+  h_623774b620da8e 208-238
+src/frontend/src/frontend.rs
+  h_623774b620da8e 38-39,68-69,105,214,224-257,265-266
+src/frontend/src/service_config.rs
+  h_623774b620da8e 20,29
+src/frontend/src/service_config/influxdb.rs
+  h_623774b620da8e 52
+src/frontend/src/service_config/pending_rows_batcher.rs
+  h_623774b620da8e 1-143
+src/servers/src/http.rs
+  h_623774b620da8e 24,30,43,192-207,217,238-253,650,660,667-672,894,928,946,1104,1191-1194,1230-1233,1310-1313,1338-1341,1369-1372,1378-1386,1442-1450,1453,1467-1470,1477-1480,1497-1500,1674,2409-2525
+src/standalone/src/options.rs
+  h_623774b620da8e 27-28,59-60,102,164,215-264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ace1ef7a23889120e33d34ff0e526abf3c237a70",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

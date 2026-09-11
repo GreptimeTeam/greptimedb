@@ -1,0 +1,26 @@
+src/operator/src/insert.rs
+  h_623774b620da8e 1562
+src/operator/src/lib.rs
+  h_623774b620da8e 28-29
+src/operator/src/req_convert/delete/table_to_region.rs
+  h_623774b620da8e 65
+src/operator/src/req_convert/insert/row_to_region.rs
+  h_623774b620da8e 95
+src/operator/src/req_convert/insert/table_to_region.rs
+  h_623774b620da8e 81
+src/operator/src/test_util.rs
+  h_623774b620da8e 18-19
+src/operator/src/test_util/partition_manager.rs
+  h_623774b620da8e 18,20,22,24,100,105,150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "6a3075af7f2cbcb032461d5af00ed7f091ca089c",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
