@@ -26,18 +26,17 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::OptionExt;
 
+use crate::batcher::logical_table::PHYSICAL_TABLE_KEY;
 use crate::batcher::logical_table::batch_convert::{
     TableBatch, concat_modified_batches, transform_logical_batches_to_physical,
 };
+use crate::batcher::logical_table::flow_notifier::{FlowNotification, enqueue_flow_notifications};
 use crate::batcher::logical_table::pending_worker::FlushWaiter;
 use crate::batcher::logical_table::region_write::{
     CatalogManagerPhysicalFlushAdapter, NodeManagerPhysicalFlushAdapter,
     PartitionManagerPhysicalFlushAdapter, PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester,
     PhysicalFlushPartitionProvider, encode_region_write_requests, flush_region_writes_concurrently,
     plan_region_batches, resolve_region_targets,
-};
-use crate::batcher::logical_table::{
-    FlowNotification, PHYSICAL_TABLE_KEY, enqueue_flow_notifications,
 };
 use crate::error;
 use crate::error::Result;
@@ -299,12 +298,12 @@ mod tests {
         Batch, flush_batch, flush_batch_physical, notify_waiters,
     };
     use crate::batcher::logical_table::batch_convert::TableBatch;
+    use crate::batcher::logical_table::flow_notifier::start_flow_notification_worker;
     use crate::batcher::logical_table::pending_worker::FlushWaiter;
     use crate::batcher::logical_table::region_write::{
         PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
         PhysicalTableMetadata,
     };
-    use crate::batcher::logical_table::start_flow_notification_worker;
     use crate::batcher::logical_table::test_util::{
         FlowNotificationMockNodeManager, RecordingFlownode, mock_aligned_tag_batch,
         mock_table_flownode_cache,
@@ -447,7 +446,7 @@ mod tests {
     fn mock_flow_notification_sender(
         cache: TableFlownodeSetCacheRef,
         node_manager: NodeManagerRef,
-    ) -> Notifier<crate::batcher::logical_table::FlowNotification> {
+    ) -> Notifier<crate::batcher::logical_table::flow_notifier::FlowNotification> {
         let (tx, rx) = Notifier::try_new(16).unwrap();
         start_flow_notification_worker(rx, cache, node_manager);
         tx
