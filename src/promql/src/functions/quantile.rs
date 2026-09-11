@@ -95,8 +95,8 @@ impl QuantileOverTime {
 
         let value_array = value_range.values();
         let value_array = value_array.as_any().downcast_ref::<Float64Array>().unwrap();
-        // A NULL field value means the series has no sample at that timestamp. A window holding
-        // only nulls then behaves like an empty one.
+        // A NULL field value means the series has no sample at that timestamp, so a window's
+        // samples are not simply its slots.
         let has_nulls = value_array.null_count() > 0;
         let mut result_builder = Float64Builder::with_capacity(ts_range.len());
         let mut scratch = Vec::new();

@@ -2156,10 +2156,11 @@ impl PromPlanner {
             func_exprs.push(tsid_col);
         }
 
-        // Each field column is an independent series, so a row survives as long as any field
-        // produced a sample and the others stay NULL, matching what a selector emits. Requiring
-        // every field to be non-NULL would drop one field's samples because another field has
-        // none in that window.
+        // A row survives as long as one field column produced a sample, and the fields without
+        // one stay NULL, which is the shape a selector already emits. Requiring every field to
+        // be non-NULL would drop one field's samples because another field has none in the same
+        // window — the reason alternative float/histogram columns already needed this form. A
+        // single field column reduces to the same predicate either way.
         let builder = LogicalPlanBuilder::from(input)
             .project(func_exprs)
             .context(DataFusionPlanningSnafu)?
