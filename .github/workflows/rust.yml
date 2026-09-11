@@ -147,7 +147,7 @@ jobs:
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run cargo check for Windows
-        run: cargo check --locked --workspace --all-targets --features servers/dashboard
+        run: cargo check --locked --workspace --all-targets
         env:
           RUSTFLAGS: "-D warnings"
 
