@@ -30,9 +30,10 @@ use session::context::QueryContextRef;
 use table::metadata::TableId;
 use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc, oneshot};
 
+use crate::batcher::logical_table::BatchKey;
 use crate::batcher::logical_table::batch::{Batch, flush_batch_with_managers, spawn_flush};
 use crate::batcher::logical_table::batch_convert::{RecordBatchWithTsIdx, TableBatch};
-use crate::batcher::logical_table::{BatchKey, FlowNotification};
+use crate::batcher::logical_table::flow_notifier::FlowNotification;
 use crate::error::Error;
 use crate::metrics::{PENDING_BATCHES, PENDING_ROWS, PENDING_WORKERS};
 
