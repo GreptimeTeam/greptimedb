@@ -125,7 +125,7 @@ jobs:
   check-windows:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check Windows build
-    runs-on: windows-2022-8-cores
+    runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - run: git config --global core.autocrlf false
