@@ -177,6 +177,9 @@ pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 [target.'cfg(not(windows))'.dev-dependencies]
 tikv-jemallocator = "0.7"
 
+[target.'cfg(not(windows))'.dev-dependencies]
+tikv-jemallocator.workspace = true
+
 [build-dependencies]
 common-version.workspace = true
 
@@ -188,6 +191,10 @@ harness = false
 name = "prom_decode"
 harness = false
 required-features = ["testing"]
+
+[[bench]]
+name = "otlp_metrics"
+harness = false
 
 [[bench]]
 name = "to_http_output"
