@@ -560,7 +560,7 @@ struct ParquetFlat {
     arrow_schema: SchemaRef,
     /// Projection computed for the flat format.
     format_projection: FormatProjection,
-    /// Column id to index in SST.
+    /// Column id to logical root index in the SST schema.
     column_id_to_sst_index: HashMap<ColumnId, usize>,
 }
 
@@ -614,12 +614,14 @@ impl ParquetFlat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        let Some(index) = self.column_id_to_sst_index.get(&column_id) else {
-            // No such column in the SST.
+        if !self.column_id_to_sst_index.contains_key(&column_id) {
             return StatValues::NoColumn;
+        }
+        let Some(leaf_index) = self.physical_leaf_index(row_groups, column_id) else {
+            return StatValues::NoStats;
         };
 
-        let stats = column_null_counts(row_groups, *index);
+        let stats = column_null_counts(row_groups, leaf_index);
         StatValues::from_stats_opt(stats)
     }
 
@@ -633,16 +635,46 @@ impl ParquetFlat {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
-        // Safety: `column_id_to_sst_index` is built from `metadata`.
-        let index = self.column_id_to_sst_index.get(&column_id).unwrap();
+        let Some(leaf_index) = self.physical_leaf_index(row_groups, column_id) else {
+            return StatValues::NoStats;
+        };
 
-        let stats = column_values(row_groups, column, *index, is_min);
+        let stats = column_values(row_groups, column, leaf_index, is_min);
         StatValues::from_stats_opt(stats)
+    }
+
+    /// Returns the physical Parquet leaf index for a logical root column.
+    ///
+    /// [`RowGroupMetaData::column`] is indexed by physical leaves, whereas the
+    /// SST schema indexes logical roots. They are equal only while every root
+    /// has one leaf. Nested values such as JSON2 break that assumption and
+    /// shift all following leaf positions. Statistics are only meaningful for a
+    /// root with exactly one leaf; return `None` otherwise to disable pruning
+    /// conservatively.
+    fn physical_leaf_index(
+        &self,
+        row_groups: &[impl Borrow<RowGroupMetaData>],
+        column_id: ColumnId,
+    ) -> Option<usize> {
+        let root_index = *self.column_id_to_sst_index.get(&column_id)?;
+        let row_group = row_groups.first()?.borrow();
+        let schema = row_group.schema_descr();
+        let mut leaves = schema
+            .columns()
+            .iter()
+            .enumerate()
+            .filter_map(|(leaf_index, _)| {
+                (schema.get_column_root_idx(leaf_index) == root_index).then_some(leaf_index)
+            });
+        let leaf_index = leaves.next()?;
+        leaves.next().is_none().then_some(leaf_index)
     }
 }
 
-/// Returns a map that the key is the column id and the value is the column position
-/// in the SST.
+/// Returns a map from column id to logical root-column position in the SST.
+///
+/// This is not a Parquet physical leaf index. Callers accessing
+/// [`RowGroupMetaData::column`] must resolve the root to a unique leaf first.
 /// It only supports SSTs with raw primary key columns.
 pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<ColumnId, usize> {
     let mut id_to_index = HashMap::with_capacity(metadata.column_metadatas.len());
