@@ -119,7 +119,7 @@ tracing-appender.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
-pprof = { version = "0.14", features = [
+pprof = { version = "0.15", features = [
     "flamegraph",
 ] }
 
