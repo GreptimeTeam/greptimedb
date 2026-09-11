@@ -106,19 +106,18 @@ async fn list_copy_from_paths(
         .transpose()
         .context(error::BuildRegexSnafu)?;
 
-    // A known file needs only stat. Listing its parent directory for every
-    // table makes COPY DATABASE do quadratic directory work.
-    if let Some(filename) = backend.object_path {
-        let metadata = backend
-            .object_store
-            .stat(&filename)
+    // Listing a known file's parent for every table makes COPY DATABASE do
+    // quadratic directory work.
+    if let Some(filename) = &backend.object_path {
+        let is_file = backend
+            .is_file(filename)
             .await
             .with_context(|_| common_datasource::error::ListObjectsSnafu {
                 path: req.location.clone(),
             })
             .context(error::ListObjectsSnafu)?;
-        let paths = if metadata.mode() == EntryMode::FILE {
-            vec![filename]
+        let paths = if is_file {
+            vec![filename.clone()]
         } else {
             vec![]
         };
@@ -928,6 +927,37 @@ mod tests {
                 source: common_datasource::error::Error::LocalFileAccessDenied { .. },
                 ..
             })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_copy_from_local_symlinks() {
+        use common_test_util::temp_dir::create_temp_dir;
+
+        let dir = create_temp_dir("copy_from_symlinks");
+        std::fs::write(dir.path().join("data.parquet"), b"data").unwrap();
+        std::os::unix::fs::symlink("data.parquet", dir.path().join("link.parquet")).unwrap();
+        std::os::unix::fs::symlink("missing.parquet", dir.path().join("dangling.parquet")).unwrap();
+        let access = LocalFileAccess::sandboxed(dir.path()).unwrap();
+
+        let req = copy_from_request("link.parquet", None);
+        assert!(
+            list_copy_from_paths(&req, &access)
+                .await
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        let req = copy_from_request("./", None);
+        let (_, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        assert_eq!(paths, ["data.parquet"]);
+        let req = copy_from_request("dangling.parquet", None);
+        assert!(matches!(
+            list_copy_from_paths(&req, &access).await,
+            Err(error::Error::ListObjects {
+                source: common_datasource::error::Error::ListObjects { error, .. }, ..
+            }) if error.kind() == object_store::ErrorKind::NotFound
         ));
     }
 
