@@ -383,13 +383,12 @@ impl PendingRowsBatcher {
             return None;
         }
 
-        let flush_policy =
-            TimingFlushPolicy::try_new(flush_interval, NonZeroUsize::new(max_batch_rows)?)?;
-        let flush_limiter = FlushLimiter::try_new(NonZeroUsize::new(max_concurrent_flushes)?)?;
+        let flush_policy = TimingFlushPolicy::try_new(flush_interval, max_batch_rows)?;
+        let flush_limiter = FlushLimiter::try_new(max_concurrent_flushes)?;
 
-        let request_limiter = RequestLimiter::try_new(NonZeroUsize::new(max_inflight_requests)?)?;
+        let request_limiter = RequestLimiter::try_new(max_inflight_requests)?;
         let (flow_notification_tx, flow_notification_rx) =
-            Notifier::try_new(flow_notification_queue_capacity)?;
+            Notifier::try_new(flow_notification_queue_capacity.get())?;
 
         let (shutdown, _) = broadcast::channel(1);
         let pending_rows_batch_sync = pending_rows_batch_sync_enabled();
@@ -1508,8 +1507,7 @@ fn notify_flow_dirty_windows_after_flush(
     table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
-    let (tx, rx) =
-        Notifier::try_new(NonZeroUsize::new(table_batches.len().max(1)).unwrap()).unwrap();
+    let (tx, rx) = Notifier::try_new(table_batches.len().max(1)).unwrap();
     start_flow_notification_worker(rx, table_flownode_set_cache, node_manager);
     enqueue_flow_notifications(table_batches, &tx);
 }
@@ -1837,7 +1835,6 @@ mod tests {
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
     use std::future::{Future, poll_fn};
-    use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
@@ -1897,9 +1894,9 @@ mod tests {
         Notifier, PendingBatch, PendingCore, PendingRowsBatcher, PhysicalFlushCatalogProvider,
         PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
         PlannedRegionBatch, RecordBatchWithTsIdx, RequestLimiter, ResolvedRegionBatch, TableBatch,
-        TimingFlushPolicy, WorkerCommand, WorkerRegistry, batch_key_from_ctx, columns_taxonomy, drain_batch,
-        encode_region_write_requests, extract_timestamps, flush_batch, flush_batch_physical,
-        flush_region_writes_concurrently, greptime_timestamp,
+        TimingFlushPolicy, WorkerCommand, WorkerRegistry, batch_key_from_ctx, columns_taxonomy,
+        drain_batch, encode_region_write_requests, extract_timestamps, flush_batch,
+        flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
         notify_flow_dirty_windows_after_flush, notify_waiters, plan_region_batches,
         remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
         should_dispatch_concurrently, start_flow_notification_worker, start_worker,
@@ -2129,7 +2126,7 @@ mod tests {
 
     #[test]
     fn test_flow_notification_queue_drops_when_full() {
-        let (tx, mut rx) = Notifier::try_new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let (tx, mut rx) = Notifier::try_new(1).unwrap();
         let notification = |table_id| crate::pending_rows_batcher::FlowNotification {
             table_id,
             timestamps: vec![table_id as i64],
@@ -2350,10 +2347,8 @@ mod tests {
         let ctx = session::context::QueryContext::arc();
         let (response_tx, _response_rx) = oneshot::channel();
         let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
-        let mut pending_flush = PendingCore::new(
-            TimingFlushPolicy::try_new(Duration::from_secs(10), NonZeroUsize::new(1).unwrap())
-                .unwrap(),
-        );
+        let mut pending_flush =
+            PendingCore::new(TimingFlushPolicy::try_new(Duration::from_secs(10), 1).unwrap());
         pending_flush.submit(
             FlushWaiter {
                 response_tx,
@@ -2395,10 +2390,8 @@ mod tests {
     #[tokio::test]
     async fn test_drain_batch_preserves_unready_state_and_clears_zero_rows() {
         for total_rows in [0, 1] {
-            let mut pending_flush = PendingCore::new(
-                TimingFlushPolicy::try_new(Duration::from_secs(10), NonZeroUsize::new(2).unwrap())
-                    .unwrap(),
-            );
+            let mut pending_flush =
+                PendingCore::new(TimingFlushPolicy::try_new(Duration::from_secs(10), 2).unwrap());
             let mut batch = Some(PendingBatch::new(session::context::QueryContext::arc()));
             let semaphore = Arc::new(Semaphore::new(1));
             let (response_tx, mut response_rx) = oneshot::channel();
@@ -2609,7 +2602,7 @@ mod tests {
         cache: TableFlownodeSetCacheRef,
         node_manager: NodeManagerRef,
     ) -> Notifier<crate::pending_rows_batcher::FlowNotification> {
-        let (tx, rx) = Notifier::try_new(NonZeroUsize::new(16).unwrap()).unwrap();
+        let (tx, rx) = Notifier::try_new(16).unwrap();
         start_flow_notification_worker(rx, cache, node_manager);
         tx
     }
@@ -2968,7 +2961,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancelled_waiter_retains_request_slot_until_notification() {
-        let limiter = RequestLimiter::try_new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let limiter = RequestLimiter::try_new(1).unwrap();
         let (response_tx, response_rx) = oneshot::channel();
         let waiter = FlushWaiter {
             response_tx,
@@ -3123,11 +3116,10 @@ mod tests {
             datanodes: Arc::new(HashMap::new()),
         });
         let catalog_manager = MemoryCatalogManager::with_default_setup();
-        let (flow_notification_tx, _flow_notification_rx) =
-            Notifier::try_new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let (flow_notification_tx, _flow_notification_rx) = Notifier::try_new(1).unwrap();
         let (shutdown, _) = broadcast::channel(1);
 
-        let flush_limiter = FlushLimiter::try_new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let flush_limiter = FlushLimiter::try_new(1).unwrap();
         start_worker(
             key.clone(),
             worker_tx.clone(),
@@ -3139,7 +3131,7 @@ mod tests {
             catalog_manager,
             flow_notification_tx,
             worker_idle_timeout,
-            TimingFlushPolicy::try_new(flush_interval, NonZeroUsize::new(3).unwrap()).unwrap(),
+            TimingFlushPolicy::try_new(flush_interval, 3).unwrap(),
             flush_limiter.clone(),
         );
 

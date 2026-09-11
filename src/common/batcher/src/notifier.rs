@@ -36,12 +36,12 @@ impl<T> Clone for Notifier<T> {
 }
 
 impl<T> Notifier<T> {
-    /// Returns `None` if the queue exceeds Tokio's supported capacity.
-    pub fn try_new(capacity: NonZeroUsize) -> Option<(Self, Receiver<T>)> {
-        if capacity.get() > Semaphore::MAX_PERMITS {
+    /// Returns `None` if the queue capacity is zero or exceeds Tokio's supported capacity.
+    pub fn try_new(capacity: usize) -> Option<(Self, Receiver<T>)> {
+        if capacity == 0 || capacity > Semaphore::MAX_PERMITS {
             return None;
         }
-        let (sender, receiver) = mpsc::channel(capacity.get());
+        let (sender, receiver) = mpsc::channel(capacity);
         Some((Self { sender }, receiver))
     }
 
@@ -92,8 +92,9 @@ mod tests {
 
     #[test]
     fn test_admission() {
-        assert!(Notifier::<usize>::try_new(NonZeroUsize::new(usize::MAX).unwrap()).is_none());
-        let (notifier, receiver) = Notifier::try_new(NonZeroUsize::new(1).unwrap()).unwrap();
+        assert!(Notifier::<usize>::try_new(0).is_none());
+        assert!(Notifier::<usize>::try_new(usize::MAX).is_none());
+        let (notifier, receiver) = Notifier::try_new(1).unwrap();
         let other = notifier.clone();
         assert_eq!(other.max_capacity(), 1);
         assert_eq!(notifier.try_notify(1), Ok(()));
@@ -107,8 +108,7 @@ mod tests {
         // One-factor comparison: only delivery concurrency changes.
         for _ in 0..2 {
             for concurrency in [1, 2] {
-                let (notifier, receiver) =
-                    Notifier::try_new(NonZeroUsize::new(3).unwrap()).unwrap();
+                let (notifier, receiver) = Notifier::try_new(3).unwrap();
                 for item in 0..3 {
                     notifier.try_notify(item).unwrap();
                 }

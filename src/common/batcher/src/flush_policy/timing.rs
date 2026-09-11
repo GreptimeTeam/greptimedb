@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -27,13 +26,13 @@ use crate::pending_batch::PendingBatch;
 #[derive(Debug, Clone, Copy)]
 pub struct TimingFlushPolicy {
     flush_interval: Duration,
-    max_batch_rows: NonZeroUsize,
+    max_batch_rows: usize,
 }
 
 impl TimingFlushPolicy {
-    /// Creates a policy, rejecting zero intervals and unrepresentable deadlines.
-    pub fn try_new(flush_interval: Duration, max_batch_rows: NonZeroUsize) -> Option<Self> {
-        if !Self::validate(flush_interval) {
+    /// Creates a policy, rejecting zero limits, zero intervals, and unrepresentable deadlines.
+    pub fn try_new(flush_interval: Duration, max_batch_rows: usize) -> Option<Self> {
+        if max_batch_rows == 0 || !Self::validate(flush_interval) {
             return None;
         }
         Some(Self {
@@ -49,7 +48,7 @@ impl TimingFlushPolicy {
 
     /// Checks only the row trigger when a caller drives deadline events separately.
     pub fn reached_row_threshold<T>(&self, batch: &PendingBatch<T>) -> bool {
-        !batch.is_empty() && batch.total_rows() >= self.max_batch_rows.get()
+        !batch.is_empty() && batch.total_rows() >= self.max_batch_rows
     }
 }
 
@@ -87,16 +86,14 @@ mod tests {
         for interval in [Duration::ZERO, Duration::from_secs(1), Duration::MAX] {
             assert_eq!(
                 TimingFlushPolicy::validate(interval),
-                TimingFlushPolicy::try_new(interval, NonZeroUsize::MIN).is_some()
+                TimingFlushPolicy::try_new(interval, 1).is_some()
             );
         }
     }
 
     #[test]
     fn test_first_submission_deadline() {
-        let policy =
-            TimingFlushPolicy::try_new(Duration::from_millis(10), NonZeroUsize::new(100).unwrap())
-                .unwrap();
+        let policy = TimingFlushPolicy::try_new(Duration::from_millis(10), 100).unwrap();
         let mut batch = PendingBatch::new();
         let first = Instant::now();
         assert_eq!(policy.deadline(&batch), None);
@@ -136,9 +133,7 @@ mod tests {
 
     #[test]
     fn test_row_threshold_preserves_complete_submissions() {
-        let policy =
-            TimingFlushPolicy::try_new(Duration::from_secs(1), NonZeroUsize::new(3).unwrap())
-                .unwrap();
+        let policy = TimingFlushPolicy::try_new(Duration::from_secs(1), 3).unwrap();
         let now = Instant::now();
         for rows in [2, 3, 4] {
             let mut batch = PendingBatch::new();
@@ -154,7 +149,8 @@ mod tests {
 
     #[test]
     fn test_invalid_interval() {
-        let max_batch_rows = NonZeroUsize::new(1).unwrap();
+        assert!(TimingFlushPolicy::try_new(Duration::from_secs(1), 0).is_none());
+        let max_batch_rows = 1;
         assert!(TimingFlushPolicy::try_new(Duration::ZERO, max_batch_rows).is_none());
         assert!(TimingFlushPolicy::try_new(Duration::MAX, max_batch_rows).is_none());
     }
