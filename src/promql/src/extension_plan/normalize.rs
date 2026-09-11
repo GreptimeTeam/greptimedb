@@ -48,13 +48,13 @@ use crate::extension_plan::{
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
-/// Normalize the input record batch. Notice that for simplicity, this method assumes
-/// the input batch only contains sample points from one time series.
+/// Normalizes a single-series input batch and optionally removes Prometheus stale markers.
 ///
-/// Roughly speaking, this method does these things:
-/// - retain raw native sample timestamps while biasing native histogram start timestamps by offset
-/// - sort the record batch based on timestamp column
-/// - remove Prometheus stale markers (optional)
+/// This node remains the serialized carrier of the selector offset. Native sample timestamps
+/// stay raw: applying an offset can overflow native `i64` ticks even when evaluation is valid.
+/// Manipulators instead apply it in `i128` during selection and produce millisecond outputs.
+/// Histogram start timestamps are already millisecond payloads used for rate/reset, so their
+/// offsets are applied here, preserving unknown zero values and nulls.
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct SeriesNormalize {
     offset: Millisecond,

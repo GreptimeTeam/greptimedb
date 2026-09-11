@@ -28,10 +28,7 @@ mod union_distinct_on;
 pub use absent::{Absent, AbsentExec, AbsentStream};
 use common_query::native_histogram::{SUM_FIELD, native_histogram_value_type};
 use common_query::prometheus::is_prometheus_stale_nan;
-use datafusion::arrow::array::{
-    Array, Float64Array, StructArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray,
-};
+use datafusion::arrow::array::{Array, Float64Array, StructArray};
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType, TimeUnit, TimestampMillisecondType,
 };
@@ -53,36 +50,6 @@ pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctO
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
-/// Borrows timestamp values without reducing their Arrow storage precision.
-///
-/// These integers are Arrow's native ticks, not milliseconds. Selector code must
-/// compare samples on that native timeline, then convert only where PromQL's
-/// millisecond evaluation or output ABI requires it.
-pub(crate) fn native_timestamp_values(array: &dyn Array) -> datafusion::error::Result<&[i64]> {
-    let value = match array.data_type() {
-        DataType::Timestamp(TimeUnit::Second, _) => array
-            .as_any()
-            .downcast_ref::<TimestampSecondArray>()
-            .map(|a| a.values().as_ref()),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => array
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .map(|a| a.values().as_ref()),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => array
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .map(|a| a.values().as_ref()),
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => array
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .map(|a| a.values().as_ref()),
-        _ => None,
-    };
-    value.ok_or_else(|| {
-        datafusion::error::DataFusionError::Execution("Time index column is not a timestamp".into())
-    })
-}
-
 pub(crate) fn timestamp_unit(data_type: &DataType) -> datafusion::error::Result<TimeUnit> {
     match data_type {
         DataType::Timestamp(unit, _) => Ok(*unit),
@@ -101,8 +68,12 @@ pub(crate) fn nanoseconds_per_native_tick(unit: TimeUnit) -> i128 {
     }
 }
 
-/// Returns the offset of an immediately underlying normalize node when the
-/// requested time index retains its logical identity through projections.
+/// Returns the offset serialized only by an immediately underlying normalize node.
+///
+/// Manipulators have no offset wire field, so a planner-only constructor argument
+/// would be lost on deserialization. Follow identity projections (as used by
+/// `timestamp()`) to recover it, but stop at other nodes or changed time columns
+/// to avoid applying an inner selector's offset again to an outer subquery.
 pub(crate) fn local_offset(plan: &LogicalPlan, time_index: &str) -> Millisecond {
     let Some(index) = plan.schema().index_of_column_by_name(None, time_index) else {
         return 0;

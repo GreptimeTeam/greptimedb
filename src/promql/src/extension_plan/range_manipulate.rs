@@ -39,6 +39,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::sql::TableReference;
 use datafusion_expr::col;
+use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -46,8 +47,8 @@ use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, local_offset, nanoseconds_per_native_tick,
-    native_timestamp_values, resolve_column_name, serialize_column_index, timestamp_unit,
+    METRIC_NUM_SERIES, Millisecond, local_offset, nanoseconds_per_native_tick, resolve_column_name,
+    serialize_column_index, timestamp_unit,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
@@ -679,8 +680,12 @@ impl RangeManipulateStream {
         // The timestamp range payload is always millisecond ABI. Shift in wide
         // native precision before truncating toward zero, preserving null validity.
         let scale = nanoseconds_per_native_tick(self.time_unit);
-        let timestamps = native_timestamp_values(input.column(self.time_index).as_ref())?;
+        let (timestamps, _) = timestamp_array_to_primitive(input.column(self.time_index))
+            .ok_or_else(|| {
+                DataFusionError::Execution("Time index column is not a timestamp".into())
+            })?;
         let timestamp_values = timestamps
+            .values()
             .iter()
             .enumerate()
             .map(|(index, timestamp)| {
@@ -737,7 +742,10 @@ impl RangeManipulateStream {
     ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
         let ts_column = input.column(self.time_index);
         let scale = nanoseconds_per_native_tick(self.time_unit);
-        let timestamps = native_timestamp_values(ts_column.as_ref())?;
+        let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
+            DataFusionError::Execution("Time index column is not a timestamp".into())
+        })?;
+        let timestamps = timestamps.values();
         let timestamp =
             |index| (timestamps[index] as i128) * scale + (self.offset as i128) * 1_000_000;
         let len = timestamps.len();
@@ -1146,15 +1154,20 @@ mod test {
                 vec![timestamp, Arc::new(Float64Array::from(vec![7.0]))],
             )
             .unwrap();
+            let empty_exec_input = Arc::new(DataSourceExec::new(Arc::new(
+                MemorySourceConfig::try_new(&[vec![]], schema.clone(), None).unwrap(),
+            )));
             let exec_input = Arc::new(DataSourceExec::new(Arc::new(
                 MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
             )));
-            let output = datafusion::physical_plan::collect(
-                rebuilt.to_execution_plan(exec_input),
-                SessionContext::default().task_ctx(),
-            )
-            .await
-            .unwrap();
+            let exec = rebuilt
+                .to_execution_plan(empty_exec_input)
+                .with_new_children(vec![exec_input])
+                .unwrap();
+            let output =
+                datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+                    .await
+                    .unwrap();
             assert_eq!(output.len(), 1, "{name}");
             let output = &output[0];
             assert_eq!(output.num_rows(), 1, "{name}");

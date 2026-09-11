@@ -38,6 +38,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_expr::col;
 use datatypes::arrow::compute;
+use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -47,8 +48,8 @@ use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::series_divide::SeriesDivide;
 use crate::extension_plan::{
     METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, local_offset,
-    nanoseconds_per_native_tick, native_timestamp_values, prometheus_stale_sample_column,
-    resolve_column_name, serialize_column_index, timestamp_unit,
+    nanoseconds_per_native_tick, prometheus_stale_sample_column, resolve_column_name,
+    serialize_column_index, timestamp_unit,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
@@ -627,7 +628,9 @@ impl Stream for InstantManipulateStream {
         let poll = match ready!(self.input.poll_next_unpin(cx)) {
             Some(Ok(batch)) => {
                 let timer = std::time::Instant::now();
-                self.num_series.add(1);
+                if batch.num_rows() != 0 {
+                    self.num_series.add(1);
+                }
                 let result = Ok(batch).and_then(|batch| self.manipulate(batch));
                 self.metric.elapsed_compute().add_elapsed(timer);
                 Poll::Ready(Some(result))
@@ -652,6 +655,7 @@ impl InstantManipulateStream {
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         let ts_column = input.column(self.time_index);
         if ts_column.is_empty() {
+            // Returning Pending after consuming a ready batch without a wake can stall the stream.
             return Ok(RecordBatch::new_empty(self.schema.clone()));
         }
         let scale = nanoseconds_per_native_tick(self.time_unit);
@@ -664,7 +668,10 @@ impl InstantManipulateStream {
                 .flatten()
                 .any(|column| is_prometheus_stale_sample(*column, row))
         };
-        let timestamps = native_timestamp_values(ts_column.as_ref())?;
+        let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
+            DataFusionError::Execution("Time index column is not a timestamp".into())
+        })?;
+        let timestamps = timestamps.values();
         let len = timestamps.len();
         // Shift the native-tick timeline in i128 before comparing samples. Doing
         // this in the Arrow storage unit can overflow even when the shifted
@@ -801,9 +808,10 @@ mod test {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::{
-        EmptyRelation, Extension, LogicalPlan, UserDefinedLogicalNodeCore,
+        EmptyRelation, Extension, LogicalPlan, Projection, UserDefinedLogicalNodeCore,
     };
     use datafusion::prelude::SessionContext;
+    use datafusion_expr::col;
 
     use super::*;
     use crate::extension_plan::test_util::{
@@ -1022,9 +1030,15 @@ mod test {
                     .unwrap()
                     .with_exprs_and_inputs(vec![], vec![input])
                     .unwrap();
-            let normalized = LogicalPlan::Extension(Extension {
-                node: Arc::new(normalize),
-            });
+            let normalized = LogicalPlan::Projection(
+                Projection::try_new(
+                    vec![col(TIME_INDEX_COLUMN), col("value")],
+                    Arc::new(LogicalPlan::Extension(Extension {
+                        node: Arc::new(normalize),
+                    })),
+                )
+                .unwrap(),
+            );
             let plan = InstantManipulate::new(
                 start,
                 start,
@@ -1049,15 +1063,20 @@ mod test {
                 vec![timestamp, Arc::new(Float64Array::from(vec![7.0]))],
             )
             .unwrap();
+            let empty_exec_input = Arc::new(DataSourceExec::new(Arc::new(
+                MemorySourceConfig::try_new(&[vec![]], schema.clone(), None).unwrap(),
+            )));
             let exec_input = Arc::new(DataSourceExec::new(Arc::new(
                 MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
             )));
-            let output = datafusion::physical_plan::collect(
-                rebuilt.to_execution_plan(exec_input),
-                SessionContext::default().task_ctx(),
-            )
-            .await
-            .unwrap();
+            let exec = rebuilt
+                .to_execution_plan(empty_exec_input)
+                .with_new_children(vec![exec_input])
+                .unwrap();
+            let output =
+                datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+                    .await
+                    .unwrap();
             let output = &output[0];
             assert_eq!(output.num_rows(), 1, "{name}");
             assert_eq!(
@@ -1734,7 +1753,11 @@ mod test {
     }
 
     #[test]
-    fn empty_batch_uses_declared_output_schema() {
+    fn empty_batches_preserve_stream_progression_and_output_schema() {
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+        use futures::stream;
+        use futures::task::noop_waker_ref;
+
         let input_schema = Arc::new(Schema::new(vec![Field::new(
             TIME_INDEX_COLUMN,
             DataType::Timestamp(TimeUnit::Second, None),
@@ -1745,11 +1768,26 @@ mod test {
             DataType::Timestamp(TimeUnit::Millisecond, None),
             false,
         )]));
-        let input = RecordBatch::new_empty(input_schema.clone());
-        let stream = InstantManipulateStream {
+        let empty = RecordBatch::new_empty(input_schema.clone());
+        let valid = RecordBatch::try_new(
+            input_schema.clone(),
+            vec![Arc::new(TimestampSecondArray::from(vec![1]))],
+        )
+        .unwrap();
+        let input = RecordBatchStreamAdapter::new(
+            input_schema,
+            stream::iter(vec![
+                Ok(empty.clone()),
+                Ok(empty.clone()),
+                Ok(valid),
+                Ok(empty),
+                Err(DataFusionError::Execution("injected input error".into())),
+            ]),
+        );
+        let mut stream = InstantManipulateStream {
             offset: 0,
-            start: 0,
-            end: 0,
+            start: 1_000,
+            end: 1_000,
             lookback_delta: 0,
             interval: 1,
             time_index: 0,
@@ -1758,24 +1796,54 @@ mod test {
             tsid_index: None,
             reuse_tsid_column: false,
             schema: output_schema.clone(),
-            input: Box::pin(
-                datafusion::physical_plan::memory::MemoryStream::try_new(
-                    vec![],
-                    input_schema,
-                    None,
-                )
-                .unwrap(),
-            ),
+            input: Box::pin(input),
             metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
             num_series: Count::new(),
         };
+        let waker = noop_waker_ref();
+        let mut cx = Context::from_waker(waker);
 
-        let output = stream.manipulate(input).unwrap();
-        assert_eq!(output.schema(), output_schema);
+        for _ in 0..2 {
+            let Poll::Ready(Some(Ok(batch))) = Pin::new(&mut stream).poll_next(&mut cx) else {
+                panic!("empty batch must be returned immediately");
+            };
+            assert_eq!(batch.num_rows(), 0);
+            assert_eq!(batch.schema(), output_schema);
+        }
+
+        let Poll::Ready(Some(Ok(valid))) = Pin::new(&mut stream).poll_next(&mut cx) else {
+            panic!("valid batch must follow empty batches");
+        };
+        assert_eq!(valid.schema(), output_schema);
         assert_eq!(
-            output.schema().field(0).data_type(),
+            valid.column(0).data_type(),
             &DataType::Timestamp(TimeUnit::Millisecond, None)
         );
+        assert_eq!(
+            valid
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .values(),
+            &[1_000]
+        );
+
+        let Poll::Ready(Some(Ok(empty))) = Pin::new(&mut stream).poll_next(&mut cx) else {
+            panic!("empty batch after valid batch must be returned immediately");
+        };
+        assert_eq!(empty.num_rows(), 0);
+        assert_eq!(empty.schema(), output_schema);
+
+        let Poll::Ready(Some(Err(error))) = Pin::new(&mut stream).poll_next(&mut cx) else {
+            panic!("input error must propagate");
+        };
+        assert!(error.to_string().contains("injected input error"));
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        assert_eq!(stream.num_series.value(), 1);
     }
 
     #[test]
