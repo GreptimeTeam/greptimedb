@@ -28,9 +28,9 @@ Three local PoC slices establish different improvements:
 
 | Change | Experiment | Observation | Evidence |
 | --- | --- | --- | --- |
-| Physical scan and logical projection | 64 populated logical tables, 1,000 rows each; narrow/wide physical unions; two execution orders | Data export 2.82–3.39x faster | [Export report](2026-09-11-metric-export-import/metric-export-poc.md) |
-| Batch logical DDL | 10,000 logical tables; SQL HTTP, in-process single, in-process batch | Logical CREATE: 29.181 / 19.524 / 5.776 s; calls: 10,000 / 10,000 / 79 | [DDL report](2026-09-11-metric-export-import/metric-import-ddl-poc.md) |
-| Remove repeated directory scans | 10,000 files; batch DDL in both variants | Data COPY: 146.496 → 5.481 s; total restore: 153.647 → 12.300 s | [COPY report](2026-09-11-metric-export-import/metric-import-copy-profile.md) |
+| Physical scan and logical projection | 64 populated logical tables, 1,000 rows each; narrow/wide physical unions; two execution orders | Data export 2.82–3.39x faster | [Export results](2026-09-11-metric-export-import/experiment-results.md#physical-group-export) |
+| Batch logical DDL | 10,000 logical tables; SQL HTTP, in-process single, in-process batch | Logical CREATE: 29.181 / 19.524 / 5.776 s; calls: 10,000 / 10,000 / 79 | [DDL results](2026-09-11-metric-export-import/experiment-results.md#batched-logical-ddl) |
+| Remove repeated directory scans | 10,000 files; batch DDL in both variants | Data COPY: 146.496 → 5.481 s; total restore: 153.647 → 12.300 s | [COPY results](2026-09-11-metric-export-import/experiment-results.md#copy-file-lookup) |
 
 The restore fixture has two rows per populated table and one empty table:
 19,998 rows at the 10,000-table scale. These are local standalone, warm-cache,
@@ -245,8 +245,8 @@ recovery complexity; otherwise record the evidence and defer them explicitly.
 
 The [implementation plan](2026-09-11-metric-export-import/metric-export-import-tracking.md) defines
 seven required PRs and one conditional merged-write PR. Production integration
-remains pending. The three experiment reports and two restore-results JSON files
-are included as supporting evidence.
+remains pending. The [experiment summary](2026-09-11-metric-export-import/experiment-results.md)
+contains the supporting comparisons and conclusions.
 
 | Slice | Acceptance boundary |
 | --- | --- |
@@ -272,10 +272,9 @@ and verify all schemas and typed rows outside timing. Measure schema export and
 metadata discovery too: they still perform per-table work and are excluded from
 the current data-export timings.
 
-The existing 383 regression tests and four standalone COPY SQLness cases support
-the PoC changes. They do not replace remote API, object-store, failure/recovery or
-distributed acceptance. Those results and the transport decision remain required
-before the Metric path is presented as production-ready.
+Remote API, object-store, failure/recovery and distributed acceptance, together
+with the transport decision, remain required before the Metric path is presented
+as production-ready.
 
 # Appendix: observed query plans
 

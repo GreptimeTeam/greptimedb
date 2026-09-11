@@ -22,9 +22,8 @@ Background: [Discussion #7394](https://github.com/orgs/GreptimeTeam/discussions/
 - [x] COPY profile and local fix: 10,000-file data phase 146.496 → 5.481 s with
   batch DDL in both variants; generic explicit-file lookup avoids parent listing.
 
-These boxes mean local PoC completion, not upstream delivery. Reports:
-[export](metric-export-poc.md), [DDL](metric-import-ddl-poc.md),
-[COPY](metric-import-copy-profile.md). The 5.481 s result does not use merged
+These boxes mean local PoC completion, not upstream delivery.
+[Experiment results](experiment-results.md) summarize the comparisons and conclusions. The 5.481 s result does not use merged
 writes and covers only 19,998 rows. No production throughput claim follows.
 
 ## PR plan
@@ -36,7 +35,7 @@ Opening the tracking issue itself does not count as a PR.
 
 | PR | Scope | Dependencies | Acceptance |
 | --- | --- | --- | --- |
-| PR01 — Metric export/import RFC | Agree the export and restore contracts, production DDL interface, compatibility targets and evidence; attach the PoC reports | None | Design reviewed; interface and release-scope decisions recorded |
+| PR01 — Metric export/import RFC | Agree the export and restore contracts, production DDL interface, compatibility targets and evidence; include the experiment summary | None | Design reviewed; interface and release-scope decisions recorded |
 | PR02 — COPY explicit-file lookup | Isolate the generic directory-scan fix with focused local/object-store regression coverage | None; can land before PR01 | Preserve file/directory behavior; remove repeated parent listing |
 | PR03 — Physical-group exporter | Ordered query over all regions; logical routing/projection; existing Metric Parquet types; writer resource controls, cancellation and unit/integration tests | PR01 | Multiple physical groups/regions, including a logical table spanning regions; schema/value equivalence and resource-error behavior |
 | PR04 — Export V2 integration | Connect the exporter to COPY DATABASE/V2 under the agreed gate; permissions, consistent metadata selection, chunk completion and owned-output retry | PR03 | Actual CLI export and unmodified import-v2 round trip; local/object-store cancellation, cleanup and retry |
