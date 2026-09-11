@@ -41,8 +41,9 @@ remote datanodes via `operator`/`client`.
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
-  auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
-  datanodes (distributed).
+  auto-create, partition routing, meter admission) → local `RegionServer`
+  (standalone) or RPC to datanodes (distributed). Arrow bulk inserts pass the
+  request channel to `Inserter` and check meter admission for each nonempty batch.
 
 - **Table batching** (`instance/builder.rs`): protocol entry points opt in through
   `QueryContext`. The primary inserter prepares eligible ordinary-table writes

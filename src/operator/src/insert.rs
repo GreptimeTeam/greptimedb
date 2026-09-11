@@ -33,7 +33,6 @@ use common_catalog::consts::{
     TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
     trace_operations_table_name, trace_services_table_name,
 };
-use common_error::ext::BoxedError;
 use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc_expr::util::ColumnExpr;
@@ -79,6 +78,7 @@ use crate::batcher::PendingRowsBatcher;
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
     InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
+    WriteRejectedSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -88,24 +88,6 @@ use crate::req_convert::insert::{
     fill_reqs_with_impure_default, rows_to_record_batch,
 };
 use crate::statement::StatementExecutor;
-
-/// Intercepts row inserts right before they are dispatched to datanodes,
-/// e.g. to enforce database-level ingest rate limits.
-/// Registered via `Plugins`; `None` means no interception (OSS default).
-#[async_trait::async_trait]
-pub trait InsertLimitInterceptor: Send + Sync {
-    /// Checks whether `rows` rows may be ingested into `catalog.schema`.
-    /// Returning `Err` rejects the whole request.
-    async fn check_ingest(
-        &self,
-        catalog: &str,
-        schema: &str,
-        rows: u64,
-    ) -> std::result::Result<(), BoxedError>;
-}
-
-/// Shared reference to an [InsertLimitInterceptor], registered via `Plugins`.
-pub type InsertLimitInterceptorRef = Arc<dyn InsertLimitInterceptor>;
 
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
@@ -117,7 +99,6 @@ pub struct Inserter {
     /// per-request `auto_create_table` hint. When `true`, the hint still applies.
     auto_create_table: bool,
     pending_rows_batcher: Option<Arc<dyn PendingRowsBatcher>>,
-    pub(crate) insert_limit_interceptor: Option<InsertLimitInterceptorRef>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -188,7 +169,6 @@ impl Inserter {
             table_flownode_set_cache,
             auto_create_table,
             pending_rows_batcher: None,
-            insert_limit_interceptor: None,
         }
     }
 
@@ -198,16 +178,6 @@ impl Inserter {
         batcher: Option<Arc<dyn PendingRowsBatcher>>,
     ) -> Self {
         self.pending_rows_batcher = batcher;
-        self
-    }
-
-    /// Sets the [InsertLimitInterceptor] invoked before insert requests are
-    /// dispatched to datanodes. `None` (the default) disables interception.
-    pub fn with_insert_limit_interceptor(
-        mut self,
-        interceptor: Option<InsertLimitInterceptorRef>,
-    ) -> Self {
-        self.insert_limit_interceptor = interceptor;
         self
     }
 
@@ -573,13 +543,20 @@ impl Inserter {
     }
 }
 
-/// Counts the total number of rows in a [RegionInsertRequests].
-fn count_region_insert_rows(requests: &RegionInsertRequests) -> u64 {
+fn count_insert_rows(requests: &InstantAndNormalInsertRequests) -> Result<u64> {
     requests
+        .normal_requests
         .requests
         .iter()
-        .map(|r| r.rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0) as u64)
-        .sum()
+        .chain(&requests.instant_requests.requests)
+        .filter_map(|request| request.rows.as_ref())
+        .try_fold(0u64, |total, rows| {
+            total
+                .checked_add(rows.rows.len() as u64)
+                .context(InvalidInsertRequestSnafu {
+                    reason: "Insert row count exceeds u64::MAX",
+                })
+        })
 }
 
 impl Inserter {
@@ -592,34 +569,18 @@ impl Inserter {
         // Fill impure default values in the request
         let requests = fill_reqs_with_impure_default(table_infos, requests)?;
 
-        if let Some(interceptor) = &self.insert_limit_interceptor {
-            let rows = count_region_insert_rows(&requests.normal_requests)
-                + count_region_insert_rows(&requests.instant_requests);
-            // Charge the target table's database, not the session's: fully
-            // qualified inserts (e.g. `INSERT INTO other_db.t`) may target a
-            // different database than the session's current one. All tables in
-            // one batch resolve to the same database, so any entry works; fall
-            // back to the session context when there is no table info.
-            let (catalog, schema) = table_infos
-                .values()
-                .next()
-                .map(|info| (info.catalog_name.clone(), info.schema_name.clone()))
-                .unwrap_or_else(|| (ctx.current_catalog().to_string(), ctx.current_schema()));
-            interceptor
-                .check_ingest(&catalog, &schema, rows)
-                .await
-                .map_err(|source| crate::error::Error::External {
-                    source,
-                    location: snafu::Location::default(),
-                })?;
-        }
-
+        // All tables in a batch resolve to the same database. Qualified SQL
+        // inserts may target a different database than the session's current one.
+        let table_info = table_infos.values().next();
         let write_cost = write_meter!(
-            ctx.current_catalog(),
-            ctx.current_schema(),
+            table_info.map_or(ctx.current_catalog(), |info| info.catalog_name.as_str()),
+            table_info.map_or_else(|| ctx.current_schema(), |info| info.schema_name.clone()),
             requests,
+            count_insert_rows(&requests)?,
             ctx.channel() as u8
-        );
+        )
+        .await
+        .context(WriteRejectedSnafu)?;
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: ctx.get_db_string(),
@@ -1763,14 +1724,12 @@ impl FlowMirrorTask {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::helper::{field_column_schema, time_index_column_schema};
     use api::v1::{RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_error::ext::{BoxedError, ErrorExt, PlainError};
-    use common_error::status_code::StatusCode;
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
     use common_meta::test_util::MockDatanodeManager;
@@ -1973,135 +1932,246 @@ mod tests {
         assert!(table_is_native_histogram(&table));
     }
 
-    struct RejectAllInterceptor;
+    // Keep global meter registration in one test, isolated by nextest's per-test process.
+    #[tokio::test]
+    async fn test_write_meter_admission() {
+        use std::cell::Cell;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    #[async_trait::async_trait]
-    impl InsertLimitInterceptor for RejectAllInterceptor {
-        async fn check_ingest(
-            &self,
-            _catalog: &str,
-            _schema: &str,
-            _rows: u64,
-        ) -> std::result::Result<(), BoxedError> {
-            Err(BoxedError::new(PlainError::new(
-                "rate limited for test".to_string(),
-                StatusCode::RateLimited,
-            )))
+        use api::region::RegionResponse;
+        use api::v1::region::region_request::Body;
+        use arrow::array::{Int32Array, TimestampMillisecondArray};
+        use arrow::record_batch::RecordBatch;
+        use bytes::Bytes;
+        use common_error::ext::{ErrorExt, RetryHint};
+        use common_error::status_code::StatusCode;
+        use common_grpc::flight::{FlightEncoder, FlightMessage};
+        use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
+        use futures::future::BoxFuture;
+        use meter_core::ItemCalculator;
+        use meter_core::collect::{Collect, WriteRejected};
+        use meter_core::data::MeterRecord;
+        use meter_core::global::global_registry;
+        use session::context::Channel;
+
+        const CATALOG: &str = "write_meter_test";
+
+        #[derive(Default)]
+        struct Meter {
+            reject: AtomicBool,
+            attempts: Mutex<Vec<MeterRecord>>,
+            accepted_value: AtomicU64,
         }
-    }
 
-    #[derive(Default)]
-    struct RecordingInterceptor {
-        calls: Mutex<Vec<(String, String, u64)>>,
-    }
+        impl Collect for Meter {
+            fn on_write(
+                &self,
+                record: MeterRecord,
+            ) -> BoxFuture<'_, std::result::Result<(), WriteRejected>> {
+                Box::pin(async move {
+                    if record.catalog != CATALOG {
+                        return Ok(());
+                    }
+                    let value = record.value;
+                    self.attempts.lock().unwrap().push(record);
+                    if self.reject.load(Ordering::Relaxed) {
+                        return Err(WriteRejected::new("database row quota exhausted"));
+                    }
+                    self.accepted_value.fetch_add(value, Ordering::Relaxed);
+                    Ok(())
+                })
+            }
 
-    #[async_trait::async_trait]
-    impl InsertLimitInterceptor for RecordingInterceptor {
-        async fn check_ingest(
-            &self,
-            catalog: &str,
-            schema: &str,
-            rows: u64,
-        ) -> std::result::Result<(), BoxedError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((catalog.to_string(), schema.to_string(), rows));
-            Ok(())
+            fn on_read(&self, _: MeterRecord) {}
         }
-    }
 
-    async fn new_inserter_with_interceptor(
-        interceptor: Option<InsertLimitInterceptorRef>,
-    ) -> Inserter {
+        impl ItemCalculator<InstantAndNormalInsertRequests> for Meter {
+            fn calc(&self, _: &InstantAndNormalInsertRequests) -> u64 {
+                17
+            }
+        }
+
         let kv_backend = prepare_mocked_backend().await;
-        Inserter::new(
+        let partition_manager = create_partition_rule_manager(kv_backend.clone()).await;
+        let (sender, mut dispatched) = tokio::sync::mpsc::channel(16);
+        let watcher = DatanodeWatcher::new(sender).with_handler(|_, request| {
+            let rows = match request.body.unwrap() {
+                Body::Inserts(requests) => requests
+                    .requests
+                    .iter()
+                    .filter_map(|request| request.rows.as_ref())
+                    .map(|rows| rows.rows.len())
+                    .sum(),
+                // The bulk batches below each contain two rows.
+                Body::BulkInsert(_) => 2,
+                body => panic!("unexpected request: {body:?}"),
+            };
+            Ok(RegionResponse::new(rows))
+        });
+        let flow_cache = Cache::new(100);
+        let inserter = Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
-            create_partition_rule_manager(kv_backend.clone()).await,
-            Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
+            partition_manager,
+            Arc::new(MockDatanodeManager::new(watcher)),
             Arc::new(new_table_flownode_set_cache(
                 String::new(),
-                Cache::new(100),
-                kv_backend.clone(),
+                flow_cache.clone(),
+                kv_backend,
             )),
             true,
-        )
-        .with_insert_limit_interceptor(interceptor)
-    }
-
-    fn new_region_insert_requests(
-        table_id: u32,
-        region_number: u32,
-        num_normal_rows: usize,
-        num_instant_rows: usize,
-    ) -> InstantAndNormalInsertRequests {
-        let build = |num_rows: usize| RegionInsertRequests {
-            requests: vec![RegionInsertRequest {
-                region_id: RegionId::new(table_id, region_number).as_u64(),
-                rows: Some(Rows {
-                    schema: vec![],
-                    rows: vec![api::v1::Row { values: vec![] }; num_rows],
-                }),
-                partition_expr_version: None,
-                skip_wal: false,
-            }],
+        );
+        let mut table_info = new_test_table_info(1, "table_1", [1].into_iter());
+        table_info.catalog_name = CATALOG.to_string();
+        table_info.schema_name = "target_db".to_string();
+        let table_info = Arc::new(table_info);
+        let table_infos = HashMap::from_iter([(1, table_info.clone())]);
+        let ctx = Arc::new(QueryContext::with_channel(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            Channel::Postgres,
+        ));
+        let rows_request = || {
+            let build = |num_rows| RegionInsertRequests {
+                requests: vec![RegionInsertRequest {
+                    region_id: RegionId::new(1, 1).as_u64(),
+                    rows: Some(Rows {
+                        schema: vec![],
+                        rows: vec![api::v1::Row { values: vec![] }; num_rows],
+                    }),
+                    ..Default::default()
+                }],
+            };
+            InstantAndNormalInsertRequests {
+                normal_requests: build(3),
+                instant_requests: build(2),
+            }
         };
-        InstantAndNormalInsertRequests {
-            normal_requests: build(num_normal_rows),
-            instant_requests: build(num_instant_rows),
-        }
-    }
 
-    #[tokio::test]
-    async fn test_insert_rejected_by_limit_interceptor() {
-        let inserter = new_inserter_with_interceptor(Some(Arc::new(RejectAllInterceptor))).await;
-        let table_id = 1;
-        let table_infos = HashMap::from_iter([(
-            table_id,
-            Arc::new(new_test_table_info(
-                table_id,
-                "test_table",
-                vec![0].into_iter(),
-            )),
-        )]);
-        let requests = new_region_insert_requests(table_id, 0, 3, 0);
-        let ctx = Arc::new(QueryContext::with(
-            DEFAULT_CATALOG_NAME,
-            DEFAULT_SCHEMA_NAME,
-        ));
-
-        let err = inserter
-            .do_request(requests, &table_infos, &ctx)
+        // No collector or calculator: ordinary OSS insertion still succeeds.
+        let output = inserter
+            .do_request(rows_request(), &table_infos, &ctx)
             .await
-            .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::RateLimited);
-    }
+            .unwrap();
+        assert_eq!(output.meta.cost, 0);
+        assert!(matches!(output.data, OutputData::AffectedRows(3)));
+        dispatched.try_recv().unwrap();
 
-    #[tokio::test]
-    async fn test_insert_limit_interceptor_receives_total_rows() {
-        let interceptor = Arc::new(RecordingInterceptor::default());
-        let inserter = new_inserter_with_interceptor(Some(interceptor.clone())).await;
-        let table_id = 1;
-        // The target table lives in a different database than the session's;
-        // the limit must be attributed to the table's catalog/schema.
-        let mut table_info = new_test_table_info(table_id, "test_table", vec![0].into_iter());
-        table_info.catalog_name = "other_catalog".to_string();
-        table_info.schema_name = "other_schema".to_string();
-        let table_infos = HashMap::from_iter([(table_id, Arc::new(table_info))]);
-        let requests = new_region_insert_requests(table_id, 0, 3, 2);
-        let ctx = Arc::new(QueryContext::with(
-            DEFAULT_CATALOG_NAME,
-            DEFAULT_SCHEMA_NAME,
+        let meter = Arc::new(Meter::default());
+        global_registry().set_collector(meter.clone());
+        global_registry().register_calculator(meter.clone());
+        // The dependency controls noop mode; exercise both builds with this test.
+        let enabled = Cell::new(false);
+        write_meter!({
+            enabled.set(true);
+            MeterRecord::new("probe".into(), "probe".into(), 0, 0, 0)
+        })
+        .await
+        .unwrap();
+        let enabled = enabled.get();
+
+        let output = inserter
+            .do_request(rows_request(), &table_infos, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.meta.cost, if enabled { 17 } else { 0 });
+        assert!(matches!(output.data, OutputData::AffectedRows(3)));
+        dispatched.try_recv().unwrap();
+        assert!(flow_cache.contains_key(&1));
+        flow_cache.invalidate_all();
+        meter.reject.store(true, Ordering::Relaxed);
+        let result = inserter
+            .do_request(rows_request(), &table_infos, &ctx)
+            .await;
+        if enabled {
+            let error = result.unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::RateLimited);
+            assert_eq!(error.retry_hint(), RetryHint::Retryable);
+            assert!(error.to_string().contains("database row quota exhausted"));
+            assert!(dispatched.try_recv().is_err());
+            assert!(
+                !flow_cache.contains_key(&1),
+                "rejected write reached flow mirroring"
+            );
+            assert_eq!(meter.accepted_value.load(Ordering::Relaxed), 17);
+            let attempts = meter.attempts.lock().unwrap();
+            assert_eq!(attempts.len(), 2);
+            for record in attempts.iter() {
+                assert_eq!(record.catalog, CATALOG);
+                assert_eq!(record.schema, "target_db");
+                assert_eq!(
+                    (record.rows, record.value, record.source),
+                    (5, 17, Channel::Postgres as u8)
+                );
+            }
+        } else {
+            assert_eq!(result.unwrap().meta.cost, 0);
+            dispatched.try_recv().unwrap();
+            assert!(meter.attempts.lock().unwrap().is_empty());
+        }
+        meter.attempts.lock().unwrap().clear();
+
+        let table = Arc::new(table::Table::new(
+            table_info.clone(),
+            table::metadata::FilterPushDownType::Unsupported,
+            Arc::new(DummyDataSource),
         ));
+        let batch = RecordBatch::try_new(
+            table_info.meta.schema.arrow_schema().clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![60, 70])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 1])),
+                Arc::new(Int32Array::from(vec![0, 0])),
+            ],
+        )
+        .unwrap();
+        let bulk_insert = |batch: RecordBatch| {
+            let flight_data = FlightEncoder::default()
+                .encode(FlightMessage::RecordBatch(batch.clone()))
+                .into_iter()
+                .next()
+                .unwrap();
+            inserter.handle_bulk_insert(
+                table.clone(),
+                flight_data,
+                batch,
+                Bytes::new(),
+                false,
+                Channel::Grpc,
+            )
+        };
+        // Empty batches bypass admission even while the collector rejects.
+        assert_eq!(bulk_insert(batch.slice(0, 0)).await.unwrap(), 0);
+        assert!(meter.attempts.lock().unwrap().is_empty());
+        assert!(dispatched.try_recv().is_err());
 
-        // The interceptor passes; the request then fails downstream because the
-        // mocked backend has no table route. Only the interception is asserted.
-        let _ = inserter.do_request(requests, &table_infos, &ctx).await;
-
-        let calls = interceptor.calls.lock().unwrap();
+        // A collector change between batches takes effect on the very next batch.
+        for reject in [false, true, false] {
+            meter.reject.store(reject, Ordering::Relaxed);
+            let result = bulk_insert(batch.clone()).await;
+            if enabled && reject {
+                let error = result.unwrap_err();
+                assert_eq!(error.status_code(), StatusCode::RateLimited);
+                assert_eq!(error.retry_hint(), RetryHint::Retryable);
+                assert!(dispatched.try_recv().is_err());
+            } else {
+                assert_eq!(result.unwrap(), 2);
+                dispatched.try_recv().unwrap();
+            }
+        }
+        let attempts = meter.attempts.lock().unwrap();
+        assert_eq!(attempts.len(), if enabled { 3 } else { 0 });
+        for record in attempts.iter() {
+            assert_eq!(record.catalog, CATALOG);
+            assert_eq!(record.schema, "target_db");
+            assert_eq!(
+                (record.rows, record.value, record.source),
+                (2, 0, Channel::Grpc as u8)
+            );
+        }
         assert_eq!(
-            calls.as_slice(),
-            &[("other_catalog".to_string(), "other_schema".to_string(), 5)]
+            meter.accepted_value.load(Ordering::Relaxed),
+            if enabled { 17 } else { 0 }
         );
     }
 
