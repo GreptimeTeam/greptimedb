@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::{CreateTableExpr, TableName};
 use catalog::CatalogManagerRef;
+use client::OutputWithMetrics;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
@@ -27,7 +28,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::utils::quote_identifier;
-use datafusion_common::{DFSchemaRef, TableReference};
+use datafusion_common::{DFSchemaRef, ScalarValue, TableReference};
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp, col, lit};
 use datatypes::schema::Schema;
 use query::QueryEngineRef;
@@ -38,9 +39,10 @@ use snafu::{OptionExt, ResultExt};
 use sql::parsers::utils::is_tql;
 use store_api::mito_engine_options::MERGE_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 use tokio::sync::oneshot::error::TryRecvError;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
@@ -53,8 +55,8 @@ use crate::batching_mode::state::{
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    AddFilterRewriter, ColumnMatcherRewriter, df_plan_to_sql, gen_plan_with_matching_schema,
-    get_table_info_df_schema, sql_to_df_plan,
+    AddFilterRewriter, ColumnMatcherRewriter, df_plan_to_sql,
+    gen_plan_with_matching_schema_and_values, get_table_info_df_schema, sql_to_df_plan,
 };
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
@@ -149,6 +151,7 @@ pub struct TaskConfig {
     pub catalog_manager: CatalogManagerRef,
     pub query_type: QueryType,
     pub batch_opts: Arc<BatchingModeOptions>,
+    pub exact_sequence_range_required: bool,
     pub flow_eval_interval: Option<Duration>,
     /// Typed schedule configuration, pre-parsed at task creation time.
     pub eval_schedule: Option<EvalSchedule>,
@@ -198,6 +201,36 @@ fn format_insert_target_columns(plan: &LogicalPlan) -> String {
         .join(", ")
 }
 
+/// Owns a whole serialized execution round. It may be moved to an execution
+/// collaborator, so cancellation of the caller cannot release the round early.
+pub struct BatchingExecutionGuard {
+    _lock: OwnedMutexGuard<()>,
+    restore: Option<(Arc<RwLock<TaskState>>, QueryContextRef)>,
+}
+
+impl BatchingExecutionGuard {
+    fn new(lock: OwnedMutexGuard<()>) -> Self {
+        Self {
+            _lock: lock,
+            restore: None,
+        }
+    }
+
+    fn restore_query_context(&mut self, state: Arc<RwLock<TaskState>>, old_ctx: QueryContextRef) {
+        self.restore = Some((state, old_ctx));
+    }
+}
+
+impl Drop for BatchingExecutionGuard {
+    fn drop(&mut self) {
+        if let Some((state, old_ctx)) = self.restore.take()
+            && let Ok(mut state) = state.write()
+        {
+            state.query_ctx = old_ctx;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BatchingTask {
     pub config: Arc<TaskConfig>,
@@ -206,6 +239,7 @@ pub struct BatchingTask {
     /// window restoration for this flow. Without this, a manual flush and the
     /// background loop can process the same checkpoint range concurrently.
     execution_lock: Arc<Mutex<()>>,
+    execution: Option<Arc<dyn crate::BatchingExecution>>,
 }
 
 /// Arguments for creating batching task
@@ -267,6 +301,7 @@ impl QueryCoverage {
     }
 }
 
+#[derive(Clone)]
 pub enum DirtyRestore {
     /// The query was scoped to dirty time ranges; restore those ranges if the
     /// run fails.
@@ -280,19 +315,23 @@ pub enum DirtyRestore {
     Unscoped(DirtyTimeWindows),
 }
 
-struct ExecuteOnceOutcome {
-    new_query: Option<PlanInfo>,
+pub struct ExecuteOnceOutcome {
+    pub new_query: Option<PlanInfo>,
     /// Execution result of the generated insert plan.
     ///
     /// `Ok(Some((affected_rows, elapsed)))` means a query was executed.
     /// `Ok(None)` means no query was generated because there was no dirty signal.
     /// `Err(_)` means plan generation or execution failed.
-    result: Result<Option<(usize, Duration)>, Error>,
+    pub result: Result<Option<(usize, Duration)>, Error>,
 }
 
 impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
-    pub fn try_new(
+    pub fn try_new(args: TaskArgs<'_>) -> Result<Self, Error> {
+        Self::try_new_with_exact_sequence_range_required(args, false)
+    }
+
+    pub fn try_new_with_exact_sequence_range_required(
         TaskArgs {
             flow_id,
             query,
@@ -308,6 +347,7 @@ impl BatchingTask {
             flow_eval_interval,
             eval_schedule,
         }: TaskArgs<'_>,
+        exact_sequence_range_required: bool,
     ) -> Result<Self, Error> {
         let mut state = TaskState::with_dirty_time_windows(
             query_ctx.clone(),
@@ -332,13 +372,29 @@ impl BatchingTask {
                 catalog_manager,
                 output_schema: plan.schema().clone(),
                 query_type: determine_query_type(query, &query_ctx)?,
+                exact_sequence_range_required,
                 batch_opts,
                 flow_eval_interval,
                 eval_schedule,
             }),
             state: Arc::new(RwLock::new(state)),
             execution_lock: Arc::new(Mutex::new(())),
+            execution: None,
         })
+    }
+
+    pub(crate) fn with_execution(
+        mut self,
+        execution: Option<Arc<dyn crate::BatchingExecution>>,
+    ) -> Self {
+        self.execution = execution;
+        self
+    }
+
+    pub(crate) fn stop_execution(&self) {
+        if let Some(execution) = &self.execution {
+            execution.stop();
+        }
     }
 
     pub fn last_execution_time_millis(&self) -> Option<i64> {
@@ -347,6 +403,11 @@ impl BatchingTask {
 
     pub fn start_time_millis(&self) -> Option<i64> {
         self.state.read().unwrap().start_time_millis()
+    }
+
+    /// Returns a stable clone of the task query context without exposing mutable task state.
+    pub fn query_context_snapshot(&self) -> QueryContextRef {
+        self.state.read().unwrap().query_ctx.clone()
     }
 
     /// Collect flow-related extensions from the task's query context that should be
@@ -396,26 +457,34 @@ impl BatchingTask {
         Ok(())
     }
 
-    /// Create sink table if not exists
+    /// Create the sink table if needed, then return it.
     pub async fn check_or_create_sink_table(
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
-    ) -> Result<Option<(usize, Duration)>, Error> {
-        if !self.is_table_exist(&self.config.sink_table_name).await? {
+    ) -> Result<TableRef, Error> {
+        if !self
+            .config
+            .catalog_manager
+            .table_exists(
+                &self.config.sink_table_name[0],
+                &self.config.sink_table_name[1],
+                &self.config.sink_table_name[2],
+                None,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
             let create_table = self.gen_create_table_expr(engine.clone()).await?;
-            info!(
-                "Try creating sink table(if not exists) with expr: {:?}",
-                create_table
-            );
             self.create_table(frontend_client, create_table).await?;
-            info!(
-                "Sink table {}(if not exists) created",
-                self.config.sink_table_name.join(".")
-            );
         }
-
-        Ok(None)
+        let (table, _) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
+        Ok(table)
     }
 
     /// Validates that the sink table schema can accept this flow's output.
@@ -423,106 +492,40 @@ impl BatchingTask {
     /// This is a dry-run of the same schema matching logic used by insert-plan
     /// generation, but without adding dirty-window filters or executing the query. It is used
     /// during CREATE FLOW to catch existing sink table mismatches early.
-    pub async fn validate_sink_table_schema(&self, engine: &QueryEngineRef) -> Result<(), Error> {
+    pub async fn validate_sink_table_schema(
+        &self,
+        engine: &QueryEngineRef,
+    ) -> Result<Arc<Schema>, Error> {
+        self.validate_sink_table_schema_with_values(engine, &BTreeMap::new())
+            .await
+    }
+
+    pub async fn validate_sink_table_schema_with_values(
+        &self,
+        engine: &QueryEngineRef,
+        values: &BTreeMap<String, ScalarValue>,
+    ) -> Result<Arc<Schema>, Error> {
         let (table, _) = get_table_info_df_schema(
             self.config.catalog_manager.clone(),
             self.config.sink_table_name.clone(),
         )
         .await?;
-
         let table_meta = &table.table_info().meta;
         let merge_mode_last_non_null =
             is_merge_mode_last_non_null(&table_meta.options.extra_options);
         let primary_key_indices = table_meta.primary_key_indices.clone();
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
-
-        gen_plan_with_matching_schema(
+        gen_plan_with_matching_schema_and_values(
             &self.config.query,
             query_ctx,
             engine.clone(),
             table_meta.schema.clone(),
             &primary_key_indices,
             merge_mode_last_non_null,
+            values,
         )
         .await
-        .map(|_| ())
-    }
-
-    async fn is_table_exist(&self, table_name: &[String; 3]) -> Result<bool, Error> {
-        self.config
-            .catalog_manager
-            .table_exists(&table_name[0], &table_name[1], &table_name[2], None)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-    }
-
-    pub(crate) async fn execute_once_serialized(
-        &self,
-        engine: &QueryEngineRef,
-        frontend_client: &Arc<FrontendClient>,
-        max_window_cnt: Option<usize>,
-    ) -> Result<Option<(usize, Duration)>, Error> {
-        let outcome = self
-            .execute_once_serialized_with_outcome(engine, frontend_client, max_window_cnt)
-            .await;
-        outcome.result
-    }
-
-    /// Executes one flow evaluation under `execution_lock` and keeps the
-    /// generated query context for the background loop's error logging/backoff.
-    async fn execute_once_serialized_with_outcome(
-        &self,
-        engine: &QueryEngineRef,
-        frontend_client: &Arc<FrontendClient>,
-        max_window_cnt: Option<usize>,
-    ) -> ExecuteOnceOutcome {
-        let _execution_guard = self.execution_lock.lock().await;
-        self.execute_once_unlocked(engine, frontend_client, max_window_cnt)
-            .await
-    }
-
-    /// Executes one flow evaluation. Caller must hold `execution_lock`.
-    async fn execute_once_unlocked(
-        &self,
-        engine: &QueryEngineRef,
-        frontend_client: &Arc<FrontendClient>,
-        max_window_cnt: Option<usize>,
-    ) -> ExecuteOnceOutcome {
-        let new_query = match self.gen_insert_plan_unlocked(engine, max_window_cnt).await {
-            Ok(new_query) => new_query,
-            Err(err) => {
-                return ExecuteOnceOutcome {
-                    new_query: None,
-                    result: Err(err),
-                };
-            }
-        };
-
-        if let Some(new_query) = new_query {
-            debug!("Generate new query: {}", new_query.plan);
-            let res = self
-                .execute_logical_plan_unlocked(
-                    frontend_client,
-                    &new_query.plan,
-                    &new_query.dirty_restore,
-                    &new_query.coverage,
-                )
-                .await;
-            if res.is_err() {
-                self.handle_executed_query_failure(Some(&new_query));
-            }
-            ExecuteOnceOutcome {
-                new_query: Some(new_query),
-                result: res,
-            }
-        } else {
-            debug!("Generate no query");
-            ExecuteOnceOutcome {
-                new_query: None,
-                result: Ok(None),
-            }
-        }
+        .map(|_| table_meta.schema.clone())
     }
 
     /// Generates the insert plan. Caller must reach this through the serialized path.
@@ -530,6 +533,17 @@ impl BatchingTask {
         &self,
         engine: &QueryEngineRef,
         max_window_cnt: Option<usize>,
+    ) -> Result<Option<PlanInfo>, Error> {
+        self.gen_insert_plan_with_values_unlocked(engine, max_window_cnt, &BTreeMap::new(), false)
+            .await
+    }
+
+    pub async fn gen_insert_plan_with_values_unlocked(
+        &self,
+        engine: &QueryEngineRef,
+        max_window_cnt: Option<usize>,
+        values: &BTreeMap<String, ScalarValue>,
+        force_full_snapshot: bool,
     ) -> Result<Option<PlanInfo>, Error> {
         let (table, df_schema) = get_table_info_df_schema(
             self.config.catalog_manager.clone(),
@@ -543,12 +557,14 @@ impl BatchingTask {
         let primary_key_indices = table_meta.primary_key_indices.clone();
 
         let new_query = self
-            .gen_query_with_time_window(
+            .gen_query_with_time_window_with_values(
                 engine.clone(),
                 &table.table_info().meta.schema,
                 &primary_key_indices,
                 merge_mode_last_non_null,
                 max_window_cnt,
+                values,
+                force_full_snapshot,
             )
             .await?;
 
@@ -630,14 +646,52 @@ impl BatchingTask {
         Ok(())
     }
 
-    /// Executes the insert plan. Caller must reach this through the serialized path.
     async fn execute_logical_plan_unlocked(
         &self,
+        engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
         dirty_restore: &DirtyRestore,
         coverage: &QueryCoverage,
     ) -> Result<Option<(usize, Duration)>, Error> {
+        let flow_id = self.config.flow_id;
+        let Some((res, elapsed)) = self
+            .execute_plan_unlocked(engine, frontend_client, plan, dirty_restore, coverage)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        if let Err(err) = &res {
+            let decision = {
+                let mut state = self.state.write().unwrap();
+                let reason = Self::query_failure_reason(err, coverage);
+                Self::apply_query_failure_to_state(&mut state, elapsed, coverage, reason)
+            };
+            if let Some(decision) = decision {
+                Self::record_checkpoint_decision(flow_id, decision);
+            }
+        }
+
+        let res = res?;
+        let (affected_rows, _) = res.output.extract_rows_and_cost();
+        let decision = {
+            let mut state = self.state.write().unwrap();
+            Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage)
+        };
+        Self::record_checkpoint_decision(flow_id, decision);
+
+        Ok(Some((affected_rows, elapsed)))
+    }
+
+    pub async fn execute_plan_unlocked(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        plan: &LogicalPlan,
+        dirty_restore: &DirtyRestore,
+        coverage: &QueryCoverage,
+    ) -> Result<Option<(Result<OutputWithMetrics, Error>, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
 
@@ -669,7 +723,7 @@ impl BatchingTask {
         // For incremental-mode SQL queries, attempt to rewrite the delta aggregate
         // plan into a safe delta-LEFT-JOIN-sink form before deciding on extensions.
         let incremental_plan = if coverage.is_incremental_delta() {
-            self.prepare_plan_for_incremental(&plan).await?
+            self.prepare_plan_for_incremental(engine, &plan).await?
         } else {
             None
         };
@@ -802,14 +856,6 @@ impl BatchingTask {
                 "Failed to execute Flow {flow_id} on frontend {peer_label}, result: {err:?}, elapsed: {:?} with query: {}",
                 elapsed, &plan
             );
-            let decision = {
-                let mut state = self.state.write().unwrap();
-                let reason = Self::query_failure_reason(err, coverage);
-                Self::apply_query_failure_to_state(&mut state, elapsed, coverage, reason)
-            };
-            if let Some(decision) = decision {
-                Self::record_checkpoint_decision(flow_id, decision);
-            }
         }
 
         // record slow query
@@ -824,29 +870,27 @@ impl BatchingTask {
                 .observe(elapsed.as_secs_f64());
         }
 
-        let res = res?;
-        let (affected_rows, _) = res.output.extract_rows_and_cost();
-        debug!(
-            "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
-            elapsed,
-            res.region_watermark_map()
-        );
-        METRIC_FLOW_ROWS
-            .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
-            .inc_by(affected_rows as _);
-        let decision = {
-            let mut state = self.state.write().unwrap();
-            Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage)
-        };
-        Self::record_checkpoint_decision(flow_id, decision);
-
-        Ok(Some((affected_rows, elapsed)))
+        match res {
+            Ok(res) => {
+                let (affected_rows, _) = res.output.extract_rows_and_cost();
+                debug!(
+                    "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
+                    elapsed,
+                    res.region_watermark_map()
+                );
+                METRIC_FLOW_ROWS
+                    .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
+                    .inc_by(affected_rows as _);
+                Ok(Some((Ok(res), elapsed)))
+            }
+            Err(err) => Ok(Some((Err(err), elapsed))),
+        }
     }
 
     /// Restore dirty windows consumed by a failed query so they are retried on
     /// the next execution.
     ///
-    fn restore_dirty_windows(&self, dirty_restore: &DirtyRestore) {
+    pub fn restore_dirty_windows(&self, dirty_restore: &DirtyRestore) {
         match dirty_restore {
             DirtyRestore::Scoped(filter) => self.restore_scoped_dirty_windows(filter),
             DirtyRestore::Unscoped(dirty_windows) => self
@@ -907,10 +951,8 @@ impl BatchingTask {
     /// Consume the live dirty signal for an unscoped query while keeping a copy
     /// that can be restored if planning or execution fails.
     fn drain_dirty_windows_signal(&self) -> (bool, DirtyTimeWindows) {
-        let mut state = self.state.write().unwrap();
-        let dirty_windows_to_restore = state.dirty_time_windows.clone();
+        let dirty_windows_to_restore = self.state.write().unwrap().dirty_time_windows.detach();
         let is_dirty = !dirty_windows_to_restore.is_empty();
-        state.dirty_time_windows.clean();
         (is_dirty, dirty_windows_to_restore)
     }
 
@@ -927,16 +969,18 @@ impl BatchingTask {
         dirty_windows_to_restore: DirtyTimeWindows,
         retention_filter: Option<(&str, Timestamp, &'static str)>,
         coverage: QueryCoverage,
+        values: &BTreeMap<String, ScalarValue>,
     ) -> Result<PlanInfo, Error> {
         let mut plan = self.restore_unscoped_dirty_windows_on_err(
             &dirty_windows_to_restore,
-            gen_plan_with_matching_schema(
+            gen_plan_with_matching_schema_and_values(
                 &self.config.query,
                 query_ctx,
                 engine,
                 sink_table_schema,
                 primary_key_indices,
                 allow_partial,
+                values,
             )
             .await,
         )?;
@@ -981,6 +1025,7 @@ impl BatchingTask {
         allow_partial: bool,
         retention_filter: Option<(&str, Timestamp, &'static str)>,
         coverage: QueryCoverage,
+        values: &BTreeMap<String, ScalarValue>,
     ) -> Result<Option<PlanInfo>, Error> {
         let (is_dirty, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
         if !is_dirty {
@@ -997,6 +1042,7 @@ impl BatchingTask {
             dirty_windows_to_restore,
             retention_filter,
             coverage,
+            values,
         )
         .await
         .map(Some)
@@ -1305,6 +1351,90 @@ impl BatchingTask {
         }
     }
 
+    pub(crate) async fn execute_once_serialized(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        max_window_cnt: Option<usize>,
+    ) -> Result<Option<(usize, Duration)>, Error> {
+        self.execute_once_serialized_with_outcome(engine, frontend_client, max_window_cnt)
+            .await
+            .result
+    }
+
+    async fn execute_once_serialized_with_outcome(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        let guard = BatchingExecutionGuard::new(self.execution_lock.clone().lock_owned().await);
+        self.execute_once_with_guard(guard, engine, frontend_client, max_window_cnt)
+            .await
+    }
+
+    async fn execute_once_with_guard(
+        &self,
+        guard: BatchingExecutionGuard,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        if let Some(execution) = &self.execution {
+            return execution
+                .clone()
+                .execute_once(guard, self, engine, frontend_client, max_window_cnt)
+                .await;
+        }
+        self.execute_once_default_unlocked(engine, frontend_client, max_window_cnt)
+            .await
+    }
+
+    async fn execute_once_default_unlocked(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        let new_query = match self.gen_insert_plan_unlocked(engine, max_window_cnt).await {
+            Ok(new_query) => new_query,
+            Err(err) => {
+                return ExecuteOnceOutcome {
+                    new_query: None,
+                    result: Err(err),
+                };
+            }
+        };
+        let Some(new_query) = new_query else {
+            return ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            };
+        };
+        let res = self
+            .execute_logical_plan_unlocked(
+                engine,
+                frontend_client,
+                &new_query.plan,
+                &new_query.dirty_restore,
+                &new_query.coverage,
+            )
+            .await;
+        match res {
+            Ok(result) => ExecuteOnceOutcome {
+                new_query: Some(new_query),
+                result: Ok(result),
+            },
+            Err(err) => {
+                self.handle_executed_query_failure(Some(&new_query));
+                ExecuteOnceOutcome {
+                    new_query: Some(new_query),
+                    result: Err(err),
+                }
+            }
+        }
+    }
+
     /// Check whether the shutdown signal has been received.
     fn is_shutdown_signaled(&self) -> bool {
         let mut state = self.state.write().unwrap();
@@ -1326,23 +1456,7 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
         scheduled_time_secs: i64,
     ) -> ExecuteOnceOutcome {
-        let _execution_guard = self.execution_lock.lock().await;
-
-        struct QueryContextRestoreGuard {
-            state: Arc<RwLock<TaskState>>,
-            old_ctx: Option<QueryContextRef>,
-        }
-
-        impl Drop for QueryContextRestoreGuard {
-            fn drop(&mut self) {
-                let Some(old_ctx) = self.old_ctx.take() else {
-                    return;
-                };
-                if let Ok(mut state) = self.state.write() {
-                    state.query_ctx = old_ctx;
-                }
-            }
-        }
+        let mut guard = BatchingExecutionGuard::new(self.execution_lock.clone().lock_owned().await);
 
         // Convert to milliseconds before touching the task state so an
         // unrepresentable scheduled time fails as an explicit error without
@@ -1370,21 +1484,12 @@ impl BatchingTask {
             state.query_ctx = Arc::new(new_ctx);
             old
         };
-        let restore_guard = QueryContextRestoreGuard {
-            state: self.state.clone(),
-            old_ctx: Some(old_ctx),
-        };
+        guard.restore_query_context(self.state.clone(), old_ctx);
 
-        let outcome = self
-            .execute_once_unlocked(engine, frontend_client, None)
-            .await;
-
-        // Restore while still holding `execution_lock` so no future manual
-        // flush can observe the temporary scheduled time. The guard also
-        // restores during unwind/cancellation.
-        drop(restore_guard);
-
-        outcome
+        // A collaborator may retain the guard in an owned child task. Its Drop
+        // restores the scheduled context before releasing serialization.
+        self.execute_once_with_guard(guard, engine, frontend_client, None)
+            .await
     }
 
     /// Generate the create table SQL
@@ -1414,6 +1519,7 @@ impl BatchingTask {
 
     /// Generate the next plan and classify its coverage so checkpoint handling
     /// knows whether it is full-query, scoped repair, fenced repair, or delta.
+    #[cfg(test)]
     async fn gen_query_with_time_window(
         &self,
         engine: QueryEngineRef,
@@ -1421,6 +1527,29 @@ impl BatchingTask {
         primary_key_indices: &[usize],
         allow_partial: bool,
         max_window_cnt: Option<usize>,
+    ) -> Result<Option<PlanInfo>, Error> {
+        self.gen_query_with_time_window_with_values(
+            engine,
+            sink_table_schema,
+            primary_key_indices,
+            allow_partial,
+            max_window_cnt,
+            &BTreeMap::new(),
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn gen_query_with_time_window_with_values(
+        &self,
+        engine: QueryEngineRef,
+        sink_table_schema: &Arc<Schema>,
+        primary_key_indices: &[usize],
+        allow_partial: bool,
+        max_window_cnt: Option<usize>,
+        values: &BTreeMap<String, ScalarValue>,
+        force_full_snapshot: bool,
     ) -> Result<Option<PlanInfo>, Error> {
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
         let start = SystemTime::now();
@@ -1441,6 +1570,38 @@ impl BatchingTask {
             .as_ref()
             .map(|expr| expr.eval(low_bound))
             .transpose()?;
+
+        if force_full_snapshot {
+            let detached = self.state.write().unwrap().dirty_time_windows.detach();
+            let retention_filter = self.config.expire_after.and_then(|_| {
+                self.config.time_window_expr.as_ref().and_then(|expr| {
+                    expire_time_window_bound
+                        .as_ref()
+                        .and_then(|(lower, _)| lower.as_ref())
+                        .map(|lower| {
+                            (
+                                expr.column_name.as_str(),
+                                *lower,
+                                "forced full snapshot retention",
+                            )
+                        })
+                })
+            });
+            return self
+                .gen_unfiltered_plan_info(
+                    engine,
+                    query_ctx,
+                    sink_table_schema.clone(),
+                    primary_key_indices,
+                    allow_partial,
+                    detached,
+                    retention_filter,
+                    QueryCoverage::UnfilteredFull,
+                    values,
+                )
+                .await
+                .map(Some);
+        }
 
         let (expire_lower_bound, expire_upper_bound) = match (
             expire_time_window_bound,
@@ -1474,6 +1635,7 @@ impl BatchingTask {
                         dirty_windows_to_restore,
                         None,
                         QueryCoverage::UnfilteredFull,
+                        values,
                     )
                     .await?;
 
@@ -1530,6 +1692,7 @@ impl BatchingTask {
                     allow_partial,
                     retention_filter,
                     QueryCoverage::IncrementalDelta,
+                    values,
                 )
                 .await;
         }
@@ -1573,10 +1736,11 @@ impl BatchingTask {
         );
 
         let mut add_filter = AddFilterRewriter::new(expr.expr.clone());
-        let mut add_auto_column = ColumnMatcherRewriter::new(
+        let mut add_auto_column = ColumnMatcherRewriter::new_with_values(
             sink_table_schema.clone(),
             primary_key_indices.to_vec(),
             allow_partial,
+            values.clone(),
         );
 
         let plan = self.restore_scoped_dirty_windows_on_err(

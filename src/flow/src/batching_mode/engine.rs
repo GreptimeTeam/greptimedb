@@ -21,7 +21,10 @@ use std::time::Duration;
 use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::{FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType};
+use common_meta::ddl::create_flow::{
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE, FlowType,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
@@ -72,6 +75,7 @@ pub struct BatchingEngine {
     /// Batching mode options for control how batching mode query works
     ///
     pub(crate) batch_opts: Arc<BatchingModeOptions>,
+    execution_factory: Option<Arc<dyn crate::BatchingExecutionFactory>>,
 }
 
 #[derive(Default)]
@@ -128,6 +132,26 @@ impl BatchingEngine {
         catalog_manager: CatalogManagerRef,
         batch_opts: BatchingModeOptions,
     ) -> Self {
+        Self::new_with_execution(
+            frontend_client,
+            query_engine,
+            flow_metadata_manager,
+            table_meta,
+            catalog_manager,
+            batch_opts,
+            None,
+        )
+    }
+
+    pub fn new_with_execution(
+        frontend_client: Arc<FrontendClient>,
+        query_engine: QueryEngineRef,
+        flow_metadata_manager: FlowMetadataManagerRef,
+        table_meta: TableMetadataManagerRef,
+        catalog_manager: CatalogManagerRef,
+        batch_opts: BatchingModeOptions,
+        execution_factory: Option<Arc<dyn crate::BatchingExecutionFactory>>,
+    ) -> Self {
         Self {
             runtime: Default::default(),
             frontend_client,
@@ -136,6 +160,7 @@ impl BatchingEngine {
             catalog_manager,
             query_engine,
             batch_opts: Arc::new(batch_opts),
+            execution_factory,
         }
     }
 
@@ -465,21 +490,24 @@ impl BatchingEngine {
     fn batch_opts_for_flow_options(
         &self,
         flow_options: &HashMap<String, String>,
+        exact_sequence_range_required: bool,
     ) -> Result<Arc<BatchingModeOptions>, Error> {
         let mut batch_opts = (*self.batch_opts).clone();
         if let Some(enable_incremental_read) =
             flow_options.get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
         {
-            batch_opts.experimental_enable_incremental_read = enable_incremental_read
-                .parse::<bool>()
-                .map_err(|_| {
+            batch_opts.experimental_enable_incremental_read = if exact_sequence_range_required {
+                true
+            } else {
+                enable_incremental_read.parse::<bool>().map_err(|_| {
                     InvalidQuerySnafu {
                         reason: format!(
                             "Invalid flow option {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}: {enable_incremental_read}"
                         ),
                     }
                     .build()
-                })?;
+                })?
+            };
         }
 
         Ok(Arc::new(batch_opts))
@@ -594,8 +622,14 @@ impl BatchingEngine {
             }
         );
 
-        let batch_opts = self.batch_opts_for_flow_options(&flow_options)?;
-
+        // The meta layer validates this reserved sentinel before it reaches the
+        // flownode. Derive the requirement once and pass it directly to task
+        // config; query-context extensions are irrelevant.
+        let exact_sequence_range_required = flow_options
+            .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+            .is_some_and(|value| value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE);
+        let batch_opts =
+            self.batch_opts_for_flow_options(&flow_options, exact_sequence_range_required)?;
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
             // also check table option to see if ttl!=instant
@@ -697,17 +731,35 @@ impl BatchingEngine {
             eval_schedule,
         };
 
-        let task = BatchingTask::try_new(task_args)?;
+        let task = BatchingTask::try_new_with_exact_sequence_range_required(
+            task_args,
+            exact_sequence_range_required,
+        )?;
 
-        let task_inner = task.clone();
+        if task.config.exact_sequence_range_required {
+            ensure!(
+                task.sequence_range_capable().await?,
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Flow {flow_id} requires exact sequence-range reads, but a source table lacks the Mito preserve_row_sequence capability"
+                    ),
+                }
+            );
+        }
+
         let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
-
-        // Create sink table if needed, then validate an existing/created sink schema before
-        // spawning the background task. This catches user-created sink schema mismatches at
-        // CREATE FLOW time instead of surfacing them later in the execution loop.
-        task.check_or_create_sink_table(&engine, &frontend).await?;
-        task.validate_sink_table_schema(&engine).await?;
+        let table = task.check_or_create_sink_table(&engine, &frontend).await?;
+        let execution = if let Some(factory) = &self.execution_factory {
+            factory.create(&task, table, &engine, &frontend).await?
+        } else {
+            None
+        };
+        if execution.is_none() {
+            task.validate_sink_table_schema(&engine).await?;
+        }
+        let task = task.with_execution(execution);
+        let task_inner = task.clone();
 
         let (start_tx, start_rx) = oneshot::channel();
 
@@ -991,6 +1043,8 @@ fn abort_flow_task(flow_id: FlowId, task: Option<BatchingTask>, action: &str) ->
         return false;
     };
 
+    task.stop_execution();
+
     if let Some(handle) = task.state.write().unwrap().task_handle.take() {
         handle.abort();
         debug!("Aborted {action} flow task {flow_id}");
@@ -1040,17 +1094,23 @@ impl FlowEngine for BatchingEngine {
 #[cfg(test)]
 mod tests {
     use api::v1::flow::{DirtyWindowRequest, TimeRange};
-    use catalog::memory::new_memory_catalog_manager;
+    use catalog::RegisterTableRequest;
+    use catalog::memory::MemoryCatalogManager;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_recordbatch::RecordBatch;
     use common_time::timestamp::TimeUnit;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
     use query::options::QueryOptions;
     use session::context::QueryContext;
+    use tokio::sync::Notify;
 
     use super::*;
+    use crate::ExecuteOnceOutcome;
     use crate::test_utils::create_test_query_engine;
 
     struct DropNotify(Option<oneshot::Sender<()>>);
@@ -1068,8 +1128,8 @@ mod tests {
         let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_meta.init().await.unwrap();
         let flow_meta = Arc::new(FlowMetadataManager::new(kv_backend));
-        let catalog_manager = new_memory_catalog_manager().unwrap();
         let query_engine = create_test_query_engine();
+        let catalog_manager = query_engine.engine_state().catalog_manager().clone();
         let (frontend_client, _handler) =
             FrontendClient::from_empty_grpc_handler(QueryOptions::default());
 
@@ -1083,20 +1143,371 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn test_flow_option_overrides_incremental_read_switch() {
-        let engine = new_test_engine().await;
+    async fn new_test_engine_with_execution(
+        execution_factory: Option<Arc<dyn crate::BatchingExecutionFactory>>,
+    ) -> BatchingEngine {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        let flow_meta = Arc::new(FlowMetadataManager::new(kv_backend));
+        let query_engine = create_test_query_engine();
+        let catalog_manager = query_engine.engine_state().catalog_manager().clone();
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
 
-        let default_opts = engine.batch_opts_for_flow_options(&HashMap::new()).unwrap();
-        assert!(!default_opts.experimental_enable_incremental_read);
-
-        let enabled_opts = engine
-            .batch_opts_for_flow_options(&HashMap::from([(
-                FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
-                "true".to_string(),
-            )]))
+        let engine = BatchingEngine::new_with_execution(
+            Arc::new(frontend_client),
+            query_engine,
+            flow_meta,
+            table_meta,
+            catalog_manager,
+            BatchingModeOptions::default(),
+            execution_factory,
+        );
+        engine
+            .table_meta
+            .create_table_metadata(
+                new_test_table_info_with_name(1, "numbers_with_ts"),
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
             .unwrap();
-        assert!(enabled_opts.experimental_enable_incremental_read);
+        engine
+    }
+
+    fn register_sink_with_schema(engine: &BatchingEngine, name: &str) {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(UInt32Vector::from_slice([1_u32])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        engine
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap()
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: name.to_string(),
+                table_id: 9000,
+                table: table::test_util::MemTable::table(name, recordbatch),
+            })
+            .unwrap();
+    }
+
+    fn register_number_only_sink(engine: &BatchingEngine, name: &str) {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "number",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![Arc::new(UInt32Vector::from_slice([1_u32])) as VectorRef],
+        )
+        .unwrap();
+        engine
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap()
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: name.to_string(),
+                table_id: 9001,
+                table: table::test_util::MemTable::table(name, recordbatch),
+            })
+            .unwrap();
+    }
+
+    fn flow_create_args(flow_id: FlowId, sink: &str) -> CreateFlowArgs {
+        CreateFlowArgs {
+            flow_id,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                sink.to_string(),
+            ],
+            source_table_ids: vec![1],
+            create_if_not_exists: false,
+            or_replace: false,
+            expire_after: None,
+            eval_interval: Some(10),
+            comment: None,
+            sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
+            flow_options: HashMap::new(),
+            query_ctx: Some(QueryContext::arc().as_ref().clone()),
+            eval_schedule: None,
+        }
+    }
+
+    struct TestExecution {
+        manual_calls: std::sync::atomic::AtomicUsize,
+        stops: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::BatchingExecution for TestExecution {
+        async fn execute_once(
+            self: Arc<Self>,
+            _guard: crate::BatchingExecutionGuard,
+            task: &BatchingTask,
+            _engine: &QueryEngineRef,
+            _frontend: &Arc<FrontendClient>,
+            _max_window_cnt: Option<usize>,
+        ) -> ExecuteOnceOutcome {
+            if task
+                .state
+                .read()
+                .unwrap()
+                .query_ctx
+                .extension(query::options::FLOW_SCHEDULED_TIME_MILLIS)
+                .is_none()
+            {
+                self.manual_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            }
+        }
+
+        fn stop(&self) {
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    type TestExecutionResult = crate::Result<Option<Arc<dyn crate::BatchingExecution>>>;
+
+    struct TestExecutionFactory {
+        entered: Option<Arc<Notify>>,
+        release: Option<Arc<Notify>>,
+        result: std::sync::Mutex<Option<TestExecutionResult>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::BatchingExecutionFactory for TestExecutionFactory {
+        async fn create(
+            &self,
+            _task: &BatchingTask,
+            _sink: table::TableRef,
+            _engine: &QueryEngineRef,
+            _frontend: &Arc<FrontendClient>,
+        ) -> crate::Result<Option<Arc<dyn crate::BatchingExecution>>> {
+            if let Some(entered) = &self.entered {
+                entered.notify_one();
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("execution factory should only be called once")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execution_factory_finishes_before_task_publication() {
+        const GATE_TIMEOUT: Duration = Duration::from_secs(1);
+
+        let execution = Arc::new(TestExecution {
+            manual_calls: Default::default(),
+            stops: Default::default(),
+        });
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let factory = Arc::new(TestExecutionFactory {
+            entered: Some(entered.clone()),
+            release: Some(release.clone()),
+            result: std::sync::Mutex::new(Some(Ok(Some(execution.clone())))),
+        });
+        let engine = Arc::new(new_test_engine_with_execution(Some(factory)).await);
+        register_sink_with_schema(&engine, "factory_sink");
+
+        let entered_wait = entered.notified();
+        let mut args = flow_create_args(6, "factory_sink");
+        args.eval_interval = Some(86_400);
+        let mut create = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.create_flow_inner(args).await }
+        });
+        if tokio::time::timeout(GATE_TIMEOUT, entered_wait)
+            .await
+            .is_err()
+        {
+            release.notify_one();
+            if tokio::time::timeout(GATE_TIMEOUT, &mut create)
+                .await
+                .is_err()
+            {
+                create.abort();
+            }
+            panic!("execution factory should be entered");
+        }
+        let unpublished = {
+            let runtime = engine.runtime.read().await;
+            !runtime.tasks.contains_key(&6) && !runtime.shutdown_txs.contains_key(&6)
+        };
+
+        release.notify_one();
+        assert!(unpublished);
+        let created = tokio::time::timeout(GATE_TIMEOUT, &mut create)
+            .await
+            .expect("flow creation should finish after factory release");
+        created.unwrap().unwrap();
+        assert!(engine.flow_exist_inner(6).await);
+        let calls_before_flush = execution
+            .manual_calls
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(engine.flush_flow_inner(6).await.unwrap(), 0);
+        assert_eq!(
+            execution
+                .manual_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            calls_before_flush + 1
+        );
+        engine.remove_flow_inner(6).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_execution_factory_result_controls_sink_validation_and_publication() {
+        let no_factory_engine = new_test_engine_with_execution(None).await;
+        register_number_only_sink(&no_factory_engine, "no_factory_sink");
+        assert!(
+            no_factory_engine
+                .create_flow_inner(flow_create_args(7, "no_factory_sink"))
+                .await
+                .is_err()
+        );
+        assert!(!no_factory_engine.flow_exist_inner(7).await);
+
+        let declined_engine =
+            new_test_engine_with_execution(Some(Arc::new(TestExecutionFactory {
+                entered: None,
+                release: None,
+                result: std::sync::Mutex::new(Some(Ok(None))),
+            })))
+            .await;
+        register_number_only_sink(&declined_engine, "declined_factory_sink");
+        assert!(
+            declined_engine
+                .create_flow_inner(flow_create_args(8, "declined_factory_sink"))
+                .await
+                .is_err()
+        );
+        assert!(!declined_engine.flow_exist_inner(8).await);
+
+        let accepted_engine =
+            new_test_engine_with_execution(Some(Arc::new(TestExecutionFactory {
+                entered: None,
+                release: None,
+                result: std::sync::Mutex::new(Some(Ok(Some(Arc::new(TestExecution {
+                    manual_calls: Default::default(),
+                    stops: Default::default(),
+                }))))),
+            })))
+            .await;
+        register_number_only_sink(&accepted_engine, "accepted_factory_sink");
+        accepted_engine
+            .create_flow_inner(flow_create_args(9, "accepted_factory_sink"))
+            .await
+            .unwrap();
+        assert!(accepted_engine.flow_exist_inner(9).await);
+        accepted_engine.remove_flow_inner(9).await.unwrap();
+
+        let error_engine = new_test_engine_with_execution(Some(Arc::new(TestExecutionFactory {
+            entered: None,
+            release: None,
+            result: std::sync::Mutex::new(Some(
+                UnexpectedSnafu {
+                    reason: "test execution factory failure".to_string(),
+                }
+                .fail(),
+            )),
+        })))
+        .await;
+        register_sink_with_schema(&error_engine, "error_factory_sink");
+        assert!(
+            error_engine
+                .create_flow_inner(flow_create_args(10, "error_factory_sink"))
+                .await
+                .is_err()
+        );
+        assert!(!error_engine.flow_exist_inner(10).await);
+    }
+
+    #[tokio::test]
+    async fn test_flow_option_parser_matrix() {
+        let engine = new_test_engine().await;
+        let cases = [
+            (None, Ok((false, false))),
+            (Some("true"), Ok((true, false))),
+            (Some("false"), Ok((false, false))),
+            (
+                Some(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE),
+                Ok((true, true)),
+            ),
+            (Some("malformed"), Err(())),
+        ];
+        for (value, expected) in cases {
+            let options = value
+                .map(|value| {
+                    HashMap::from([(
+                        FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                        value.to_string(),
+                    )])
+                })
+                .unwrap_or_default();
+            let exact_sequence_range_required = options
+                .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+                .is_some_and(|value| {
+                    value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE
+                });
+            match (
+                engine.batch_opts_for_flow_options(&options, exact_sequence_range_required),
+                expected,
+            ) {
+                (Ok(opts), Ok((enabled, required))) => {
+                    assert_eq!(opts.experimental_enable_incremental_read, enabled);
+                    assert_eq!(exact_sequence_range_required, required);
+                }
+                (Err(_), Err(())) => {}
+                (result, expected) => panic!(
+                    "unexpected parser result for {value:?}: {result:?}, expected {expected:?}"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exact_sequence_range_capability_is_checked_before_task_startup() {
+        let engine = new_test_engine_with_execution(None).await;
+        let mut args = flow_create_args(5, "exact_requires_capability");
+        args.flow_options.insert(
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE.to_string(),
+        );
+
+        assert!(engine.create_flow_inner(args).await.is_err());
+        assert!(!engine.flow_exist_inner(5).await);
     }
 
     #[test]
@@ -1540,11 +1951,30 @@ GROUP BY l.number, time_window
     }
 
     #[tokio::test]
-    async fn test_abort_flow_task_aborts_handle() {
+    async fn test_abort_flow_task_stops_execution_without_loop_handle() {
         let (task, _shutdown_tx) = new_test_task(42).await;
+        let execution = Arc::new(TestExecution {
+            manual_calls: Default::default(),
+            stops: Default::default(),
+        });
+        let task = task.with_execution(Some(execution.clone()));
+
+        assert!(!abort_flow_task(42, Some(task), "test"));
+        assert_eq!(execution.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_abort_flow_task_stops_execution_before_aborting_handle() {
+        let (task, _shutdown_tx) = new_test_task(42).await;
+        let execution = Arc::new(TestExecution {
+            manual_calls: Default::default(),
+            stops: Default::default(),
+        });
+        let task = task.with_execution(Some(execution.clone()));
         let drop_rx = install_abort_observed_handle(&task).await;
 
         assert!(abort_flow_task(42, Some(task), "test"));
+        assert_eq!(execution.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         tokio::time::timeout(Duration::from_secs(1), drop_rx)
             .await

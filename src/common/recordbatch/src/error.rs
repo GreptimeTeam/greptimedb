@@ -205,7 +205,26 @@ impl ErrorExt for Error {
             | Error::PhysicalExpr { .. }
             | Error::RecordBatchSliceIndexOverflow { .. } => StatusCode::Internal,
 
-            Error::PollStream { .. } => StatusCode::EngineExecuteQuery,
+            Error::PollStream { error, .. } => {
+                let mut error = error;
+                loop {
+                    error = match error {
+                        datafusion::error::DataFusionError::Shared(inner) => inner,
+                        datafusion::error::DataFusionError::Context(_, inner)
+                        | datafusion::error::DataFusionError::Diagnostic(_, inner) => inner,
+                        _ => break,
+                    };
+                }
+
+                match error {
+                    datafusion::error::DataFusionError::External(source) => source
+                        .downcast_ref::<BoxedError>()
+                        .map_or(StatusCode::EngineExecuteQuery, |source| {
+                            source.status_code()
+                        }),
+                    _ => StatusCode::EngineExecuteQuery,
+                }
+            }
 
             Error::ArrowCompute { .. } => StatusCode::IllegalState,
 
@@ -239,6 +258,109 @@ impl ErrorExt for Error {
                 source.retry_hint()
             }
             _ => RetryHint::NonRetryable,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_error::ext::PlainError;
+    use datafusion::error::DataFusionError;
+
+    use super::*;
+
+    #[test]
+    fn poll_stream_status_code_preserves_boxed_error_through_wrappers() {
+        let boxed_error = |status| {
+            DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                "neutral error".to_string(),
+                status,
+            ))))
+        };
+
+        for status in [
+            StatusCode::RequestOutdated,
+            StatusCode::Unknown,
+            StatusCode::Unsupported,
+        ] {
+            let errors = [
+                boxed_error(status),
+                DataFusionError::Shared(Arc::new(boxed_error(status))),
+                DataFusionError::Context("context".to_string(), Box::new(boxed_error(status))),
+                DataFusionError::Diagnostic(
+                    Box::new(datafusion::common::Diagnostic::new_error(
+                        "diagnostic",
+                        None,
+                    )),
+                    Box::new(boxed_error(status)),
+                ),
+                DataFusionError::Shared(Arc::new(DataFusionError::Context(
+                    "context".to_string(),
+                    Box::new(DataFusionError::Diagnostic(
+                        Box::new(datafusion::common::Diagnostic::new_error(
+                            "diagnostic",
+                            None,
+                        )),
+                        Box::new(boxed_error(status)),
+                    )),
+                ))),
+            ];
+
+            for error in errors {
+                let error = Error::PollStream {
+                    error,
+                    location: Location::default(),
+                };
+                assert_eq!(error.status_code(), status);
+            }
+        }
+
+        let error = Error::PollStream {
+            error: DataFusionError::Shared(Arc::new(DataFusionError::External(Box::new(
+                BoxedError::new(Error::PhysicalExpr {
+                    error: DataFusionError::NotImplemented("inner error".to_string()),
+                    location: Location::default(),
+                }),
+            )))),
+            location: Location::default(),
+        };
+        assert_eq!(error.status_code(), StatusCode::Internal);
+    }
+
+    #[test]
+    fn poll_stream_status_code_defaults_for_other_datafusion_errors() {
+        let wrap = |error| {
+            DataFusionError::Shared(Arc::new(DataFusionError::Context(
+                "context".to_string(),
+                Box::new(DataFusionError::Diagnostic(
+                    Box::new(datafusion::common::Diagnostic::new_error(
+                        "diagnostic",
+                        None,
+                    )),
+                    Box::new(error),
+                )),
+            )))
+        };
+        let errors = || {
+            [
+                DataFusionError::External(Box::new(std::io::Error::other("neutral io error"))),
+                DataFusionError::Internal("neutral internal error".to_string()),
+                DataFusionError::NotImplemented("neutral not implemented error".to_string()),
+                DataFusionError::Plan("neutral plan error".to_string()),
+                DataFusionError::External(Box::new(DataFusionError::Internal(
+                    "inner error".to_string(),
+                ))),
+            ]
+        };
+
+        for error in errors().into_iter().chain(errors().map(wrap)) {
+            let error = Error::PollStream {
+                error,
+                location: Location::default(),
+            };
+            assert_eq!(error.status_code(), StatusCode::EngineExecuteQuery);
         }
     }
 }

@@ -33,6 +33,8 @@ mod test {
     use client::region::RegionRequester;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
     use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
     use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
@@ -720,12 +722,14 @@ mod test {
         let mut stale_fence_error = None;
         while let Some(batch) = stream.next().await {
             if let Err(err) = batch {
-                stale_fence_error = Some(format!("{err:?}"));
+                stale_fence_error = Some(err);
                 break;
             }
         }
 
-        let err_msg = stale_fence_error.expect("expected stale snapshot fence rejection");
+        let stale_fence_error = stale_fence_error.expect("expected stale snapshot fence rejection");
+        assert_eq!(stale_fence_error.status_code(), StatusCode::RequestOutdated);
+        let err_msg = format!("{stale_fence_error:?}");
         assert!(
             err_msg.contains("STALE_SNAPSHOT_FENCE")
                 || err_msg.contains("RequestOutdated")

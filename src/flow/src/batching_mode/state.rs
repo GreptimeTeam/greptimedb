@@ -35,8 +35,6 @@ use crate::metrics::{
 };
 use crate::{Error, FlowId};
 
-/// The state of the [`BatchingTask`].
-#[derive(Debug)]
 pub struct TaskState {
     /// Query context
     pub(crate) query_ctx: QueryContextRef,
@@ -121,6 +119,11 @@ impl TaskState {
     /// First execution time in unix timestamp milliseconds, set once.
     pub fn start_time_millis(&self) -> Option<i64> {
         self.start_time_millis
+    }
+
+    /// Pending dirty work, without permitting mutation of the task state.
+    pub fn dirty_time_windows(&self) -> &DirtyTimeWindows {
+        &self.dirty_time_windows
     }
 
     pub fn checkpoint_mode(&self) -> CheckpointMode {
@@ -551,6 +554,15 @@ impl DirtyTimeWindows {
         self.windows.clear();
     }
 
+    pub(crate) fn detach(&mut self) -> Self {
+        let mut detached = Self::new(
+            self.max_filter_num_per_query,
+            self.time_window_merge_threshold,
+        );
+        std::mem::swap(&mut detached.windows, &mut self.windows);
+        detached
+    }
+
     /// Set windows to be dirty, only useful for full aggr without time window
     /// to mark some new data is inserted
     pub fn set_dirty(&mut self) {
@@ -907,7 +919,7 @@ pub(crate) fn to_df_literal(value: Timestamp) -> Result<datafusion_common::Scala
 }
 
 #[derive(Debug, Clone)]
-enum ExecState {
+pub(crate) enum ExecState {
     Idle,
     Executing,
 }

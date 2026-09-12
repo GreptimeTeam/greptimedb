@@ -12,13 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use catalog::RegisterTableRequest;
-use common_recordbatch::RecordBatch;
+use common_query::OutputData;
+use common_recordbatch::recordbatch::merge_record_batches;
+use common_recordbatch::{RecordBatch, util};
 use common_time::Timestamp;
 use datafusion_common::tree_node::TreeNode as _;
 use datafusion_expr::GroupingSet;
+use datatypes::arrow::array::{Array, AsArray};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Float64Type, Int64Type, UInt64Type};
 use datatypes::prelude::{ConcreteDataType, MutableVector, Scalar, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::timestamp::TimestampMillisecond;
@@ -270,6 +275,81 @@ async fn test_sql_plan_convert() {
     assert_eq!(
         r#"SELECT "UPPERCASE_NUMBERS_WITH_TS"."NUMBER" FROM "UPPERCASE_NUMBERS_WITH_TS""#,
         new_sql
+    );
+}
+
+#[test]
+fn test_df_plan_to_sql_quotes_colon_table_name() {
+    // Prometheus-style table names contain ':' (e.g.
+    // `kube_pod_cpu_cores:sum`). The unparser dialect must quote them,
+    // otherwise the re-parsed SQL is invalid (`keyword: :`).
+    let table = single_row_u32_table("kube_pod_cpu_cores:sum", vec!["value"]);
+    let provider = Arc::new(DfTableProviderAdapter::new(table));
+    let table_source = Arc::new(DefaultTableSource::new(provider));
+    let table_ref = TableReference::full("catalog", "schema", "kube_pod_cpu_cores:sum");
+    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let sql = df_plan_to_sql(&plan).unwrap();
+    assert!(
+        sql.contains("\"kube_pod_cpu_cores:sum\""),
+        "expected quoted table name in {sql}"
+    );
+    // The only occurrence of `cores:sum` must be inside the quoted identifier.
+    assert_eq!(
+        sql.matches("cores:sum").count(),
+        1,
+        "colon should only appear inside quotes in {sql}"
+    );
+}
+
+#[test]
+fn test_df_plan_to_sql_does_not_quote_plain_lowercase() {
+    let table = single_row_u32_table("plain_table", vec!["value"]);
+    let provider = Arc::new(DfTableProviderAdapter::new(table));
+    let table_source = Arc::new(DefaultTableSource::new(provider));
+    let table_ref = TableReference::full("catalog", "schema", "plain_table");
+    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
+        .unwrap()
+        .project(vec![datafusion_expr::col("value")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let sql = df_plan_to_sql(&plan).unwrap();
+    assert!(
+        sql.contains("plain_table") && !sql.contains("\"plain_table\""),
+        "plain lowercase table should stay unquoted in {sql}"
+    );
+    // `value` is not a reserved word, so the column stays unquoted.
+    assert!(
+        sql.contains("plain_table.value"),
+        "column unquoted in {sql}"
+    );
+    assert!(!sql.contains('`'), "no backtick quoting in {sql}");
+}
+
+#[test]
+fn test_df_plan_to_sql_quotes_digit_leading_table_name() {
+    // A table literally named `123metrics` starts with a digit and must be
+    // quoted, otherwise the re-parsed SQL is invalid.
+    let table = single_row_u32_table("123metrics", vec!["value"]);
+    let provider = Arc::new(DfTableProviderAdapter::new(table));
+    let table_source = Arc::new(DefaultTableSource::new(provider));
+    let table_ref = TableReference::full("catalog", "schema", "123metrics");
+    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
+        .unwrap()
+        .project(vec![datafusion_expr::col("value")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let sql = df_plan_to_sql(&plan).unwrap();
+    assert!(
+        sql.contains("\"123metrics\""),
+        "expected digit-leading table name quoted in {sql}"
     );
 }
 
@@ -668,8 +748,8 @@ async fn test_gen_plan_with_matching_schema_accepts_out_of_order_matching_names(
         output_names,
         vec![
             "number".to_string(),
-            "ts".to_string(),
-            "time_window".to_string()
+            "time_window".to_string(),
+            "ts".to_string()
         ]
     );
     assert!(duplicate_names(&output_names).is_empty());
@@ -842,6 +922,92 @@ async fn test_validate_sink_table_schema_rejects_existing_sink_missing_flow_colu
         "{err}"
     );
     assert!(err.contains("extra"), "{err}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_injects_attempt_columns_in_sink_order() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("marker", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("payload", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("epoch", ConcreteDataType::uint64_datatype(), true),
+        ColumnSchema::new(
+            AUTO_CREATED_UPDATE_AT_TS_COL,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        ),
+    ]));
+    let values = BTreeMap::from([
+        ("marker".to_string(), ScalarValue::UInt32(Some(7))),
+        (
+            "payload".to_string(),
+            ScalarValue::Utf8(Some("state".to_string())),
+        ),
+        ("epoch".to_string(), ScalarValue::UInt64(Some(9))),
+    ]);
+    let plan = gen_plan_with_matching_schema_and_values(
+        "SELECT number, ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+        &values,
+    )
+    .await
+    .unwrap();
+    let output_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        output_names,
+        vec!["number", "ts", "marker", "payload", "epoch", "update_at"]
+    );
+    let sql = df_plan_to_sql(&plan).unwrap();
+    assert!(sql.contains("7 AS marker"), "{sql}");
+    assert!(sql.contains("'state' AS payload"), "{sql}");
+    assert!(sql.contains("9 AS epoch"), "{sql}");
+    assert!(sql.contains("now() AS update_at"), "{sql}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_arbitrary_missing_attempt_column() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("missing", ConcreteDataType::uint32_datatype(), true),
+    ]));
+    let err = gen_plan_with_matching_schema_and_values(
+        "SELECT number, ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+        &BTreeMap::new(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("missing sink columns"), "{err}");
 }
 
 #[tokio::test]
@@ -1106,13 +1272,16 @@ async fn test_rewrite_incremental_aggregate_allows_alias_wrapped_scan() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(n.number) AS number, n.ts FROM numbers_with_ts AS n GROUP BY n.ts";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+        .await
+        .unwrap();
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(analysis.unsupported_exprs.is_empty());
 
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         single_row_u32_table("alias_wrapped_sink", vec!["ts", "number"]),
         &[
             "greptime".to_string(),
@@ -1364,6 +1533,7 @@ async fn test_analyze_incremental_aggregate_plan_allows_literal_outputs() {
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table.clone(),
         &sink_table_name,
         None,
@@ -1437,7 +1607,9 @@ async fn test_rewrite_incremental_aggregate_preserves_non_identifier_aliases() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(number) AS \"max value\", number, 42 AS \"literal value\" FROM numbers_with_ts GROUP BY number";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+        .await
+        .unwrap();
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(analysis.unsupported_exprs.is_empty());
     assert_eq!(
@@ -1449,6 +1621,7 @@ async fn test_rewrite_incremental_aggregate_preserves_non_identifier_aliases() {
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table,
         &[
             "greptime".to_string(),
@@ -1522,24 +1695,34 @@ async fn test_datafusion_rejects_duplicate_output_names() {
 }
 
 #[tokio::test]
-async fn test_analyze_incremental_aggregate_plan_rejects_same_aggregate_multiple_aliases() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sql = "SELECT sum(number) AS a, sum(number) AS b, ts FROM numbers_with_ts GROUP BY ts";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+async fn test_analyze_incremental_aggregate_plan_supports_same_aggregate_multiple_aliases() {
+    let analysis = analyze_test_sql(
+        "SELECT sum(number) AS a, sum(number) AS b, ts FROM numbers_with_ts GROUP BY ts",
+    )
+    .await;
 
-    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+    assert_eq!(analysis.merge_columns.len(), 2);
+    assert_eq!(analysis.merge_columns[0].input_field_name, "a");
+    assert_eq!(analysis.merge_columns[1].input_field_name, "a");
     assert!(
         analysis
-            .unsupported_exprs
+            .merge_columns
             .iter()
-            .any(|expr| expr.contains("same aggregate output")
-                && expr.contains("a")
-                && expr.contains("b")),
-        "same aggregate with multiple aliases should be unsupported until explicit reproduction is implemented: {:?}",
-        analysis.unsupported_exprs
+            .all(|column| { column.merge_op == IncrementalAggregateMergeOp::Sum })
     );
-    assert!(analysis.merge_columns.is_empty());
+    assert!(
+        analysis
+            .merge_columns
+            .iter()
+            .any(|column| column.output_field_name == "a")
+    );
+    assert!(
+        analysis
+            .merge_columns
+            .iter()
+            .any(|column| column.output_field_name == "b")
+    );
 }
 
 #[test]
@@ -1581,6 +1764,292 @@ async fn test_analyze_incremental_aggregate_plan_rejects_avg() {
 
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(!analysis.unsupported_exprs.is_empty());
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_supports_mixed_state_families() {
+    let analysis = analyze_test_sql(
+        "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, \
+         hll(CAST(number AS VARCHAR)) AS hll_b, \
+         uddsketch_state(128, 0.01, CAST(number AS DOUBLE)) AS percentile_a, \
+         uddsketch_state(256, 0.02, number) AS percentile_b, \
+         stddev_pop_state(number) AS stddev_state, \
+         sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
+    )
+    .await;
+
+    assert!(
+        analysis.unsupported_exprs.is_empty(),
+        "mixed state aggregate should be supported: {:?}",
+        analysis.unsupported_exprs
+    );
+    assert_eq!(analysis.merge_columns.len(), 6);
+    assert!(analysis.merge_columns.iter().any(|column| {
+        column.output_field_name == "hll_a"
+            && column.merge_op
+                == (IncrementalAggregateMergeOp::StateDeltaMerge {
+                    function_name: "__hll_delta_merge",
+                    params: vec![],
+                })
+    }));
+    assert!(analysis.merge_columns.iter().any(|column| {
+        column.output_field_name == "hll_b"
+            && column.input_field_name == "hll_a"
+            && column.merge_op
+                == (IncrementalAggregateMergeOp::StateDeltaMerge {
+                    function_name: "__hll_delta_merge",
+                    params: vec![],
+                })
+    }));
+    for (output_field_name, function_name, param_count) in [
+        ("percentile_a", "__uddsketch_state_delta_merge", 2),
+        ("percentile_b", "__uddsketch_state_delta_merge", 2),
+        ("stddev_state", "__stddev_pop_state_delta_merge", 0),
+    ] {
+        let column = analysis
+            .merge_columns
+            .iter()
+            .find(|column| column.output_field_name == output_field_name)
+            .unwrap();
+        assert!(matches!(
+            &column.merge_op,
+            IncrementalAggregateMergeOp::StateDeltaMerge {
+                function_name: actual_name,
+                params,
+            } if *actual_name == function_name && params.len() == param_count
+        ));
+    }
+}
+
+#[tokio::test]
+async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_families() {
+    let query_engine = create_test_query_engine();
+    let old_sql = "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN CAST(NULL AS BIGINT) ELSE 2 END AS grp FROM numbers_with_ts WHERE number <= 3 OR number = 6 GROUP BY grp";
+    let new_sql = "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN CAST(NULL AS BIGINT) WHEN number <= 8 THEN 2 ELSE 3 END AS grp FROM numbers_with_ts WHERE number >= 4 AND number != 6 GROUP BY grp";
+    let old_plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), old_sql, false)
+        .await
+        .unwrap();
+    let old_output = query_engine
+        .execute(old_plan, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(old_stream) = old_output.data else {
+        panic!("expected old aggregate execution to be a stream");
+    };
+    let old_batches = util::collect(old_stream).await.unwrap();
+    let old_schema = old_batches.first().unwrap().schema.clone();
+    let old_batch = merge_record_batches(old_schema, &old_batches).unwrap();
+    assert_eq!(
+        old_batch.num_rows(),
+        2,
+        "old state must have one row per group"
+    );
+    let old_groups = old_batch
+        .column_by_name("grp")
+        .unwrap()
+        .as_primitive::<Int64Type>();
+    assert_eq!(old_groups.null_count(), 1);
+    let mut old_group_values = (0..old_groups.len())
+        .map(|index| (!old_groups.is_null(index)).then(|| old_groups.value(index)))
+        .collect::<Vec<_>>();
+    old_group_values.sort_unstable();
+    assert_eq!(old_group_values, [None, Some(2)]);
+    let sink_table = MemTable::table("state_merge_sink", old_batch);
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "state_merge_sink".to_string(),
+    ];
+
+    let new_plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), new_sql, false)
+        .await
+        .unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&new_plan)
+        .unwrap()
+        .unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+    let rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &new_plan,
+        &analysis,
+        &query_engine,
+        sink_table,
+        &sink_table_name,
+        None,
+    )
+    .await
+    .unwrap();
+    let rendered = format!("{}", rewritten.display_indent());
+    for function_name in [
+        "__hll_delta_merge",
+        "__uddsketch_state_delta_merge",
+        "__stddev_pop_state_delta_merge",
+    ] {
+        assert!(rendered.contains(function_name), "{rendered}");
+    }
+    assert_eq!(
+        analysis.output_field_names,
+        vec![
+            "hll_a",
+            "hll_b",
+            "percentile_a",
+            "percentile_b",
+            "stddev_state",
+            "total",
+            "grp",
+        ],
+        "repeated HLL aliases must preserve output order"
+    );
+
+    let output = query_engine
+        .execute(rewritten, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(stream) = output.data else {
+        panic!("expected rewritten plan to execute as a stream");
+    };
+    let batches = util::collect(stream).await.unwrap();
+    let merged_schema = batches.first().unwrap().schema.clone();
+    let merged_batch = merge_record_batches(merged_schema, &batches).unwrap();
+    assert_eq!(
+        merged_batch.num_rows(),
+        3,
+        "rewrite must produce one row per group"
+    );
+    let merged_groups = merged_batch
+        .column_by_name("grp")
+        .unwrap()
+        .as_primitive::<Int64Type>();
+    assert_eq!(merged_groups.null_count(), 1);
+    let mut merged_group_values = (0..merged_groups.len())
+        .map(|index| (!merged_groups.is_null(index)).then(|| merged_groups.value(index)))
+        .collect::<Vec<_>>();
+    merged_group_values.sort_unstable();
+    assert_eq!(merged_group_values, [None, Some(2), Some(3)]);
+    let merged_table = MemTable::table("merged_states", merged_batch);
+    query_engine
+        .engine_state()
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+        .unwrap()
+        .register_table_sync(RegisterTableRequest {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table_name: "merged_states".to_string(),
+            table_id: 4097,
+            table: merged_table,
+        })
+        .unwrap();
+    let checks = "SELECT grp, sum(total) AS total, hll_count(hll_merge(hll_a)) AS hll_a, hll_count(hll_merge(hll_b)) AS hll_b, stddev_pop_calc(stddev_pop_merge(stddev_state)) AS stddev, uddsketch_calc(0.5, uddsketch_merge(128, 0.000001, percentile_a)) AS p50_a, uddsketch_calc(0.5, uddsketch_merge(256, 0.02, percentile_b)) AS p50_b FROM merged_states GROUP BY grp ORDER BY grp NULLS FIRST";
+    let checks_plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), checks, false)
+        .await
+        .unwrap();
+    let checks_output = query_engine
+        .execute(checks_plan, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(checks_stream) = checks_output.data else {
+        panic!("expected state check execution to be a stream");
+    };
+    let checks_batches = util::collect(checks_stream).await.unwrap();
+    let checks_schema = checks_batches.first().unwrap().schema.clone();
+    let checks = merge_record_batches(checks_schema, &checks_batches).unwrap();
+    assert_eq!(checks.num_rows(), 3);
+    assert_eq!(
+        checks
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["grp", "total", "hll_a", "hll_b", "stddev", "p50_a", "p50_b"]
+    );
+    let group = checks.column(0).as_primitive::<Int64Type>();
+    let total = checks.column(1).as_primitive::<UInt64Type>();
+    let hll_a = checks.column(2).as_primitive::<UInt64Type>();
+    let hll_b = checks.column(3).as_primitive::<UInt64Type>();
+    let stddev = checks.column(4).as_primitive::<Float64Type>();
+    let p50_a = checks.column(5).as_primitive::<Float64Type>();
+    let p50_b = checks.column(6).as_primitive::<Float64Type>();
+    assert_eq!(group.null_count(), 1);
+    assert_eq!(total.null_count(), 0);
+    assert_eq!(hll_a.null_count(), 0);
+    assert_eq!(hll_b.null_count(), 0);
+    assert_eq!(stddev.null_count(), 0);
+    assert_eq!(p50_a.null_count(), 0);
+    assert_eq!(p50_b.null_count(), 0);
+    for (index, expected) in [
+        (None, 15_u64, 5_u64, 2_f64.sqrt(), 3_f64, 3_f64),
+        (
+            Some(2_i64),
+            21_u64,
+            3_u64,
+            (2_f64 / 3.0).sqrt(),
+            7_f64,
+            7_f64,
+        ),
+        (Some(3_i64), 19_u64, 2_u64, 0.5_f64, 10_f64, 10_f64),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            (!group.is_null(index)).then(|| group.value(index)),
+            expected.0
+        );
+        assert_eq!(total.value(index), expected.1);
+        assert_eq!(hll_a.value(index), expected.2);
+        assert_eq!(hll_b.value(index), expected.2);
+        assert!((stddev.value(index) - expected.3).abs() < 1e-12);
+        // UDDSketch's relative-error bounds are 1e-6 and 2e-2 respectively.
+        assert!((p50_a.value(index) - expected.4).abs() <= expected.4 * 0.000001);
+        assert!((p50_b.value(index) - expected.5).abs() <= expected.5 * 0.02);
+    }
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_state_producer_metadata_and_rejections() {
+    let analysis = analyze_test_sql(
+        "SELECT hll(CAST(number AS VARCHAR)) AS hll_state, \
+         stddev_pop_state(number) AS stddev_state, \
+         uddsketch_state(128, 0.000001, number) AS percentile_state, ts \
+         FROM numbers_with_ts GROUP BY ts",
+    )
+    .await;
+    assert!(analysis.unsupported_exprs.is_empty());
+    let percentile = analysis
+        .merge_columns
+        .iter()
+        .find(|column| column.output_field_name == "percentile_state")
+        .unwrap();
+    let IncrementalAggregateMergeOp::StateDeltaMerge {
+        function_name,
+        params,
+    } = &percentile.merge_op
+    else {
+        panic!("expected UDDSketch state delta merge");
+    };
+    assert_eq!(*function_name, "__uddsketch_state_delta_merge");
+    assert_eq!(params.len(), 2);
+    assert!(matches!(
+        params[0],
+        Expr::Literal(ScalarValue::Int64(Some(128)), _)
+    ));
+    assert!(matches!(
+        params[1],
+        Expr::Literal(ScalarValue::Float64(Some(rate)), _) if rate == 0.000001
+    ));
+
+    for sql in [
+        "SELECT uddsketch_state(CAST(number AS BIGINT), 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        "SELECT uddsketch_state(128, NULL, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        "SELECT uddsketch_state(NULL, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        "SELECT avg(number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        "SELECT stddev_pop(number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+    ] {
+        let analysis = analyze_test_sql(sql).await;
+        assert!(!analysis.unsupported_exprs.is_empty(), "must reject {sql}");
+    }
 }
 
 #[tokio::test]
@@ -1640,6 +2109,7 @@ async fn test_rewrite_incremental_aggregate_with_left_join() {
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table.clone(),
         &sink_table_name,
         None,
@@ -1701,6 +2171,7 @@ async fn test_rewrite_incremental_aggregate_filters_sink_dirty_time_window() {
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table.clone(),
         &sink_table_name,
         Some(sink_filter.clone()),
@@ -1751,7 +2222,9 @@ async fn test_rewrite_incremental_aggregate_rejects_empty_group_keys() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(number) AS number FROM numbers_with_ts";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+        .await
+        .unwrap();
     let analysis = IncrementalAggregateAnalysis {
         group_key_names: vec![],
         merge_columns: vec![IncrementalAggregateMergeColumn::new(
@@ -1772,6 +2245,7 @@ async fn test_rewrite_incremental_aggregate_rejects_empty_group_keys() {
     let err = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table,
         &sink_table_name,
         None,
@@ -1790,7 +2264,9 @@ async fn test_rewrite_incremental_aggregate_preserves_raw_aggregate_field_name()
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(number), number FROM numbers_with_ts GROUP BY number";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+        .await
+        .unwrap();
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(analysis.unsupported_exprs.is_empty());
 
@@ -1804,6 +2280,7 @@ async fn test_rewrite_incremental_aggregate_preserves_raw_aggregate_field_name()
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table.clone(),
         &sink_table_name,
         None,
@@ -1841,9 +2318,7 @@ async fn test_null_cast() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT NULL::DOUBLE FROM numbers_with_ts";
-    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
-        .await
-        .unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
 
     let _sub_plan = DFLogicalSubstraitConvertor {}
         .encode(&plan, DefaultSerializer)
@@ -1986,77 +2461,265 @@ async fn test_gen_plan_with_matching_schema_last_non_null_rejects_extra_flow_col
     );
 }
 
-#[test]
-fn test_df_plan_to_sql_quotes_colon_table_name() {
-    // Prometheus-style table names contain ':' (e.g.
-    // `kube_pod_cpu_cores:sum`). The unparser dialect must quote them,
-    // otherwise the re-parsed SQL is invalid (`keyword: :`).
-    let table = single_row_u32_table("kube_pod_cpu_cores:sum", vec!["value"]);
-    let provider = Arc::new(DfTableProviderAdapter::new(table));
-    let table_source = Arc::new(DefaultTableSource::new(provider));
-    let table_ref = TableReference::full("catalog", "schema", "kube_pod_cpu_cores:sum");
-    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
-        .unwrap()
-        .build()
-        .unwrap();
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_unknown_attempt_column() {
+    for allow_partial in [false, true] {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let sink_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let values =
+            BTreeMap::from([(String::from("unknown_attempt"), ScalarValue::Int64(Some(1)))]);
+        let primary_key_indices: &[usize] = if allow_partial { &[0] } else { &[] };
+        let err = gen_plan_with_matching_schema_and_values(
+            "SELECT number, ts FROM numbers_with_ts",
+            ctx,
+            query_engine,
+            sink_schema,
+            primary_key_indices,
+            allow_partial,
+            &values,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown_attempt"), "{err}");
+        assert!(err.contains("does not exist in sink schema"), "{err}");
+    }
+}
 
-    let sql = df_plan_to_sql(&plan).unwrap();
-    assert!(
-        sql.contains("\"kube_pod_cpu_cores:sum\""),
-        "expected quoted table name in {sql}"
-    );
-    // The only occurrence of `cores:sum` must be inside the quoted identifier.
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_wrong_attempt_column_type() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("attempt", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let values = BTreeMap::from([(
+        String::from("attempt"),
+        ScalarValue::Utf8(Some("one".into())),
+    )]);
+    let err = gen_plan_with_matching_schema_and_values(
+        "SELECT number, ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[0],
+        false,
+        &values,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("attempt"), "{err}");
+    assert!(err.contains("incompatible type"), "{err}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_matches_positional_alias_and_injects_attempt() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("renamed_number", ConcreteDataType::int64_datatype(), true),
+        ColumnSchema::new("attempt", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let values = BTreeMap::from([(
+        String::from("attempt"),
+        ScalarValue::Utf8(Some("one".into())),
+    )]);
+    let plan = gen_plan_with_matching_schema_and_values(
+        "SELECT number, ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[0],
+        false,
+        &values,
+    )
+    .await
+    .unwrap();
+    let output_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(output_names, vec!["renamed_number", "attempt", "ts"]);
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_injects_ordinary_columns_after_auto_update_at() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("state_0", ConcreteDataType::int32_datatype(), true),
+        ColumnSchema::new("state_1", ConcreteDataType::int32_datatype(), true),
+        ColumnSchema::new(
+            "update_at",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        ),
+        ColumnSchema::new("metadata_a", ConcreteDataType::uint32_datatype(), false),
+        ColumnSchema::new("metadata_b", ConcreteDataType::uint32_datatype(), false),
+    ]));
+    let ordinary_values = BTreeMap::from([
+        ("metadata_a".to_string(), ScalarValue::UInt32(Some(1))),
+        ("metadata_b".to_string(), ScalarValue::UInt32(Some(2))),
+    ]);
+
+    let plan = gen_plan_with_matching_schema_and_values(
+        "SELECT number AS state_0, number AS state_1 FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[],
+        false,
+        &ordinary_values,
+    )
+    .await
+    .unwrap();
+
+    let output_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
     assert_eq!(
-        sql.matches("cores:sum").count(),
-        1,
-        "colon should only appear inside quotes in {sql}"
+        output_names,
+        vec![
+            "state_0",
+            "state_1",
+            "update_at",
+            "metadata_a",
+            "metadata_b",
+        ]
     );
+    assert_eq!(plan.schema().field(3).data_type(), &ArrowDataType::UInt32);
+    assert_eq!(plan.schema().field(4).data_type(), &ArrowDataType::UInt32);
+    let LogicalPlan::Projection(projection) = plan else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &projection.expr[3],
+        Expr::Alias(alias)
+            if alias.name == "metadata_a"
+                && matches!(alias.expr.as_ref(), Expr::Literal(ScalarValue::UInt32(Some(1)), _))
+    ));
+    assert!(matches!(
+        &projection.expr[4],
+        Expr::Alias(alias)
+            if alias.name == "metadata_b"
+                && matches!(alias.expr.as_ref(), Expr::Literal(ScalarValue::UInt32(Some(2)), _))
+    ));
 }
 
-#[test]
-fn test_df_plan_to_sql_does_not_quote_plain_lowercase() {
-    let table = single_row_u32_table("plain_table", vec!["value"]);
-    let provider = Arc::new(DfTableProviderAdapter::new(table));
-    let table_source = Arc::new(DefaultTableSource::new(provider));
-    let table_ref = TableReference::full("catalog", "schema", "plain_table");
-    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
-        .unwrap()
-        .project(vec![datafusion_expr::col("value")])
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let sql = df_plan_to_sql(&plan).unwrap();
-    assert!(
-        sql.contains("plain_table") && !sql.contains("\"plain_table\""),
-        "plain lowercase table should stay unquoted in {sql}"
-    );
-    // `value` is not a reserved word, so the column stays unquoted.
-    assert!(
-        sql.contains("plain_table.value"),
-        "column unquoted in {sql}"
-    );
-    assert!(!sql.contains('`'), "no backtick quoting in {sql}");
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_no_attempt_strict_mismatch() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("attempt", ConcreteDataType::string_datatype(), true),
+    ]));
+    let err = gen_plan_with_matching_schema(
+        "SELECT number, ts FROM numbers_with_ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[0],
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("does not match sink table schema"), "{err}");
+    assert!(err.contains("attempt"), "{err}");
 }
 
-#[test]
-fn test_df_plan_to_sql_quotes_digit_leading_table_name() {
-    // A table literally named `123metrics` starts with a digit and must be
-    // quoted, otherwise the re-parsed SQL is invalid.
-    let table = single_row_u32_table("123metrics", vec!["value"]);
-    let provider = Arc::new(DfTableProviderAdapter::new(table));
-    let table_source = Arc::new(DefaultTableSource::new(provider));
-    let table_ref = TableReference::full("catalog", "schema", "123metrics");
-    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
-        .unwrap()
-        .project(vec![datafusion_expr::col("value")])
-        .unwrap()
-        .build()
-        .unwrap();
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_attempt_output_collision() {
+    for allow_partial in [false, true] {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let sink_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("attempt", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let values = BTreeMap::from([(String::from("attempt"), ScalarValue::UInt32(Some(1)))]);
+        let err = gen_plan_with_matching_schema_and_values(
+            "SELECT number, number AS attempt, ts FROM numbers_with_ts",
+            ctx,
+            query_engine,
+            sink_schema,
+            &[0],
+            allow_partial,
+            &values,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("attempt"), "{err}");
+        assert!(err.contains("collides with a flow output"), "{err}");
+    }
+}
 
-    let sql = df_plan_to_sql(&plan).unwrap();
-    assert!(
-        sql.contains("\"123metrics\""),
-        "expected digit-leading table name quoted in {sql}"
-    );
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_rejects_duplicate_original_outputs() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    let err = gen_plan_with_matching_schema(
+        "SELECT * FROM numbers_with_ts AS lhs JOIN numbers_with_ts AS rhs ON lhs.ts = rhs.ts",
+        ctx,
+        query_engine,
+        sink_schema,
+        &[0],
+        false,
+    )
+    .await
+    .unwrap_err();
+    let diagnostic = format!("{err:?}");
+    assert!(diagnostic.contains("duplicate column"), "{diagnostic}");
+    assert!(diagnostic.contains("number"), "{diagnostic}");
 }
