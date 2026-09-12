@@ -79,6 +79,10 @@ impl<'de> Deserialize<'de> for JsonSettings {
 /// These hints let JSON2 encode frequently used subpaths in a typed layout, so
 /// queries over those subpaths can get behavior and performance closer to
 /// ordinary columns.
+///
+/// New writes strictly apply all hint properties. During compaction, type hints
+/// guide physical layout rewriting and may ignore some constraint properties,
+/// such as defaults and nullability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonTypeHint {
     /// JSON2 subpath for a typed field.
