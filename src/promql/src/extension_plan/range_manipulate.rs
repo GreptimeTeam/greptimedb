@@ -60,7 +60,7 @@ use crate::range_array::RangeArray;
 /// will add those extra columns:
 /// - timestamp range with type [RangeArray], which is the folded timestamp column.
 /// - end of current range with the same type as the timestamp column. (todo)
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RangeManipulate {
     start: Millisecond,
     end: Millisecond,
@@ -106,6 +106,20 @@ impl RangeManipulate {
 
     pub const fn name() -> &'static str {
         "RangeManipulate"
+    }
+
+    /// Evaluation bounds, independent of the selector's offset and lookback.
+    pub fn time_bounds(&self) -> (Millisecond, Millisecond) {
+        (self.start, self.end)
+    }
+
+    /// Rebinds evaluation bounds, leaving step, range and schema untouched.
+    pub fn with_time_bounds(&self, start: Millisecond, end: Millisecond) -> Self {
+        Self {
+            start,
+            end,
+            ..self.clone()
+        }
     }
 
     pub fn build_timestamp_range_name(time_index: &str) -> String {

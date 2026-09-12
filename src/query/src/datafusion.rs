@@ -17,6 +17,7 @@
 mod error;
 mod json_expr_planner;
 mod planner;
+pub(crate) mod promql_plan_cache;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -470,6 +471,27 @@ impl DatafusionQueryEngine {
                 .map_err(Into::into);
         }
 
+        // A cached template only replaces analysis and optimization. The raw
+        // plan of this request has already resolved (and authorized) its table
+        // source, and physical planning still runs below, so region routes,
+        // snapshots and dynamic filters stay request-local.
+        let plan_cache = self.state.promql_plan_cache();
+        let candidate = plan_cache
+            .and_then(|cache| cache.candidate(logical_plan, state, ctx.query_ctx().as_ref()));
+        if let (Some(cache), Some(candidate)) = (plan_cache, &candidate) {
+            if let Some(plan) = cache.get(candidate).await? {
+                metrics::PROMQL_PLAN_CACHE.with_label_values(&["hit"]).inc();
+                return state
+                    .query_planner()
+                    .create_physical_plan(&plan, state)
+                    .await
+                    .map_err(Into::into);
+            }
+            metrics::PROMQL_PLAN_CACHE
+                .with_label_values(&["miss"])
+                .inc();
+        }
+
         // analyze first
         let analyzed_plan = state.analyzer().execute_and_check(
             logical_plan.clone(),
@@ -494,6 +516,17 @@ impl DatafusionQueryEngine {
 
         common_telemetry::debug!("Create physical plan, optimized plan: {optimized_plan}");
         logger.after_optimize = Some(optimized_plan.clone());
+
+        if let (Some(cache), Some(candidate)) = (plan_cache, candidate) {
+            let outcome = if cache.insert(candidate, &optimized_plan).await {
+                "insert"
+            } else {
+                "uncacheable"
+            };
+            metrics::PROMQL_PLAN_CACHE
+                .with_label_values(&[outcome])
+                .inc();
+        }
 
         let physical_plan = state
             .query_planner()

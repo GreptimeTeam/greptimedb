@@ -337,6 +337,16 @@ memory_pool_size = "50%"
 #+ experimental_spill_compression = "uncompressed"
 # --- End spill-to-disk ---
 
+## Experimental: number of PromQL logical plan templates the query engine keeps.
+## Set to 0 to disable template reuse.
+## Only the plan shape is cached; every request rebinds its own evaluation range,
+## time filters and table source. A template measures around 30KiB, so the
+## default holds roughly 18MiB. One PromQL query needs about three templates on a
+## single node, and a datanode needs that many per region of the queried table.
+## Raise this when `greptime_promql_plan_cache_entries` sits at the configured
+## value while `greptime_promql_plan_cache_total{outcome="miss"}` keeps rising.
+#+ experimental_promql_plan_cache_size = 512
+
 ## Datanode options.
 [datanode]
 ## Datanode client options.
