@@ -42,6 +42,7 @@ use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::flat_merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
+use crate::read::scan_memory::hold_reservation;
 use crate::read::scan_region::StreamContext;
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
 use crate::sst::file::{FileTimeRange, RegionFileId};
@@ -1465,6 +1466,7 @@ pub(crate) async fn scan_flat_file_ranges(
     read_type: &'static str,
     partition_pruner: Arc<PartitionPruner>,
 ) -> Result<impl Stream<Item = Result<RecordBatch>>> {
+    let guard = stream_ctx.input.reserve_scan_memory(index)?;
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
@@ -1493,12 +1495,15 @@ pub(crate) async fn scan_flat_file_ranges(
         None
     };
 
-    Ok(build_flat_file_range_scan_stream(
-        stream_ctx,
-        part_metrics,
-        read_type,
-        ranges,
-        init_per_file_metrics,
+    Ok(hold_reservation(
+        build_flat_file_range_scan_stream(
+            stream_ctx,
+            part_metrics,
+            read_type,
+            ranges,
+            init_per_file_metrics,
+        ),
+        guard,
     ))
 }
 

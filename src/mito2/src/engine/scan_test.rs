@@ -900,15 +900,26 @@ async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
 
 #[tokio::test]
 async fn test_max_concurrent_scan_files() {
-    test_max_concurrent_scan_files_with_format(false).await;
-    test_max_concurrent_scan_files_with_format(true).await;
+    test_max_concurrent_scan_files_with_format(false, false).await;
+    test_max_concurrent_scan_files_with_format(true, false).await;
 }
 
-async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
+#[tokio::test]
+async fn test_scan_memory_budget_small_files() {
+    test_max_concurrent_scan_files_with_format(false, true).await;
+    test_max_concurrent_scan_files_with_format(true, true).await;
+}
+
+async fn test_max_concurrent_scan_files_with_format(flat_format: bool, estimated: bool) {
     let mut env = TestEnv::with_prefix("test_max_concurrent_scan_files").await;
     let config = MitoConfig {
         default_flat_format: flat_format,
         max_concurrent_scan_files: 2,
+        experimental_scan_memory_budget: if estimated {
+            common_base::memory_limit::MemoryLimit::Size(ReadableSize::mb(1))
+        } else {
+            common_base::memory_limit::MemoryLimit::Unlimited
+        },
         ..Default::default()
     };
     let engine = env.create_engine(config).await;
@@ -941,8 +952,15 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
     let Scanner::Seq(scanner) = scanner else {
         panic!("Scanner should be seq scan");
     };
-    let error = scanner.check_scan_limit().unwrap_err();
-    assert_eq!(StatusCode::RateLimited, error.status_code());
+    if estimated {
+        scanner.check_scan_limit().unwrap();
+        RecordBatches::try_collect(scanner.build_stream().unwrap())
+            .await
+            .unwrap();
+    } else {
+        let error = scanner.check_scan_limit().unwrap_err();
+        assert_eq!(StatusCode::RateLimited, error.status_code());
+    }
 
     let request = ScanRequest {
         distribution: Some(TimeSeriesDistribution::PerSeries),
@@ -952,8 +970,15 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
     let Scanner::Series(scanner) = scanner else {
         panic!("Scanner should be series scan");
     };
-    let error = scanner.check_scan_limit().unwrap_err();
-    assert_eq!(StatusCode::RateLimited, error.status_code());
+    if estimated {
+        scanner.check_scan_limit().unwrap();
+        RecordBatches::try_collect(scanner.build_stream().await.unwrap())
+            .await
+            .unwrap();
+    } else {
+        let error = scanner.check_scan_limit().unwrap_err();
+        assert_eq!(StatusCode::RateLimited, error.status_code());
+    }
 }
 
 #[tokio::test]
