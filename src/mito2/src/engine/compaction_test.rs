@@ -833,6 +833,7 @@ struct CompactionPlanningGate {
     pending_ddl_armed: AtomicBool,
     pending_ddl_entered: Notify,
     pending_ddl_permits: Semaphore,
+    flush_completed: Notify,
 }
 
 /// Releases an armed [`CompactionPlanningGate`] when a test exits unexpectedly.
@@ -928,6 +929,7 @@ impl CompactionPlanningGate {
             pending_ddl_armed: AtomicBool::new(false),
             pending_ddl_entered: Notify::new(),
             pending_ddl_permits: Semaphore::new(0),
+            flush_completed: Notify::new(),
         }
     }
 
@@ -998,6 +1000,12 @@ impl CompactionPlanningGate {
 
 #[async_trait]
 impl EventListener for CompactionPlanningGate {
+    fn on_flush_success(&self, region_id: RegionId) {
+        if region_id == self.region_id {
+            self.flush_completed.notify_one();
+        }
+    }
+
     async fn on_compaction_pick_begin(&self, region_id: RegionId) {
         if region_id != self.region_id {
             return;
@@ -1041,6 +1049,61 @@ impl EventListener for CompactionPlanningGate {
     fn on_compaction_cancel_requested(&self, region_id: RegionId) {
         if region_id == self.region_id {
             self.cancel_requested.notify_one();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_idle_region_accepts_ddl_after_create_and_reopen() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(45, 1);
+    let create = CreateRequestBuilder::new().build();
+    let table_dir = create.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    for reopen in [false, true] {
+        if reopen {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+                .unwrap();
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Open(RegionOpenRequest {
+                        engine: String::new(),
+                        table_dir: table_dir.clone(),
+                        path_type: PathType::Bare,
+                        options: Default::default(),
+                        skip_wal_replay: false,
+                        checkpoint: None,
+                        requirements: Default::default(),
+                    }),
+                )
+                .await
+                .unwrap();
+            engine
+                .set_region_role(region_id, RegionRole::Leader)
+                .unwrap();
+        }
+        for request in [
+            RegionRequest::Compact(RegionCompactRequest::default()),
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        ] {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                engine.handle_request(region_id, request),
+            )
+            .await
+            .expect("idle registration must not stall DDL or the next compaction")
+            .unwrap();
         }
     }
 }
@@ -1104,6 +1167,9 @@ async fn assert_automatic_followup_updates_schedule_time(preexisting_flushes: us
             offset * 10..offset * 10 + 10,
         )
         .await;
+        tokio::time::timeout(Duration::from_secs(5), gate.flush_completed.notified())
+            .await
+            .unwrap();
     }
 
     let first_schedule_time = initial_time + interval.as_millis() as i64;
@@ -1120,6 +1186,9 @@ async fn assert_automatic_followup_updates_schedule_time(preexisting_flushes: us
     tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
         .await
         .expect("initial automatic planning did not reach the gate");
+    tokio::time::timeout(Duration::from_secs(5), gate.flush_completed.notified())
+        .await
+        .unwrap();
 
     let trigger_time = first_schedule_time + interval.as_millis() as i64;
     time_provider.set_now(trigger_time);
@@ -1130,6 +1199,11 @@ async fn assert_automatic_followup_updates_schedule_time(preexisting_flushes: us
         first_start + 10..first_start + 20,
     )
     .await;
+    // The flush reply precedes the worker's compaction trigger; wait for that trigger
+    // before advancing the mock clock and releasing the picker.
+    tokio::time::timeout(Duration::from_secs(5), gate.flush_completed.notified())
+        .await
+        .unwrap();
     let followup_schedule_time = trigger_time + 1;
     time_provider.set_now(followup_schedule_time);
     gate_guard.release();

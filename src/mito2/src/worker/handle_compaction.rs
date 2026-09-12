@@ -129,8 +129,8 @@ impl<S> RegionWorkerLoop<S> {
         let Some(region) = self.regions.get_region(region_id) else {
             return;
         };
-        // A terminal pick (canceled, no plan, or failed) may remove the
-        // compaction status and release DDLs fenced behind its picking phase.
+        // A terminal pick (canceled, no plan, or failed) may return the region
+        // to idle and release DDLs fenced behind its picking phase.
         // Such a pick never produces an execution callback, so the worker must
         // execute the returned DDLs from this notification.
         let transition = self
