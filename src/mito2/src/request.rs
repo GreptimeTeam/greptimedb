@@ -57,6 +57,7 @@ use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::region::MitoRegionRef;
 use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
@@ -906,10 +907,15 @@ pub(crate) struct SenderDdlRequest {
 /// Notification from a background job.
 #[derive(Debug)]
 pub(crate) enum BackgroundNotify {
+    /// Registers a loaded region and its scheduling state before acknowledging open.
+    RegionOpened {
+        region: MitoRegionRef,
+        registered: Sender<()>,
+    },
     /// Local unit publication and resource completion events.
     CompactionUnit(CompactionUnitNotification),
     /// A DDL released by compaction has actually completed, including failure.
-    CompactionDdlComplete { generation: u64 },
+    CompactionDdlComplete { generation: u64, request_id: usize },
     /// Compaction planning has finished.
     CompactionPickFinished(CompactionPickFinished),
     /// Flush has finished.

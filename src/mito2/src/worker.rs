@@ -981,6 +981,13 @@ struct RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Publishes a loaded region together with its resident compaction state.
+    fn register_region(&mut self, region: MitoRegionRef) {
+        self.compaction_scheduler
+            .register_region(&region.version_control, &region.access_layer);
+        self.regions.insert_region(region);
+    }
+
     /// Starts the worker loop.
     async fn run(&mut self) {
         let init_check_delay = worker_init_check_delay();
@@ -1309,12 +1316,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
         match notify {
+            BackgroundNotify::RegionOpened { region, registered } => {
+                self.register_region(region);
+                self.region_count.inc();
+                let _ = registered.send(());
+            }
             BackgroundNotify::CompactionUnit(req) => {
                 self.handle_compaction_unit(region_id, req).await;
             }
-            BackgroundNotify::CompactionDdlComplete { generation } => {
+            BackgroundNotify::CompactionDdlComplete {
+                generation,
+                request_id,
+            } => {
                 self.compaction_scheduler
-                    .on_ddl_complete(region_id, generation);
+                    .on_ddl_complete(region_id, generation, request_id);
             }
             BackgroundNotify::CompactionPickFinished(req) => {
                 self.handle_compaction_pick_finished(region_id, req).await

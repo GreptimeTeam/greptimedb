@@ -40,8 +40,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        // Fence compaction before waiting for flush; a unit may be publishing
-        // while the flush is waiting for that unit's apply acknowledgement.
+        // Fence compaction before any later flush wait so handed-off DDLs keep admission paused.
         let (sender, req) = match self.compaction_scheduler.try_cancel_and_add_ddl(
             region_id,
             sender,

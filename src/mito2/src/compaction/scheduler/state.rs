@@ -75,6 +75,8 @@ impl CompactionExecution {
 
 #[derive(Debug)]
 pub(super) enum CompactionPhase {
+    /// The region is registered but has no compaction in progress.
+    Idle,
     Picking {
         plan_id: u64,
         cancelled: bool,
@@ -111,6 +113,17 @@ pub(super) struct ActiveCompaction {
 }
 
 impl ActiveCompaction {
+    /// Creates an empty cycle while retaining the region's scheduling record.
+    pub(super) fn idle() -> Self {
+        Self {
+            phase: CompactionPhase::Idle,
+            trigger: CompactionTrigger::Automatic,
+            waiters: Vec::new(),
+            automatic_followup_required: false,
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn picking(
         plan_id: u64,
         waiters: Vec<OutputTx>,
@@ -174,7 +187,7 @@ impl ActiveCompaction {
 
     pub(super) fn matches_execution(&self, execution: &CompactionExecution) -> bool {
         match &self.phase {
-            CompactionPhase::Picking { .. } => None,
+            CompactionPhase::Idle | CompactionPhase::Picking { .. } => None,
             #[cfg(test)]
             CompactionPhase::Local { execution, .. } => Some(execution),
             CompactionPhase::Units(_) => None,
@@ -185,6 +198,7 @@ impl ActiveCompaction {
 
     pub(super) fn request_cancel(&mut self) -> RequestCancelResult {
         match &mut self.phase {
+            CompactionPhase::Idle => RequestCancelResult::TooLateToCancel,
             CompactionPhase::Picking { cancelled, .. } => {
                 if *cancelled {
                     RequestCancelResult::AlreadyCancelling
@@ -277,7 +291,31 @@ impl Drop for CompactingFile {
     }
 }
 
-/// Status of running and pending region compaction tasks.
+/// A handed-off DDL batch, retained until each reply has been observed once.
+#[derive(Debug)]
+pub(super) struct DdlExecution {
+    generation: u64,
+    pending_replies: HashSet<usize>,
+}
+
+impl DdlExecution {
+    /// Tracks a batch's individual replies so duplicate notifications are harmless.
+    pub(super) fn new(generation: u64, count: usize) -> Self {
+        Self {
+            generation,
+            pending_replies: (0..count).collect(),
+        }
+    }
+
+    /// Returns true only for the last distinct reply of this batch.
+    pub(super) fn complete(&mut self, generation: u64, request_id: usize) -> bool {
+        self.generation == generation
+            && self.pending_replies.remove(&request_id)
+            && self.pending_replies.is_empty()
+    }
+}
+
+/// Scheduling state retained for the lifetime of a loaded region.
 pub(super) struct CompactionStatus {
     /// Id of the region.
     pub(super) region_id: RegionId,
@@ -298,24 +336,25 @@ pub(super) struct CompactionStatus {
     /// [`crate::request::DdlRequest::Truncate`] and [`crate::request::DdlRequest::EnterStaging`] here. Both must serialize with
     /// compaction so they observe the version after compaction terminates.
     pub(super) pending_ddl_requests: Vec<SenderDdlRequest>,
+    /// DDLs already handed to the worker keep new compaction paused until their replies.
+    pub(super) executing_ddl: Option<DdlExecution>,
 }
 
 impl CompactionStatus {
-    /// Creates a new picking [CompactionStatus].
+    /// Registers an idle region without starting a compaction cycle.
     pub(super) fn new(
         region_id: RegionId,
         version_control: VersionControlRef,
         access_layer: AccessLayerRef,
-        plan_id: u64,
-        trigger: CompactionTrigger,
     ) -> CompactionStatus {
         CompactionStatus {
             region_id,
             version_control,
             access_layer,
-            active: ActiveCompaction::picking(plan_id, Vec::new(), trigger),
+            active: ActiveCompaction::idle(),
             pending_request: None,
             pending_ddl_requests: Vec::new(),
+            executing_ddl: None,
         }
     }
 
@@ -325,13 +364,24 @@ impl CompactionStatus {
         version_control: VersionControlRef,
         access_layer: AccessLayerRef,
     ) -> Self {
-        Self::new(
-            region_id,
-            version_control,
-            access_layer,
-            0,
-            CompactionTrigger::Automatic,
-        )
+        let mut status = Self::new(region_id, version_control, access_layer);
+        status.active = ActiveCompaction::picking(0, Vec::new(), CompactionTrigger::Automatic);
+        status
+    }
+
+    /// Registration alone does not indicate active work.
+    pub(super) fn is_compacting(&self) -> bool {
+        !matches!(self.active.phase, CompactionPhase::Idle)
+    }
+
+    /// Both queued and handed-off DDLs prevent new compaction admission.
+    pub(super) fn has_ddl(&self) -> bool {
+        !self.pending_ddl_requests.is_empty() || self.executing_ddl.is_some()
+    }
+
+    /// Ends the current cycle without losing region or DDL execution state.
+    pub(super) fn become_idle(&mut self) {
+        self.active = ActiveCompaction::idle();
     }
 
     #[cfg(test)]
@@ -418,14 +468,15 @@ impl CompactionStatus {
         }
     }
 
-    pub(super) fn on_failure(mut self, err: Arc<Error>) {
-        for waiter in self.active.waiters.drain(..) {
+    pub(super) fn on_failure(&mut self, err: Arc<Error>) {
+        let mut active = std::mem::replace(&mut self.active, ActiveCompaction::idle());
+        for waiter in active.waiters.drain(..) {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));
         }
 
-        if let Some(pending_compaction) = self.pending_request {
+        if let Some(pending_compaction) = self.pending_request.take() {
             pending_compaction
                 .waiter
                 .send(Err(err.clone()).context(CompactRegionSnafu {
@@ -433,7 +484,7 @@ impl CompactionStatus {
                 }));
         }
 
-        for pending_ddl in self.pending_ddl_requests {
+        for pending_ddl in self.pending_ddl_requests.drain(..) {
             pending_ddl
                 .sender
                 .send(Err(err.clone()).context(CompactRegionSnafu {
@@ -443,12 +494,13 @@ impl CompactionStatus {
     }
 
     #[must_use]
-    pub(super) fn on_cancel(mut self) -> Vec<SenderDdlRequest> {
-        for waiter in self.active.waiters.drain(..) {
+    pub(super) fn on_cancel(&mut self) -> Vec<SenderDdlRequest> {
+        let mut active = std::mem::replace(&mut self.active, ActiveCompaction::idle());
+        for waiter in active.waiters.drain(..) {
             waiter.send(CompactionCancelledSnafu.fail());
         }
 
-        if let Some(pending_compaction) = self.pending_request {
+        if let Some(pending_compaction) = self.pending_request.take() {
             pending_compaction.waiter.send(
                 Err(Arc::new(CompactionCancelledSnafu.build())).context(CompactRegionSnafu {
                     region_id: self.region_id,

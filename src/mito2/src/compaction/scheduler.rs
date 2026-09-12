@@ -28,7 +28,7 @@ use common_time::range::TimestampRange;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 pub(crate) use state::CompactionExecution;
-use state::{CompactionStatus, CompactionTrigger, PendingCompaction};
+use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
@@ -52,7 +52,7 @@ use crate::worker::WorkerListener;
 /// Compaction scheduler tracks and manages compaction tasks.
 pub(crate) struct CompactionScheduler {
     scheduler: SchedulerRef,
-    /// Compacting regions.
+    /// All loaded regions, including idle regions and regions executing DDLs.
     region_status: HashMap<RegionId, CompactionStatus>,
     /// Request sender of the worker that this scheduler belongs to.
     request_sender: Sender<WorkerRequestWithTime>,
@@ -66,8 +66,6 @@ pub(crate) struct CompactionScheduler {
     /// Scheduler-wide generation counter for compaction plans and executions.
     /// It outlives region statuses so close/reopen cannot reuse an old identity.
     next_plan_id: u64,
-    /// DDLs handed to the worker remain fenced through their actual reply.
-    ddl_fences: HashMap<RegionId, (u64, usize)>,
 }
 
 /// Describes the immediate action produced by a compaction terminal transition.
@@ -139,15 +137,41 @@ impl CompactionScheduler {
             listener,
             plugins,
             next_plan_id: 0,
-            ddl_fences: HashMap::new(),
         }
+    }
+
+    /// Registers a loaded region; replacing its VersionControl invalidates the old incarnation.
+    pub(crate) fn register_region(
+        &mut self,
+        version_control: &VersionControlRef,
+        access_layer: &AccessLayerRef,
+    ) {
+        let region_id = version_control.region_id();
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            if Arc::ptr_eq(&status.version_control, version_control) {
+                return;
+            }
+            status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+        }
+        self.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone()),
+        );
+    }
+
+    /// Reports active work rather than the existence of a resident region record.
+    #[cfg(test)]
+    fn is_compacting(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(CompactionStatus::is_compacting)
     }
 
     /// Accepts an automatic compaction trigger for a region.
     ///
     /// # Effects
     ///
-    /// Starts planning when no scheduler status exists for the region.
+    /// Starts planning when the registered region is idle.
     /// Otherwise, an active status coalesces the trigger into one unrestricted
     /// follow-up cycle. Returns `true` only when this call dispatches planning.
     ///
@@ -182,7 +206,7 @@ impl CompactionScheduler {
     ///
     /// # Effects
     ///
-    /// Starts planning when no scheduler status exists for the region. During
+    /// Starts planning when the registered region is idle. During
     /// an automatic compaction, queues the request and replaces any older
     /// pending manual request; during a manual compaction, rejects the new
     /// request through `waiter`. Returns `true` only when this call dispatches
@@ -269,7 +293,7 @@ impl CompactionScheduler {
     /// # Effects
     ///
     /// Notifies waiters, schedules a pending manual or automatic follow-up, or
-    /// removes the region status. A follow-up is scheduled whenever the cycle
+    /// returns the region to idle. A follow-up is scheduled whenever the cycle
     /// latched an automatic trigger, or when `made_progress` is true (the
     /// execution produced output or reduced the file count): successful compaction
     /// keeps draining the region until the picker returns no plan. The returned
@@ -305,7 +329,7 @@ impl CompactionScheduler {
     ///
     /// # Effects
     ///
-    /// Removes the matching region status and fails all compaction waiters and
+    /// Resets the matching region to idle and fails all compaction waiters and
     /// dependent DDL requests with the supplied error.
     ///
     /// # Constraints
@@ -334,8 +358,7 @@ impl CompactionScheduler {
     ///
     /// The owning worker must invoke this as part of serialized region teardown.
     pub(crate) fn on_region_dropped(&mut self, region_id: RegionId) {
-        self.ddl_fences.remove(&region_id);
-        self.remove_region_on_failure(
+        self.remove_region(
             region_id,
             Arc::new(RegionDroppedSnafu { region_id }.build()),
         );
@@ -351,11 +374,10 @@ impl CompactionScheduler {
     ///
     /// The owning worker must invoke this as part of serialized region teardown.
     pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
-        self.ddl_fences.remove(&region_id);
-        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
+        self.remove_region(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
     }
 
-    /// Removes compaction state because the region was truncated.
+    /// Resets the cycle after truncate, retaining registration and outstanding DDL replies.
     ///
     /// # Effects
     ///
@@ -365,7 +387,7 @@ impl CompactionScheduler {
     ///
     /// The owning worker must invoke this after truncate completes.
     pub(crate) fn on_region_truncated(&mut self, region_id: RegionId) {
-        self.remove_region_on_failure(
+        self.fail_compaction(
             region_id,
             Arc::new(RegionTruncatedSnafu { region_id }.build()),
         );
@@ -396,6 +418,9 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return Err((sender, request));
         };
+        if !status.is_compacting() {
+            return Err((sender, request));
+        }
         status.request_cancel();
 
         let request = SenderDdlRequest {
@@ -438,7 +463,10 @@ impl CompactionScheduler {
         time_range: Option<TimestampRange>,
     ) -> Result<bool> {
         let region_id = version_control.region_id();
-        if self.ddl_fences.contains_key(&region_id) {
+        let status = self.region_status.entry(region_id).or_insert_with(|| {
+            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone())
+        });
+        if status.has_ddl() {
             waiter.send(CompactionCancelledSnafu.fail());
             return Ok(false);
         }
@@ -452,18 +480,7 @@ impl CompactionScheduler {
             return Ok(false);
         }
 
-        if let Some(status) = self.region_status.get_mut(&region_id) {
-            // Pending Truncate/EnterStaging requests form a scheduling fence. Any later
-            // manual request receives CompactionCancelled; automatic triggers are ignored.
-            if !status.pending_ddl_requests.is_empty() {
-                waiter.send(CompactionCancelledSnafu.fail());
-                info!(
-                    "Region {} has pending DDL requests, ignoring compaction: {:?}",
-                    region_id, compact_options
-                );
-                return Ok(false);
-            }
-
+        if status.is_compacting() {
             match trigger {
                 CompactionTrigger::Automatic => status.mark_automatic_trigger(),
                 CompactionTrigger::Manual if status.is_manual_compaction() => {
@@ -491,13 +508,7 @@ impl CompactionScheduler {
 
         // Publish the picking phase before dispatching background planning.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
-        let mut status = CompactionStatus::new(
-            region_id,
-            version_control.clone(),
-            access_layer.clone(),
-            plan_id,
-            trigger,
-        );
+        status.start_picking_with_trigger(plan_id, trigger);
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             self.engine_config.clone(),
@@ -508,7 +519,6 @@ impl CompactionScheduler {
             max_parallelism,
         );
         status.merge_waiter(waiter);
-        self.region_status.insert(region_id, status);
         self.dispatch_compaction_planning(plan_id, request, compact_options, time_range);
         self.listener.on_compaction_scheduled(region_id);
         Ok(true)
@@ -587,8 +597,6 @@ impl CompactionScheduler {
             return CompactionTransition::NoAction;
         }
 
-        // The region status might be removed by the previous steps.
-        // So we return empty DDL requests.
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return CompactionTransition::NoAction;
         };
@@ -608,7 +616,9 @@ impl CompactionScheduler {
         {
             return CompactionTransition::AutomaticFollowupScheduled;
         }
-        self.region_status.remove(&region_id);
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.become_idle();
+        }
         CompactionTransition::NoAction
     }
 
@@ -652,13 +662,13 @@ impl CompactionScheduler {
     /// Notifies the scheduler that the compaction job is cancelled cooperatively.
     #[cfg(test)]
     async fn on_compaction_cancelled(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
-        self.remove_region_on_cancel(region_id)
+        self.finish_compaction_on_cancel(region_id)
     }
 
     /// Notifies the scheduler that the compaction job is failed.
     fn on_compaction_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to compact, cancel all pending tasks", region_id);
-        self.remove_region_on_failure(region_id, err);
+        self.fail_compaction(region_id, err);
     }
 
     #[cfg(test)]
@@ -692,18 +702,23 @@ impl CompactionScheduler {
             .request_cancel()
     }
 
-    fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
-        // Remove this region.
-        let Some(status) = self.region_status.remove(&region_id) else {
-            return;
-        };
-
-        // Notifies all pending tasks.
-        status.on_failure(err);
+    /// Unregisters a closed or dropped region and fails its queued requests.
+    fn remove_region(&mut self, region_id: RegionId, err: Arc<Error>) {
+        if let Some(mut status) = self.region_status.remove(&region_id) {
+            status.on_failure(err);
+        }
     }
 
-    fn remove_region_on_cancel(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
-        let Some(status) = self.region_status.remove(&region_id) else {
+    /// Fails a cycle without discarding the loaded region's registration.
+    fn fail_compaction(&mut self, region_id: RegionId, err: Arc<Error>) {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.on_failure(err);
+        }
+    }
+
+    /// Returns the cycle to idle and records any DDL handoff in the same resident entry.
+    fn finish_compaction_on_cancel(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
             return Vec::new();
         };
 
@@ -721,7 +736,7 @@ impl CompactionScheduler {
         {
             return None;
         }
-        Some(self.remove_region_on_cancel(region_id))
+        Some(self.finish_compaction_on_cancel(region_id))
     }
 
     /// Wraps DDL replies so compaction stays paused until every handed-off request completes.
@@ -734,8 +749,10 @@ impl CompactionScheduler {
             return ddls;
         }
         let generation = Self::next_plan_id(&mut self.next_plan_id);
-        self.ddl_fences.insert(region_id, (generation, ddls.len()));
-        for ddl in &mut ddls {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.executing_ddl = Some(DdlExecution::new(generation, ddls.len()));
+        }
+        for (request_id, ddl) in ddls.iter_mut().enumerate() {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let reply = std::mem::replace(&mut ddl.sender, tx.into());
             let sender = self.request_sender.clone();
@@ -751,6 +768,7 @@ impl CompactionScheduler {
                             region_id,
                             notify: crate::request::BackgroundNotify::CompactionDdlComplete {
                                 generation,
+                                request_id,
                             },
                         },
                     ))
@@ -762,23 +780,26 @@ impl CompactionScheduler {
     }
 
     /// Releases the DDL fence after its last reply, ignoring replies from an older generation.
-    pub(crate) fn on_ddl_complete(&mut self, region_id: RegionId, generation: u64) {
-        let Some((current, remaining)) = self.ddl_fences.get_mut(&region_id) else {
+    pub(crate) fn on_ddl_complete(
+        &mut self,
+        region_id: RegionId,
+        generation: u64,
+        request_id: usize,
+    ) {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
-        if *current != generation {
-            return;
-        }
-        *remaining -= 1;
-        if *remaining == 0 {
-            self.ddl_fences.remove(&region_id);
+        if let Some(ddl) = &mut status.executing_ddl
+            && ddl.complete(generation, request_id)
+        {
+            status.executing_ddl = None;
         }
     }
 }
 
 impl Drop for CompactionScheduler {
     fn drop(&mut self) {
-        for (region_id, status) in self.region_status.drain() {
+        for (region_id, mut status) in self.region_status.drain() {
             // We are shutting down so notify all pending tasks.
             status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
         }

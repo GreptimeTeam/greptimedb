@@ -359,11 +359,213 @@ async fn test_find_compaction_options_priority() {
 }
 
 #[tokio::test]
+async fn test_resident_region_survives_terminal_cycles_and_truncate() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = Arc::new(VersionControlBuilder::new().build());
+    let id = version.region_id();
+    scheduler.register_region(&version, &env.access_layer);
+    assert!(!scheduler.is_compacting(id));
+    assert!(scheduler.region_status.contains_key(&id));
+    for cancelled in [false, true] {
+        let status = scheduler.region_status.get_mut(&id).unwrap();
+        status.start_picking(7);
+        let (reply, response) = oneshot::channel();
+        status.merge_waiter(reply.into());
+        scheduler.register_region(&version, &env.access_layer);
+        assert!(
+            scheduler.is_compacting(id),
+            "duplicate registration must retain the active cycle"
+        );
+        if cancelled {
+            assert!(scheduler.on_compaction_cancelled(id).await.is_empty());
+        } else {
+            scheduler.on_compaction_failed(id, Arc::new(InvalidSchedulerStateSnafu.build()));
+        }
+        assert!(response.await.unwrap().is_err());
+        assert!(!scheduler.is_compacting(id));
+        assert!(Arc::ptr_eq(
+            &scheduler.region_status[&id].version_control,
+            &version
+        ));
+    }
+    scheduler.on_region_truncated(id);
+    assert!(scheduler.region_status.contains_key(&id));
+    assert!(!scheduler.is_compacting(id));
+    scheduler.on_region_closed(id);
+    assert!(!scheduler.region_status.contains_key(&id));
+    scheduler.register_region(&version, &env.access_layer);
+    let (reply, response) = oneshot::channel();
+    let status = scheduler.region_status.get_mut(&id).unwrap();
+    status.start_picking(8);
+    status.merge_waiter(reply.into());
+    let replacement = Arc::new(VersionControlBuilder::new().build());
+    scheduler.register_region(&replacement, &env.access_layer);
+    assert!(response.await.unwrap().is_err());
+    assert!(Arc::ptr_eq(
+        &scheduler.region_status[&id].version_control,
+        &replacement
+    ));
+    assert!(!scheduler.is_compacting(id));
+    scheduler.on_region_dropped(id);
+    assert!(!scheduler.region_status.contains_key(&id));
+}
+
+/// Reads the real completion event produced by a wrapped DDL reply.
+async fn recv_ddl_completion(rx: &mut mpsc::Receiver<WorkerRequestWithTime>) -> (u64, usize) {
+    let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let WorkerRequest::Background {
+        notify:
+            BackgroundNotify::CompactionDdlComplete {
+                generation,
+                request_id,
+            },
+        ..
+    } = request.request
+    else {
+        panic!("expected DDL completion");
+    };
+    (generation, request_id)
+}
+
+#[tokio::test]
+async fn test_resident_region_ddl_handoff_and_late_replies() {
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = Arc::new(VersionControlBuilder::new().build());
+    let id = version.region_id();
+    let manifest = env
+        .mock_manifest_context(version.current().version.metadata.clone())
+        .await;
+    let (schemas, _) = mock_schema_metadata_manager();
+    scheduler.register_region(&version, &env.access_layer);
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .start_picking(7);
+    let mut responses = Vec::new();
+    for _ in 0..2 {
+        let (reply, response) = oneshot::channel();
+        scheduler
+            .try_cancel_and_add_ddl(id, reply.into(), (), |_| {
+                DdlRequest::Truncate(store_api::region_request::RegionTruncateRequest::All)
+            })
+            .unwrap();
+        responses.push(response);
+    }
+    let mut ddls = scheduler.on_compaction_cancelled(id).await;
+    assert_eq!(2, ddls.len());
+    assert!(!scheduler.is_compacting(id));
+    assert!(scheduler.region_status[&id].has_ddl());
+    assert!(scheduler.region_status[&id].pending_ddl_requests.is_empty());
+    assert!(
+        !scheduler
+            .schedule_automatic_compaction(
+                Options::Regular(Default::default()),
+                &version,
+                &env.access_layer,
+                &manifest,
+                schemas.clone()
+            )
+            .unwrap()
+    );
+    let (reply, response) = oneshot::channel();
+    assert!(
+        !scheduler
+            .schedule_manual_compaction(
+                Options::Regular(Default::default()),
+                &version,
+                &env.access_layer,
+                reply.into(),
+                &manifest,
+                schemas.clone(),
+                1,
+                None
+            )
+            .unwrap()
+    );
+    assert_matches!(
+        response.await.unwrap(),
+        Err(Error::CompactionCancelled { .. })
+    );
+
+    ddls.remove(0).sender.send(Ok(0));
+    let (old_generation, first) = recv_ddl_completion(&mut rx).await;
+    scheduler.on_ddl_complete(id, old_generation, first);
+    scheduler.on_ddl_complete(id, old_generation, first);
+    scheduler.on_region_truncated(id);
+    scheduler.register_region(&version, &env.access_layer);
+    assert!(
+        scheduler.region_status[&id].has_ddl(),
+        "duplicate replies and truncate must not end the batch"
+    );
+    ddls.pop().unwrap().sender.send(Ok(0));
+    let (_, late_reply) = recv_ddl_completion(&mut rx).await;
+    for response in responses {
+        assert_eq!(0, response.await.unwrap().unwrap());
+    }
+
+    scheduler.on_region_closed(id);
+    let reopened = Arc::new(VersionControlBuilder::new().build());
+    scheduler.register_region(&reopened, &env.access_layer);
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .start_picking(8);
+    let (reply, response) = oneshot::channel();
+    scheduler
+        .try_cancel_and_add_ddl(id, reply.into(), (), |_| {
+            DdlRequest::Truncate(store_api::region_request::RegionTruncateRequest::All)
+        })
+        .unwrap();
+    let mut ddls = scheduler.on_compaction_cancelled(id).await;
+    scheduler.on_ddl_complete(id, old_generation, late_reply);
+    assert!(
+        scheduler.region_status[&id].has_ddl(),
+        "old incarnation must not clear the new batch"
+    );
+    ddls.pop()
+        .unwrap()
+        .sender
+        .send(InvalidSchedulerStateSnafu.fail());
+    let (generation, request_id) = recv_ddl_completion(&mut rx).await;
+    scheduler.on_ddl_complete(id, generation, request_id);
+    scheduler.on_ddl_complete(id, generation, request_id);
+    assert!(response.await.unwrap().is_err());
+    assert!(!scheduler.region_status[&id].has_ddl());
+    assert!(
+        scheduler
+            .schedule_automatic_compaction(
+                Options::Regular(Default::default()),
+                &reopened,
+                &env.access_layer,
+                &manifest,
+                schemas.clone()
+            )
+            .unwrap()
+    );
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+    assert!(!scheduler.is_compacting(id));
+    assert!(scheduler.region_status.contains_key(&id));
+}
+
+#[tokio::test]
 async fn test_schedule_empty() {
     let env = SchedulerEnv::new().await;
     let (tx, mut rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let mut builder = VersionControlBuilder::new();
+    let region_id = builder.region_id();
     let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
     schema_metadata_manager
         .register_region_table_info(
@@ -402,10 +604,12 @@ async fn test_schedule_empty() {
         .await;
     let output = output_rx.await.unwrap().unwrap();
     assert_eq!(output, 0);
-    assert!(scheduler.region_status.is_empty());
+    assert_eq!(1, scheduler.region_status.len());
+    assert!(!scheduler.is_compacting(region_id));
 
     // Only one file, picker won't compact it.
     let version_control = Arc::new(builder.push_l0_file(0, 1000).build());
+    scheduler.register_region(&version_control, &env.access_layer);
     let (output_tx, output_rx) = oneshot::channel();
     let waiter = OptionOutputTx::from(output_tx);
     let scheduled = scheduler
@@ -428,7 +632,8 @@ async fn test_schedule_empty() {
         .await;
     let output = output_rx.await.unwrap().unwrap();
     assert_eq!(output, 0);
-    assert!(scheduler.region_status.is_empty());
+    assert_eq!(1, scheduler.region_status.len());
+    assert!(!scheduler.is_compacting(region_id));
 }
 
 #[tokio::test]
@@ -484,7 +689,7 @@ async fn test_schedule_compaction_returns_true_when_task_scheduled() {
         .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
         .await;
     assert_eq!(1, job_scheduler.num_jobs());
-    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.is_compacting(region_id));
 }
 
 #[tokio::test]
@@ -521,7 +726,7 @@ async fn test_planning_followup_reports_automatic_schedule() {
 }
 
 #[tokio::test]
-async fn test_planning_panic_notifies_and_clears_status() {
+async fn test_planning_panic_notifies_and_returns_region_to_idle() {
     let env = SchedulerEnv::new().await;
     let (tx, mut rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx.clone());
@@ -555,7 +760,8 @@ async fn test_planning_panic_notifies_and_clears_status() {
 
     assert!(pending_ddls.is_empty());
     assert!(waiter_rx.await.unwrap().is_err());
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
 }
 
 #[tokio::test]
@@ -639,7 +845,8 @@ async fn test_ddl_fence_prevents_repeated_regular_followups() {
     );
 
     assert!(pre_fence_rx.await.unwrap().is_err());
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     assert!(rx.try_recv().is_err());
 }
 
@@ -768,7 +975,8 @@ async fn test_pick_result_local_submission_failure_releases_and_notifies_once() 
 
     assert!(waiter_rx.await.unwrap().is_err());
     assert!(selected.iter().all(|file| !file.compacting()));
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
 }
 
 #[tokio::test]
@@ -798,7 +1006,8 @@ async fn test_pick_result_remote_submission_failure_releases_and_notifies_once()
 
     assert!(waiter_rx.await.unwrap().is_err());
     assert!(selected.iter().all(|file| !file.compacting()));
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
 }
 
 #[tokio::test]
@@ -874,13 +1083,13 @@ async fn test_stale_plan_execution_does_not_affect_replacement_status() {
         )
         .await;
     assert!(pending_ddls.is_empty());
-    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.is_compacting(region_id));
     scheduler.on_execution_failed(
         region_id,
         &stale_execution,
         Arc::new(InvalidSchedulerStateSnafu.build()),
     );
-    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.is_compacting(region_id));
     assert_matches!(
         waiter_rx.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
@@ -947,7 +1156,8 @@ async fn test_schedule_compaction_skips_task_exceeding_memory_limit() {
     assert_eq!(output_rx.await.unwrap().unwrap(), 0);
     assert_eq!(rejected_before + 1, rejected.get());
     assert_eq!(0, job_scheduler.num_jobs());
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     assert!(selected.iter().all(|file| !file.compacting()));
 }
 
@@ -1031,7 +1241,7 @@ async fn test_execution_finished_drains_until_no_plan() {
         )
         .await;
     assert_matches!(transition, CompactionTransition::AutomaticFollowupScheduled);
-    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.is_compacting(region_id));
     let finished = recv_compaction_pick_finished(&mut rx).await;
     scheduler
         .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager.clone())
@@ -1061,12 +1271,13 @@ async fn test_execution_finished_drains_until_no_plan() {
         .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager.clone())
         .await;
     assert_matches!(transition, CompactionTransition::NoAction);
-    assert!(scheduler.region_status.is_empty());
+    assert_eq!(1, scheduler.region_status.len());
+    assert!(!scheduler.is_compacting(region_id));
     assert_eq!(2, job_scheduler.num_jobs());
 }
 
 #[tokio::test]
-async fn test_execution_finished_without_progress_removes_status() {
+async fn test_execution_finished_without_progress_keeps_idle_status() {
     common_telemetry::init_default_ut_logging();
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
@@ -1128,7 +1339,8 @@ async fn test_execution_finished_without_progress_removes_status() {
         )
         .await;
     assert_matches!(transition, CompactionTransition::NoAction);
-    assert!(scheduler.region_status.is_empty());
+    assert_eq!(1, scheduler.region_status.len());
+    assert!(!scheduler.is_compacting(region_id));
     assert_eq!(1, job_scheduler.num_jobs());
 }
 
@@ -1664,7 +1876,8 @@ async fn test_compaction_bypass_in_staging_mode() {
 
     let result = rx.await.unwrap();
     assert_eq!(result.unwrap(), 0);
-    assert_eq!(0, scheduler.region_status.len());
+    assert_eq!(1, scheduler.region_status.len());
+    assert!(!scheduler.is_compacting(version_control.region_id()));
 }
 
 #[tokio::test]
@@ -1843,6 +2056,10 @@ async fn test_try_cancel_and_add_ddl_returns_request_when_not_running() {
     let (tx, _rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let region_id = RegionId::new(1, 1);
+    let version = Arc::new(VersionControlBuilder::new().build());
+    scheduler.register_region(&version, &env.access_layer);
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     let (ddl_tx, ddl_rx) = oneshot::channel();
 
     let result =
@@ -1932,7 +2149,8 @@ async fn test_on_compaction_cancelled_returns_pending_ddl_requests() {
 
     assert_eq!(pending_ddls.len(), 1);
     assert!(!scheduler.has_pending_ddls(region_id));
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     assert_eq!(job_scheduler.num_jobs(), 0);
 }
 
@@ -1979,7 +2197,8 @@ async fn test_on_compaction_cancelled_prioritizes_pending_ddls_over_pending_comp
     let pending_ddls = scheduler.on_compaction_cancelled(region_id).await;
 
     assert_eq!(pending_ddls.len(), 1);
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     assert_eq!(job_scheduler.num_jobs(), 0);
     assert_matches!(manual_rx.await.unwrap(), Err(_));
 }
@@ -2165,7 +2384,8 @@ async fn test_on_compaction_finished_returns_pending_ddl_requests() {
 
     assert_eq!(pending_ddls.len(), 1);
     assert!(!scheduler.has_pending_ddls(region_id));
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     assert_eq!(job_scheduler.num_jobs(), 0);
 }
 
@@ -2218,7 +2438,8 @@ async fn test_planning_terminal_prioritizes_pending_ddl_over_automatic_followup(
         .await;
 
     assert_eq!(pending_ddls.len(), 1);
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     assert!(rx.try_recv().is_err());
     assert!(manual_rx.await.unwrap().is_err());
 }
@@ -2263,7 +2484,8 @@ async fn test_on_compaction_finished_dispatches_pending_ddl_before_chained_regul
         .await;
 
     assert_eq!(pending_ddls.len(), 1);
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     assert!(rx.try_recv().is_err());
 }
 
@@ -2349,7 +2571,8 @@ async fn test_on_compaction_finished_ddl_bypasses_failing_manual_scheduler() {
     };
     assert_eq!(ddls.len(), 1);
     assert!(rx.try_recv().is_err());
-    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert!(scheduler.region_status.contains_key(&region_id));
+    assert!(!scheduler.is_compacting(region_id));
     assert_matches!(manual_rx.await.unwrap(), Err(_));
     ddls.pop().unwrap().sender.send(Ok(0));
     assert_eq!(ddl_rx.await.unwrap().unwrap(), 0);
