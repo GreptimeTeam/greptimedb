@@ -38,6 +38,7 @@ use crate::access_layer::{
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::reader::CompactionSstReaderBuilder;
+use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
@@ -261,8 +262,8 @@ impl CompactionRegion {
 
     /// Fires [`RegionHook::on_sst_files_written`] for the freshly-merged SST
     /// files in `merge_output`. Shared by both compaction paths, it must run
-    /// before [`Compactor::update_manifest`], whose `on_manifest_updated`
-    /// drains the per-region state this hook populates.
+    /// before this unit's [`Compactor::update_manifest`] so its committed edit
+    /// can be associated with the SST metadata reported here.
     pub async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
         let Some(hook) = self.plugins.get::<RegionHookRef>() else {
             return;
@@ -630,6 +631,49 @@ impl DefaultCompactor {
     }
 }
 
+impl<M: SstMerger> DefaultCompactor<M> {
+    /// Merges a complete atomic unit. No partial input replacement is returned.
+    pub(crate) async fn merge_unit(
+        &self,
+        region: &CompactionRegion,
+        unit: &CompactionUnit,
+    ) -> Result<MergeOutput> {
+        let mut result = MergeOutput {
+            files_to_remove: unit.inputs.iter().map(|f| f.meta_ref().clone()).collect(),
+            compaction_time_window: Some(unit.time_window_size),
+            ..Default::default()
+        };
+        for output in &unit.outputs {
+            if self.cancel_handle.is_cancelled() {
+                return error::CompactionCancelledSnafu.fail();
+            }
+            // Let the writer finish and register its files before observing cancellation.
+            // Dropping it mid-write can lose ownership of already finalized SSTs.
+            let (files, infos) = self
+                .merger
+                .merge_single_output(
+                    region.clone(),
+                    output.clone(),
+                    WriteOptions {
+                        write_buffer_size: region.engine_config.sst_write_buffer_size,
+                        max_file_size: unit.max_file_size,
+                        row_group_size: region.region_options.row_group_size(),
+                    },
+                )
+                .await?;
+            if let Some(uncommitted) = &self.uncommitted {
+                uncommitted.track(&infos);
+            }
+            result.files_to_add.extend(files);
+            result.sst_infos.extend(infos);
+        }
+        if self.cancel_handle.is_cancelled() {
+            return error::CompactionCancelledSnafu.fail();
+        }
+        Ok(result)
+    }
+}
+
 #[async_trait::async_trait]
 impl<M: SstMerger> Compactor for DefaultCompactor<M>
 where
@@ -948,6 +992,56 @@ mod tests {
                 }
                 .fail(),
                 None => panic!("MockMerger: no result configured for call index {idx}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compaction_unit_group_failure_is_atomic() {
+        let region = new_test_compaction_region().await;
+        let input = new_file_handle(dummy_file_meta());
+        let unit = CompactionUnit::from_picker(PickerOutput {
+            outputs: (0..2)
+                .map(|_| CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![input.clone()],
+                    filter_deleted: false,
+                    output_time_range: None,
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .unwrap()
+        .pop()
+        .unwrap();
+        for fail_second in [false, true] {
+            let second = if fail_second {
+                error::InvalidMetaSnafu {
+                    reason: "second output failed",
+                }
+                .fail()
+            } else {
+                Ok(vec![dummy_file_meta(), dummy_file_meta()])
+            };
+            let compactor =
+                DefaultCompactor::with_merger(MockMerger::new(vec![Ok(Vec::new()), second]));
+            let result = compactor.merge_unit(&region, &unit).await;
+            if fail_second {
+                assert!(
+                    result.is_err(),
+                    "cannot publish a successful subset of a dependency group"
+                );
+            } else {
+                let result = result.unwrap();
+                assert_eq!(2, result.files_to_add.len());
+                assert_eq!(
+                    vec![input.meta_ref().file_id],
+                    result
+                        .files_to_remove
+                        .iter()
+                        .map(|f| f.file_id)
+                        .collect::<Vec<_>>()
+                );
             }
         }
     }
