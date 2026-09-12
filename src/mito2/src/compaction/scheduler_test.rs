@@ -613,14 +613,11 @@ async fn test_ddl_fence_prevents_repeated_regular_followups() {
             schema_metadata_manager.clone(),
         )
         .await;
-    assert!(pending_ddls.is_empty());
-
-    let mut followup_finished = tokio::time::timeout(
-        Duration::from_secs(5),
-        recv_compaction_pick_finished(&mut rx),
-    )
-    .await
-    .expect("pre-fence regular follow-up was not planned");
+    assert_eq!(pending_ddls.len(), 1);
+    assert!(
+        rx.try_recv().is_err(),
+        "DDL must precede even an earlier pending manual request"
+    );
     let (post_fence_tx, post_fence_rx) = oneshot::channel();
     assert!(
         !scheduler
@@ -641,12 +638,7 @@ async fn test_ddl_fence_prevents_repeated_regular_followups() {
         Error::CompactionCancelled { .. }
     );
 
-    followup_finished.result = CompactionPlanningResult::NoPlan;
-    let pending_ddls = scheduler
-        .handle_compaction_pick_finished(followup_finished, &manifest_ctx, schema_metadata_manager)
-        .await;
-    assert_eq!(pending_ddls.len(), 1);
-    assert_eq!(pre_fence_rx.await.unwrap().unwrap(), 0);
+    assert!(pre_fence_rx.await.unwrap().is_err());
     assert!(!scheduler.region_status.contains_key(&region_id));
     assert!(rx.try_recv().is_err());
 }
@@ -832,7 +824,7 @@ async fn test_remote_fallback_uses_new_execution_plan_id() {
     assert_eq!(job_scheduler.num_jobs(), 1);
     assert!(matches!(
         &scheduler.region_status[&region_id].active.phase,
-        CompactionPhase::Local { .. }
+        CompactionPhase::Units(_)
     ));
     assert!(
         !scheduler.region_status[&region_id]
@@ -2225,14 +2217,10 @@ async fn test_planning_terminal_prioritizes_pending_ddl_over_automatic_followup(
         )
         .await;
 
-    assert!(pending_ddls.is_empty());
-    let finished = recv_compaction_pick_finished(&mut rx).await;
-    let pending_ddls = scheduler
-        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
-        .await;
     assert_eq!(pending_ddls.len(), 1);
     assert!(!scheduler.region_status.contains_key(&region_id));
-    assert_eq!(manual_rx.await.unwrap().unwrap(), 0);
+    assert!(rx.try_recv().is_err());
+    assert!(manual_rx.await.unwrap().is_err());
 }
 
 #[tokio::test]
@@ -2300,7 +2288,7 @@ async fn test_on_compaction_finished_returns_empty_when_region_absent() {
 }
 
 #[tokio::test]
-async fn test_on_compaction_finished_manual_schedule_error_cleans_status() {
+async fn test_on_compaction_finished_ddl_bypasses_failing_manual_scheduler() {
     let env = SchedulerEnv::new()
         .await
         .scheduler(Arc::new(FailingScheduler));
@@ -2356,15 +2344,15 @@ async fn test_on_compaction_finished_manual_schedule_error_cleans_status() {
         )
         .await;
 
-    assert!(pending_ddls.is_empty());
-    let finished = recv_compaction_pick_finished(&mut rx).await;
-    let pending_ddls = scheduler
-        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
-        .await;
-    assert!(pending_ddls.is_empty());
+    let super::CompactionTransition::DdlReady(mut ddls) = pending_ddls else {
+        panic!("DDL not released")
+    };
+    assert_eq!(ddls.len(), 1);
+    assert!(rx.try_recv().is_err());
     assert!(!scheduler.region_status.contains_key(&region_id));
     assert_matches!(manual_rx.await.unwrap(), Err(_));
-    assert_matches!(ddl_rx.await.unwrap(), Err(_));
+    ddls.pop().unwrap().sender.send(Ok(0));
+    assert_eq!(ddl_rx.await.unwrap().unwrap(), 0);
 }
 
 #[tokio::test]

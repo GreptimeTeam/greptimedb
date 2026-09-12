@@ -26,6 +26,7 @@ mod task;
 #[cfg(test)]
 mod test_util;
 mod twcs;
+mod unit;
 mod window;
 
 use std::collections::HashMap;
