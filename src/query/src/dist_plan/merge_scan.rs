@@ -53,6 +53,8 @@ use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::{
+    ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN, ENABLE_DYNAMIC_FILTER_PUSHDOWN,
+    ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN, ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN,
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContextRef,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
 };
@@ -74,7 +76,10 @@ use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
-use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
+use crate::options::{
+    FlowQueryExtensions, dynamic_filter_pushdown_options,
+    remote_dyn_filter_pushdown_enabled_from_extensions,
+};
 use crate::query_engine::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -125,6 +130,39 @@ fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
         }
         _ => None,
     }
+}
+
+fn materialize_dynamic_filter_pushdown_extensions(
+    query_ctx: &mut session::context::QueryContext,
+) -> Result<()> {
+    let options = dynamic_filter_pushdown_options(
+        query_ctx
+            .configuration_parameter()
+            .dynamic_filter_pushdown(),
+        &query_ctx.extensions(),
+    )
+    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+    for (name, enabled) in [
+        (
+            ENABLE_DYNAMIC_FILTER_PUSHDOWN,
+            options.enable_dynamic_filter_pushdown,
+        ),
+        (
+            ENABLE_AGGREGATE_DYNAMIC_FILTER_PUSHDOWN,
+            options.enable_aggregate_dynamic_filter_pushdown,
+        ),
+        (
+            ENABLE_JOIN_DYNAMIC_FILTER_PUSHDOWN,
+            options.enable_join_dynamic_filter_pushdown,
+        ),
+        (
+            ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN,
+            options.enable_topk_dynamic_filter_pushdown,
+        ),
+    ] {
+        query_ctx.set_extension(name, enabled.to_string());
+    }
+    Ok(())
 }
 
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
@@ -710,6 +748,7 @@ impl MergeScanExec {
                     region_id,
                     &captured_remote_dyn_filters,
                 );
+                materialize_dynamic_filter_pushdown_extensions(&mut region_query_ctx)?;
                 if live_analyze_metrics {
                     let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
                     if let Some(remote_query_id) = remote_query_id {
@@ -1433,7 +1472,7 @@ mod tests {
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
     use futures_util::{Stream, TryStreamExt};
     use session::ReadPreference;
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
     use session::query_id::QueryId;
     use table::table::scan::REGION_SCAN_EXEC_NAME;
     use table::table_name::TableName;
@@ -1443,7 +1482,7 @@ mod tests {
     use super::*;
     use crate::dist_plan::DynFilterRegistryManager;
     use crate::options::QueryOptions;
-    use crate::query_engine::{QueryEngineContext, QueryEngineState};
+    use crate::query_engine::{DefaultPlanDecoder, QueryEngineContext, QueryEngineState};
     use crate::region_query::RegionQueryHandler;
 
     fn test_target(id: u64) -> crate::region_query::RegionQueryTarget {
@@ -2016,7 +2055,18 @@ mod tests {
     #[tokio::test]
     async fn immediate_eof_do_get_receives_refreshed_remote_dyn_filter_snapshot() {
         let handler = Arc::new(ImmediateEofRegionQueryHandler::default());
-        let query_ctx = QueryContext::arc();
+        let configuration_parameter = Arc::new(session::context::ConfigurationVariables::default());
+        configuration_parameter
+            .set_dynamic_filter_pushdown(ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN, false);
+        let query_ctx = Arc::new(
+            session::context::QueryContextBuilder::default()
+                .configuration_parameter(configuration_parameter)
+                .set_extension(
+                    ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+                    "true".to_string(),
+                )
+                .build(),
+        );
         let state = query_engine_state(handler.clone());
         let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
         let dyn_filter = install_remote_dyn_filter(&exec);
@@ -2033,6 +2083,37 @@ mod tests {
         assert!(snapshot.generation > 0);
         assert!(!snapshot.is_complete);
         assert_eq!(
+            handler
+                .dynamic_filter_extensions()
+                .get(ENABLE_DYNAMIC_FILTER_PUSHDOWN),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            handler
+                .dynamic_filter_extensions()
+                .get(ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN),
+            Some(&"true".to_string())
+        );
+        let dn_ctx = Arc::new(QueryContext::from(api::v1::QueryContext {
+            extensions: handler.dynamic_filter_extensions(),
+            ..Default::default()
+        }));
+        let decoder = DefaultPlanDecoder::new(SessionStateBuilder::new().build(), &dn_ctx).unwrap();
+        assert!(
+            decoder
+                .session_state()
+                .config_options()
+                .optimizer
+                .enable_dynamic_filter_pushdown
+        );
+        assert!(
+            decoder
+                .session_state()
+                .config_options()
+                .optimizer
+                .enable_topk_dynamic_filter_pushdown
+        );
+        assert_eq!(
             snapshot
                 .payload
                 .decode_datafusion_expr(
@@ -2048,6 +2129,49 @@ mod tests {
                 .to_string(),
             "false"
         );
+    }
+
+    #[tokio::test]
+    async fn session_dynamic_filter_settings_reach_dn_decoder_without_hint() {
+        let handler = Arc::new(ImmediateEofRegionQueryHandler::default());
+        let configuration_parameter = Arc::new(session::context::ConfigurationVariables::default());
+        configuration_parameter.set_dynamic_filter_pushdown(ENABLE_DYNAMIC_FILTER_PUSHDOWN, false);
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .configuration_parameter(configuration_parameter)
+                .build(),
+        );
+        let state = query_engine_state(handler.clone());
+        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let dyn_filter = install_remote_dyn_filter(&exec);
+        dyn_filter.update(physical_lit(false) as _).unwrap();
+
+        let mut stream = exec
+            .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+            .unwrap();
+        assert!(stream.next().await.is_none());
+
+        let dn_ctx = Arc::new(QueryContext::from(api::v1::QueryContext {
+            extensions: handler.dynamic_filter_extensions(),
+            ..Default::default()
+        }));
+        let decoder = DefaultPlanDecoder::new(SessionStateBuilder::new().build(), &dn_ctx).unwrap();
+        let optimizer = &decoder.session_state().config_options().optimizer;
+        assert!(!optimizer.enable_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_aggregate_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_join_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_topk_dynamic_filter_pushdown);
+        let optimizer = &decoder
+            .session_state()
+            .execution_props()
+            .config_options
+            .as_ref()
+            .unwrap()
+            .optimizer;
+        assert!(!optimizer.enable_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_aggregate_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_join_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_topk_dynamic_filter_pushdown);
     }
 
     #[test]
@@ -2444,11 +2568,20 @@ mod tests {
     #[derive(Default)]
     struct ImmediateEofRegionQueryHandler {
         registrations: Mutex<Option<InitialDynFilterRegs>>,
+        dynamic_filter_extensions: Mutex<Option<std::collections::HashMap<String, String>>>,
     }
 
     impl ImmediateEofRegionQueryHandler {
         fn registrations(&self) -> InitialDynFilterRegs {
             self.registrations.lock().unwrap().clone().unwrap()
+        }
+
+        fn dynamic_filter_extensions(&self) -> std::collections::HashMap<String, String> {
+            self.dynamic_filter_extensions
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
         }
     }
 
@@ -2467,19 +2600,18 @@ mod tests {
             _target: &crate::region_query::RegionQueryTarget,
             request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
-            let registrations = request
+            let extensions = request
                 .header
-                .clone()
-                .and_then(|header| header.query_context)
-                .and_then(|query_context| {
-                    query_context
-                        .extensions
-                        .get(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
-                        .cloned()
-                })
-                .map(|serialized| InitialDynFilterRegs::from_extension_value(&serialized).unwrap())
+                .as_ref()
+                .and_then(|header| header.query_context.as_ref())
+                .map(|query_context| query_context.extensions.clone())
+                .unwrap();
+            let registrations = extensions
+                .get(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .map(|serialized| InitialDynFilterRegs::from_extension_value(serialized).unwrap())
                 .unwrap();
             *self.registrations.lock().unwrap() = Some(registrations);
+            *self.dynamic_filter_extensions.lock().unwrap() = Some(extensions);
             Ok(empty_record_batch_stream(&request))
         }
 

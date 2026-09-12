@@ -50,6 +50,7 @@ use substrait::extension_serializer::ExtensionSerializer;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::dist_plan::MergeScanLogicalPlan;
+use crate::options::apply_dynamic_filter_pushdown_options;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
 #[derive(Debug)]
@@ -104,10 +105,22 @@ pub struct DefaultPlanDecoder {
 }
 
 impl DefaultPlanDecoder {
+    #[cfg(test)]
+    pub(crate) fn session_state(&self) -> &SessionState {
+        &self.session_state
+    }
+
     pub fn new(
         session_state: SessionState,
         query_ctx: &QueryContextRef,
     ) -> crate::error::Result<Self> {
+        let mut session_state = session_state;
+        apply_dynamic_filter_pushdown_options(session_state.config_mut().options_mut(), query_ctx)?;
+        let config_options = session_state.config_options().clone();
+        let _ = session_state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
         Ok(Self {
             session_state,
             query_ctx: query_ctx.clone(),
@@ -252,13 +265,91 @@ mod tests {
     };
     use datatypes::data_type::DataType;
     use promql::extension_plan::RangeManipulate;
-    use session::context::QueryContext;
+    use session::context::{
+        ConfigurationVariables, ENABLE_DYNAMIC_FILTER_PUSHDOWN,
+        ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN, QueryContext, QueryContextBuilder,
+    };
 
     use super::*;
     use crate::QueryEngineFactory;
     use crate::dummy_catalog::DummyCatalogList;
     use crate::optimizer::test_util::mock_table_provider;
     use crate::options::QueryOptions;
+
+    fn assert_dynamic_filter_pushdown_disabled(session_state: &SessionState) {
+        let optimizer = &session_state.config_options().optimizer;
+        assert!(!optimizer.enable_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_aggregate_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_join_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_topk_dynamic_filter_pushdown);
+
+        let snapshot = session_state
+            .execution_props()
+            .config_options
+            .as_ref()
+            .unwrap();
+        let optimizer = &snapshot.optimizer;
+        assert!(!optimizer.enable_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_aggregate_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_join_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_topk_dynamic_filter_pushdown);
+    }
+
+    #[test]
+    fn test_plan_decoder_applies_dynamic_filter_extensions() {
+        let session_only = Arc::new(ConfigurationVariables::default());
+        session_only.set_dynamic_filter_pushdown(ENABLE_DYNAMIC_FILTER_PUSHDOWN, false);
+        let session_only_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .configuration_parameter(session_only)
+                .build(),
+        );
+        let decoder =
+            DefaultPlanDecoder::new(SessionStateBuilder::new().build(), &session_only_ctx).unwrap();
+        assert_dynamic_filter_pushdown_disabled(&decoder.session_state);
+
+        let session_with_hint = Arc::new(ConfigurationVariables::default());
+        session_with_hint.set_dynamic_filter_pushdown(ENABLE_DYNAMIC_FILTER_PUSHDOWN, false);
+        let hinted_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .configuration_parameter(session_with_hint)
+                .set_extension(
+                    ENABLE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+                    "true".to_string(),
+                )
+                .set_extension(
+                    ENABLE_TOPK_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+                    "false".to_string(),
+                )
+                .build(),
+        );
+        let decoder =
+            DefaultPlanDecoder::new(SessionStateBuilder::new().build(), &hinted_ctx).unwrap();
+        let optimizer = &decoder.session_state.config_options().optimizer;
+        assert!(optimizer.enable_dynamic_filter_pushdown);
+        assert!(!optimizer.enable_topk_dynamic_filter_pushdown);
+        assert_eq!(
+            decoder
+                .session_state
+                .execution_props()
+                .config_options
+                .as_ref()
+                .unwrap()
+                .optimizer
+                .enable_topk_dynamic_filter_pushdown,
+            false
+        );
+
+        let invalid_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    ENABLE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+                    "invalid".to_string(),
+                )
+                .build(),
+        );
+        assert!(DefaultPlanDecoder::new(SessionStateBuilder::new().build(), &invalid_ctx).is_err());
+    }
 
     fn mock_plan(schema: SchemaRef) -> LogicalPlan {
         let table_source = LogicalTableSource::new(schema);
