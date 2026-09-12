@@ -28,6 +28,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::CompactionVersion;
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::scheduler::local::LocalCompaction;
 use crate::compaction::scheduler::planning::CompactionRequest;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -36,7 +37,9 @@ use crate::error::{
 use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
 use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
-use crate::schedule::{CancellableTaskState, RequestCancelResult};
+#[cfg(test)]
+use crate::schedule::CancellableTaskState;
+use crate::schedule::RequestCancelResult;
 use crate::sst::file::FileHandle;
 use crate::worker::WorkerListener;
 
@@ -49,6 +52,10 @@ pub(crate) struct CompactionExecution {
 }
 
 impl CompactionExecution {
+    /// Returns the attempt ID used to reject stale execution notifications.
+    pub(crate) fn plan_id(&self) -> u64 {
+        self.plan_id
+    }
     pub(super) fn new(plan_id: u64, files: CompactingFiles) -> Self {
         Self {
             plan_id,
@@ -72,6 +79,7 @@ pub(super) enum CompactionPhase {
         plan_id: u64,
         cancelled: bool,
     },
+    #[cfg(test)]
     Local {
         state: CancellableTaskState,
         execution: CompactionExecution,
@@ -79,6 +87,7 @@ pub(super) enum CompactionPhase {
     Remote {
         execution: CompactionExecution,
     },
+    Units(LocalCompaction),
 }
 
 /// Describes how the current compaction cycle was triggered.
@@ -166,9 +175,10 @@ impl ActiveCompaction {
     pub(super) fn matches_execution(&self, execution: &CompactionExecution) -> bool {
         match &self.phase {
             CompactionPhase::Picking { .. } => None,
-            CompactionPhase::Local { execution, .. } | CompactionPhase::Remote { execution } => {
-                Some(execution)
-            }
+            #[cfg(test)]
+            CompactionPhase::Local { execution, .. } => Some(execution),
+            CompactionPhase::Units(_) => None,
+            CompactionPhase::Remote { execution } => Some(execution),
         }
         .is_some_and(|current| current.matches(execution))
     }
@@ -183,7 +193,9 @@ impl ActiveCompaction {
                     RequestCancelResult::CancelIssued
                 }
             }
+            #[cfg(test)]
             CompactionPhase::Local { state, .. } => state.request_cancel(),
+            CompactionPhase::Units(units) => units.request_cancel(),
             CompactionPhase::Remote { .. } => RequestCancelResult::TooLateToCancel,
         }
     }
@@ -198,55 +210,70 @@ impl ActiveCompaction {
 /// Owns atomic reservations for every SST selected by a compaction plan.
 #[derive(Debug, Clone)]
 pub(super) struct CompactingFiles {
-    _inner: Arc<CompactingFilesInner>,
+    files: Vec<Arc<CompactingFile>>,
 }
 
+/// Keeps an SST reserved until the last shared lease is dropped.
 #[derive(Debug)]
-struct CompactingFilesInner {
-    files: Vec<FileHandle>,
+struct CompactingFile {
+    file: FileHandle,
 }
 
 impl CompactingFiles {
+    /// Reserves both merge inputs and expired files from an accepted picker result.
     pub(super) fn try_new(output: &PickerOutput) -> Option<Self> {
+        Self::try_reserve(
+            output
+                .outputs
+                .iter()
+                .flat_map(|o| &o.inputs)
+                .chain(&output.expired_ssts),
+        )
+    }
+
+    /// Reserves distinct inputs, releasing acquired leases if any input is already busy.
+    pub(super) fn try_reserve<'a>(
+        selected_files: impl IntoIterator<Item = &'a FileHandle>,
+    ) -> Option<Self> {
         let mut seen = HashSet::new();
-        let mut files: Vec<FileHandle> = Vec::new();
-        let selected_files = output
-            .outputs
-            .iter()
-            .flat_map(|output| output.inputs.iter())
-            .chain(output.expired_ssts.iter());
+        let mut files = Vec::new();
 
         for file in selected_files {
             if !seen.insert(file.file_id()) {
                 continue;
             }
             if !file.try_set_compacting() {
-                for reserved in &files {
-                    reserved.set_compacting(false);
-                }
                 return None;
             }
-            files.push(file.clone());
+            files.push(Arc::new(CompactingFile { file: file.clone() }));
         }
 
-        Some(Self {
-            _inner: Arc::new(CompactingFilesInner { files }),
-        })
+        Some(Self { files })
+    }
+
+    /// Transfers a dependency group's leases without briefly releasing any input.
+    /// A delayed remote notifier may retain the same leases across local fallback.
+    pub(super) fn for_inputs(&self, inputs: &[FileHandle]) -> Self {
+        let ids: HashSet<_> = inputs.iter().map(FileHandle::file_id).collect();
+        Self {
+            files: self
+                .files
+                .iter()
+                .filter(|lease| ids.contains(&lease.file.file_id()))
+                .cloned()
+                .collect(),
+        }
     }
 
     #[cfg(test)]
     pub(super) fn empty() -> Self {
-        Self {
-            _inner: Arc::new(CompactingFilesInner { files: Vec::new() }),
-        }
+        Self { files: Vec::new() }
     }
 }
 
-impl Drop for CompactingFilesInner {
+impl Drop for CompactingFile {
     fn drop(&mut self) {
-        for file in &self.files {
-            file.set_compacting(false);
-        }
+        self.file.set_compacting(false);
     }
 }
 
@@ -376,10 +403,6 @@ impl CompactionStatus {
         self.active.waiters.extend(waiters);
     }
 
-    pub(super) fn append_waiters(&mut self, waiters: &mut Vec<OutputTx>) {
-        self.active.waiters.append(waiters);
-    }
-
     pub(super) fn set_phase(&mut self, phase: CompactionPhase) {
         self.active.phase = phase;
     }
@@ -476,4 +499,30 @@ pub(super) struct PendingCompaction {
     pub(crate) max_parallelism: usize,
     /// Optional time range that constrains candidate compaction windows.
     pub(crate) time_range: Option<TimestampRange>,
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use store_api::storage::FileId;
+
+    use super::*;
+    use crate::compaction::test_util::new_file_handle;
+
+    #[test]
+    fn test_compaction_unit_input_leases_release_independently() {
+        let x = new_file_handle(FileId::random(), 0, 100, 0);
+        let y = new_file_handle(FileId::random(), 100, 200, 0);
+        let reserved = CompactingFiles::try_reserve([&x, &y]).unwrap();
+        let first = reserved.for_inputs(std::slice::from_ref(&x));
+        let second = reserved.for_inputs(std::slice::from_ref(&y));
+        drop(reserved);
+        assert!(x.compacting() && y.compacting());
+        drop(first);
+        assert!(!x.compacting() && y.compacting());
+        let notification = second.clone();
+        drop(second);
+        assert!(y.compacting());
+        drop(notification);
+        assert!(!y.compacting());
+    }
 }

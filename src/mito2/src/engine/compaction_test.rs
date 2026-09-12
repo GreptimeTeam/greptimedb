@@ -136,6 +136,667 @@ async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
     res
 }
 
+/// Pauses the first unit at merge or commit while observing sibling progress.
+struct UnitVisibilityGate {
+    first: std::sync::atomic::AtomicU64,
+    at_commit: bool,
+    entered: Notify,
+    resume: Semaphore,
+    applied: Notify,
+    cancel_requested: Notify,
+}
+
+/// Fails a selected SST close and records earlier outputs for cleanup assertions.
+struct FailingUnitSstWriter {
+    inner: object_store::layers::mock::Writer,
+    path: String,
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    finalized: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl object_store::layers::mock::Write for FailingUnitSstWriter {
+    async fn write(
+        &mut self,
+        bytes: object_store::layers::mock::Buffer,
+    ) -> object_store::layers::mock::Result<()> {
+        self.inner.write(bytes).await
+    }
+    /// Injects failure at the configured close without publishing that SST.
+    async fn close(
+        &mut self,
+    ) -> object_store::layers::mock::Result<object_store::layers::mock::Metadata> {
+        let previous = self
+            .remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        if previous == Ok(1) {
+            return Err(object_store::layers::mock::Error::new(
+                object_store::layers::mock::ErrorKind::Unexpected,
+                "second unit SST failed",
+            ));
+        }
+        let metadata = self.inner.close().await?;
+        if previous.is_ok() {
+            self.finalized.lock().unwrap().push(self.path.clone());
+        }
+        Ok(metadata)
+    }
+    async fn abort(&mut self) -> object_store::layers::mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+#[tokio::test]
+async fn test_compaction_unit_failed_dependency_group_keeps_input_and_cleans_output() {
+    let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let finalized = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let count = remaining.clone();
+    let written = finalized.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".parquet") {
+                Box::new(FailingUnitSstWriter {
+                    inner,
+                    path: path.to_string(),
+                    remaining: count.clone(),
+                    finalized: written.clone(),
+                })
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let config = MitoConfig {
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(43, 1);
+    let create = CreateRequestBuilder::new().build();
+    let table_dir = create.table_dir.clone();
+    let columns = create
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &columns, 0..122).await;
+    let original = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+        .file_ids();
+    remaining.store(2, Ordering::SeqCst);
+    let error = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow { window_seconds: 60 },
+                ),
+                parallelism: Some(2),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    let current = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(original, current.file_ids());
+    let expected = (0..122).map(|n| n * 1000).collect::<Vec<_>>();
+    assert_eq!(
+        expected,
+        collect_stream_ts(current.scan().await.unwrap()).await
+    );
+    let paths = finalized.lock().unwrap().clone();
+    assert_eq!(
+        1,
+        paths.len(),
+        "one output must have finished before the failing output"
+    );
+    let store = env.get_object_store().unwrap();
+    for path in paths {
+        assert!(
+            !store.exists(&path).await.unwrap(),
+            "abandoned output {path}"
+        );
+    }
+    let engine = env.reopen_engine(engine, config).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options: Default::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    let reopened = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        expected,
+        collect_stream_ts(reopened.scan().await.unwrap()).await
+    );
+}
+
+impl UnitVisibilityGate {
+    /// Blocks only the first arriving unit, leaving its siblings free to progress.
+    async fn block_first(&self, id: u64) {
+        if self
+            .first
+            .compare_exchange(u64::MAX, id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            self.entered.notify_one();
+            self.resume.acquire().await.unwrap().forget();
+        }
+    }
+}
+
+/// Releases the visibility gate even when a test exits through a panic.
+struct UnitVisibilityGuard(Arc<UnitVisibilityGate>);
+
+/// Holds one unit before merge and its sibling at commit for deterministic failure ordering.
+struct UnitFailureGate {
+    merge: Arc<UnitVisibilityGate>,
+    commit: Arc<CompactionPlanningGate>,
+}
+
+#[async_trait]
+impl EventListener for UnitFailureGate {
+    async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, id: u64) {
+        self.merge.block_first(id).await;
+    }
+
+    async fn on_compaction_commit_begin(&self, region_id: RegionId) {
+        self.commit.on_compaction_commit_begin(region_id).await;
+    }
+
+    fn on_compaction_cancel_requested(&self, region_id: RegionId) {
+        self.commit.on_compaction_cancel_requested(region_id);
+    }
+
+    async fn on_compaction_result_notified(&self, region_id: RegionId) {
+        self.commit.on_compaction_result_notified(region_id).await;
+    }
+}
+
+/// Distinguishes a rejected write from a lost reply after persistence.
+#[derive(Clone, Copy)]
+enum ManifestWriteFailure {
+    BeforeWrite,
+    AfterWrite,
+}
+
+/// Injects manifest failures around a real storage write to verify output ownership.
+struct FailingManifestWriter {
+    inner: object_store::layers::mock::Writer,
+    failure: ManifestWriteFailure,
+}
+
+impl object_store::layers::mock::Write for FailingManifestWriter {
+    /// Rejects the pre-write case before any bytes reach the real writer.
+    async fn write(
+        &mut self,
+        bytes: object_store::layers::mock::Buffer,
+    ) -> object_store::layers::mock::Result<()> {
+        if matches!(self.failure, ManifestWriteFailure::BeforeWrite) {
+            return Err(object_store::layers::mock::Error::new(
+                object_store::layers::mock::ErrorKind::PermissionDenied,
+                "manifest write rejected before persistence",
+            ));
+        }
+        self.inner.write(bytes).await
+    }
+    /// Persists the manifest before simulating a lost success reply.
+    async fn close(
+        &mut self,
+    ) -> object_store::layers::mock::Result<object_store::layers::mock::Metadata> {
+        self.inner.close().await?;
+        Err(object_store::layers::mock::Error::new(
+            object_store::layers::mock::ErrorKind::Unexpected,
+            "lost manifest response after persistence",
+        ))
+    }
+    async fn abort(&mut self) -> object_store::layers::mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+#[tokio::test]
+async fn test_compaction_unit_manifest_failure_preserves_outputs() {
+    for failure in [
+        ManifestWriteFailure::BeforeWrite,
+        ManifestWriteFailure::AfterWrite,
+    ] {
+        let armed = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ssts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (inject, writes, paths) = (armed.clone(), attempts.clone(), ssts.clone());
+        let layer = object_store::layers::mock::MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _, inner| {
+                if path.ends_with(".parquet") {
+                    paths.lock().unwrap().push(path.to_string());
+                }
+                if path.contains("/manifest/") && path.contains(".json") {
+                    writes.fetch_add(1, Ordering::SeqCst);
+                    if inject.swap(false, Ordering::SeqCst) {
+                        return Box::new(FailingManifestWriter { inner, failure });
+                    }
+                }
+                inner
+            }))
+            .build()
+            .unwrap();
+        let region_id = RegionId::new(44, 1);
+        let gate = Arc::new(CompactionPlanningGate::new(region_id));
+        let merge_gate = Arc::new(UnitVisibilityGate {
+            first: std::sync::atomic::AtomicU64::new(u64::MAX),
+            at_commit: false,
+            entered: Notify::new(),
+            resume: Semaphore::new(0),
+            applied: Notify::new(),
+            cancel_requested: Notify::new(),
+        });
+        let merge_guard = UnitVisibilityGuard(merge_gate.clone());
+        let mut env = TestEnv::new().await.with_mock_layer(layer);
+        let engine = env
+            .create_engine_with(
+                MitoConfig {
+                    max_background_compactions: 2,
+                    min_compaction_interval: Duration::from_secs(3600),
+                    ..Default::default()
+                },
+                None,
+                Some(Arc::new(UnitFailureGate {
+                    merge: merge_gate,
+                    commit: gate.clone(),
+                })),
+                None,
+            )
+            .await;
+        let create = CreateRequestBuilder::new().build();
+        let columns = create
+            .column_metadatas
+            .iter()
+            .map(column_metadata_to_column_schema)
+            .collect::<Vec<_>>();
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        put_and_flush(&engine, region_id, &columns, 0..2).await;
+        put_and_flush(&engine, region_id, &columns, 120..122).await;
+        let original = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+            .file_ids();
+        assert_eq!(2, original.len());
+        let region = engine.get_region(region_id).unwrap();
+        let version = region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .manifest()
+            .manifest_version;
+        ssts.lock().unwrap().clear();
+        attempts.store(0, Ordering::SeqCst);
+        armed.store(true, Ordering::SeqCst);
+        let guard = gate.arm_commit();
+        let compact_engine = engine.clone();
+        let compact = tokio::spawn(async move {
+            compact_engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Compact(RegionCompactRequest {
+                        options: api::v1::region::compact_request::Options::StrictWindow(
+                            api::v1::region::StrictWindow { window_seconds: 60 },
+                        ),
+                        parallelism: Some(2),
+                        ..Default::default()
+                    }),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), gate.wait_until_commit_entered())
+            .await
+            .unwrap();
+        let sibling_guard = gate.arm_pending_ddl_dispatch();
+        let ddl_engine = engine.clone();
+        let truncate = tokio::spawn(async move {
+            ddl_engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Truncate(RegionTruncateRequest::All),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), gate.wait_until_cancel_requested())
+            .await
+            .unwrap();
+        drop(merge_guard);
+        // Observe the cancelled sibling's exit before releasing the failing commit.
+        // Its cancellation must neither finish the request nor mask the later I/O error.
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            gate.wait_until_pending_ddl_dispatch(),
+        )
+        .await
+        .unwrap();
+        assert!(!compact.is_finished());
+        assert!(!truncate.is_finished());
+        sibling_guard.release();
+        guard.release();
+        let error = tokio::time::timeout(Duration::from_secs(10), compact)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+        let error = tokio::time::timeout(Duration::from_secs(10), truncate)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+        assert_eq!(
+            1,
+            attempts.load(Ordering::SeqCst),
+            "one failed publication, without automatic retry"
+        );
+        assert!(!armed.load(Ordering::SeqCst));
+        assert_eq!(
+            version,
+            region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .manifest()
+                .manifest_version
+        );
+        let scan = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            original,
+            scan.file_ids(),
+            "failed edits must not be applied"
+        );
+        assert_eq!(
+            vec![0, 1000, 120_000, 121_000],
+            collect_stream_ts(scan.scan().await.unwrap()).await
+        );
+        assert!(
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|l| l.files())
+                .all(|f| !f.compacting())
+        );
+        let paths = ssts.lock().unwrap().clone();
+        assert!(!paths.is_empty());
+        let store = env.get_object_store().unwrap();
+        let mut retained = 0;
+        for path in paths {
+            retained += usize::from(store.exists(&path).await.unwrap());
+        }
+        assert_eq!(
+            usize::from(matches!(failure, ManifestWriteFailure::AfterWrite)),
+            retained
+        );
+    }
+}
+
+impl Drop for UnitVisibilityGuard {
+    fn drop(&mut self) {
+        self.0.resume.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl EventListener for UnitVisibilityGate {
+    fn on_compaction_cancel_requested(&self, _region_id: RegionId) {
+        self.cancel_requested.notify_one();
+    }
+    async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, id: u64) {
+        if !self.at_commit {
+            self.block_first(id).await;
+        }
+    }
+    async fn on_compaction_unit_committed(&self, _region_id: RegionId, id: u64) {
+        if self.at_commit {
+            self.block_first(id).await;
+        }
+    }
+    fn on_compaction_unit_applied(&self, _region_id: RegionId, _id: u64) {
+        self.applied.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn test_compaction_unit_commit_and_apply_can_interleave() {
+    enum Scenario {
+        SlowMerge,
+        PendingApply,
+        Truncate,
+        Reopen,
+    }
+    for scenario in [
+        Scenario::SlowMerge,
+        Scenario::PendingApply,
+        Scenario::Truncate,
+        Scenario::Reopen,
+    ] {
+        let at_commit = matches!(scenario, Scenario::PendingApply | Scenario::Reopen);
+        let gate = Arc::new(UnitVisibilityGate {
+            first: std::sync::atomic::AtomicU64::new(u64::MAX),
+            at_commit,
+            entered: Notify::new(),
+            resume: Semaphore::new(0),
+            applied: Notify::new(),
+            cancel_requested: Notify::new(),
+        });
+        let guard = UnitVisibilityGuard(gate.clone());
+        let mut env = TestEnv::new().await;
+        let config = MitoConfig {
+            max_background_compactions: 2,
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let engine = env
+            .create_engine_with(config.clone(), None, Some(gate.clone()), None)
+            .await;
+        let region_id = RegionId::new(42, 1);
+        let create = CreateRequestBuilder::new().build();
+        let table_dir = create.table_dir.clone();
+        let columns = create
+            .column_metadatas
+            .iter()
+            .map(column_metadata_to_column_schema)
+            .collect::<Vec<_>>();
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        put_and_flush(&engine, region_id, &columns, 0..2).await;
+        put_and_flush(&engine, region_id, &columns, 120..122).await;
+        let old = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let old_ids = old.file_ids();
+        assert_eq!(2, old.num_files());
+        let compact_engine = engine.clone();
+        let task = tokio::spawn(async move {
+            compact_engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Compact(RegionCompactRequest {
+                        options: api::v1::region::compact_request::Options::StrictWindow(
+                            api::v1::region::StrictWindow { window_seconds: 60 },
+                        ),
+                        parallelism: Some(2),
+                        ..Default::default()
+                    }),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), gate.applied.notified())
+            .await
+            .expect("sibling unit waited for another unit's merge or apply");
+        let current = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let unchanged = current
+            .file_ids()
+            .iter()
+            .filter(|id| old_ids.contains(id))
+            .count();
+        assert_eq!(1, unchanged, "the ungated unit must already be visible");
+        assert!(
+            !task.is_finished(),
+            "manual request finished before all units"
+        );
+        let mut expected = vec![0, 1000, 120_000, 121_000];
+        assert_eq!(
+            expected,
+            collect_stream_ts(current.scan().await.unwrap()).await
+        );
+        assert_eq!(expected, collect_stream_ts(old.scan().await.unwrap()).await);
+        let truncate_task = if matches!(scenario, Scenario::Truncate) {
+            let engine = engine.clone();
+            let ddl = tokio::spawn(async move {
+                engine
+                    .handle_request(
+                        region_id,
+                        RegionRequest::Truncate(RegionTruncateRequest::All),
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(10), gate.cancel_requested.notified())
+                .await
+                .unwrap();
+            assert!(!ddl.is_finished());
+            assert!(!task.is_finished());
+            Some(ddl)
+        } else {
+            None
+        };
+        if matches!(scenario, Scenario::Reopen) {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+                .unwrap();
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Open(RegionOpenRequest {
+                        engine: String::new(),
+                        table_dir: table_dir.clone(),
+                        path_type: PathType::Bare,
+                        options: Default::default(),
+                        skip_wal_replay: false,
+                        checkpoint: None,
+                        requirements: Default::default(),
+                    }),
+                )
+                .await
+                .unwrap();
+            let recovered = engine
+                .scanner(region_id, ScanRequest::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                expected,
+                collect_stream_ts(recovered.scan().await.unwrap()).await
+            );
+        }
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        if let Some(ddl) = truncate_task {
+            assert_eq!(StatusCode::Cancelled, result.unwrap_err().status_code());
+            tokio::time::timeout(Duration::from_secs(10), ddl)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            expected.clear();
+        } else if matches!(scenario, Scenario::Reopen) {
+            assert_eq!(StatusCode::Cancelled, result.unwrap_err().status_code());
+        } else {
+            result.unwrap();
+        }
+        let completed = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        assert!(completed.file_ids().iter().all(|id| !old_ids.contains(id)));
+        assert_eq!(
+            expected,
+            collect_stream_ts(completed.scan().await.unwrap()).await,
+            "applying the delayed edit must preserve its sibling's result"
+        );
+        let engine =
+            tokio::time::timeout(Duration::from_secs(10), env.reopen_engine(engine, config))
+                .await
+                .unwrap();
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    table_dir,
+                    path_type: PathType::Bare,
+                    options: Default::default(),
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let reopened = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            expected,
+            collect_stream_ts(reopened.scan().await.unwrap()).await
+        );
+    }
+}
+
 struct CompactionListenerGuard(Option<Arc<CompactionListener>>);
 
 impl CompactionListenerGuard {

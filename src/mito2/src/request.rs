@@ -48,9 +48,9 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::compaction::{CompactionExecution, CompactionPickFinished};
 use crate::error::{
-    CompactRegionSnafu, CompactionCancelledSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
-    Error, FillDefaultSnafu, FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
-    MissingPartitionExprSnafu, Result, UnexpectedSnafu,
+    CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
+    FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
+    Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionEdit, TruncateKind};
@@ -906,6 +906,10 @@ pub(crate) struct SenderDdlRequest {
 /// Notification from a background job.
 #[derive(Debug)]
 pub(crate) enum BackgroundNotify {
+    /// Local unit publication and resource completion events.
+    CompactionUnit(CompactionUnitNotification),
+    /// A DDL released by compaction has actually completed, including failure.
+    CompactionDdlComplete { generation: u64 },
     /// Compaction planning has finished.
     CompactionPickFinished(CompactionPickFinished),
     /// Flush has finished.
@@ -922,8 +926,6 @@ pub(crate) enum BackgroundNotify {
     IndexBuildRetry(BuildIndexRequest),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
-    /// Compaction has been cancelled cooperatively.
-    CompactionCancelled(CompactionCancelled),
     /// Compaction has failed.
     CompactionFailed(CompactionFailed),
     /// Truncate result.
@@ -1013,6 +1015,22 @@ pub(crate) struct IndexBuildFailed {
     pub(crate) err: Arc<Error>,
 }
 
+/// A local unit event carries only identity, never an input reservation lease.
+#[derive(Debug)]
+pub(crate) enum CompactionUnitNotification {
+    /// A persisted edit or error awaits worker apply or failure acknowledgement.
+    Finished {
+        plan_id: u64,
+        result: std::result::Result<RegionEdit, Arc<Error>>,
+        applied: tokio::sync::oneshot::Sender<()>,
+    },
+    /// The task has exited and released its owned resources.
+    Released {
+        /// Identifies the exited attempt, not the whole compaction request.
+        plan_id: u64,
+    },
+}
+
 /// Notifies a compaction job has finished.
 #[derive(Debug)]
 pub(crate) struct CompactionFinished {
@@ -1026,26 +1044,6 @@ pub(crate) struct CompactionFinished {
     pub(crate) start_time: Instant,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
-}
-
-/// Notifies a compaction job has been cancelled cooperatively.
-#[derive(Debug)]
-pub(crate) struct CompactionCancelled {
-    /// Region id.
-    pub(crate) region_id: RegionId,
-    /// Identity and reservation lease of the accepted execution.
-    pub(crate) execution: CompactionExecution,
-    /// Waiters to wake once the cancellation has been observed by the worker.
-    pub(crate) senders: Vec<OutputTx>,
-}
-
-impl CompactionCancelled {
-    pub(crate) fn on_success(self) {
-        for sender in self.senders {
-            sender.send(CompactionCancelledSnafu {}.fail());
-        }
-        info!("Compaction cancelled for region: {}", self.region_id);
-    }
 }
 
 impl CompactionFinished {
@@ -1266,8 +1264,6 @@ pub(crate) struct CopyRegionFromRequest {
 mod tests {
     use api::v1::value::ValueData;
     use api::v1::{Row, SemanticType};
-    use common_error::ext::ErrorExt;
-    use common_error::status_code::StatusCode;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnDefaultConstraint;
     use mito_codec::test_util::i64_value;
@@ -1383,22 +1379,6 @@ mod tests {
         assert_eq!(0, request.column_index_by_name("c0").unwrap());
         assert_eq!(1, request.column_index_by_name("c1").unwrap());
         assert_eq!(None, request.column_index_by_name("c2"));
-    }
-
-    #[test]
-    fn test_compaction_cancelled_sends_cancelled_error() {
-        let (tx, rx) = oneshot::channel();
-        let request = CompactionCancelled {
-            region_id: RegionId::new(1, 1),
-            execution: crate::compaction::CompactionExecution::for_test(0),
-            senders: vec![OutputTx::new(tx)],
-        };
-
-        request.on_success();
-
-        let err = rx.blocking_recv().unwrap().unwrap_err();
-        assert!(matches!(err, Error::CompactionCancelled { .. }));
-        assert_eq!(err.status_code(), StatusCode::Cancelled);
     }
 
     #[test]

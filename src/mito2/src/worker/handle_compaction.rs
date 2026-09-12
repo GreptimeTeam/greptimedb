@@ -24,7 +24,7 @@ use crate::error::{RegionNotFoundSnafu, StaleCompactionExecutionSnafu};
 use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
 use crate::request::{
-    BuildIndexRequest, CompactionCancelled, CompactionFailed, CompactionFinished, OnFailure,
+    BuildIndexRequest, CompactionFailed, CompactionFinished, CompactionUnitNotification, OnFailure,
     OptionOutputTx,
 };
 use crate::sst::index::IndexBuildType;
@@ -35,6 +35,90 @@ fn made_progress(files_to_add: usize, files_to_remove: usize) -> bool {
 }
 
 impl<S> RegionWorkerLoop<S> {
+    /// Drives local unit publication and applies successful edits before acknowledging completion.
+    pub(crate) async fn handle_compaction_unit(
+        &mut self,
+        region_id: RegionId,
+        notify: CompactionUnitNotification,
+    ) where
+        S: LogStore,
+    {
+        match notify {
+            CompactionUnitNotification::Finished {
+                plan_id,
+                result,
+                applied,
+            } => {
+                let Some(region) = self.regions.get_region(region_id) else {
+                    return;
+                };
+                match result {
+                    Ok(edit) => {
+                        if !self.compaction_scheduler.can_apply_unit(region_id, plan_id) {
+                            let _ = applied.send(());
+                            return;
+                        }
+                        let progress =
+                            made_progress(edit.files_to_add.len(), edit.files_to_remove.len());
+                        region.version_control.apply_edit(
+                            Some(edit.clone()),
+                            &[],
+                            region.file_purger.clone(),
+                        );
+                        self.listener.on_compaction_unit_applied(region_id, plan_id);
+                        self.compaction_scheduler.on_unit_finished(
+                            region_id,
+                            plan_id,
+                            Ok(progress),
+                        );
+                        if self.config.index.build_mode == IndexBuildMode::Async
+                            && !edit.files_to_add.is_empty()
+                        {
+                            self.handle_rebuild_index(
+                                BuildIndexRequest {
+                                    region_id,
+                                    build_type: IndexBuildType::Compact,
+                                    file_metas: edit.files_to_add,
+                                },
+                                OptionOutputTx::new(None),
+                            )
+                            .await;
+                        }
+                    }
+                    Err(err) => {
+                        self.compaction_scheduler
+                            .on_unit_finished(region_id, plan_id, Err(err));
+                    }
+                }
+                let _ = applied.send(());
+            }
+            CompactionUnitNotification::Released { plan_id } => {
+                let Some(region) = self.regions.get_region(region_id) else {
+                    return;
+                };
+                let transition = self
+                    .compaction_scheduler
+                    .on_unit_released(
+                        region_id,
+                        plan_id,
+                        &region.manifest_ctx,
+                        self.schema_metadata_manager.clone(),
+                    )
+                    .await;
+                self.listener.on_compaction_result_notified(region_id).await;
+                match transition {
+                    CompactionTransition::AutomaticFollowupScheduled => {
+                        region.update_schedule_compaction_millis()
+                    }
+                    CompactionTransition::DdlReady(mut ddls) => {
+                        self.handle_ddl_requests(&mut ddls).await
+                    }
+                    CompactionTransition::NoAction => {}
+                }
+            }
+        }
+    }
+
     pub(crate) async fn handle_compaction_pick_finished(
         &mut self,
         region_id: RegionId,
@@ -187,36 +271,6 @@ impl<S> RegionWorkerLoop<S> {
                 self.handle_ddl_requests(&mut pending_ddls).await;
             }
         }
-    }
-
-    pub(crate) async fn handle_compaction_cancelled(
-        &mut self,
-        region_id: RegionId,
-        request: CompactionCancelled,
-    ) where
-        S: LogStore,
-    {
-        let execution = request.execution.clone();
-        let is_current = self.regions.get_region(region_id).is_some_and(|_| {
-            self.compaction_scheduler
-                .is_current_execution(region_id, &execution)
-        });
-        request.on_success();
-
-        if !is_current {
-            return;
-        }
-
-        // Reuse the scheduler's finish path to wake pending DDLs after a cooperative stop.
-        let mut pending_ddls = self
-            .compaction_scheduler
-            .on_execution_cancelled(region_id, &execution)
-            .await;
-        if !pending_ddls.is_empty() {
-            self.listener.on_compaction_result_notified(region_id).await;
-        }
-
-        self.handle_ddl_requests(&mut pending_ddls).await;
     }
 
     /// When compaction fails, we simply log the error.
