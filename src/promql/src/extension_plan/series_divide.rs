@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{Array, ArrayRef, UInt64Array};
+use datafusion::arrow::array::{Array, ArrayRef, UInt32Array, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
@@ -490,6 +490,42 @@ impl RecordBatchStream for SeriesDivideStream {
     }
 }
 
+/// Concatenates batches from one isolated series; every designated tag is constant.
+fn concat_series_batches(
+    schema: &SchemaRef,
+    batches: &[RecordBatch],
+    tag_indices: &[usize],
+) -> DataFusionResult<RecordBatch> {
+    if batches.len() <= 1 || tag_indices.is_empty() || schema.fields().is_empty() {
+        return Ok(compute::concat_batches(schema, batches)?);
+    }
+
+    let Some(first_batch) = batches.iter().find(|batch| batch.num_rows() > 0) else {
+        return Ok(compute::concat_batches(schema, batches)?);
+    };
+    let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    let take_indices = UInt32Array::from(vec![0; total_rows]);
+    let columns = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            if tag_indices.contains(&index) {
+                compute::take(first_batch.column(index), &take_indices, None)
+            } else {
+                compute::concat(
+                    &batches
+                        .iter()
+                        .map(|batch| batch.column(index).as_ref())
+                        .collect::<Vec<_>>(),
+                )
+            }
+        })
+        .collect::<datafusion::arrow::error::Result<Vec<_>>>()?;
+
+    RecordBatch::try_new(schema.clone(), columns).map_err(Into::into)
+}
+
 impl Stream for SeriesDivideStream {
     type Item = DataFusionResult<RecordBatch>;
 
@@ -519,7 +555,8 @@ impl Stream for SeriesDivideStream {
                     } else {
                         self.buffer.remove(0);
                     }
-                    let result_batch = compute::concat_batches(&self.schema, &result_batches)?;
+                    let result_batch =
+                        concat_series_batches(&self.schema, &result_batches, &self.tag_indices)?;
 
                     self.inspect_start = 0;
                     self.num_series.add(1);
@@ -537,7 +574,8 @@ impl Stream for SeriesDivideStream {
                         continue;
                     } else {
                         // input stream is ended
-                        let result = compute::concat_batches(&self.schema, &self.buffer)?;
+                        let result =
+                            concat_series_batches(&self.schema, &self.buffer, &self.tag_indices)?;
                         self.buffer.clear();
                         self.inspect_start = 0;
                         self.num_series.add(1);
@@ -623,10 +661,16 @@ impl SeriesDivideStream {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
+
     use datafusion::arrow::array::{
-        DictionaryArray, Int32Array, LargeStringArray, StringArray, StringViewArray, UInt32Array,
+        DictionaryArray, Int32Array, Int64Array, LargeStringArray, PrimitiveArray, StringArray,
+        StringViewArray, UInt32Array, UInt64Array,
     };
-    use datafusion::arrow::datatypes::{DataType, Field, Int32Type, Schema, UInt32Type};
+    use datafusion::arrow::datatypes::{
+        ArrowDictionaryKeyType, DataType, Field, Int8Type, Int16Type, Int32Type, Int64Type, Schema,
+        UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    };
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
@@ -634,6 +678,348 @@ mod test {
     use datafusion::prelude::SessionContext;
 
     use super::*;
+
+    fn assert_concat_matches_reference(
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+        tags: &[usize],
+    ) {
+        let expected = compute::concat_batches(&schema, &batches).unwrap();
+        let actual = concat_series_batches(&schema, &batches, tags).unwrap();
+        assert_eq!(actual.schema(), schema);
+        assert_eq!(actual.num_rows(), expected.num_rows());
+
+        for (index, (actual, expected)) in
+            actual.columns().iter().zip(expected.columns()).enumerate()
+        {
+            assert_eq!(actual.data_type(), expected.data_type(), "column {index}");
+            let (actual, expected) = match actual.data_type() {
+                DataType::Dictionary(_, value_type) => (
+                    compute::cast(actual.as_ref(), value_type).unwrap(),
+                    compute::cast(expected.as_ref(), value_type).unwrap(),
+                ),
+                _ => (actual.clone(), expected.clone()),
+            };
+            assert_eq!(actual.to_data(), expected.to_data(), "column {index}");
+        }
+    }
+
+    #[test]
+    fn test_concat_series_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tag", DataType::Utf8, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let batches = vec![
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec![Some("tag"), Some("tag")])),
+                    Arc::new(Int64Array::from(vec![Some(1), None])),
+                ],
+            )
+            .unwrap(),
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec![Some("tag"), Some("tag")])),
+                    Arc::new(Int64Array::from(vec![Some(3), Some(4)])),
+                ],
+            )
+            .unwrap(),
+        ];
+        assert_concat_matches_reference(schema, batches, &[0]);
+    }
+
+    #[test]
+    fn test_concat_series_batches_string_tags() {
+        for (data_type, batches) in [
+            (
+                DataType::LargeUtf8,
+                vec![
+                    Arc::new(LargeStringArray::from(vec![
+                        Some("long tag"),
+                        Some("long tag"),
+                    ])) as ArrayRef,
+                    Arc::new(LargeStringArray::from(vec![Some("long tag")])) as ArrayRef,
+                ],
+            ),
+            (
+                DataType::Utf8View,
+                vec![
+                    Arc::new(StringViewArray::from(vec![
+                        Some("view tag longer than twelve bytes"),
+                        Some("view tag longer than twelve bytes"),
+                    ])) as ArrayRef,
+                    Arc::new(StringViewArray::from(vec![Some(
+                        "view tag longer than twelve bytes",
+                    )])) as ArrayRef,
+                ],
+            ),
+            (
+                DataType::Utf8,
+                vec![
+                    Arc::new(StringArray::from(vec![None::<&str>, None])) as ArrayRef,
+                    Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+                ],
+            ),
+            (
+                DataType::Utf8,
+                vec![
+                    Arc::new(StringArray::from(vec![Some(""), Some("")])) as ArrayRef,
+                    Arc::new(StringArray::from(vec![Some("")])) as ArrayRef,
+                ],
+            ),
+        ] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("tag", data_type, true),
+                Field::new("value", DataType::Int64, true),
+            ]));
+            let batches = batches
+                .into_iter()
+                .enumerate()
+                .map(|(index, tag)| {
+                    RecordBatch::try_new(
+                        schema.clone(),
+                        vec![
+                            tag.clone(),
+                            Arc::new(Int64Array::from_iter_values(
+                                (0..tag.len()).map(|row| (index * 10 + row) as i64),
+                            )),
+                        ],
+                    )
+                    .unwrap()
+                })
+                .collect();
+            assert_concat_matches_reference(schema, batches, &[0]);
+        }
+    }
+
+    fn assert_dictionary_concat<K: ArrowDictionaryKeyType>(
+        keys: Vec<Option<K::Native>>,
+        values: ArrayRef,
+        other_keys: Vec<Option<K::Native>>,
+        other_values: ArrayRef,
+    ) where
+        PrimitiveArray<K>: From<Vec<Option<K::Native>>>,
+    {
+        let data_type = DataType::Dictionary(
+            Box::new(PrimitiveArray::<K>::from(keys.clone()).data_type().clone()),
+            Box::new(values.data_type().clone()),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tag", data_type, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let first = Arc::new(DictionaryArray::<K>::new(
+            PrimitiveArray::<K>::from(keys),
+            values,
+        )) as ArrayRef;
+        let second = Arc::new(DictionaryArray::<K>::new(
+            PrimitiveArray::<K>::from(other_keys),
+            other_values,
+        )) as ArrayRef;
+        let batches = [first, second]
+            .into_iter()
+            .enumerate()
+            .map(|(index, tag)| {
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        tag.clone(),
+                        Arc::new(Int64Array::from_iter_values(
+                            (0..tag.len()).map(|row| (index * 10 + row) as i64),
+                        )),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_concat_matches_reference(schema, batches, &[0]);
+    }
+
+    #[test]
+    fn test_concat_series_batches_dictionary_tags() {
+        macro_rules! dictionary_cases {
+            ($($key_type:ty, $key:expr),+ $(,)?) => {
+                $(assert_dictionary_concat::<$key_type>(
+                    vec![Some(($key)(1)), Some(($key)(1))],
+                    Arc::new(StringArray::from(vec!["other", "tag"])),
+                    vec![Some(($key)(0))],
+                    Arc::new(StringArray::from(vec!["tag", "other"])),
+                );)+
+            };
+        }
+        dictionary_cases!(
+            Int8Type,
+            |value| value as i8,
+            Int16Type,
+            |value| value as i16,
+            Int32Type,
+            |value: i32| value,
+            Int64Type,
+            |value| value as i64,
+            UInt8Type,
+            |value| value as u8,
+            UInt16Type,
+            |value| value as u16,
+            UInt32Type,
+            |value| value as u32,
+            UInt64Type,
+            |value| value as u64,
+        );
+        assert_dictionary_concat::<UInt16Type>(
+            vec![Some(0), Some(0)],
+            Arc::new(LargeStringArray::from(vec![None::<&str>])),
+            vec![None],
+            Arc::new(LargeStringArray::from(vec!["unused"])),
+        );
+        // Compare logical values rather than dictionary keys for the reverse null orientation.
+        assert_dictionary_concat::<UInt16Type>(
+            vec![None],
+            Arc::new(StringArray::from(vec!["unused"])),
+            vec![Some(0)],
+            Arc::new(StringArray::from(vec![None::<&str>])),
+        );
+        assert_dictionary_concat::<UInt32Type>(
+            vec![Some(1), Some(1)],
+            Arc::new(StringViewArray::from(vec![
+                "other",
+                "view tag longer than twelve bytes",
+            ])),
+            vec![Some(0)],
+            Arc::new(StringViewArray::from(vec![
+                "view tag longer than twelve bytes",
+                "other",
+            ])),
+        );
+    }
+
+    #[test]
+    fn test_concat_series_batches_uint64_nullable_tag() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tsid", DataType::UInt64, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        for tags in [vec![Some(42), Some(42)], vec![None, None]] {
+            let batches = [tags.clone(), tags]
+                .into_iter()
+                .enumerate()
+                .map(|(batch, tags)| {
+                    RecordBatch::try_new(
+                        schema.clone(),
+                        vec![
+                            Arc::new(UInt64Array::from(tags)),
+                            Arc::new(Int64Array::from_iter_values(
+                                (0..2).map(|row| (batch * 10 + row) as i64),
+                            )),
+                        ],
+                    )
+                    .unwrap()
+                })
+                .collect();
+            assert_concat_matches_reference(schema.clone(), batches, &[0]);
+        }
+    }
+
+    #[test]
+    fn test_concat_series_batches_leading_empty_and_sliced_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tag", DataType::Utf8, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let make_sliced_batch = |values| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["discard", "tag", "tag"])),
+                    Arc::new(Int64Array::from(values)),
+                ],
+            )
+            .unwrap()
+            .slice(1, 2)
+        };
+        let batches = vec![
+            RecordBatch::new_empty(schema.clone()),
+            make_sliced_batch(vec![0, 1, 2]),
+            make_sliced_batch(vec![3, 4, 5]),
+        ];
+        assert_concat_matches_reference(schema, batches, &[0]);
+    }
+
+    #[test]
+    fn test_concat_series_batches_interleaved_tags_and_schema_metadata() {
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("value_before", DataType::Int64, true),
+                Field::new("host", DataType::Utf8, true),
+                Field::new("value_between", DataType::UInt64, true),
+                Field::new("path", DataType::Utf8, true),
+                Field::new("value_after", DataType::Int32, true),
+            ],
+            HashMap::from([("source".to_string(), "concat test".to_string())]),
+        ));
+        let batches = [
+            (
+                vec![Some(1), None],
+                vec![Some(10), Some(11)],
+                vec![100, 101],
+            ),
+            (
+                vec![Some(2), Some(3)],
+                vec![Some(12), Some(13)],
+                vec![102, 103],
+            ),
+        ]
+        .into_iter()
+        .map(|(before, between, after)| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(before)),
+                    Arc::new(StringArray::from(vec!["host-a", "host-a"])),
+                    Arc::new(UInt64Array::from(between)),
+                    Arc::new(StringArray::from(vec!["/metrics", "/metrics"])),
+                    Arc::new(Int32Array::from(after)),
+                ],
+            )
+            .unwrap()
+        })
+        .collect();
+        assert_concat_matches_reference(schema, batches, &[1, 3]);
+    }
+
+    #[test]
+    fn test_concat_series_batches_fallbacks() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            true,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![Some(1), None]))],
+        )
+        .unwrap();
+        assert_concat_matches_reference(schema.clone(), vec![batch.clone()], &[0]);
+        assert_concat_matches_reference(schema.clone(), vec![batch.clone(), batch], &[]);
+
+        let empty_schema = Arc::new(Schema::empty());
+        let empty_batch = RecordBatch::try_new_with_options(
+            empty_schema.clone(),
+            vec![],
+            &datafusion::arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(2)),
+        )
+        .unwrap();
+        assert_concat_matches_reference(
+            empty_schema.clone(),
+            vec![empty_batch.clone(), empty_batch],
+            &[],
+        );
+
+        let zero_rows = RecordBatch::new_empty(schema.clone());
+        assert_concat_matches_reference(schema, vec![zero_rows.clone(), zero_rows], &[0]);
+    }
 
     #[test]
     fn test_dictionary_tag_child_null_comparison() {
