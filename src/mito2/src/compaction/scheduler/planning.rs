@@ -297,7 +297,7 @@ impl CompactionScheduler {
         // execution callback will follow, so return DDLs released by the fence.
         if !status.accept_plan(finished.plan_id) {
             return CompactionTransition::from_pending_ddls(
-                self.remove_region_on_cancel(region_id),
+                self.finish_compaction_on_cancel(region_id),
             );
         }
 
@@ -355,7 +355,7 @@ impl CompactionScheduler {
                         .await
                     }
                     Err(err) => {
-                        self.remove_region_on_failure(region_id, Arc::new(err));
+                        self.fail_compaction(region_id, Arc::new(err));
                         CompactionTransition::NoAction
                     }
                 }
@@ -422,7 +422,9 @@ impl CompactionScheduler {
             return CompactionTransition::AutomaticFollowupScheduled;
         }
 
-        self.region_status.remove(&region_id);
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.become_idle();
+        }
         CompactionTransition::NoAction
     }
 
