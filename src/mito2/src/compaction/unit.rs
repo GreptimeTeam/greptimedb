@@ -37,6 +37,8 @@ pub(crate) struct CompactionUnit {
 impl CompactionUnit {
     /// Groups outputs by the transitive closure of shared input FileIds.
     /// Returns `None` for an inconsistent plan that both expires and merges a file.
+    /// Merge units follow the legacy compactor's tail-first execution order; a shared-input
+    /// group inherits the position of its highest-priority output.
     pub(crate) fn from_picker(output: PickerOutput) -> Option<Vec<Self>> {
         let PickerOutput {
             outputs,
@@ -51,7 +53,8 @@ impl CompactionUnit {
                 if let Some(&previous) = owners.get(&file.file_id()) {
                     let a = root(&mut parents, previous);
                     let b = root(&mut parents, index);
-                    parents[a.max(b)] = a.min(b);
+                    // Higher output indices are consumed first by the legacy compactor.
+                    parents[a.min(b)] = a.max(b);
                 } else {
                     owners.insert(file.file_id(), index);
                 }
@@ -72,7 +75,7 @@ impl CompactionUnit {
                 .push(output);
         }
         let mut units = Vec::with_capacity(groups.len() + 1);
-        for outputs in groups.into_values() {
+        for outputs in groups.into_values().rev() {
             let mut seen = HashSet::new();
             let inputs: Vec<_> = outputs
                 .iter()
@@ -165,6 +168,35 @@ mod tests {
         assert_eq!(files[2].file_id(), units[1].inputs[0].file_id());
         assert_eq!(Some(1024), units[0].max_file_size);
         assert_eq!(100, units[1].time_window_size);
+    }
+
+    #[test]
+    fn test_compaction_unit_group_inherits_highest_output_priority() {
+        let files: Vec<_> = (0..3)
+            .map(|_| new_file_handle(FileId::random(), 0, 100, 0))
+            .collect();
+        let units = CompactionUnit::from_picker(PickerOutput {
+            outputs: [0, 1, 1, 2, 0]
+                .into_iter()
+                .map(|index| output(vec![files[index].clone()]))
+                .collect(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            vec![files[0].file_id(), files[2].file_id(), files[1].file_id()],
+            units
+                .iter()
+                .map(|unit| unit.inputs[0].file_id())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![2, 1, 2],
+            units
+                .iter()
+                .map(|unit| unit.outputs.len())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
