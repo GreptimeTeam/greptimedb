@@ -115,6 +115,33 @@ pub struct CompactionRegion {
     pub(crate) plugins: Plugins,
 }
 
+/// Builds a minimal [`CompactionRegion`] for tests that do not touch the access layer.
+#[cfg(test)]
+pub(crate) async fn new_test_compaction_region() -> CompactionRegion {
+    let env = crate::test_util::scheduler_util::SchedulerEnv::new().await;
+    let metadata = crate::test_util::memtable_util::metadata_for_test();
+    let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+    CompactionRegion {
+        region_id: RegionId::new(1, 1),
+        region_options: RegionOptions::default(),
+        engine_config: Arc::new(MitoConfig::default()),
+        region_metadata: metadata.clone(),
+        cache_manager: Arc::new(CacheManager::default()),
+        access_layer: env.access_layer.clone(),
+        manifest_ctx,
+        current_version: CompactionVersion {
+            metadata,
+            options: RegionOptions::default(),
+            ssts: Arc::new(SstVersion::new()),
+            compaction_time_window: None,
+        },
+        file_purger: None,
+        ttl: None,
+        max_parallelism: 1,
+        plugins: Plugins::new(),
+    }
+}
+
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
 #[derive(Clone)]
 pub struct OpenCompactionRegionRequest {
@@ -856,14 +883,10 @@ mod tests {
     use tokio::time::sleep;
 
     use super::{DefaultCompactor, *};
-    use crate::cache::CacheManager;
     use crate::compaction::picker::PickerOutput;
     use crate::error::Result;
     use crate::sst::file::FileHandle;
     use crate::sst::file_purger::NoopFilePurger;
-    use crate::sst::version::SstVersion;
-    use crate::test_util::memtable_util::metadata_for_test;
-    use crate::test_util::scheduler_util::SchedulerEnv;
 
     fn dummy_file_meta() -> FileMeta {
         FileMeta {
@@ -929,33 +952,6 @@ mod tests {
         assert_eq!(None, known_max_input_sequence(&inputs));
 
         assert_eq!(None, known_max_input_sequence(&[]));
-    }
-
-    /// Build a minimal [`CompactionRegion`] suitable for tests where the
-    /// [`SstMerger`] is mocked and never touches the access layer.
-    async fn new_test_compaction_region() -> CompactionRegion {
-        let env = SchedulerEnv::new().await;
-        let metadata = metadata_for_test();
-        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        CompactionRegion {
-            region_id: RegionId::new(1, 1),
-            region_options: RegionOptions::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            region_metadata: metadata.clone(),
-            cache_manager: Arc::new(CacheManager::default()),
-            access_layer: env.access_layer.clone(),
-            manifest_ctx,
-            current_version: CompactionVersion {
-                metadata,
-                options: RegionOptions::default(),
-                ssts: Arc::new(SstVersion::new()),
-                compaction_time_window: None,
-            },
-            file_purger: None,
-            ttl: None,
-            max_parallelism: 1,
-            plugins: Plugins::new(),
-        }
     }
 
     /// An [`SstMerger`] that returns pre-configured results per call index.

@@ -27,6 +27,7 @@ mod twcs;
 mod unit;
 mod window;
 
+use std::any::Any;
 use std::collections::HashMap;
 
 use common_meta::key::SchemaMetadataManagerRef;
@@ -153,4 +154,15 @@ pub struct SerializedCompactionOutput {
     inputs: Vec<FileMeta>,
     filter_deleted: bool,
     output_time_range: Option<TimestampRange>,
+}
+
+/// Returns the printable reason carried by a caught panic payload.
+pub(crate) fn format_panic_reason(payload: &(dyn Any + Send + 'static)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message.to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }

@@ -18,14 +18,15 @@ use std::sync::Arc;
 use common_base::cancellation::CancellableFuture;
 use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::error;
+use futures::FutureExt;
 use snafu::ResultExt;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::compaction::CompactionExecution;
 use crate::compaction::compactor::{CompactionRegion, Compactor, DefaultCompactor, MergeOutput};
 use crate::compaction::memory_manager::CompactionMemoryManager;
 use crate::compaction::picker::CompactionTask;
 use crate::compaction::unit::CompactionUnit;
+use crate::compaction::{CompactionExecution, format_panic_reason};
 use crate::error::{self, CompactionCancelledSnafu, CompactionMemoryExhaustedSnafu, Result};
 use crate::manifest::action::RegionEdit;
 use crate::metrics::{
@@ -147,27 +148,27 @@ impl CompactionTaskImpl {
         Ok(edit)
     }
 
-    /// Sends a unit lifecycle event to the owning region worker.
-    async fn notify(&self, notify: CompactionUnitNotification) -> Result<()> {
-        self.request_sender
-            .send(WorkerRequestWithTime::new(WorkerRequest::Background {
-                region_id: self.compaction_region.region_id,
-                notify: BackgroundNotify::CompactionUnit(notify),
-            }))
-            .await
-            .map_err(|_| error::InvalidSenderSnafu.build())
+    /// Converts a caught panic into the unit's terminal error.
+    fn panic_to_error(&self, payload: &(dyn std::any::Any + Send + 'static)) -> error::Error {
+        let region_id = self.compaction_region.region_id;
+        let plan_id = self.execution.plan_id();
+        error::UnexpectedSnafu {
+            reason: format!(
+                "Compaction unit panicked for region {region_id}, plan_id {plan_id}: {}",
+                format_panic_reason(payload)
+            ),
+        }
+        .build()
     }
-}
 
-#[async_trait::async_trait]
-impl CompactionTask for CompactionTaskImpl {
-    /// Executes one unit and retains its resources until worker apply or failure acknowledgement.
-    async fn run(&mut self) {
-        let start = std::time::Instant::now();
-        let result = match self.merge().await {
-            Ok(output) => self.publish(output).await,
-            Err(err) => Err(err),
-        };
+    /// Runs merge and publication.
+    async fn run_once(&mut self) -> Result<RegionEdit> {
+        let output = self.merge().await?;
+        self.publish(output).await
+    }
+
+    /// Cleans up and reports a terminal result before task exit.
+    async fn complete(&self, result: Result<RegionEdit>, start: std::time::Instant) {
         if let Err(err) = &result {
             if !matches!(err, error::Error::CompactionCancelled { .. }) {
                 COMPACTION_FAILURE_COUNT.inc();
@@ -187,7 +188,7 @@ impl CompactionTask for CompactionTaskImpl {
             result: result.map_err(Arc::new),
             applied,
         };
-        if let Err(err) = self.notify(notify).await {
+        if let Err(err) = self.notify_result(notify).await {
             error!(err; "Failed to notify compaction unit completion, region: {}", self.compaction_region.region_id);
             return;
         }
@@ -195,5 +196,98 @@ impl CompactionTask for CompactionTaskImpl {
         if receiver.await.is_ok() && succeeded {
             crate::metrics::COMPACTION_ELAPSED_TOTAL.observe(start.elapsed().as_secs_f64());
         }
+    }
+
+    /// Sends a unit lifecycle event to the owning region worker.
+    async fn notify_result(&self, notify: CompactionUnitNotification) -> Result<()> {
+        self.request_sender
+            .send(WorkerRequestWithTime::new(WorkerRequest::Background {
+                region_id: self.compaction_region.region_id,
+                notify: BackgroundNotify::CompactionUnit(notify),
+            }))
+            .await
+            .map_err(|_| error::InvalidSenderSnafu.build())
+    }
+}
+
+#[async_trait::async_trait]
+impl CompactionTask for CompactionTaskImpl {
+    /// Executes one unit and retains its resources until worker apply or failure acknowledgement.
+    async fn run(&mut self) {
+        let start = std::time::Instant::now();
+        let result = std::panic::AssertUnwindSafe(self.run_once())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|payload| Err(self.panic_to_error(payload.as_ref())));
+        self.complete(result, start).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::compaction::compactor::new_test_compaction_region;
+    use crate::compaction::memory_manager::new_compaction_memory_manager;
+    use crate::engine::listener::EventListener;
+    use crate::error::Error;
+
+    struct PanicOnUnitMergeBegin;
+
+    #[async_trait::async_trait]
+    impl EventListener for PanicOnUnitMergeBegin {
+        async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, _plan_id: u64) {
+            panic!("unit merge listener boom");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compaction_unit_panic_reports_terminal_error() {
+        let region = new_test_compaction_region().await;
+        let (request_sender, mut requests) = mpsc::channel(1);
+        let mut task = CompactionTaskImpl {
+            state: CancellableTaskState::new(),
+            execution: CompactionExecution::for_test(7),
+            compaction_region: region.clone(),
+            request_sender,
+            listener: WorkerListener::new(Some(Arc::new(PanicOnUnitMergeBegin))),
+            unit: CompactionUnit {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                time_window_size: 0,
+                max_file_size: None,
+            },
+            memory_manager: Arc::new(new_compaction_memory_manager(0)),
+            memory_policy: OnExhaustedPolicy::default(),
+            estimated_memory_bytes: 0,
+            uncommitted: UncommittedSsts::new(region.region_id, region.access_layer.clone(), None),
+        };
+        let task_handle = tokio::spawn(async move { task.run().await });
+
+        let request = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WorkerRequest::Background {
+            notify:
+                BackgroundNotify::CompactionUnit(CompactionUnitNotification::Finished {
+                    plan_id,
+                    result,
+                    applied,
+                }),
+            ..
+        } = request.request
+        else {
+            panic!("expected unit terminal notification");
+        };
+        assert_eq!(7, plan_id);
+        let err = result.unwrap_err();
+        assert!(matches!(err.as_ref(), Error::Unexpected { .. }));
+        assert!(err.to_string().contains("unit merge listener boom"));
+        applied.send(()).unwrap();
+        task_handle.await.unwrap();
     }
 }
