@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -144,6 +144,165 @@ struct UnitVisibilityGate {
     resume: Semaphore,
     applied: Notify,
     cancel_requested: Notify,
+}
+
+/// Occupies one pool slot and holds the target's first commit to expose dispatch order.
+struct WindowPriorityGate {
+    blocker: RegionId,
+    target: RegionId,
+    blocker_started: Notify,
+    release_blocker: Semaphore,
+    target_committed: Notify,
+    release_target: Semaphore,
+    target_started: std::sync::atomic::AtomicUsize,
+    first_target_commit: AtomicBool,
+}
+
+/// Releases both background tasks if an assertion aborts the test.
+struct WindowPriorityGuard(Arc<WindowPriorityGate>);
+
+impl Drop for WindowPriorityGuard {
+    fn drop(&mut self) {
+        self.0.release_blocker.add_permits(1);
+        self.0.release_target.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl EventListener for WindowPriorityGate {
+    async fn on_compaction_unit_merge_begin(&self, region_id: RegionId, _plan_id: u64) {
+        if region_id == self.blocker {
+            self.blocker_started.notify_one();
+            self.release_blocker.acquire().await.unwrap().forget();
+        } else if region_id == self.target {
+            self.target_started.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn on_compaction_unit_committed(&self, region_id: RegionId, _plan_id: u64) {
+        if region_id == self.target && self.first_target_commit.swap(false, Ordering::SeqCst) {
+            self.target_committed.notify_one();
+            self.release_target.acquire().await.unwrap().forget();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_compaction_unit_newest_window_starts_first_with_one_available_slot() {
+    let blocker = RegionId::new(46, 1);
+    let target = RegionId::new(47, 1);
+    let gate = Arc::new(WindowPriorityGate {
+        blocker,
+        target,
+        blocker_started: Notify::new(),
+        release_blocker: Semaphore::new(0),
+        target_committed: Notify::new(),
+        release_target: Semaphore::new(0),
+        target_started: std::sync::atomic::AtomicUsize::new(0),
+        first_target_commit: AtomicBool::new(true),
+    });
+    let guard = WindowPriorityGuard(gate.clone());
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine_with_time(
+            MitoConfig {
+                max_background_compactions: 2,
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            Arc::new(MockTimeProvider::new(1000)),
+        )
+        .await;
+    for region_id in [blocker, target] {
+        let create = CreateRequestBuilder::new()
+            .insert_option("compaction.type", "twcs")
+            .insert_option("compaction.twcs.time_window", "1h")
+            .insert_option("compaction.twcs.trigger_file_num", "4")
+            .insert_option("compaction.twcs.inactive_window_trigger_file_num", "4")
+            .build();
+        let columns = create
+            .column_metadatas
+            .iter()
+            .map(column_metadata_to_column_schema)
+            .collect::<Vec<_>>();
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        if region_id == blocker {
+            put_and_flush(&engine, region_id, &columns, 0..2).await;
+        } else {
+            for window_start in [0, 3600] {
+                for _ in 0..4 {
+                    put_and_flush(&engine, region_id, &columns, window_start..window_start + 2)
+                        .await;
+                }
+            }
+        }
+    }
+    let region = engine.get_region(target).unwrap();
+    let version = region.version();
+    let (newest, older): (HashSet<_>, HashSet<_>) = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| (file.meta_ref().file_id, file.time_range().0))
+        .partition(|(_, start)| *start >= Timestamp::new_second(3600));
+    assert_eq!(4, newest.len());
+    assert_eq!(4, older.len());
+    let blocker_engine = engine.clone();
+    let blocked = tokio::spawn(async move {
+        blocker_engine
+            .handle_request(
+                blocker,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: api::v1::region::compact_request::Options::StrictWindow(
+                        api::v1::region::StrictWindow {
+                            window_seconds: 3600,
+                        },
+                    ),
+                    ..Default::default()
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.blocker_started.notified())
+        .await
+        .unwrap();
+    let target_engine = engine.clone();
+    let compact = tokio::spawn(async move {
+        target_engine
+            .handle_request(
+                target,
+                RegionRequest::Compact(RegionCompactRequest {
+                    parallelism: Some(2),
+                    ..Default::default()
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.target_committed.notified())
+        .await
+        .unwrap();
+    assert_eq!(1, gate.target_started.load(Ordering::SeqCst));
+    let manifest = region.manifest_ctx.manifest_manager.read().await.manifest();
+    assert!(
+        newest
+            .iter()
+            .all(|(id, _)| !manifest.files.contains_key(id)),
+        "the newest window must consume the only available execution slot"
+    );
+    assert!(older.iter().all(|(id, _)| manifest.files.contains_key(id)));
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        compact.await.unwrap().unwrap();
+        blocked.await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 /// Fails a selected SST close and records earlier outputs for cleanup assertions.
