@@ -35,7 +35,7 @@ use crate::compaction::picker::{PickerOutput, new_picker};
 use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
 use crate::compaction::unit::CompactionUnit;
-use crate::compaction::{CompactionOutput, find_dynamic_options};
+use crate::compaction::{CompactionOutput, find_dynamic_options, format_panic_reason};
 use crate::config::MitoConfig;
 use crate::error::{CompactRegionSnafu, Error, RemoteCompactionSnafu, Result, UnexpectedSnafu};
 use crate::metrics::{
@@ -148,13 +148,7 @@ impl CompactionScheduler {
     ) {
         // The idiomatic way to handle a panic result.
         let result = std::panic::AssertUnwindSafe(planning).catch_unwind().await.unwrap_or_else(|payload| {
-            let reason = if let Some(message) = payload.as_ref().downcast_ref::<&str>() {
-                message.to_string()
-            } else if let Some(message) = payload.as_ref().downcast_ref::<String>() {
-                message.clone()
-            } else {
-                "unknown panic".to_string()
-            };
+            let reason = format_panic_reason(payload.as_ref());
             CompactionPlanningResult::Error(Arc::new(
                 UnexpectedSnafu {
                     reason: format!(
