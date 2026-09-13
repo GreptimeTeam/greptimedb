@@ -38,16 +38,41 @@ pub trait Scheduler: Send + Sync {
     /// Schedules a Job
     fn schedule(&self, job: Job) -> Result<()>;
 
+    /// Runs completion only after the job and its owned resources have been dropped.
+    fn schedule_with_completion(&self, job: Job, completion: Job) -> Result<()> {
+        self.schedule(Box::pin(async move {
+            job.await;
+            completion.await;
+        }))
+    }
+
     /// Stops scheduler. If `await_termination` is set to true, the scheduler will wait until all tasks are processed.
     async fn stop(&self, await_termination: bool) -> Result<()>;
 }
 
 pub type SchedulerRef = Arc<dyn Scheduler>;
 
+/// A queued job with an optional completion future dispatched after the job exits.
+struct ScheduledJob {
+    job: Job,
+    completion: Option<Job>,
+}
+
+impl ScheduledJob {
+    /// Finishes the job before dispatching completion outside its runner.
+    async fn run(self) {
+        self.job.await;
+        if let Some(completion) = self.completion {
+            // The original job has exited. Notification must not occupy its runner.
+            common_runtime::spawn_global(completion);
+        }
+    }
+}
+
 /// Request scheduler based on local state.
 pub struct LocalScheduler {
     /// Sends jobs to flume bounded channel
-    sender: RwLock<Option<async_channel::Sender<Job>>>,
+    sender: RwLock<Option<async_channel::Sender<ScheduledJob>>>,
     /// Task handles
     handles: Mutex<Vec<JoinHandle<()>>>,
     /// Token used to halt the scheduler
@@ -61,7 +86,7 @@ impl LocalScheduler {
     ///
     /// concurrency: the number of bounded receiver
     pub fn new(concurrency: usize) -> Self {
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded::<ScheduledJob>();
         let token = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
 
@@ -79,7 +104,7 @@ impl LocalScheduler {
                         }
                         req_opt = receiver.recv() =>{
                             if let Ok(job) = req_opt {
-                                job.await;
+                                job.run().await;
                             }
                         }
                     }
@@ -88,7 +113,7 @@ impl LocalScheduler {
                 if state_clone.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
                     // recv_async waits until all sender's been dropped.
                     while let Ok(job) = receiver.recv().await {
-                        job.await;
+                        job.run().await;
                     }
                     state_clone.store(STATE_STOP, Ordering::Relaxed);
                 }
@@ -108,13 +133,10 @@ impl LocalScheduler {
     fn is_running(&self) -> bool {
         self.state.load(Ordering::Relaxed) == STATE_RUNNING
     }
-}
 
-#[async_trait::async_trait]
-impl Scheduler for LocalScheduler {
-    fn schedule(&self, job: Job) -> Result<()> {
+    /// Enqueues work only while the scheduler and its sender remain available.
+    fn submit(&self, job: ScheduledJob) -> Result<()> {
         ensure!(self.is_running(), InvalidSchedulerStateSnafu);
-
         self.sender
             .read()
             .unwrap()
@@ -122,6 +144,24 @@ impl Scheduler for LocalScheduler {
             .context(InvalidSchedulerStateSnafu)?
             .try_send(job)
             .map_err(|_| InvalidSenderSnafu {}.build())
+    }
+}
+
+#[async_trait::async_trait]
+impl Scheduler for LocalScheduler {
+    fn schedule(&self, job: Job) -> Result<()> {
+        self.submit(ScheduledJob {
+            job,
+            completion: None,
+        })
+    }
+
+    /// Queues the job and its completion together so completion cannot precede task exit.
+    fn schedule_with_completion(&self, job: Job, completion: Job) -> Result<()> {
+        self.submit(ScheduledJob {
+            job,
+            completion: Some(completion),
+        })
     }
 
     /// if await_termination is true, scheduler will wait all tasks finished before stopping

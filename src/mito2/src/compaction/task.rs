@@ -14,57 +14,42 @@
 
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use std::time::Instant;
 
 use common_base::cancellation::CancellableFuture;
 use common_memory_manager::OnExhaustedPolicy;
-use common_telemetry::{error, info, warn};
-use itertools::Itertools;
+use common_telemetry::error;
 use snafu::ResultExt;
-use store_api::ManifestVersion;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::compaction::CompactionExecution;
-use crate::compaction::compactor::{CompactionRegion, Compactor, MergeOutput};
-use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
-use crate::compaction::picker::{CompactionTask, PickerOutput};
-use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
-use crate::region::RegionRoleState;
+use crate::compaction::compactor::{CompactionRegion, Compactor, DefaultCompactor, MergeOutput};
+use crate::compaction::memory_manager::CompactionMemoryManager;
+use crate::compaction::picker::CompactionTask;
+use crate::compaction::unit::CompactionUnit;
+use crate::error::{self, CompactionCancelledSnafu, CompactionMemoryExhaustedSnafu, Result};
+use crate::manifest::action::RegionEdit;
+use crate::metrics::{
+    COMPACTION_FAILURE_COUNT, COMPACTION_INPUT_BYTES, COMPACTION_OUTPUT_BYTES,
+    COMPACTION_STAGE_ELAPSED,
+};
 use crate::request::{
-    BackgroundNotify, CompactionCancelled, CompactionFailed, CompactionFinished, OutputTx,
-    RegionEditResult, Waiters, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, CompactionUnitNotification, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::CancellableTaskState;
-use crate::sst::file::{FileMeta, UncommittedSsts};
+use crate::sst::file::UncommittedSsts;
 use crate::worker::WorkerListener;
-use crate::{error, metrics};
 
-/// Maximum number of compaction tasks in parallel.
 pub const MAX_PARALLEL_COMPACTION: usize = 1;
 
+/// One local atomic unit. The scheduler owns request waiters and sibling units.
 pub(crate) struct CompactionTaskImpl {
-    /// Shared local-compaction state for cooperative cancellation.
     pub(crate) state: CancellableTaskState,
-    /// Identity and reservation lease of this accepted execution.
     pub(crate) execution: CompactionExecution,
-    pub compaction_region: CompactionRegion,
-    /// Request sender to notify the worker.
+    pub(crate) compaction_region: CompactionRegion,
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
-    /// Senders that are used to notify waiters waiting for pending compaction tasks.
-    pub waiters: Vec<OutputTx>,
-    /// Start time of compaction task
-    pub start_time: Instant,
-    /// Event listener.
     pub(crate) listener: WorkerListener,
-    /// Compactor to handle compaction.
-    pub(crate) compactor: Arc<dyn Compactor>,
-    /// Output of the picker.
-    pub(crate) picker_output: PickerOutput,
-    /// Memory manager to acquire memory budget.
+    pub(crate) unit: CompactionUnit,
     pub(crate) memory_manager: Arc<CompactionMemoryManager>,
-    /// Policy when memory is exhausted.
     pub(crate) memory_policy: OnExhaustedPolicy,
     /// Estimated memory bytes needed for this compaction.
     pub(crate) estimated_memory_bytes: u64,
@@ -76,7 +61,7 @@ impl Debug for CompactionTaskImpl {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsCompactionTask")
             .field("region_id", &self.compaction_region.region_id)
-            .field("picker_output", &self.picker_output)
+            .field("unit", &self.unit)
             .field(
                 "append_mode",
                 &self.compaction_region.region_options.append_mode,
@@ -86,383 +71,129 @@ impl Debug for CompactionTaskImpl {
 }
 
 impl CompactionTaskImpl {
-    /// Acquires memory budget based on the configured policy.
-    ///
-    /// Returns an error if memory cannot be acquired according to the policy.
-    async fn acquire_memory_with_policy(&self) -> error::Result<CompactionMemoryGuard> {
+    /// Acquires the unit's memory budget and merges on the compaction runtime.
+    async fn merge(&self) -> Result<MergeOutput> {
         let region_id = self.compaction_region.region_id;
-        let requested_bytes = self.estimated_memory_bytes;
-        let policy = self.memory_policy;
-
-        let _timer = COMPACTION_MEMORY_WAIT.start_timer();
-        self.memory_manager
-            .acquire_with_policy(requested_bytes, policy)
-            .await
-            .context(CompactionMemoryExhaustedSnafu {
-                region_id,
-                policy: format!("{policy:?}"),
-            })
-    }
-
-    fn cancelled_notify(&mut self) -> BackgroundNotify {
-        let senders = std::mem::take(&mut self.waiters);
-        BackgroundNotify::CompactionCancelled(CompactionCancelled {
-            region_id: self.compaction_region.region_id,
-            execution: self.execution.clone(),
-            senders,
-        })
-    }
-
-    /// Remove expired ssts files, update manifest immediately
-    /// and apply the edit to region version.
-    ///
-    /// This function logs errors but does not stop the compaction process if removal fails.
-    async fn remove_expired(
-        &self,
-        compaction_region: &CompactionRegion,
-        expired_files: Vec<FileMeta>,
-    ) {
-        let region_id = compaction_region.region_id;
-        let expired_files_str = expired_files.iter().map(|f| f.file_id).join(",");
-        let (expire_delete_sender, expire_delete_listener) = tokio::sync::oneshot::channel();
-        // Update manifest to remove expired SSTs
-        let edit = RegionEdit {
-            files_to_add: Vec::new(),
-            files_to_remove: expired_files,
-            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
-            compaction_time_window: None,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
+        self.listener
+            .on_compaction_unit_merge_begin(region_id, self.execution.plan_id())
+            .await;
+        let bytes = self.estimated_memory_bytes;
+        let _memory_guard = if bytes == 0 {
+            None
+        } else {
+            let _wait_timer = crate::metrics::COMPACTION_MEMORY_WAIT.start_timer();
+            Some(
+                CancellableFuture::new(
+                    self.memory_manager
+                        .acquire_with_policy(bytes, self.memory_policy),
+                    self.state.cancel_handle(),
+                )
+                .await
+                .map_err(|_| CompactionCancelledSnafu.build())?
+                .context(CompactionMemoryExhaustedSnafu {
+                    region_id,
+                    policy: format!("{:?}", self.memory_policy),
+                })?,
+            )
         };
-
-        // 1. Update manifest
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        let RegionRoleState::Leader(current_region_state) =
-            compaction_region.manifest_ctx.current_state()
-        else {
-            warn!(
-                "Region {} not in leader state, skip removing expired files",
-                region_id
-            );
-            return;
-        };
-        if let Err(e) = compaction_region
-            .manifest_ctx
-            .update_manifest(current_region_state, action_list, false)
-            .await
-        {
-            warn!(
-                e;
-                "Failed to update manifest for expired files removal, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
-            );
-            return;
-        }
-
-        // 2. Notify region worker loop to remove expired files from region version.
-        self.send_to_worker(WorkerRequest::Background {
-            region_id,
-            notify: BackgroundNotify::RegionEdit(RegionEditResult {
-                region_id,
-                waiters: Waiters::one(expire_delete_sender),
-                edit,
-                result: Ok(()),
-                update_region_state: false,
-                is_staging: false,
-            }),
-        })
-        .await;
-
-        if let Err(e) = expire_delete_listener
-            .await
-            .context(error::RecvSnafu)
-            .flatten()
-        {
-            warn!(
-                e;
-                "Failed to remove expired files from region version, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
-            );
-            return;
-        }
-
-        info!(
-            "Successfully removed expired files, region: {region_id}, files: [{expired_files_str}]"
-        );
-    }
-
-    async fn handle_expiration(&mut self) {
-        // 1. In case of local compaction, we can delete expired ssts in advance.
-        if !self.picker_output.expired_ssts.is_empty() {
-            let remove_timer = COMPACTION_STAGE_ELAPSED
-                .with_label_values(&["remove_expired"])
-                .start_timer();
-            let expired_ssts = self
-                .picker_output
-                .expired_ssts
-                .drain(..)
-                .map(|f| f.meta_ref().clone())
-                .collect();
-            // remove_expired logs errors but doesn't stop compaction
-            self.remove_expired(&self.compaction_region, expired_ssts)
-                .await;
-            remove_timer.observe_duration();
-        }
-    }
-
-    async fn handle_compaction(&mut self) -> error::Result<MergeOutput> {
-        // 2. Merge inputs
-        let merge_timer = COMPACTION_STAGE_ELAPSED
+        let _timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["merge"])
             .start_timer();
-
-        let compaction_result = match self
-            .compactor
-            .merge_ssts(&self.compaction_region, self.picker_output.clone())
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                error!(e; "Failed to compact region: {}", self.compaction_region.region_id);
-                merge_timer.stop_and_discard();
-                return Err(e);
-            }
-        };
-        let merge_time = merge_timer.stop_and_record();
-
-        metrics::COMPACTION_INPUT_BYTES.inc_by(compaction_result.input_file_size() as f64);
-        metrics::COMPACTION_OUTPUT_BYTES.inc_by(compaction_result.output_file_size() as f64);
-        info!(
-            "Compacted SST files, region_id: {}, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s",
-            self.compaction_region.region_id,
-            compaction_result.files_to_remove,
-            compaction_result.files_to_add,
-            compaction_result.compaction_time_window,
-            self.waiters.len(),
-            merge_time,
+        let compactor = DefaultCompactor::with_cancel_handle(
+            self.state.cancel_handle(),
+            self.uncommitted.clone(),
         );
-
-        self.listener
-            .on_merge_ssts_finished(self.compaction_region.region_id)
-            .await;
-
-        Ok(compaction_result)
+        let region = self.compaction_region.clone();
+        let unit = self.unit.clone();
+        let output =
+            common_runtime::spawn_compact(
+                async move { compactor.merge_unit(&region, &unit).await },
+            )
+            .await
+            .context(error::JoinSnafu)??;
+        COMPACTION_INPUT_BYTES.inc_by(output.input_file_size() as f64);
+        COMPACTION_OUTPUT_BYTES.inc_by(output.output_file_size() as f64);
+        self.listener.on_merge_ssts_finished(region_id).await;
+        Ok(output)
     }
 
-    async fn update_manifest(
-        &self,
-        compaction_result: crate::compaction::compactor::MergeOutput,
-    ) -> error::Result<(RegionEdit, ManifestVersion)> {
-        let _manifest_timer = COMPACTION_STAGE_ELAPSED
+    /// Commits this unit through the existing manifest path, independently of sibling applies.
+    async fn publish(&self, output: MergeOutput) -> Result<RegionEdit> {
+        if !self.state.mark_commit_started() {
+            return CompactionCancelledSnafu.fail();
+        }
+        // Report this unit's SSTs before its manifest update; sibling units may progress independently.
+        self.compaction_region.invoke_sst_hook(&output).await;
+        self.listener
+            .on_compaction_commit_begin(self.compaction_region.region_id)
+            .await;
+        let _timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
             .start_timer();
-
-        self.compactor
-            .update_manifest(&self.compaction_region, compaction_result)
-            .await
+        let compactor = DefaultCompactor::with_cancel_handle(
+            self.state.cancel_handle(),
+            self.uncommitted.clone(),
+        );
+        let (edit, _manifest_version) = compactor
+            .update_manifest(&self.compaction_region, output)
+            .await?;
+        self.uncommitted.disarm_cleanup();
+        self.listener
+            .on_compaction_unit_committed(
+                self.compaction_region.region_id,
+                self.execution.plan_id(),
+            )
+            .await;
+        Ok(edit)
     }
 
-    /// Handles compaction failure, notifies all waiters.
-    pub(crate) fn on_failure(&mut self, err: Arc<error::Error>) {
-        COMPACTION_FAILURE_COUNT.inc();
-        for waiter in self.waiters.drain(..) {
-            waiter.send(Err(err.clone()).context(CompactRegionSnafu {
+    /// Sends a unit lifecycle event to the owning region worker.
+    async fn notify(&self, notify: CompactionUnitNotification) -> Result<()> {
+        self.request_sender
+            .send(WorkerRequestWithTime::new(WorkerRequest::Background {
                 region_id: self.compaction_region.region_id,
-            }));
-        }
-    }
-
-    /// Notifies region worker to handle post-compaction tasks.
-    async fn send_to_worker(&self, request: WorkerRequest) {
-        if let Err(e) = self
-            .request_sender
-            .send(WorkerRequestWithTime::new(request))
+                notify: BackgroundNotify::CompactionUnit(notify),
+            }))
             .await
-        {
-            error!(
-                "Failed to notify compaction job status for region {}, request: {:?}",
-                self.compaction_region.region_id, e.0
-            );
-        }
-    }
-
-    async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
-        self.compaction_region.invoke_sst_hook(merge_output).await;
+            .map_err(|_| error::InvalidSenderSnafu.build())
     }
 }
 
 #[async_trait::async_trait]
 impl CompactionTask for CompactionTaskImpl {
+    /// Executes one unit and retains its resources until worker apply or failure acknowledgement.
     async fn run(&mut self) {
-        // Acquire memory budget before starting compaction
-        let cancel_handle = self.state.cancel_handle();
-        let _memory_guard = match CancellableFuture::new(
-            self.acquire_memory_with_policy(),
-            cancel_handle,
-        )
-        .await
-        {
-            Ok(Ok(guard)) => guard,
-            Ok(Err(e)) => {
-                error!(e; "Failed to acquire memory for compaction, region id: {}", self.compaction_region.region_id);
-                let err = Arc::new(e);
-                self.on_failure(err.clone());
-                let notify = BackgroundNotify::CompactionFailed(CompactionFailed {
-                    region_id: self.compaction_region.region_id,
-                    execution: self.execution.clone(),
-                    err,
-                });
-                self.send_to_worker(WorkerRequest::Background {
-                    region_id: self.compaction_region.region_id,
-                    notify,
-                })
-                .await;
-                return;
-            }
-            Err(_) => {
-                info!(
-                    "Compaction cancelled while waiting for memory, region id: {}",
-                    self.compaction_region.region_id
-                );
-                let notify = self.cancelled_notify();
-                self.send_to_worker(WorkerRequest::Background {
-                    region_id: self.compaction_region.region_id,
-                    notify,
-                })
-                .await;
-                return;
-            }
+        let start = std::time::Instant::now();
+        let result = match self.merge().await {
+            Ok(output) => self.publish(output).await,
+            Err(err) => Err(err),
         };
-
-        self.handle_expiration().await;
-
-        // The local compactor owns cancellation of its spawned merge tasks. Waiting for it to
-        // return ensures all finalized outputs are tracked before cleanup starts.
-        let notify = match self.handle_compaction().await {
-            Ok(merge_output) => {
-                self.invoke_sst_hook(&merge_output).await;
-                // Stop accepting cancellation once we are about to publish the compaction edit.
-                if !self.state.mark_commit_started() {
-                    self.uncommitted.cleanup().await;
-                    self.cancelled_notify()
-                } else {
-                    self.listener
-                        .on_compaction_commit_begin(self.compaction_region.region_id)
-                        .await;
-                    match self.update_manifest(merge_output).await {
-                        Ok((edit, _manifest_version)) => {
-                            self.uncommitted.disarm_cleanup();
-                            let senders = std::mem::take(&mut self.waiters);
-                            BackgroundNotify::CompactionFinished(CompactionFinished {
-                                region_id: self.compaction_region.region_id,
-                                execution: self.execution.clone(),
-                                senders,
-                                start_time: self.start_time,
-                                edit,
-                            })
-                        }
-                        Err(e) => {
-                            if e.may_have_persisted_manifest_update() {
-                                self.uncommitted.disarm_cleanup();
-                            } else {
-                                info!(
-                                    "Cleaning uncommitted SSTs because the manifest update was not persisted, region: {}, job: compaction, error: {:?}",
-                                    self.compaction_region.region_id, e
-                                );
-                                self.uncommitted.cleanup().await;
-                            }
-                            error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
-                            let err = Arc::new(e);
-                            self.on_failure(err.clone());
-                            BackgroundNotify::CompactionFailed(CompactionFailed {
-                                region_id: self.compaction_region.region_id,
-                                execution: self.execution.clone(),
-                                err,
-                            })
-                        }
-                    }
-                }
+        if let Err(err) = &result {
+            if !matches!(err, error::Error::CompactionCancelled { .. }) {
+                COMPACTION_FAILURE_COUNT.inc();
+                error!(err; "Compaction unit failed, region: {}, plan_id: {}",
+                    self.compaction_region.region_id, self.execution.plan_id());
             }
-            Err(e) => {
-                error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
+            if self.state.commit_started() && err.may_have_persisted_manifest_update() {
+                self.uncommitted.disarm_cleanup();
+            } else {
                 self.uncommitted.cleanup().await;
-                let err = Arc::new(e);
-                // notify compaction waiters
-                self.on_failure(err.clone());
-                BackgroundNotify::CompactionFailed(CompactionFailed {
-                    region_id: self.compaction_region.region_id,
-                    execution: self.execution.clone(),
-                    err,
-                })
             }
+        }
+        let succeeded = result.is_ok();
+        let (applied, receiver) = oneshot::channel();
+        let notify = CompactionUnitNotification::Finished {
+            plan_id: self.execution.plan_id(),
+            result: result.map_err(Arc::new),
+            applied,
         };
-
-        self.send_to_worker(WorkerRequest::Background {
-            region_id: self.compaction_region.region_id,
-            notify,
-        })
-        .await;
+        if let Err(err) = self.notify(notify).await {
+            error!(err; "Failed to notify compaction unit completion, region: {}", self.compaction_region.region_id);
+            return;
+        }
+        // This keeps the execution slot and inputs alive through worker apply.
+        if receiver.await.is_ok() && succeeded {
+            crate::metrics::COMPACTION_ELAPSED_TOTAL.observe(start.elapsed().as_secs_f64());
+        }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use store_api::storage::FileId;
-
-    use crate::compaction::picker::PickerOutput;
-    use crate::compaction::test_util::new_file_handle;
-
-    #[test]
-    fn test_picker_output_with_expired_ssts() {
-        // Test that PickerOutput correctly includes expired_ssts
-        // This verifies that expired SSTs are properly identified and included
-        // in the picker output, which is then handled by handle_expiration()
-
-        let file_ids = (0..3).map(|_| FileId::random()).collect::<Vec<_>>();
-        let expired_ssts = vec![
-            new_file_handle(file_ids[0], 0, 999, 0),
-            new_file_handle(file_ids[1], 1000, 1999, 0),
-        ];
-
-        let picker_output = PickerOutput {
-            outputs: vec![],
-            expired_ssts: expired_ssts.clone(),
-            time_window_size: 3600,
-            max_file_size: None,
-        };
-
-        // Verify expired_ssts are included
-        assert_eq!(picker_output.expired_ssts.len(), 2);
-        assert_eq!(
-            picker_output.expired_ssts[0].file_id(),
-            expired_ssts[0].file_id()
-        );
-        assert_eq!(
-            picker_output.expired_ssts[1].file_id(),
-            expired_ssts[1].file_id()
-        );
-    }
-
-    #[test]
-    fn test_picker_output_without_expired_ssts() {
-        // Test that PickerOutput works correctly when there are no expired SSTs
-        let picker_output = PickerOutput {
-            outputs: vec![],
-            expired_ssts: vec![],
-            time_window_size: 3600,
-            max_file_size: None,
-        };
-
-        // Verify empty expired_ssts
-        assert!(picker_output.expired_ssts.is_empty());
-    }
-
-    // Note: Testing remove_expired() directly requires extensive mocking of:
-    // - manifest_ctx (ManifestContext)
-    // - request_sender (mpsc::Sender<WorkerRequestWithTime>)
-    // - WorkerRequest handling
-    //
-    // The behavior is tested indirectly through integration tests:
-    // - remove_expired() logs errors but doesn't stop compaction
-    // - handle_expiration() continues even if remove_expired() encounters errors
-    // - The expiration stage is designed to be non-blocking for compaction
 }
