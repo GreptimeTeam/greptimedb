@@ -37,6 +37,7 @@ pub(crate) struct CompactionUnit {
 impl CompactionUnit {
     /// Groups outputs by the transitive closure of shared input FileIds.
     /// Returns `None` for an inconsistent plan that both expires and merges a file.
+    /// Expiration maintenance runs before merge units, matching the legacy pre-merge removal.
     /// Merge units follow the legacy compactor's tail-first execution order; a shared-input
     /// group inherits the position of its highest-priority output.
     pub(crate) fn from_picker(output: PickerOutput) -> Option<Vec<Self>> {
@@ -75,6 +76,18 @@ impl CompactionUnit {
                 .push(output);
         }
         let mut units = Vec::with_capacity(groups.len() + 1);
+        if !expired_ssts.is_empty() {
+            let mut seen = HashSet::new();
+            units.push(Self {
+                inputs: expired_ssts
+                    .into_iter()
+                    .filter(|f| seen.insert(f.file_id()))
+                    .collect(),
+                outputs: Vec::new(),
+                time_window_size,
+                max_file_size,
+            });
+        }
         for outputs in groups.into_values().rev() {
             let mut seen = HashSet::new();
             let inputs: Vec<_> = outputs
@@ -89,18 +102,6 @@ impl CompactionUnit {
             units.push(Self {
                 inputs,
                 outputs,
-                time_window_size,
-                max_file_size,
-            });
-        }
-        if !expired_ssts.is_empty() {
-            let mut seen = HashSet::new();
-            units.push(Self {
-                inputs: expired_ssts
-                    .into_iter()
-                    .filter(|f| seen.insert(f.file_id()))
-                    .collect(),
-                outputs: Vec::new(),
                 time_window_size,
                 max_file_size,
             });
@@ -197,6 +198,28 @@ mod tests {
                 .map(|unit| unit.outputs.len())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_compaction_unit_expiration_precedes_merge_units() {
+        let files: Vec<_> = (0..3)
+            .map(|_| new_file_handle(FileId::random(), 0, 100, 0))
+            .collect();
+        let units = CompactionUnit::from_picker(PickerOutput {
+            outputs: vec![
+                output(vec![files[0].clone()]),
+                output(vec![files[1].clone()]),
+            ],
+            expired_ssts: vec![files[2].clone()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(3, units.len());
+        assert!(units[0].outputs.is_empty());
+        assert_eq!(files[2].file_id(), units[0].inputs[0].file_id());
+        assert_eq!(files[1].file_id(), units[1].inputs[0].file_id());
+        assert_eq!(files[0].file_id(), units[2].inputs[0].file_id());
     }
 
     #[test]
