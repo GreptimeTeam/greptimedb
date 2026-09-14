@@ -21,7 +21,7 @@ use common_telemetry::warn;
 use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
-use object_store::util::with_instrument_layers;
+use object_store::util::{join_dir, with_instrument_layers};
 use object_store::{ATOMIC_WRITE_DIR, ErrorKind, OLD_ATOMIC_WRITE_DIR, ObjectStore};
 use parquet::file::metadata::PageIndexPolicy;
 use smallvec::SmallVec;
@@ -656,11 +656,12 @@ impl TempFileCleaner {
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
-    let [atomic_write_dir, old_atomic_temp_dir] = fs_cache_temp_dirs(root);
+    let atomic_write_dir = fs_cache_atomic_write_dir(root);
     clean_dir(&atomic_write_dir.to_string_lossy()).await?;
 
     // Compatible code. Remove this after a major release.
-    clean_dir(&old_atomic_temp_dir.to_string_lossy()).await?;
+    let old_atomic_temp_dir = join_dir(root, OLD_ATOMIC_WRITE_DIR);
+    clean_dir(&old_atomic_temp_dir).await?;
 
     let builder = Fs::default()
         .root(root)
@@ -670,10 +671,9 @@ pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
     Ok(with_instrument_layers(store, false))
 }
 
-// These are filesystem paths, so preserve native prefixes such as Windows UNC shares.
-fn fs_cache_temp_dirs(root: &str) -> [PathBuf; 2] {
-    let root = Path::new(root);
-    [root.join(ATOMIC_WRITE_DIR), root.join(OLD_ATOMIC_WRITE_DIR)]
+// Preserve native filesystem prefixes such as Windows UNC shares.
+fn fs_cache_atomic_write_dir(root: &str) -> PathBuf {
+    Path::new(root).join(ATOMIC_WRITE_DIR)
 }
 
 /// Clean the directory.
@@ -774,39 +774,41 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn test_fs_cache_temp_dirs_windows() {
+    fn test_fs_cache_atomic_write_dir_windows() {
         for (root, expected_root) in [
             (r"C:\data", r"C:\data"),
             ("C:/data/", r"C:\data"),
             ("//server/share/data", r"\\server\share\data"),
             (r"\\server\share\data", r"\\server\share\data"),
         ] {
-            for (dir, name) in fs_cache_temp_dirs(root)
-                .into_iter()
-                .zip([ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR])
-            {
-                assert_eq!(dir.parent().unwrap(), Path::new(expected_root));
-                assert_eq!(
-                    dir.file_name().unwrap(),
-                    Path::new(name).file_name().unwrap()
-                );
-            }
+            let dir = fs_cache_atomic_write_dir(root);
+            assert_eq!(dir.parent().unwrap(), Path::new(expected_root));
+            assert_eq!(
+                dir.file_name().unwrap(),
+                Path::new(ATOMIC_WRITE_DIR).file_name().unwrap()
+            );
         }
     }
 
     #[tokio::test]
     async fn test_new_fs_cache_store() {
         let root = common_test_util::temp_dir::create_temp_dir("fs-cache-store");
-        for name in [ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR] {
-            let dir = root.path().join(name);
-            tokio::fs::create_dir_all(&dir).await.unwrap();
+        let dirs = [
+            root.path().join(ATOMIC_WRITE_DIR),
+            PathBuf::from(join_dir(
+                root.path().to_str().unwrap(),
+                OLD_ATOMIC_WRITE_DIR,
+            )),
+        ];
+        for dir in &dirs {
+            tokio::fs::create_dir_all(dir).await.unwrap();
             tokio::fs::write(dir.join("stale"), b"stale").await.unwrap();
         }
         let store = new_fs_cache_store(root.path().to_str().unwrap())
             .await
             .unwrap();
-        for name in [ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR] {
-            assert!(!root.path().join(name).join("stale").exists());
+        for dir in &dirs {
+            assert!(!dir.join("stale").exists());
         }
         store.write("index", "contents").await.unwrap();
         assert_eq!(

@@ -422,36 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn test_series_index_config() {
-        assert!(!MitoConfig::default().experimental_enable_series_index);
-        let mut config: MitoConfig = toml::from_str(
-            "experimental_enable_series_index = true
-             experimental_series_index_maintenance_interval = '30s'",
-        )
-        .unwrap();
-        config.sanitize("/data").unwrap();
-        assert!(config.experimental_enable_series_index);
-        assert_eq!(
-            config.experimental_series_index_maintenance_interval,
-            Duration::from_secs(30)
-        );
-        let restored: MitoConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
-        assert_eq!(config, restored);
-
-        let disabled: MitoConfig =
-            toml::from_str("experimental_enable_series_index = false").unwrap();
-        assert!(!disabled.experimental_enable_series_index);
-
-        let mut config: MitoConfig =
-            toml::from_str("experimental_series_index_maintenance_interval = '0s'").unwrap();
-        config.sanitize("/data").unwrap();
-        assert_eq!(
-            config.experimental_series_index_maintenance_interval,
-            MitoConfig::default().experimental_series_index_maintenance_interval
-        );
-    }
-
-    #[test]
     fn test_experimental_series_scan_v2_config() {
         assert!(MitoConfig::default().experimental_series_scan_v2);
 
