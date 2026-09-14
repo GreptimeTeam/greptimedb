@@ -16,8 +16,11 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::BuildHasher;
+use std::ops::Range;
 
 use arrow::array::{Array, ArrayRef, AsArray, StructArray};
+use arrow::buffer::BooleanBuffer;
+use arrow::compute::kernels::cmp::distinct;
 use arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use arrow_schema::DataType;
 use axum::Json;
@@ -398,24 +401,12 @@ impl PrometheusJsonResponse {
                 .transpose()?;
 
             // Read the labels once per run of rows that share them instead of
-            // once per row. `partition` marks every boundary, so the probe only
+            // once per row. `label_runs` finds every boundary, so the probe only
             // decides whether looking for runs is worth its cost.
-            let label_runs = if !prefer_label_runs(&tag_columns, batch.num_rows()) {
-                Either::Left((0..batch.num_rows()).map(|row| row..row + 1))
+            let label_runs = if prefer_label_runs(&tag_columns, batch.num_rows()) {
+                Either::Left(label_runs(&tag_columns, batch.num_rows())?.into_iter())
             } else {
-                let runs = if tag_columns.is_empty() {
-                    // Without labels the whole batch is a single series.
-                    std::iter::once(0..batch.num_rows()).collect()
-                } else {
-                    let columns = tag_columns
-                        .iter()
-                        .map(|column| (*column).clone())
-                        .collect::<Vec<_>>();
-                    arrow::compute::partition(&columns)
-                        .context(ArrowSnafu)?
-                        .ranges()
-                };
-                Either::Right(runs.into_iter())
+                Either::Right((0..batch.num_rows()).map(|row| row..row + 1))
             };
 
             // assemble rows
@@ -577,6 +568,37 @@ impl PrometheusJsonResponse {
 
         Ok(data)
     }
+}
+
+/// Ranges of consecutive rows whose label values are all equal.
+///
+/// `arrow::compute::partition` computes the same ranges, but its contract takes
+/// lexicographically sorted columns, which query output is not: range queries
+/// run without the plan's output sort, and `sort`/`topk` order by value.
+/// `distinct` is element-wise, so it holds for any row order, and its null
+/// handling is the one a series key needs: a null label and an empty one are
+/// distinct, and two nulls are not.
+fn label_runs(columns: &[&ArrayRef], rows: usize) -> Result<Vec<Range<usize>>> {
+    let mut boundaries: Option<BooleanBuffer> = None;
+    if rows >= 2 {
+        for column in columns {
+            let changed = distinct(&column.slice(0, rows - 1), &column.slice(1, rows - 1))
+                .context(ArrowSnafu)?;
+            boundaries = Some(match boundaries {
+                Some(accumulated) => &accumulated | changed.values(),
+                None => changed.values().clone(),
+            });
+        }
+    }
+
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for boundary in boundaries.iter().flat_map(BooleanBuffer::set_indices) {
+        runs.push(start..boundary + 1);
+        start = boundary + 1;
+    }
+    runs.push(start..rows);
+    Ok(runs)
 }
 
 /// Decides whether to group the rows of a batch into runs that share their
