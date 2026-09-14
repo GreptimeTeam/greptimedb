@@ -366,6 +366,30 @@ uv run --no-project python .github/scripts/query-regression-run.py \
   --work-dir /tmp/query-regression-work
 ```
 
+### Default CPU profiles
+
+After a successful `direct_readable_sst` or `prom_remote_write_then_query`
+measure and validation, the outer runner automatically records CPU protobufs
+for the base target and then the candidate target. For each role, frontend and datanode profile concurrently via
+`POST /debug/prof/cpu?seconds=10&frequency=49&output=proto`, while the first
+configured timed SQL or TQL query is launched only during the ten-second
+sampling window. A query launched before that deadline retains its normal HTTP
+timeout and may finish after sampling ends. The ordinary measurement samples and
+report remain unchanged.
+
+Each case writes `logs/cpu-profile-manifest.json` and
+`logs/cpu-profiles/<role>/{frontend,datanode}.pb`. The manifest records the
+selected query name and text, role, binary version, artifact paths, query and
+profile errors, and `success`, `failure`, or `unsupported` status. A profile or
+profile-workload failure fails the direct-SST case after retaining those files;
+an unsupported direct-SST query selection is recorded explicitly. The existing
+workflow artifact upload includes the case `logs/**` tree, so these outputs are
+retained with the report.
+
+This default profiling stage covers all seven routine default cases: three
+direct-SST and four remote-write query cases. `otlp_trace_load` is an ingest
+scenario and is explicitly not covered.
+
 The Rust runner subcommands are also useful for focused diagnostics:
 
 ```bash
