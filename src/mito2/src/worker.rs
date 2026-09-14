@@ -1628,9 +1628,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_group_start_stop() {
-        let env = TestEnv::with_prefix("group-stop").await;
-        let root = env.data_home().join("series_index");
-        for (run, enabled) in [false, true, false].into_iter().enumerate() {
+        for (enabled, existing_index) in [(false, false), (true, false), (false, true)] {
+            // Use a fresh WAL directory for each case: stopping workers does not stop the log store.
+            let env = TestEnv::with_prefix("group-stop").await;
+            let root = env.data_home().join("series_index");
+            if existing_index {
+                tokio::fs::create_dir_all(&root).await.unwrap();
+                tokio::fs::write(root.join("retained"), b"index")
+                    .await
+                    .unwrap();
+            }
             let group = env
                 .create_worker_group(MitoConfig {
                     num_workers: 4,
@@ -1643,12 +1650,8 @@ mod tests {
                 assert_eq!(worker.series_index_task_state.is_some(), enabled);
                 assert_eq!(worker.series_index_handle.lock().await.is_some(), enabled);
             }
-            assert_eq!(root.is_dir(), run > 0);
-            if enabled {
-                tokio::fs::write(root.join("retained"), b"index")
-                    .await
-                    .unwrap();
-            } else if root.exists() {
+            assert_eq!(root.is_dir(), enabled || existing_index);
+            if existing_index {
                 assert_eq!(
                     tokio::fs::read(root.join("retained")).await.unwrap(),
                     b"index"
