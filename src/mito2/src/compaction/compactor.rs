@@ -410,10 +410,10 @@ struct OutputSequenceMetadata {
     exact_sequence_trusted: bool,
 }
 
-/// Preserve the exact-read capability of the inputs, not just their physical
-/// sequences. An untrusted file still needs its admission marker so an exact
-/// scan cannot silently prune it using a smaller physical sequence bound.
-async fn output_sequence_metadata(
+/// Compaction does not admit new data, so it inherits the input sequence bounds
+/// without allocating a new admission marker. Retaining physical row sequences
+/// does not by itself restore exact-read capability for untrusted inputs.
+fn output_sequence_metadata(
     region: &CompactionRegion,
     inputs: &[FileHandle],
 ) -> OutputSequenceMetadata {
@@ -421,28 +421,15 @@ async fn output_sequence_metadata(
         && inputs
             .iter()
             .all(|f| f.is_effective_target_sequence_trusted(region.region_id));
-    let file_sequence = if exact_sequence_trusted {
-        known_max_input_sequence(inputs)
-    } else {
-        // Retain the existing admission-marker rule. This is file metadata,
-        // not a new row version, and does not advance the live region sequence.
-        let manifest = region.manifest_ctx.manifest_manager.read().await.manifest();
-        NonZeroU64::new(
-            manifest
-                .committed_sequence
-                .unwrap_or(manifest.flushed_sequence)
-                + 1,
-        )
-    };
     OutputSequenceMetadata {
-        file_sequence,
+        file_sequence: known_max_input_sequence(inputs),
         exact_sequence_trusted,
     }
 }
 
 /// Computes the maximum target-domain sequence bound of the output of merging
-/// `inputs`. Foreign files are described by their target-local barrier; local
-/// trusted files use their physical sequence bound. Unknown bounds must remain
+/// `inputs`. A bound can be a row maximum or an admission marker; compaction
+/// must preserve both for sequence-based pruning. Unknown bounds must remain
 /// unknown rather than being replaced with a partial maximum.
 fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
     let mut max: Option<NonZeroU64> = None;
@@ -488,7 +475,7 @@ impl SstMerger for DefaultSstMerger {
             .iter()
             .map(|f| f.file_id().to_string())
             .join(",");
-        let sequence_metadata = output_sequence_metadata(&compaction_region, &output.inputs).await;
+        let sequence_metadata = output_sequence_metadata(&compaction_region, &output.inputs);
         let builder = CompactionSstReaderBuilder {
             metadata: compaction_region.region_metadata.clone(),
             sst_layer: compaction_region.access_layer.clone(),
@@ -906,7 +893,8 @@ mod tests {
                 ..dummy_file_meta()
             })
         };
-        // Known, mixed-trust, unknown local bound, and unknown foreign domain.
+        // Bounds are independent of row trust: known, mixed trust, unknown in
+        // either sequence domain, empty inputs, and the largest possible bound.
         let cases = [
             (
                 vec![file(local, Some(3), true), file(foreign, Some(9), false)],
@@ -915,17 +903,37 @@ mod tests {
             ),
             (
                 vec![file(local, Some(3), true), file(local, Some(6), false)],
-                None,
+                Some(6),
                 false,
+            ),
+            (
+                vec![file(foreign, Some(9), false), file(foreign, Some(11), true)],
+                Some(11),
+                true,
             ),
             (
                 vec![file(local, Some(3), true), file(local, None, true)],
                 None,
                 true,
             ),
-            (vec![file(foreign, None, true)], None, false),
+            (
+                vec![file(local, None, false), file(local, Some(6), true)],
+                None,
+                false,
+            ),
+            (
+                vec![file(local, Some(3), true), file(foreign, None, true)],
+                None,
+                false,
+            ),
+            (vec![], None, true),
+            (
+                vec![file(local, Some(u64::MAX), false)],
+                Some(u64::MAX),
+                false,
+            ),
         ];
-        for barrier in [101, 102] {
+        for committed_sequence in [100, 101] {
             region
                 .manifest_ctx
                 .manifest_manager
@@ -933,7 +941,7 @@ mod tests {
                 .await
                 .update(
                     RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-                        committed_sequence: Some(barrier - 1),
+                        committed_sequence: Some(committed_sequence),
                         files_to_add: vec![],
                         files_to_remove: vec![],
                         timestamp_ms: None,
@@ -948,11 +956,13 @@ mod tests {
             for preserve in [false, true] {
                 region.region_options.preserve_row_sequence = preserve;
                 for (inputs, known_bound, inputs_trusted) in &cases {
-                    let metadata = output_sequence_metadata(&region, inputs).await;
+                    let metadata = output_sequence_metadata(&region, inputs);
                     let trusted = preserve && *inputs_trusted;
                     assert_eq!(trusted, metadata.exact_sequence_trusted);
-                    let expected = if trusted { *known_bound } else { Some(barrier) };
-                    assert_eq!(expected.and_then(NonZeroU64::new), metadata.file_sequence);
+                    assert_eq!(
+                        known_bound.and_then(NonZeroU64::new),
+                        metadata.file_sequence
+                    );
                 }
             }
         }
@@ -967,6 +977,7 @@ mod tests {
     #[tokio::test]
     async fn test_independent_outputs_preserve_delete_in_every_visibility_state(
         #[case] flat_format: bool,
+        #[values(false, true)] unknown_put_bound: bool,
     ) {
         use datatypes::arrow::array::AsArray;
         use datatypes::arrow::datatypes::TimestampMillisecondType;
@@ -1011,6 +1022,13 @@ mod tests {
             .collect();
         assert_eq!(3, files.len());
         files.sort_unstable_by_key(|file| file.meta_ref().sequence);
+        if unknown_put_bound {
+            // Model a legacy SST whose physical rows are readable but whose
+            // file-level boundary is unknown. Merging cannot invent that bound.
+            let mut meta = files[0].meta_ref().clone();
+            meta.sequence = None;
+            files[0] = FileHandle::new(meta, Arc::new(NoopFilePurger));
+        }
         let compaction_region = CompactionRegion {
             region_id,
             region_options: version.options.clone(),
@@ -1062,6 +1080,20 @@ mod tests {
             .iter()
             .find(|file| file.meta_ref().num_rows == 1)
             .unwrap();
+        assert_eq!(
+            if unknown_put_bound {
+                None
+            } else {
+                NonZeroU64::new(3)
+            },
+            put_output.meta_ref().sequence,
+        );
+        assert_eq!(NonZeroU64::new(2), delete_output.meta_ref().sequence);
+        assert!(
+            outputs
+                .iter()
+                .all(|file| !file.meta_ref().preserve_row_sequence)
+        );
 
         // Cover the original snapshot, each partial success/cancellation state,
         // and both completed outputs using real persisted SSTs and merge readers.

@@ -245,9 +245,10 @@ pub struct FileMeta {
     pub num_row_groups: u64,
     /// File-level sequence bound or admission marker in the target region.
     ///
-    /// Flush records the maximum input row sequence. Trusted compaction outputs
-    /// inherit the known maximum input bound; untrusted outputs use an admission
-    /// marker. This does not imply that every physical row has this sequence.
+    /// Flush records the maximum input row sequence. Compaction outputs inherit
+    /// the maximum input bound, or remain unknown if any input bound is unknown,
+    /// independently of per-row sequence trust. This does not imply that every
+    /// physical row has this sequence.
     /// Readers also use it to normalize foreign and legacy all-zero files.
     pub sequence: Option<NonZeroU64>,
     /// Partition expression from the region metadata when the file is created.

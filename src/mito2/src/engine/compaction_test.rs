@@ -257,10 +257,7 @@ async fn test_compaction_preserves_flush_sequences_across_generations(
             preserve_row_sequence,
             files[0].meta_ref().preserve_row_sequence
         );
-        assert_eq!(
-            Some(max + u64::from(!preserve_row_sequence)),
-            files[0].meta_ref().sequence.map(|s| s.get())
-        );
+        assert_eq!(Some(max), files[0].meta_ref().sequence.map(|s| s.get()));
         assert_eq!(
             expected,
             read_sequences(&engine, region_id).await,

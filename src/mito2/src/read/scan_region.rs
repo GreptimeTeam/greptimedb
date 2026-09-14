@@ -1836,9 +1836,10 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 /// contribute a row to `(C, H]`.
 ///
 /// Unmarked local files use `FileMeta.sequence` as an admission barrier rather
-/// than a row maximum. Compaction and edit assign it as `committed_sequence + 1`;
-/// `C >= barrier` proves Flow has already consumed the entire file, so such a
-/// file is excluded before the capability check.
+/// than a row maximum. Region edits allocate this barrier; compaction inherits
+/// the maximum input bound without assigning a new barrier. `C >= barrier`
+/// proves Flow has already consumed the entire file, so such a file is excluded
+/// before the capability check. An unknown bound cannot prove this exclusion.
 ///
 /// A foreign file is different: the parquet reader virtualizes every row to its
 /// target-local `FileMeta.sequence`. Consequently, a present sequence is the
