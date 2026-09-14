@@ -1239,7 +1239,7 @@ async fn check_two_phase_series_scan(use_index: bool, use_range_index: bool) {
     let engine = env
         .create_engine(MitoConfig {
             experimental_series_scan_v2: true,
-            experimental_series_index_root: "series-index".to_string(),
+            experimental_enable_series_index: true,
             ..Default::default()
         })
         .await;
@@ -1335,6 +1335,8 @@ async fn check_two_phase_series_scan(use_index: bool, use_range_index: bool) {
             source_file_ids: Vec::new(),
             min_file_sequence: sequence,
             max_file_sequence: sequence,
+            compaction_window_secs: 1,
+            window_sequences: Default::default(),
         };
         let keys = [
             (10, 0, "a", "x"),
