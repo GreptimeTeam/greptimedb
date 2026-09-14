@@ -54,16 +54,18 @@ class RemoteWriteLifecycleTest(unittest.TestCase):
         def stop(target, component, _procs):
             events.append(f"stop:{target.name}:{component}")
 
+        plan = {"scenario": {"kind": "prom_remote_write_then_query", "remote_write": {"database": "public"}, "queries": [{"kind": "sql", "query": "SELECT 1", "iterations": 1}]}}
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.object(runner, "allocate_ports", return_value=self.ports),
             patch.object(runner, "start_component", side_effect=start),
             patch.object(runner, "stop_component", side_effect=stop),
             patch.object(runner.subprocess, "run", side_effect=run),
+            patch.object(runner, "collect_cpu_profiles", return_value="success"),
         ):
             self.assertEqual(
                 runner.run_remote_case(
-                    self.args, Path("case.toml"), Path(tmpdir), Path("base"), Path("candidate"), Path("fixture"), Path("runner")
+                    self.args, Path("case.toml"), Path(tmpdir), Path("base"), Path("candidate"), Path("fixture"), Path("runner"), plan
                 ),
                 0,
             )
@@ -93,6 +95,7 @@ class RemoteWriteLifecycleTest(unittest.TestCase):
         def stop(target, component, _procs):
             events.append(f"stop:{target.name}:{component}")
 
+        plan = {"scenario": {"kind": "prom_remote_write_then_query", "remote_write": {"database": "public"}, "queries": [{"kind": "sql", "query": "SELECT 1", "iterations": 1}]}}
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.object(runner, "allocate_ports", return_value=self.ports),
@@ -102,7 +105,7 @@ class RemoteWriteLifecycleTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "prepare exploded"):
                 runner.run_remote_case(
-                    self.args, Path("case.toml"), Path(tmpdir), Path("base"), Path("candidate"), Path("fixture"), Path("runner")
+                    self.args, Path("case.toml"), Path(tmpdir), Path("base"), Path("candidate"), Path("fixture"), Path("runner"), plan
                 )
 
         self.assertIn("prepare-remote", events)

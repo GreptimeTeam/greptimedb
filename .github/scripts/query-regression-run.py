@@ -24,7 +24,9 @@ import re
 import signal
 import socket
 import subprocess
+import threading
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -295,6 +297,257 @@ def load_plan(fixture_generator: Path, case_path: Path) -> dict[str, Any]:
     return json.loads(result.stdout)
 
 
+
+CPU_PROFILE_SECONDS = 10
+CPU_PROFILE_FREQUENCY = 49
+CPU_PROFILE_TIMEOUT_SECONDS = 180
+CPU_PROFILE_MANIFEST = Path("logs/cpu-profile-manifest.json")
+
+
+def select_cpu_profile_query(plan: dict[str, Any]) -> tuple[dict[str, str] | None, str | None]:
+    """Select the first timed SQL or TQL query from a supported query plan."""
+    scenario = plan.get("scenario")
+    if not isinstance(scenario, dict):
+        return None, "fixture plan has no scenario"
+    kind = scenario.get("kind")
+    if kind == "direct_readable_sst":
+        tables = scenario.get("tables")
+        database = (
+            tables[0].get("database")
+            if isinstance(tables, list) and tables and isinstance(tables[0], dict)
+            else None
+        )
+    elif kind == "prom_remote_write_then_query":
+        remote_write = scenario.get("remote_write")
+        database = remote_write.get("database") if isinstance(remote_write, dict) else None
+    else:
+        return None, f"CPU profiling does not cover scenario kind {kind!r}"
+    if not isinstance(database, str) or not database:
+        return None, "fixture plan has no query database"
+    queries = scenario.get("queries")
+    if not isinstance(queries, list):
+        return None, "fixture plan has no configured queries"
+    for query in queries:
+        if not isinstance(query, dict):
+            continue
+        query_kind = query.get("kind")
+        statement = query.get("query")
+        iterations = query.get("iterations", 1)
+        if (
+            query_kind in {"sql", "tql"}
+            and isinstance(statement, str)
+            and statement
+            and isinstance(iterations, int)
+            and iterations > 0
+        ):
+            name = query.get("name")
+            return {
+                "name": name if isinstance(name, str) else statement,
+                "kind": query_kind,
+                "query": statement,
+                "database": database,
+            }, None
+    return None, "no timed SQL or TQL query is configured"
+
+
+def binary_version(binary: Path) -> dict[str, str]:
+    result: dict[str, str] = {"path": str(binary)}
+    try:
+        completed = subprocess.run(
+            [str(binary), "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        output = completed.stdout.strip() or completed.stderr.strip()
+        if completed.returncode == 0:
+            result["version"] = output
+        else:
+            result["error"] = f"--version exited {completed.returncode}: {output}"
+    except Exception as err:  # noqa: BLE001 - version metadata must not hide profiling artifacts
+        result["error"] = repr(err)
+    return result
+
+
+def query_response_error(payload: Any) -> str | None:
+    """Return a `/v1/sql` failure using the runner's response contract."""
+    if not isinstance(payload, dict):
+        return "query response was not a JSON object"
+    for key in ("error", "err_msg", "error_msg"):
+        value = payload.get(key)
+        if value is not None and value != "" and value is not False and value != 0:
+            return f"query response {key}: {value}"
+    error_code = payload.get("error_code")
+    if error_code is not None and str(error_code).lower() not in {"", "0", "success"}:
+        return f"query response error_code {error_code}: {payload.get('message')}"
+    code = payload.get("code")
+    if "output" not in payload and code is not None and str(code).lower() not in {"", "0", "success"}:
+        return f"query response code {code}: {payload.get('message')}"
+    return None
+
+
+def post_profile_query(
+    target: RunTarget,
+    query: dict[str, str],
+    timeout_s: float,
+) -> tuple[bool, str | None]:
+    body = urllib.parse.urlencode(
+        {"sql": query["query"], "db": query["database"], "format": "json"},
+    ).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{target.http_port}/v1/sql",
+        data=body,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            payload = response.read()
+            if response.status >= 400:
+                return False, f"HTTP {response.status}"
+        error = query_response_error(json.loads(payload))
+        return error is None, error
+    except Exception as err:  # noqa: BLE001 - request diagnostics belong in the profile manifest
+        return False, repr(err)
+
+
+def download_cpu_profile(port: int, output: Path) -> None:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/debug/prof/cpu?seconds={CPU_PROFILE_SECONDS}&frequency={CPU_PROFILE_FREQUENCY}&output=proto",
+        data=b"",
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=CPU_PROFILE_TIMEOUT_SECONDS) as response:
+        if response.status >= 400:
+            raise RuntimeError(f"CPU profile request returned HTTP {response.status}")
+        payload = response.read()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(payload)
+        if not payload:
+            raise RuntimeError("CPU profile response was empty")
+
+
+def collect_target_cpu_profiles(
+    target: RunTarget,
+    query: dict[str, str],
+    work_dir: Path,
+    manifest_target: dict[str, Any],
+    http_timeout: float,
+) -> None:
+    """Profile one target while executing only during the sampling interval."""
+    profiles = manifest_target["profiles"]
+    workers: list[threading.Thread] = []
+    try:
+        for component, port in (("frontend", target.http_port), ("datanode", target.datanode_http_port)):
+            artifact = work_dir / "logs" / "cpu-profiles" / target.name / f"{component}.pb"
+            profile: dict[str, Any] = {
+                "component": component,
+                "endpoint": f"http://127.0.0.1:{port}/debug/prof/cpu",
+                "path": str(artifact.relative_to(work_dir)),
+                "status": "running",
+            }
+            profiles.append(profile)
+
+            def run_profile(record: dict[str, Any] = profile, profile_port: int = port, profile_path: Path = artifact) -> None:
+                try:
+                    download_cpu_profile(profile_port, profile_path)
+                    record["status"] = "success"
+                except Exception as err:  # noqa: BLE001 - retain each component failure in the manifest
+                    record["status"] = "failure"
+                    record["error"] = repr(err)
+
+            worker = threading.Thread(
+                target=run_profile,
+                name=f"cpu-profile-{target.name}-{component}",
+            )
+            worker.start()
+            workers.append(worker)
+
+        deadline = time.monotonic() + CPU_PROFILE_SECONDS
+        query_result = manifest_target["query_execution"]
+        while time.monotonic() < deadline:
+            # The deadline controls launching new work. A query already launched may use
+            # its normal timeout and finish after sampling ends.
+            ok, error = post_profile_query(target, query, http_timeout)
+            query_result["attempts"] += 1
+            if ok:
+                query_result["successes"] += 1
+            else:
+                query_result["failures"] += 1
+                if len(query_result["errors"]) < 5:
+                    query_result["errors"].append(error)
+    finally:
+        # Reports can still be symbolizing if startup or query execution raises.
+        # Join before the caller reaches stop_all and terminates their components.
+        for worker in workers:
+            worker.join()
+
+
+def collect_cpu_profiles(args: argparse.Namespace, plan: dict[str, Any], work_dir: Path, targets: list[RunTarget]) -> str:
+    """Collect default CPU profiles for direct-SST and remote-write query cases."""
+    query, unsupported_reason = select_cpu_profile_query(plan)
+    manifest: dict[str, Any] = {
+        "status": "unsupported",
+        "sampling": {
+            "seconds": CPU_PROFILE_SECONDS,
+            "frequency": CPU_PROFILE_FREQUENCY,
+            "output": "proto",
+            "request_timeout_seconds": CPU_PROFILE_TIMEOUT_SECONDS,
+        },
+        "binaries": {target.name: binary_version(target.binary) for target in targets},
+        "query": {
+            "selection": "first timed SQL or TQL query",
+            "selected": query,
+            "unsupported_reason": unsupported_reason,
+        },
+        "targets": [],
+        "errors": [],
+    }
+    if query is not None:
+        for target in targets:  # Base and candidate intentionally do not profile concurrently.
+            target_manifest: dict[str, Any] = {
+                "role": target.name,
+                "query_execution": {"attempts": 0, "successes": 0, "failures": 0, "errors": []},
+                "profiles": [],
+            }
+            manifest["targets"].append(target_manifest)
+            try:
+                collect_target_cpu_profiles(
+                    target,
+                    query,
+                    work_dir,
+                    target_manifest,
+                    float(args.http_timeout),
+                )
+            except Exception as err:  # noqa: BLE001 - save the partial manifest before failing the case
+                target_manifest["error"] = repr(err)
+                manifest["errors"].append(f"{target.name}: {err!r}")
+        failed_profiles = [
+            profile for target in manifest["targets"] for profile in target["profiles"]
+            if profile["status"] != "success"
+        ]
+        failed_queries = [
+            target
+            for target in manifest["targets"]
+            if (
+                target["query_execution"]["successes"] == 0
+                or target["query_execution"]["failures"]
+                or target.get("error")
+            )
+        ]
+        manifest["status"] = "failure" if failed_profiles or failed_queries else "success"
+    manifest_path = work_dir / CPU_PROFILE_MANIFEST
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if manifest["status"] != "success":
+        if manifest["status"] == "unsupported":
+            reason = unsupported_reason
+        else:
+            reason = manifest["errors"] or "profile or workload query failed"
+        print(f"CPU profile {manifest['status']}: {reason}; manifest: {manifest_path}", flush=True)
+    return manifest["status"]
+
 def run_direct_case(
     args: argparse.Namespace,
     case_path: Path,
@@ -303,6 +556,7 @@ def run_direct_case(
     candidate_bin: Path,
     fixture_generator: Path,
     runner: Path,
+    plan: dict[str, Any],
 ) -> int:
     ports = allocate_ports(16)
     targets = [
@@ -378,7 +632,9 @@ def run_direct_case(
             for target in targets:
                 restart_component(target, "frontend", procs)
             status = subprocess.run(measure, check=False).returncode
-        return status
+        if status != 0:
+            return status
+        return 0 if collect_cpu_profiles(args, plan, work_dir, targets) == "success" else 1
     finally:
         stop_all(targets, procs)
 
@@ -391,6 +647,7 @@ def run_remote_case(
     candidate_bin: Path,
     fixture_generator: Path,
     runner: Path,
+    plan: dict[str, Any],
 ) -> int:
     ports = allocate_ports(16)
     targets = [
@@ -454,6 +711,9 @@ def run_remote_case(
         measure_status = subprocess.run(measure, check=False).returncode
         if measure_status != 0 and not report.exists():
             return measure_status
+        profile_status = "unsupported"
+        if measure_status == 0:
+            profile_status = collect_cpu_profiles(args, plan, work_dir, targets)
 
         for target in targets:
             stop_component(target, "datanode", procs)
@@ -470,7 +730,11 @@ def run_remote_case(
         if finalize_status != 0:
             return finalize_status
         final_report = json.loads(report.read_text(encoding="utf-8"))
-        return 1 if measure_status != 0 or final_report.get("status") == "failed" else 0
+        return 1 if (
+            measure_status != 0
+            or profile_status != "success"
+            or final_report.get("status") == "failed"
+        ) else 0
     finally:
         stop_all(targets, procs)
 
@@ -556,6 +820,7 @@ def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
                 candidate_bin,
                 fixture_generator,
                 runner,
+                plan,
             )
         if kind == "prom_remote_write_then_query":
             return run_remote_case(
@@ -566,6 +831,7 @@ def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
                 candidate_bin,
                 fixture_generator,
                 runner,
+                plan,
             )
         if kind == "otlp_trace_load":
             return run_otlp_case(
