@@ -33,7 +33,10 @@ use crate::range_array::RangeArray;
     display_name = prom_avg_over_time
 )]
 pub fn avg_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    compute::sum(values).map(|result| result / values.len() as f64)
+    // `sum` already skips null slots and yields `None` for an all-null window, so only the
+    // divisor needs to count samples instead of slots.
+    let sample_count = values.len() - values.null_count();
+    compute::sum(values).map(|result| result / sample_count as f64)
 }
 
 /// The minimum value of all points in the specified interval.
@@ -87,11 +90,8 @@ pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
     display_name = prom_count_over_time
 )]
 pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        Some(values.len() as f64)
-    }
+    let sample_count = values.len() - values.null_count();
+    (sample_count > 0).then_some(sample_count as f64)
 }
 
 /// The most recent point value in specified interval.
@@ -101,7 +101,7 @@ pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> 
     display_name = prom_last_over_time
 )]
 pub fn last_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    values.values().last().copied()
+    values.iter().flatten().last()
 }
 
 /// absent_over_time returns an empty vector if the range vector passed to it has any
@@ -113,7 +113,11 @@ pub fn last_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> O
     display_name = prom_absent_over_time
 )]
 pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() { Some(1.0) } else { None }
+    if values.null_count() == values.len() {
+        Some(1.0)
+    } else {
+        None
+    }
 }
 
 /// the value 1 for any series in the specified interval.
@@ -123,7 +127,7 @@ pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
     display_name = prom_present_over_time
 )]
 pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() { None } else { Some(1.0) }
+    (values.null_count() < values.len()).then_some(1.0)
 }
 
 /// the population standard variance of the values in the specified interval.
@@ -135,26 +139,21 @@ pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -
     display_name = prom_stdvar_over_time
 )]
 pub fn stdvar_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        let mut count = 0;
-        let mut mean: f64 = 0.0;
-        let mut result: f64 = 0.0;
-        for value in values {
-            let value = value.unwrap();
-            let new_count = count + 1;
-            let delta1 = value - mean;
-            let new_mean = delta1 / new_count as f64 + mean;
-            let delta2 = value - new_mean;
-            let new_result = result + delta1 * delta2;
+    let mut count = 0;
+    let mut mean: f64 = 0.0;
+    let mut result: f64 = 0.0;
+    for value in values.iter().flatten() {
+        let new_count = count + 1;
+        let delta1 = value - mean;
+        let new_mean = delta1 / new_count as f64 + mean;
+        let delta2 = value - new_mean;
+        let new_result = result + delta1 * delta2;
 
-            count += 1;
-            mean = new_mean;
-            result = new_result;
-        }
-        Some(result / count as f64)
+        count = new_count;
+        mean = new_mean;
+        result = new_result;
     }
+    (count > 0).then(|| result / count as f64)
 }
 
 /// the population standard deviation of the values in the specified interval.
@@ -165,35 +164,32 @@ pub fn stdvar_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
     display_name = prom_stddev_over_time
 )]
 pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        let mut count = 0.0;
-        let mut mean = 0.0;
-        let mut comp_mean = 0.0;
-        let mut deviations_sum_sq = 0.0;
-        let mut comp_deviations_sum_sq = 0.0;
-        for v in values {
-            count += 1.0;
-            let current_value = v.unwrap();
-            let delta = current_value - (mean + comp_mean);
-            let (new_mean, new_comp_mean) = compensated_sum_inc(delta / count, mean, comp_mean);
-            mean = new_mean;
-            comp_mean = new_comp_mean;
-            let (new_deviations_sum_sq, new_comp_deviations_sum_sq) = compensated_sum_inc(
-                delta * (current_value - (mean + comp_mean)),
-                deviations_sum_sq,
-                comp_deviations_sum_sq,
-            );
-            deviations_sum_sq = new_deviations_sum_sq;
-            comp_deviations_sum_sq = new_comp_deviations_sum_sq;
-        }
-        Some(((deviations_sum_sq + comp_deviations_sum_sq) / count).sqrt())
+    let mut count = 0.0;
+    let mut mean = 0.0;
+    let mut comp_mean = 0.0;
+    let mut deviations_sum_sq = 0.0;
+    let mut comp_deviations_sum_sq = 0.0;
+    for current_value in values.iter().flatten() {
+        count += 1.0;
+        let delta = current_value - (mean + comp_mean);
+        let (new_mean, new_comp_mean) = compensated_sum_inc(delta / count, mean, comp_mean);
+        mean = new_mean;
+        comp_mean = new_comp_mean;
+        let (new_deviations_sum_sq, new_comp_deviations_sum_sq) = compensated_sum_inc(
+            delta * (current_value - (mean + comp_mean)),
+            deviations_sum_sq,
+            comp_deviations_sum_sq,
+        );
+        deviations_sum_sq = new_deviations_sum_sq;
+        comp_deviations_sum_sq = new_comp_deviations_sum_sq;
     }
+    (count > 0.0).then(|| ((deviations_sum_sq + comp_deviations_sum_sq) / count).sqrt())
 }
 
 #[cfg(test)]
 mod test {
+    use datafusion::arrow::buffer::NullBuffer;
+
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
 
@@ -561,6 +557,73 @@ mod test {
             RangeArray::from_ranges(values_array, ranges).unwrap(),
             vec![],
             vec![Some(0.0), Some(3.249615361854384)],
+        );
+    }
+    /// Timestamps and value ranges shared by the null-sample assertions below.
+    fn null_sample_range_arrays() -> (RangeArray, RangeArray) {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values([
+            0i64, 1000, 2000, 3000,
+        ]));
+        // Samples are 2.0@0 and 8.0@3000; the null slots keep a payload that would skew every
+        // aggregate if it were read.
+        let values_array = Arc::new(Float64Array::new(
+            vec![2.0, 1000.0, -1000.0, 8.0].into(),
+            Some(NullBuffer::from_iter([true, false, false, true])),
+        ));
+        // The second window holds no sample at all.
+        let ranges = [(0, 4), (1, 2)];
+
+        (
+            RangeArray::from_ranges(ts_array, ranges).unwrap(),
+            RangeArray::from_ranges(values_array, ranges).unwrap(),
+        )
+    }
+
+    #[test]
+    fn over_time_functions_skip_null_samples() {
+        let (ts_array, value_array) = null_sample_range_arrays();
+        simple_range_udf_runner(
+            AvgOverTime::scalar_udf(),
+            ts_array,
+            value_array,
+            vec![],
+            vec![Some(5.0), None],
+        );
+
+        let (ts_array, value_array) = null_sample_range_arrays();
+        simple_range_udf_runner(
+            CountOverTime::scalar_udf(),
+            ts_array,
+            value_array,
+            vec![],
+            vec![Some(2.0), None],
+        );
+
+        let (ts_array, value_array) = null_sample_range_arrays();
+        simple_range_udf_runner(
+            LastOverTime::scalar_udf(),
+            ts_array,
+            value_array,
+            vec![],
+            vec![Some(8.0), None],
+        );
+
+        let (ts_array, value_array) = null_sample_range_arrays();
+        simple_range_udf_runner(
+            StdvarOverTime::scalar_udf(),
+            ts_array,
+            value_array,
+            vec![],
+            vec![Some(9.0), None],
+        );
+
+        let (ts_array, value_array) = null_sample_range_arrays();
+        simple_range_udf_runner(
+            StddevOverTime::scalar_udf(),
+            ts_array,
+            value_array,
+            vec![],
+            vec![Some(3.0), None],
         );
     }
 }

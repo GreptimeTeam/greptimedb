@@ -46,7 +46,7 @@ use datafusion::sql::TableReference;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchema, NullEquality};
 use datafusion_expr::expr::WindowFunctionParams;
-use datafusion_expr::utils::conjunction;
+use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
     ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
 };
@@ -3366,8 +3366,8 @@ impl PromPlanner {
         // This error context should be computed lazily: the planner may set `ctx.table_name` to
         // `None` for derived expressions (e.g. after projecting the LHS of a vector-vector
         // comparison filter). Eagerly calling `table_ref()?` here can turn a valid plan into
-        // a `TableNameNotFound` error even when `conjunction(exprs)` succeeds.
-        conjunction(exprs).with_context(|| ValueNotFoundSnafu {
+        // a `TableNameNotFound` error even when `disjunction(exprs)` succeeds.
+        disjunction(exprs).with_context(|| ValueNotFoundSnafu {
             table: self
                 .table_ref()
                 .map(|t| t.to_quoted_string())

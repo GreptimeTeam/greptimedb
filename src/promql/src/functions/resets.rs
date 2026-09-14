@@ -31,24 +31,22 @@ use crate::range_array::RangeArray;
 /// used to count the number of times the time series starts over.
 #[range_fn(name = Resets, ret = Float64Array, display_name = prom_resets)]
 pub fn resets(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        let (first, rest) = values.values().split_first().unwrap();
-        let mut num_resets = 0;
-        let mut prev_element = first;
-        for cur_element in rest {
-            if cur_element < prev_element {
-                num_resets += 1;
-            }
-            prev_element = cur_element;
+    let mut samples = values.iter().flatten();
+    let mut prev_element = samples.next()?;
+    let mut num_resets = 0;
+    for cur_element in samples {
+        if cur_element < prev_element {
+            num_resets += 1;
         }
-        Some(num_resets as f64)
+        prev_element = cur_element;
     }
+    Some(num_resets as f64)
 }
 
 #[cfg(test)]
 mod test {
+    use datafusion::arrow::buffer::NullBuffer;
+
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
 
@@ -115,6 +113,23 @@ mod test {
             value_array_3,
             vec![],
             vec![Some(0.0), Some(0.0), Some(0.0), Some(0.0), None],
+        );
+    }
+    #[test]
+    fn resets_skips_null_samples() {
+        let values = Arc::new(Float64Array::new(
+            vec![10.0, 7.0, 10.0].into(),
+            Some(NullBuffer::from(vec![true, false, true])),
+        ));
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values([
+            0i64, 1000, 2000,
+        ]));
+        simple_range_udf_runner(
+            Resets::scalar_udf(),
+            RangeArray::from_ranges(timestamps, [(0, 3), (1, 1)]).unwrap(),
+            RangeArray::from_ranges(values, [(0, 3), (1, 1)]).unwrap(),
+            vec![],
+            vec![Some(0.0), None],
         );
     }
 }
