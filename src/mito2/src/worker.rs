@@ -169,7 +169,9 @@ impl WorkerGroup {
     /// Starts a worker group.
     ///
     /// The number of workers should be power of two.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start<S: LogStore>(
+        data_home: &str,
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
@@ -195,11 +197,7 @@ impl WorkerGroup {
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
-        let series_index_store = if config.experimental_series_index_root.trim().is_empty() {
-            None
-        } else {
-            Some(new_fs_cache_store(&config.experimental_series_index_root).await?)
-        };
+        let series_index_store = series_index_store_from_config(&config, data_home).await?;
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -391,6 +389,7 @@ impl WorkerGroup {
     /// The number of workers should be power of two.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_for_test<S: LogStore>(
+        data_home: &str,
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
@@ -410,11 +409,7 @@ impl WorkerGroup {
         });
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
-        let series_index_store = if config.experimental_series_index_root.trim().is_empty() {
-            None
-        } else {
-            Some(new_fs_cache_store(&config.experimental_series_index_root).await?)
-        };
+        let series_index_store = series_index_store_from_config(&config, data_home).await?;
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -515,6 +510,23 @@ impl WorkerGroup {
 fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
     ((id.table_id() as usize % num_workers) + (id.region_number() as usize % num_workers))
         % num_workers
+}
+
+/// Opens the fixed local series-index store only when the feature is enabled.
+async fn series_index_store_from_config(
+    config: &MitoConfig,
+    data_home: &str,
+) -> Result<Option<ObjectStore>> {
+    if !config.experimental_enable_series_index {
+        return Ok(None);
+    }
+
+    let root = series_index_dir(data_home);
+    new_fs_cache_store(&root.to_string_lossy()).await.map(Some)
+}
+
+fn series_index_dir(data_home: &str) -> std::path::PathBuf {
+    Path::new(data_home).join("series_index")
 }
 
 pub async fn write_cache_from_config(
@@ -1618,20 +1630,58 @@ mod tests {
         assert_eq!(index, 1);
     }
 
+    #[test]
+    fn test_series_index_dir() {
+        assert_eq!(series_index_dir("/data"), Path::new("/data/series_index"));
+        assert_eq!(series_index_dir("/data/"), Path::new("/data/series_index"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_series_index_dir_windows() {
+        for (data_home, expected) in [
+            (r"C:\data", r"C:\data\series_index"),
+            ("C:/data/", r"C:\data\series_index"),
+            ("//server/share/data", r"\\server\share\data\series_index"),
+            (r"\\server\share\data", r"\\server\share\data\series_index"),
+        ] {
+            assert_eq!(series_index_dir(data_home), Path::new(expected));
+        }
+    }
+
     #[tokio::test]
     async fn test_worker_group_start_stop() {
         let env = TestEnv::with_prefix("group-stop").await;
-        let group = env
-            .create_worker_group(MitoConfig {
-                num_workers: 4,
-                experimental_series_index_root: "series-index".to_string(),
-                ..Default::default()
-            })
-            .await;
+        let root = env.data_home().join("series_index");
+        for (run, enabled) in [false, true, false].into_iter().enumerate() {
+            let group = env
+                .create_worker_group(MitoConfig {
+                    num_workers: 4,
+                    experimental_enable_series_index: enabled,
+                    ..Default::default()
+                })
+                .await;
 
-        tokio::time::timeout(Duration::from_secs(5), group.stop())
-            .await
-            .expect("series-index tasks should stop without waiting for their interval")
-            .unwrap();
+            for worker in &group.workers {
+                assert_eq!(worker.series_index_task_state.is_some(), enabled);
+                assert_eq!(worker.series_index_handle.lock().await.is_some(), enabled);
+            }
+            assert_eq!(root.is_dir(), run > 0);
+            if enabled {
+                tokio::fs::write(root.join("retained"), b"index")
+                    .await
+                    .unwrap();
+            } else if root.exists() {
+                assert_eq!(
+                    tokio::fs::read(root.join("retained")).await.unwrap(),
+                    b"index"
+                );
+            }
+
+            tokio::time::timeout(Duration::from_secs(5), group.stop())
+                .await
+                .expect("series-index tasks should stop without waiting for their interval")
+                .unwrap();
+        }
     }
 }
