@@ -10057,6 +10057,7 @@ dependencies = [
  "arrow-ipc 58.3.0",
  "async-stream",
  "async-trait",
+ "axum 0.8.4",
  "bytes",
  "catalog",
  "chrono",
@@ -10117,6 +10118,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.14.2",
  "tracing",
+ "url",
 ]
 
 [[package]]
