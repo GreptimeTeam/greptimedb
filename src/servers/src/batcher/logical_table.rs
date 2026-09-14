@@ -40,6 +40,8 @@ use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_runtime::spawn_global;
 use common_telemetry::{debug, error, warn};
 use datatypes::timestamp::append_timestamps;
+use meter_core::data::MeterRecord;
+use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -275,6 +277,17 @@ impl LogicalTablePendingRowsBatcher {
         if total_rows == 0 {
             return Ok(0);
         }
+
+        // Flushes dispatch directly to datanodes, so admit once before enqueueing.
+        write_meter!(MeterRecord::new(
+            ctx.current_catalog().to_string(),
+            ctx.current_schema(),
+            0,
+            total_rows as u64,
+            ctx.channel() as u8,
+        ))
+        .await
+        .context(error::WriteRejectedSnafu)?;
 
         let permit = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED

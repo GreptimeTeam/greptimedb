@@ -146,6 +146,12 @@ pub fn validate_database_option_value(
     key: &str,
     value: Option<&str>,
 ) -> std::result::Result<(), &'static str> {
+    if key == INGEST_ROWS_RATE_LIMIT_KEY {
+        return value
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|_| ())
+            .ok_or("expected a non-negative integer fitting in u64");
+    }
     let (minimum, constraint) = match key {
         TWCS_TRIGGER_FILE_NUM
         | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
@@ -997,6 +1003,27 @@ mod tests {
                     "{key}: {boundary}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_database_ingest_rate_limit_value_boundaries() {
+        for invalid in [
+            None,
+            Some(""),
+            Some("abc"),
+            Some("1000/s"),
+            Some("-1"),
+            Some("1.5"),
+            Some("18446744073709551616"),
+        ] {
+            assert!(validate_database_option_value(INGEST_ROWS_RATE_LIMIT_KEY, invalid).is_err());
+        }
+        let maximum = u64::MAX.to_string();
+        for valid in ["0", "1", maximum.as_str()] {
+            assert!(
+                validate_database_option_value(INGEST_ROWS_RATE_LIMIT_KEY, Some(valid)).is_ok()
+            );
         }
     }
 

@@ -13617,6 +13617,8 @@ dependencies = [
  "local-ip-address",
  "log-query",
  "loki-proto",
+ "meter-core",
+ "meter-macros",
  "metric-engine",
  "mime_guess",
  "moka",
