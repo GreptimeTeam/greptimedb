@@ -1978,16 +1978,8 @@ mod tests {
         }
 
         #[derive(Debug, Deserialize)]
-        struct LegacyGcRegions {
-            regions: Vec<RegionId>,
-            file_refs_manifest: serde_json::Value,
-            full_file_listing: bool,
-        }
-
-        #[derive(Debug, Deserialize)]
         enum LegacyInstruction {
             GetFileRefs(LegacyGetFileRefs),
-            GcRegions(LegacyGcRegions),
         }
 
         let get_file_refs = Instruction::GetFileRefs(GetFileRefs {
@@ -1997,9 +1989,7 @@ mod tests {
         let get_file_refs_json = serde_json::to_string(&get_file_refs).unwrap();
         let legacy_get_file_refs: LegacyInstruction =
             serde_json::from_str(&get_file_refs_json).unwrap();
-        let LegacyInstruction::GetFileRefs(legacy_get_file_refs) = legacy_get_file_refs else {
-            panic!("expected legacy GetFileRefs instruction");
-        };
+        let LegacyInstruction::GetFileRefs(legacy_get_file_refs) = legacy_get_file_refs;
         assert_eq!(legacy_get_file_refs.query_regions.len(), 1);
         assert!(legacy_get_file_refs.related_regions.is_empty());
 
@@ -2023,21 +2013,6 @@ mod tests {
         });
         let packed_json = serde_json::to_string(&packed).unwrap();
         assert!(serde_json::from_str::<LegacyInstruction>(&packed_json).is_err());
-
-        let legacy_gc = serde_json::json!({
-            "GcRegions": {
-                "regions": [],
-                "file_refs_manifest": {},
-                "full_file_listing": false
-            }
-        });
-        let LegacyInstruction::GcRegions(legacy_gc) = serde_json::from_value(legacy_gc).unwrap()
-        else {
-            panic!("expected legacy GcRegions instruction");
-        };
-        assert!(legacy_gc.regions.is_empty());
-        assert!(!legacy_gc.full_file_listing);
-        assert!(legacy_gc.file_refs_manifest.is_object());
     }
 
     #[test]
