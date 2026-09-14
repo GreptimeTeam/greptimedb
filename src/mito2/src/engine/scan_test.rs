@@ -18,6 +18,7 @@ use std::sync::Arc;
 use api::helper::encode_json_value;
 use api::v1::Rows;
 use api::v1::helper::row;
+use api::v1::region::{StrictWindow, compact_request};
 use api::v1::value::ValueData;
 use arrow_schema::extension::ExtensionType;
 use common_base::readable_size::ReadableSize;
