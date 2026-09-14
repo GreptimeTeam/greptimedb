@@ -36,7 +36,7 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{
     ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, UInt64Array,
 };
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef, UInt32Type};
+use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::types::json_type::JsonNativeType;
@@ -137,25 +137,14 @@ pub(crate) fn column_values(
     column_index: usize,
     is_min: bool,
 ) -> Option<ArrayRef> {
-    column_values_by_type(
-        row_groups,
-        &column.column_schema.data_type.as_arrow_type(),
-        column_index,
-        is_min,
-    )
-}
-
-/// Returns min/max values for a top-level column with the given Arrow data type.
-/// Resolves its leaf from the actual Parquet schema, not an inferred Arrow layout.
-pub(crate) fn column_values_by_type(
-    row_groups: &[impl Borrow<RowGroupMetaData>],
-    data_type: &ArrowDataType,
-    column_index: usize,
-    is_min: bool,
-) -> Option<ArrayRef> {
     let column_index =
         scalar_leaf_index(row_groups.first()?.borrow().schema_descr(), column_index)?;
-    let null_scalar: ScalarValue = data_type.try_into().ok()?;
+    let null_scalar: ScalarValue = column
+        .column_schema
+        .data_type
+        .as_arrow_type()
+        .try_into()
+        .ok()?;
     let scalar_values = row_groups
         .iter()
         .map(|meta| {
