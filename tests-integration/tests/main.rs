@@ -36,6 +36,7 @@ mod repartition;
 mod repartition_event;
 #[macro_use]
 mod repartition_expr_version;
+mod metric_export;
 mod mysql;
 mod reconciliation_event;
 mod view_ddl_event;
