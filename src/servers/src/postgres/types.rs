@@ -16,19 +16,21 @@ mod error;
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
 use arrow::array::{Array, AsArray};
 use arrow_pg::encoder::{Encoder, encode_value};
 use arrow_pg::list_encoder::encode_list;
 use arrow_schema::{DataType, TimeUnit};
+use bytes::BufMut;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, map_dictionary_to_values_data_type};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
+use datafusion_pg_catalog::pg_catalog::PgCatalogStaticTables;
 use datafusion_pg_catalog::pg_catalog::oid_field::{self, OID_ALIAS_KEY};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonSettings;
@@ -42,7 +44,9 @@ use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::FieldInfo;
 use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::types::ToSqlText;
 use pgwire::types::format::FormatOptions as PgFormatOptions;
+use postgres_types::{IsNull, ToSql};
 use query::planner::DfLogicalPlanner;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -99,7 +103,11 @@ fn pg_oid_alias_type(column: &datatypes::schema::ColumnSchema) -> Option<Type> {
         return None;
     }
 
-    match column.metadata().get(OID_ALIAS_KEY)?.as_str() {
+    pg_oid_alias_type_name(column.metadata().get(OID_ALIAS_KEY)?)
+}
+
+fn pg_oid_alias_type_name(alias: &str) -> Option<Type> {
+    match alias {
         oid_field::kind::OID => Some(Type::OID),
         oid_field::kind::REGPROC => Some(Type::REGPROC),
         oid_field::kind::REGCLASS => Some(Type::REGCLASS),
@@ -113,6 +121,116 @@ fn pg_oid_alias_type(column: &datatypes::schema::ColumnSchema) -> Option<Type> {
         "regdictionary" => Some(Type::REGDICTIONARY),
         "regrole" => Some(Type::REGROLE),
         _ => None,
+    }
+}
+
+/// OIDs keyed by their unambiguous `pg_proc.proname` in the static catalog.
+static REGPROC_OIDS: LazyLock<std::result::Result<HashMap<String, Option<u32>>, String>> =
+    LazyLock::new(|| {
+        let tables = PgCatalogStaticTables::try_new()
+            .map_err(|e| format!("load static PostgreSQL catalog tables: {e}"))?;
+        let mut oids = HashMap::new();
+
+        for batch in tables.pg_proc.data() {
+            let names = batch
+                .column_by_name("proname")
+                .ok_or("pg_proc is missing proname")?;
+            let procedure_oids = batch
+                .column_by_name("oid")
+                .ok_or("pg_proc is missing oid")?;
+            if names.data_type() != &DataType::Utf8
+                || procedure_oids.data_type() != &DataType::Int32
+            {
+                return Err("pg_proc has unexpected proname or oid types".to_string());
+            }
+
+            let names = names.as_string::<i32>();
+            let procedure_oids = procedure_oids.as_primitive::<arrow::datatypes::Int32Type>();
+            for (name, oid) in names.iter().zip(procedure_oids.iter()) {
+                let (Some(name), Some(oid)) = (name, oid) else {
+                    continue;
+                };
+                let oid = u32::try_from(oid)
+                    .map_err(|_| format!("pg_proc contains negative oid {oid}"))?;
+
+                if oids.insert(name.to_string(), Some(oid)).is_some() {
+                    oids.insert(name.to_string(), None);
+                }
+            }
+        }
+
+        Ok(oids)
+    });
+
+#[derive(Debug)]
+struct OidAliasError(String);
+
+impl std::fmt::Display for OidAliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OidAliasError {}
+
+fn resolve_oid_alias(value: &str, alias: &str) -> std::result::Result<u32, OidAliasError> {
+    if value == "-" {
+        return Ok(0);
+    }
+
+    if let Ok(oid) = value.parse() {
+        return Ok(oid);
+    }
+
+    if alias == oid_field::kind::REGPROC {
+        let oids = REGPROC_OIDS
+            .as_ref()
+            .map_err(|e| OidAliasError(e.clone()))?;
+        return match oids.get(value) {
+            Some(Some(oid)) => Ok(*oid),
+            Some(None) => Err(OidAliasError(format!("ambiguous regproc name: {value}"))),
+            None => Err(OidAliasError(format!("unknown regproc name: {value}"))),
+        };
+    }
+
+    Err(OidAliasError(format!(
+        "named oid aliases are only supported for regproc: {value}"
+    )))
+}
+
+#[derive(Debug)]
+struct OidAliasValue<'a> {
+    text: &'a str,
+    alias: &'a str,
+}
+
+impl ToSql for OidAliasValue<'_> {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        let oid = resolve_oid_alias(self.text, self.alias)?;
+        out.put_u32(oid);
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        pg_oid_alias_type_name(ty.name()).is_some()
+    }
+
+    postgres_types::to_sql_checked!();
+}
+
+impl ToSqlText for OidAliasValue<'_> {
+    fn to_sql_text(
+        &self,
+        _ty: &Type,
+        out: &mut bytes::BytesMut,
+        _format_options: &PgFormatOptions,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.put_slice(self.text.as_bytes());
+        Ok(IsNull::No)
     }
 }
 
@@ -259,6 +377,22 @@ where
                 }
                 DataType::Struct(_) => {
                     encode_struct(query_ctx, Default::default(), encoder, pg_field)?;
+                }
+                DataType::Utf8 => {
+                    let arrow_field = arrow_schema.field(j);
+                    if let Some(alias) = arrow_field
+                        .metadata()
+                        .get(OID_ALIAS_KEY)
+                        .filter(|alias| pg_oid_alias_type_name(alias).is_some())
+                    {
+                        let value = OidAliasValue {
+                            text: column.as_string::<i32>().value(i),
+                            alias,
+                        };
+                        encoder.encode_field(&value, pg_field)?;
+                    } else {
+                        encode_value(encoder, column, i, arrow_field, pg_field)?;
+                    }
                 }
                 _ => {
                     // Encode value using arrow-pg
@@ -1329,7 +1463,9 @@ mod test {
     use futures::{StreamExt as FuturesStreamExt, stream};
     use pgwire::api::Type;
     use pgwire::api::portal::{Format, Portal};
-    use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
+    use pgwire::api::results::{
+        CopyEncoder, CopyTextOptions, DataRowEncoder, FieldFormat, FieldInfo,
+    };
     use pgwire::api::stmt::StoredStatement;
     use pgwire::messages::extendedquery::Bind;
     use session::context::QueryContextBuilder;
@@ -1783,6 +1919,209 @@ mod test {
         for row in rows {
             assert_eq!(row.field_count, pg_schema_ref.len() as i16);
         }
+    }
+
+    #[test]
+    fn test_encode_utf8_oid_alias_data() {
+        let aliases = [
+            ("regproc_binary", FieldFormat::Binary, Some("boolrecv")),
+            ("regproc_text", FieldFormat::Text, Some("boolrecv")),
+            ("regproc_unknown_text", FieldFormat::Text, Some("unknown")),
+            ("regproc_ambiguous_text", FieldFormat::Text, Some("int4")),
+            ("regtype_text", FieldFormat::Text, Some("int4recv")),
+            ("regproc_zero", FieldFormat::Binary, Some("-")),
+            ("regproc_null", FieldFormat::Binary, None),
+        ];
+        let mut columns = Vec::new();
+        let mut values = Vec::new();
+        let mut formats = Vec::new();
+
+        for (name, format, value) in aliases {
+            let mut column = ColumnSchema::new(name, ConcreteDataType::string_datatype(), true);
+            column.mut_metadata().insert(
+                OID_ALIAS_KEY.to_string(),
+                if name == "regtype_text" {
+                    oid_field::kind::REGTYPE.to_string()
+                } else {
+                    oid_field::kind::REGPROC.to_string()
+                },
+            );
+            columns.push(column);
+            values.push(Arc::new(StringVector::from(vec![value])) as VectorRef);
+            formats.push(format.value());
+        }
+
+        columns.push(ColumnSchema::new(
+            "varchar",
+            ConcreteDataType::string_datatype(),
+            false,
+        ));
+        values.push(Arc::new(StringVector::from(vec![Some("varchar")])) as VectorRef);
+        formats.push(FieldFormat::Binary.value());
+
+        let schema = Arc::new(Schema::new(columns));
+        let pg_schema =
+            Arc::new(schema_to_pg(&schema, &Format::Individual(formats), None).unwrap());
+        let record_batch = RecordBatch::new(schema.clone(), values).unwrap();
+        let query_context = QueryContextBuilder::default()
+            .configuration_parameter(Default::default())
+            .build()
+            .into();
+        let row_stream = RecordBatchRowStream::new(
+            query_context,
+            pg_schema.clone(),
+            schema,
+            stream::once(async { Ok(record_batch) }),
+            DataRowEncoder::new(pg_schema),
+        );
+
+        let row = futures::executor::block_on(row_stream.into_future())
+            .0
+            .unwrap()
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(row.field_count, 8);
+        assert_eq!(
+            &row.data[..],
+            [
+                0, 0, 0, 4, 0, 0, 9, 132, // boolrecv (OID 2436), binary
+                0, 0, 0, 8, b'b', b'o', b'o', b'l', b'r', b'e', b'c', b'v', // text
+                0, 0, 0, 7, b'u', b'n', b'k', b'n', b'o', b'w', b'n', // unknown text
+                0, 0, 0, 4, b'i', b'n', b't', b'4', // ambiguous text
+                0, 0, 0, 8, b'i', b'n', b't', b'4', b'r', b'e', b'c', b'v', // regtype text
+                0, 0, 0, 4, 0, 0, 0, 0, // - is OID 0
+                255, 255, 255, 255, // NULL
+                0, 0, 0, 7, b'v', b'a', b'r', b'c', b'h', b'a', b'r',
+            ]
+        );
+    }
+
+    #[test]
+    fn test_encode_utf8_oid_alias_numeric_data() {
+        let aliases = [
+            oid_field::kind::OID,
+            oid_field::kind::REGPROC,
+            "regprocedure",
+            "regoper",
+            "regoperator",
+            oid_field::kind::REGCLASS,
+            oid_field::kind::REGTYPE,
+            oid_field::kind::REGNAMESPACE,
+            "regrole",
+            "regconfig",
+            "regdictionary",
+            "regcollation",
+        ];
+        let mut columns = Vec::new();
+        let mut values = Vec::new();
+        for alias in aliases {
+            let mut column = ColumnSchema::new(alias, ConcreteDataType::string_datatype(), false);
+            column
+                .mut_metadata()
+                .insert(OID_ALIAS_KEY.to_string(), alias.to_string());
+            columns.push(column);
+            values.push(Arc::new(StringVector::from(vec![Some("4294967295")])) as VectorRef);
+        }
+
+        let schema = Arc::new(Schema::new(columns));
+        let pg_schema = Arc::new(schema_to_pg(&schema, &Format::UnifiedBinary, None).unwrap());
+        let record_batch = RecordBatch::new(schema.clone(), values).unwrap();
+        let query_context = QueryContextBuilder::default()
+            .configuration_parameter(Default::default())
+            .build()
+            .into();
+        let row_stream = RecordBatchRowStream::new(
+            query_context,
+            pg_schema.clone(),
+            schema,
+            stream::once(async { Ok(record_batch) }),
+            DataRowEncoder::new(pg_schema),
+        );
+
+        let row = futures::executor::block_on(row_stream.into_future())
+            .0
+            .unwrap()
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(row.field_count, aliases.len() as i16);
+        assert_eq!(
+            &row.data[..],
+            &[[0, 0, 0, 4, 255, 255, 255, 255]; 12].concat()
+        );
+    }
+
+    #[test]
+    fn test_encode_utf8_oid_alias_binary_errors() {
+        for value in ["unknown", "int4"] {
+            let mut column =
+                ColumnSchema::new("regproc", ConcreteDataType::string_datatype(), false);
+            column.mut_metadata().insert(
+                OID_ALIAS_KEY.to_string(),
+                oid_field::kind::REGPROC.to_string(),
+            );
+            let schema = Arc::new(Schema::new(vec![column]));
+            let pg_schema = Arc::new(schema_to_pg(&schema, &Format::UnifiedBinary, None).unwrap());
+            let record_batch = RecordBatch::new(
+                schema.clone(),
+                vec![Arc::new(StringVector::from(vec![Some(value)])) as VectorRef],
+            )
+            .unwrap();
+            let query_context = QueryContextBuilder::default()
+                .configuration_parameter(Default::default())
+                .build()
+                .into();
+            let row_stream = RecordBatchRowStream::new(
+                query_context,
+                pg_schema.clone(),
+                schema,
+                stream::once(async { Ok(record_batch) }),
+                DataRowEncoder::new(pg_schema),
+            );
+
+            assert!(
+                futures::executor::block_on(row_stream.into_future())
+                    .0
+                    .unwrap()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_copy_text_utf8_oid_alias_preserves_named_value() {
+        let mut column = ColumnSchema::new("regproc", ConcreteDataType::string_datatype(), false);
+        column.mut_metadata().insert(
+            OID_ALIAS_KEY.to_string(),
+            oid_field::kind::REGPROC.to_string(),
+        );
+        let schema = Arc::new(Schema::new(vec![column]));
+        let pg_schema = Arc::new(schema_to_pg(&schema, &Format::UnifiedBinary, None).unwrap());
+        let record_batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(StringVector::from(vec![Some("unknown")])) as VectorRef],
+        )
+        .unwrap();
+        let query_context = QueryContextBuilder::default()
+            .configuration_parameter(Default::default())
+            .build()
+            .into();
+        let row_stream = RecordBatchRowStream::new(
+            query_context,
+            pg_schema.clone(),
+            schema,
+            stream::once(async { Ok(record_batch) }),
+            CopyEncoder::new_text(pg_schema, CopyTextOptions::default()),
+        );
+
+        let row = futures::executor::block_on(row_stream.into_future())
+            .0
+            .unwrap()
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(row.data.as_ref(), b"unknown\n");
     }
 
     #[test]
