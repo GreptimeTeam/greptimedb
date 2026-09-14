@@ -850,6 +850,7 @@ mod test {
     use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::memory::MemoryStream;
+    use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
     use futures::FutureExt;
@@ -1242,7 +1243,10 @@ mod test {
                 )));
                 let exec = rebuilt
                     .to_execution_plan(empty_exec_input)
-                    .with_new_children(vec![exec_input])
+                    .replace_children(
+                        vec![exec_input],
+                        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                    )
                     .unwrap();
                 let output =
                     datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())

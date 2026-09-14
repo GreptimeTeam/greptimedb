@@ -830,6 +830,7 @@ mod test {
     use datafusion::logical_expr::{
         EmptyRelation, Extension, LogicalPlan, Projection, UserDefinedLogicalNodeCore,
     };
+    use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
     use datafusion::prelude::SessionContext;
     use datafusion_expr::col;
 
@@ -1114,7 +1115,10 @@ mod test {
                 )));
                 let exec = rebuilt
                     .to_execution_plan(empty_exec_input)
-                    .with_new_children(vec![exec_input])
+                    .replace_children(
+                        vec![exec_input],
+                        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                    )
                     .unwrap();
                 let output =
                     datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
