@@ -407,11 +407,14 @@ impl ExecutionPlan for RegionScanExec {
         &self,
         f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
     ) -> datafusion_common::Result<TreeNodeRecursion> {
-        self.output_ordering
-            .as_ref()
-            .map_or(Ok(TreeNodeRecursion::Continue), |ordering| {
-                apply_expression_roots(ordering.iter().map(|sort_expr| &sort_expr.expr), f)
-            })
+        let pushed_dyn_filters = self.pushed_dyn_filters.lock().unwrap().clone();
+        apply_expression_roots(
+            self.output_ordering
+                .iter()
+                .flat_map(|ordering| ordering.iter().map(|sort_expr| &sort_expr.expr))
+                .chain(pushed_dyn_filters.iter()),
+            f,
+        )
     }
 
     fn with_new_children(
@@ -954,6 +957,52 @@ mod test {
         assert_eq!(
             stream.try_collect::<Vec<_>>().await.unwrap()[0].num_rows(),
             1
+        );
+    }
+
+    #[test]
+    fn test_apply_expressions_visits_pushed_dynamic_filters() {
+        let (_, plan) = dynamic_filter_fixture(5685);
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("a", 0))],
+            lit(true),
+        ));
+        let propagation = plan
+            .handle_child_pushdown_result(
+                FilterPushdownPhase::Post,
+                ChildPushdownResult {
+                    parent_filters: vec![ChildFilterPushdownResult {
+                        filter: dynamic_filter.clone(),
+                        child_results: vec![PushedDown::No],
+                    }],
+                    self_filters: vec![],
+                },
+                &datafusion::config::ConfigOptions::default(),
+            )
+            .unwrap();
+        assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
+
+        let mut visited = 0;
+        assert_eq!(
+            plan.apply_expressions(&mut |expr| {
+                visited += 1;
+                assert!(plan.pushed_dyn_filters.try_lock().is_ok());
+                assert_eq!(expr.expression_id(), dynamic_filter.expression_id());
+                assert_eq!(
+                    expr.downcast_ref::<DynamicFilterPhysicalExpr>().unwrap(),
+                    dynamic_filter.as_ref()
+                );
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap(),
+            TreeNodeRecursion::Continue
+        );
+        assert_eq!(visited, 1);
+
+        assert_eq!(
+            plan.apply_expressions(&mut |_| Ok(TreeNodeRecursion::Stop))
+                .unwrap(),
+            TreeNodeRecursion::Stop
         );
     }
 
