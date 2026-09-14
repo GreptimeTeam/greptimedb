@@ -48,6 +48,7 @@ use crate::read::range::RowGroupIndex;
 use crate::read::range_cache::{
     build_candidate_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
 };
+use crate::read::scan_memory::hold_reservation;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
 use crate::series_index::{METRIC_SERIES_ID_BATCH_SIZE, MetricSeriesId, MetricSeriesIdStream};
@@ -268,6 +269,7 @@ impl SeriesCandidateRangeBuilder {
             {
                 return Ok(None);
             }
+            let guard = self.stream_ctx.input.reserve_scan_memory(index)?;
             let mut reader_metrics = ReaderMetrics {
                 filter_metrics: new_filter_metrics(self.part_metrics.explain_verbose()),
                 ..Default::default()
@@ -320,7 +322,10 @@ impl SeriesCandidateRangeBuilder {
                 reader_metrics.observe_rows("candidate_series");
                 part_metrics.merge_reader_metrics(&reader_metrics, None);
             });
-            return Ok(Some(candidate_primary_key_stream(raw, filter)));
+            return Ok(Some(candidate_primary_key_stream(
+                Box::pin(hold_reservation(raw, guard)),
+                filter,
+            )));
         }
 
         UnexpectedSnafu {

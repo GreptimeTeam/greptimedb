@@ -30,6 +30,7 @@ pub mod range_cache;
 #[cfg(not(feature = "test"))]
 pub(crate) mod range_cache;
 pub mod read_columns;
+pub(crate) mod scan_memory;
 pub mod scan_region;
 pub mod scan_util;
 pub(crate) mod seq_scan;
