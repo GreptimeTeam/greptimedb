@@ -37,6 +37,14 @@ use crate::test_util::{
     put_rows, raft_engine_log_store_factory, rows_schema,
 };
 
+fn set_skip_wal_request(skip_wal: bool) -> RegionRequest {
+    RegionRequest::Alter(RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::SkipWal(skip_wal)],
+        },
+    })
+}
+
 #[tokio::test]
 async fn test_close_region_skip_wal_with_pending_data() {
     test_close_region_skip_wal(true).await;
@@ -81,25 +89,11 @@ async fn test_alter_skip_wal_stops_wal_and_flushes_on_close() {
     assert!(!before_alter.version.memtables.is_empty());
 
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal(true)],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(true))
         .await
         .unwrap();
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal(true)],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(true))
         .await
         .unwrap();
 
@@ -194,7 +188,8 @@ async fn test_alter_skip_wal_round_trip_reuses_provider(factory: Option<LogStore
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    assert!(!matches!(&region.provider, Provider::Noop));
+    let provider = region.provider.clone();
+    assert!(!matches!(&provider, Provider::Noop));
 
     put_rows(
         &engine,
@@ -208,14 +203,7 @@ async fn test_alter_skip_wal_round_trip_reuses_provider(factory: Option<LogStore
     let last_entry_id = region.version_control.current().last_entry_id;
 
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal(true)],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(true))
         .await
         .unwrap();
     put_rows(
@@ -234,19 +222,12 @@ async fn test_alter_skip_wal_round_trip_reuses_provider(factory: Option<LogStore
 
     for _ in 0..2 {
         engine
-            .handle_request(
-                region_id,
-                RegionRequest::Alter(RegionAlterRequest {
-                    kind: AlterKind::SetRegionOptions {
-                        options: vec![SetRegionOption::SkipWal(false)],
-                    },
-                }),
-            )
+            .handle_request(region_id, set_skip_wal_request(false))
             .await
             .unwrap();
     }
     assert!(!region.version().options.skip_wal);
-    assert!(!matches!(&region.provider, Provider::Noop));
+    assert_eq!(&provider, &region.provider);
 
     put_rows(
         &engine,
@@ -278,22 +259,25 @@ async fn test_alter_skip_wal_rejects_noop_provider() {
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let provider = region.provider.clone();
+    assert!(matches!(&provider, Provider::Noop));
+
+    engine
+        .handle_request(region_id, set_skip_wal_request(true))
+        .await
+        .unwrap();
+    assert!(region.version().options.skip_wal);
+    assert_eq!(&provider, &region.provider);
+
     let error = engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal(false)],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(false))
         .await
         .unwrap_err();
 
     assert!(error.output_msg().contains("uses the Noop WAL provider"));
-    let region = engine.get_region(region_id).unwrap();
     assert!(region.version().options.skip_wal);
-    assert!(matches!(&region.provider, Provider::Noop));
+    assert_eq!(&provider, &region.provider);
 }
 
 #[tokio::test]
@@ -312,14 +296,7 @@ async fn test_alter_skip_wal_on_follower_survives_promotion() {
         .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal(true)],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(true))
         .await
         .unwrap();
 
@@ -328,14 +305,7 @@ async fn test_alter_skip_wal_on_follower_survives_promotion() {
     assert!(region.version().options.skip_wal);
 
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal(false)],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(false))
         .await
         .unwrap();
     assert!(!region.version().options.skip_wal);
