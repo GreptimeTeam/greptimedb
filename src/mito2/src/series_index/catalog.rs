@@ -256,6 +256,8 @@ mod tests {
             source_file_ids: Vec::new(),
             min_file_sequence: 2,
             max_file_sequence: 4,
+            compaction_window_secs: 1,
+            window_sequences: BTreeMap::new(),
         };
         for (start, end, sequence, own_region, covered) in [
             (1000, 1999, 2, true, true),

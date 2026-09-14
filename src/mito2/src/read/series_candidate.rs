@@ -788,6 +788,8 @@ mod tests {
             source_file_ids: Vec::new(),
             min_file_sequence: 1,
             max_file_sequence: 2,
+            compaction_window_secs: 1,
+            window_sequences: Default::default(),
         };
         let path = series_index_path(metadata.region_id, entry.index_uuid);
         let codec = SparsePrimaryKeyCodec::new(&metadata);
