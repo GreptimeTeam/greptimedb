@@ -28,6 +28,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
+use datafusion::functions_nested::expr_fn::make_array;
 use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ExprSchema, JoinType, ScalarValue};
@@ -365,6 +366,47 @@ fn frontend_only_histogram_folds_stay_above_merge_scan() {
             .encode(remote_input, DefaultSerializer)
             .unwrap();
     }
+}
+
+/// `Categorizer` calls `Unnest` commutative, so the Substrait check in `should_expand` is
+/// the only thing keeping it on the frontend. It also sits above an encodable projection,
+/// which pins the rewriter to the whole-plan check rather than to the root node alone.
+#[test]
+fn unencodable_unnest_stays_above_merge_scan() {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            col("pk1"),
+            make_array(vec![col("number")]).alias("numbers"),
+        ])
+        .unwrap()
+        .unnest_column("numbers")
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .is_err()
+    );
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    let result_text = result.to_string();
+    assert!(result_text.contains("Unnest:"), "{result_text}");
+
+    let remote_input = find_merge_scan(&result).unwrap().input();
+    let remote_text = remote_input.to_string();
+    assert!(!remote_text.contains("Unnest:"), "{remote_text}");
+    assert!(remote_text.contains("make_array"), "{remote_text}");
+    DFLogicalSubstraitConvertor
+        .encode(remote_input, DefaultSerializer)
+        .unwrap();
 }
 
 #[test]

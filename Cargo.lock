@@ -6121,7 +6121,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b74667d17827481dbb6222fa0326163627211557#b74667d17827481dbb6222fa0326163627211557"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=0c4beffaa2b3968034915867593a717c6ab0c6b4#0c4beffaa2b3968034915867593a717c6ab0c6b4"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -10057,6 +10057,7 @@ dependencies = [
  "arrow-ipc 58.3.0",
  "async-stream",
  "async-trait",
+ "axum 0.8.4",
  "bytes",
  "catalog",
  "chrono",
@@ -10117,6 +10118,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.14.2",
  "tracing",
+ "url",
 ]
 
 [[package]]

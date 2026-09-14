@@ -248,7 +248,7 @@ impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
-        let mut rewriter = PlanRewriter::default();
+        let mut rewriter = PlanRewriter::new(&plan.data);
         let result = plan.data.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
@@ -302,7 +302,7 @@ impl DistPlannerAnalyzer {
     }
 
     fn handle_subquery(subquery: Subquery) -> DfResult<Subquery> {
-        let mut rewriter = PlanRewriter::default();
+        let mut rewriter = PlanRewriter::new(&subquery.subquery);
         let mut rewrote_subquery = subquery
             .subquery
             .as_ref()
@@ -391,6 +391,9 @@ enum RewriterStatus {
 
 #[derive(Debug, Default)]
 struct PlanRewriter {
+    /// Whether the whole plan this rewriter walks can be encoded to Substrait.
+    /// Used by [`PlanRewriter::should_expand`] to skip the per-node encoding check.
+    whole_plan_encodable: bool,
     /// Current level in the tree
     level: usize,
     /// Simulated stack for the `rewrite` recursion
@@ -447,6 +450,17 @@ struct PlanRewriter {
 }
 
 impl PlanRewriter {
+    /// `plan` must be the root of the tree that is about to be rewritten, otherwise
+    /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
+    fn new(plan: &LogicalPlan) -> Self {
+        Self {
+            whole_plan_encodable: DFLogicalSubstraitConvertor
+                .encode(plan, DefaultSerializer)
+                .is_ok(),
+            ..Default::default()
+        }
+    }
+
     fn get_parent(&self) -> Option<&LogicalPlan> {
         // level starts from 1, it's safe to minus by 1
         self.stack
@@ -467,7 +481,16 @@ impl PlanRewriter {
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
-        if let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer) {
+        // Substrait encoding recurses from the root to the leaves, so a root that encodes
+        // proves that every node below it encodes as well. `plan` here always comes from
+        // `self.stack`, which holds untouched sub-trees of that root, so one check on the
+        // root covers the whole descent. Each check builds a fresh `SessionState`, which
+        // is the dominant cost on deep PromQL plans.
+        // When the root does not encode, the plan holds at least one node that has to stay
+        // on the frontend and only the per-node check locates it.
+        if !self.whole_plan_encodable
+            && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
+        {
             debug!(
                 "PlanRewriter: plan cannot be converted to substrait with error={e:?}, expanding now: {plan}"
             );

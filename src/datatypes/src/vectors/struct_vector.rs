@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{MutableArrayData, NullBufferBuilder};
+use arrow::array::NullBufferBuilder;
 use arrow::compute::TakeOptions;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
@@ -143,31 +143,6 @@ impl Vector for StructVector {
 }
 
 impl VectorOp for StructVector {
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        assert_eq!(offsets.len(), self.len());
-        assert!(offsets.is_sorted(), "offsets must be non-decreasing");
-
-        let Some(&output_len) = offsets.last() else {
-            return self.slice(0, 0);
-        };
-
-        let source = self.array.to_data();
-        let mut output = MutableArrayData::new(vec![&source], false, output_len);
-        let mut previous_offset = 0;
-
-        for (index, &offset) in offsets.iter().enumerate() {
-            for _ in previous_offset..offset {
-                output.extend(0, index, index + 1);
-            }
-            previous_offset = offset;
-        }
-
-        Arc::new(StructVector {
-            array: StructArray::from(output.freeze()),
-            fields: self.fields.clone(),
-        })
-    }
-
     fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
         UnsupportedOperationSnafu {
             op: "cast",
@@ -466,10 +441,6 @@ impl ScalarVectorBuilder for StructVectorBuilder {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{DictionaryArray, Int8Array, StringArray};
-    use arrow::buffer::NullBuffer;
-    use arrow::datatypes::Int8Type;
-
     use super::*;
     use crate::json::JsonSettings;
     use crate::schema::{ColumnDefaultConstraint, ColumnSchema};
@@ -555,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn test_replicate_preserves_json2_identity() {
+    fn test_default_vector_preserves_json2_identity() {
         let json = JsonSettings::default()
             .encode(serde_json::json!({"answer": 42}))
             .unwrap();
@@ -574,39 +545,6 @@ mod tests {
 
         assert_eq!(replicated.data_type(), data_type);
         assert_eq!(replicated.len(), 2);
-    }
-
-    #[test]
-    fn test_replicate_preserves_dictionary_and_nulls() {
-        let fields = StructType::new(Arc::new(vec![StructField::new(
-            "label",
-            ConcreteDataType::dictionary_datatype(
-                ConcreteDataType::int8_datatype(),
-                ConcreteDataType::string_datatype(),
-            ),
-            true,
-        )]));
-        let dictionary = DictionaryArray::<Int8Type>::new(
-            Int8Array::from(vec![Some(0), Some(1)]),
-            Arc::new(StringArray::from(vec!["a", "b"])),
-        );
-        let array = StructArray::new(
-            fields.as_arrow_fields(),
-            vec![Arc::new(dictionary)],
-            Some(NullBuffer::from(vec![true, false])),
-        );
-        let vector = StructVector::try_new(fields.clone(), array).unwrap();
-
-        let replicated = vector.replicate(&[2, 3]);
-
-        assert_eq!(
-            replicated.data_type(),
-            ConcreteDataType::struct_datatype(fields)
-        );
-        assert_eq!(replicated.len(), 3);
-        assert_eq!(replicated.null_count(), 1);
-        assert_eq!(replicated.get(0), replicated.get(1));
-        assert!(replicated.is_null(2));
     }
 
     #[test]

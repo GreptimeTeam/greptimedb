@@ -90,6 +90,7 @@ CREATE TABLE test_cleanup_repartition (
     let mut procedure = BatchGcProcedure::new_update_repartition_for_test(
         metasrv.mailbox().clone(),
         metasrv.table_metadata_manager().clone(),
+        metasrv.runtime_switch_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         regions,
         manifest,
@@ -183,6 +184,7 @@ async fn test_cleanup_region_repartition_preserve_uninvolved_entries() {
     let mut procedure = BatchGcProcedure::new_update_repartition_for_test(
         metasrv.mailbox().clone(),
         metasrv.table_metadata_manager().clone(),
+        metasrv.runtime_switch_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         regions,
         manifest,
@@ -267,6 +269,7 @@ async fn test_cleanup_region_repartition_remove_when_tmp_refs_empty() {
     let mut procedure = BatchGcProcedure::new_update_repartition_for_test(
         metasrv.mailbox().clone(),
         metasrv.table_metadata_manager().clone(),
+        metasrv.runtime_switch_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         regions,
         manifest,

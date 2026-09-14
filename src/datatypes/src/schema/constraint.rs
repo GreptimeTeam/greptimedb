@@ -23,7 +23,7 @@ use crate::error::{self, Result};
 use crate::types::cast;
 use crate::value::Value;
 use crate::vectors::operations::VectorOp;
-use crate::vectors::{TimestampMillisecondVector, VectorRef};
+use crate::vectors::{Helper, TimestampMillisecondVector, VectorRef};
 
 pub const CURRENT_TIMESTAMP: &str = "current_timestamp";
 pub const CURRENT_TIMESTAMP_FN: &str = "current_timestamp()";
@@ -151,15 +151,20 @@ impl ColumnDefaultConstraint {
             ColumnDefaultConstraint::Value(v) => {
                 ensure!(is_nullable || !v.is_null(), error::NullDefaultSnafu);
 
-                // TODO(yingwen):
-                // 1. For null value, we could use NullVector once it supports custom logical type.
-                // 2. For non null value, we could use ConstantVector, but it would cause all codes
-                //  attempt to downcast the vector fail if they don't check whether the vector is const
-                //  first.
-                let mut mutable_vector = data_type.create_mutable_vector(1);
-                mutable_vector.try_push_value_ref(&v.as_value_ref())?;
-                let base_vector = mutable_vector.to_vector();
-                Ok(base_vector.replicate(&[num_rows]))
+                if let Ok(vector) = v.try_to_scalar_value(data_type).and_then(|scalar| {
+                    Helper::try_from_scalar_value(scalar, num_rows, Some(data_type))
+                }) {
+                    return Ok(vector);
+                }
+
+                // Some extension values, such as JSON nested in a struct, cannot safely
+                // round-trip through ScalarValue. Preserve their logical type with the
+                // type-specific vector builder instead.
+                let mut mutable_vector = data_type.create_mutable_vector(num_rows);
+                for _ in 0..num_rows {
+                    mutable_vector.try_push_value_ref(&v.as_value_ref())?;
+                }
+                Ok(mutable_vector.to_vector())
             }
         }
     }
@@ -389,6 +394,82 @@ mod tests {
         assert_eq!(expect, v);
         let v = constraint.create_default(&data_type, false).unwrap();
         assert_eq!(Value::Int32(10), v);
+    }
+
+    #[test]
+    fn test_struct_default_null_fields_and_json() {
+        use crate::types::{StructField, StructType};
+        use crate::value::StructValue;
+
+        let inner_type = StructType::from([StructField::new(
+            "x",
+            ConcreteDataType::int32_datatype(),
+            true,
+        )]);
+        let inner = Value::Struct(StructValue::new(vec![Value::Null], inner_type));
+        let json = crate::json::JsonSettings::default()
+            .encode(serde_json::json!({"answer": 42}))
+            .unwrap();
+        let nested_type = StructType::from([StructField::new("nested", inner.data_type(), true)]);
+        let json_type = StructType::from([StructField::new("json", json.data_type(), true)]);
+        let values = [
+            inner.clone(),
+            Value::Struct(StructValue::new(vec![inner], nested_type)),
+            Value::Struct(StructValue::new(vec![], StructType::default())),
+            Value::Struct(StructValue::new(vec![json], json_type)),
+        ];
+        for value in values {
+            let data_type = value.data_type();
+            // JSON children are read back as their underlying struct values.
+            let expected = serde_json::Value::try_from(value.clone()).unwrap();
+            for num_rows in [1, 3] {
+                let vector = ColumnDefaultConstraint::Value(value.clone())
+                    .create_default_vector(&data_type, false, num_rows)
+                    .unwrap();
+                assert_eq!(data_type, vector.data_type());
+                assert_eq!(
+                    data_type.as_arrow_type(),
+                    *vector.to_arrow_array().data_type()
+                );
+                assert_eq!(num_rows, vector.len());
+                assert_eq!(0, vector.null_count());
+                for row in 0..num_rows {
+                    assert_eq!(
+                        expected,
+                        serde_json::Value::try_from(vector.get(row)).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_string_default_preserves_batch_schema() {
+        use arrow::datatypes::{Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        for data_type in [
+            ConcreteDataType::large_string_datatype(),
+            ConcreteDataType::utf8_view_datatype(),
+        ] {
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "tag",
+                data_type.as_arrow_type(),
+                true,
+            )]));
+            for value in [Value::from("greptime"), Value::Null] {
+                let vector = ColumnDefaultConstraint::Value(value.clone())
+                    .create_default_vector(&data_type, true, 3)
+                    .unwrap();
+                let batch =
+                    RecordBatch::try_new(schema.clone(), vec![vector.to_arrow_array()]).unwrap();
+                assert_eq!(3, batch.num_rows());
+                assert_eq!(data_type, vector.data_type());
+                for row in 0..batch.num_rows() {
+                    assert_eq!(value, vector.get(row));
+                }
+            }
+        }
     }
 
     #[test]

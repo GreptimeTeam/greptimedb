@@ -437,6 +437,7 @@ mod tests {
                     0,
                     1000,
                     1000,
+                    0,
                     1000,
                     "timestamp".to_string(),
                     vec!["float".to_string(), "histogram".to_string()],
