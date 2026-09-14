@@ -655,6 +655,7 @@ where
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
                 row_group_size: compaction_region.region_options.row_group_size(),
+                float_field_encoding: compaction_region.region_options.float_field_encoding,
             };
             let merger = self.merger.clone();
             let compaction_region = compaction_region.clone();
