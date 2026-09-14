@@ -392,6 +392,167 @@ async fn test_json2_v1_region_reopen_and_compaction() -> WhateverResult<()> {
 }
 
 #[tokio::test]
+async fn test_json2_mixed_subject_compaction_preserves_values() -> WhateverResult<()> {
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("append_mode", "true")
+        .insert_option("memtable.type", "bulk")
+        .insert_option("sst_format", "flat")
+        .build();
+    let table_dir = request.table_dir.clone();
+    let schema = test_util::rows_schema(&request);
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: std::time::Duration::from_secs(3600),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1027, 0);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    // #9133: the second SST stores a heterogeneous subject in its remainder.
+    let values = [
+        json!({"subject": {"cid": "first", "uri": "at://first"}}),
+        json!({"subject": "did:plc:x"}),
+        json!({"subject": {"cid": "last", "uri": "at://last"}}),
+        json!({"subject": {"cid": 42}}),
+    ];
+    for (offset, batch) in [(0, &values[..1]), (1, &values[1..])] {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: batch
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| {
+                        row(vec![
+                            ValueData::StringValue("tag".into()),
+                            ValueData::JsonValue(encode_json_value(JsonValue::from(value.clone()))),
+                            ValueData::TimestampMillisecondValue((offset + i) as i64 * 1000),
+                        ])
+                    })
+                    .collect(),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let old_ids = engine
+        .scanner(region_id, ScanRequest::default())
+        .await?
+        .file_ids();
+    assert_eq!(2, old_ids.len());
+    for _ in 0..2 {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 86400,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            1,
+            scanner.num_files(),
+            "a swallowed merge failure must not pass"
+        );
+        assert!(scanner.file_ids().iter().all(|id| !old_ids.contains(id)));
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut actual = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                actual.push(JsonArray::from(&array).try_get_value(i)?);
+            }
+        }
+        assert_eq!(values.as_slice(), actual.as_slice());
+        reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    json_type_hint: HashMap::from([(
+                        "field_0".into(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "subject".into(),
+                            JsonNativeType::String,
+                        )])),
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut subjects = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                subjects.push(JsonArray::from(&array).try_get_value(i)?);
+            }
+        }
+        let expected = values.iter().map(|value| {
+            let subject = &value["subject"];
+            json!({"subject": subject.as_str().map(str::to_string).unwrap_or_else(|| subject.to_string())})
+        }).collect::<Vec<_>>();
+        assert_eq!(
+            expected, subjects,
+            "projection must read values spilled to remainder"
+        );
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    json_type_hint: HashMap::from([(
+                        "field_0".into(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "subject".into(),
+                            JsonNativeType::Object(JsonObjectType::from([(
+                                "cid".into(),
+                                JsonNativeType::String,
+                            )])),
+                        )])),
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut cids = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                cids.push(JsonArray::from(&array).try_get_value(i)?["subject"]["cid"].clone());
+            }
+        }
+        assert_eq!(
+            vec![json!("first"), json!(null), json!("last"), json!("42")],
+            cids
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_flush_aligns_different_json2_layouts() -> WhateverResult<()> {
     let mut request = CreateRequestBuilder::new()
         .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(

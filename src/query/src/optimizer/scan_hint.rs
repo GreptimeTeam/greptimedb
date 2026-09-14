@@ -19,7 +19,6 @@ use arrow_schema::SortOptions;
 use common_function::aggrs::aggr_wrapper::aggr_state_func_name;
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_time::timestamp::TimeUnit;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{Column, Result};
@@ -131,8 +130,7 @@ impl ScanHintRule {
     /// predicate later rejects that row. Only recognized tag/time predicates are
     /// allowed: tags select whole series, and supported time predicates constrain
     /// the scan window before row selection. Field or unrecognized predicates are
-    /// conservatively rejected. Finer-than-millisecond timestamps are also excluded
-    /// because instant evaluation can conflate distinct samples at that precision.
+    /// conservatively rejected.
     ///
     /// This checks only attached predicates; the path allowlist separately rejects
     /// residual Filter nodes between InstantManipulate and the scan.
@@ -141,14 +139,6 @@ impl ScanHintRule {
         provider: &DummyTableProvider,
     ) -> bool {
         let metadata = provider.region_metadata();
-        // Instant evaluation is millisecond-based, so finer time units can
-        // conflate timestamps and must not use the LastRow hint.
-        if !matches!(
-            metadata.time_index_type().unit(),
-            TimeUnit::Second | TimeUnit::Millisecond
-        ) {
-            return false;
-        }
         for filter in &table_scan.filters {
             let Some(filter) = SimpleFilterEvaluator::try_new(filter) else {
                 return false;
@@ -439,6 +429,10 @@ fn single_evaluation_node_allowed(node: &LogicalPlan) -> bool {
 
 /// This whitelist assumes the planner preserves time-index and series identity;
 /// it is not a proof that an arbitrary plan does so.
+///
+/// Identity projections preserve the selected samples. Only the planner's named
+/// seconds/milliseconds-to-milliseconds casts are accepted; a microsecond or
+/// nanosecond cast could collapse a future sample onto the evaluation boundary.
 fn single_evaluation_projection_expr_allowed(
     expr: &Expr,
     projection: &datafusion_expr::logical_plan::Projection,
@@ -624,6 +618,7 @@ mod test {
                 1000,
                 1000,
                 1000,
+                0,
                 "ts".to_string(),
                 vec![],
                 Some("v0".to_string()),
@@ -671,24 +666,47 @@ mod test {
     }
 
     fn last_value_aggregate(input: LogicalPlan) -> LogicalPlan {
-        LogicalPlanBuilder::from(input)
+        let aggregate = LogicalPlanBuilder::from(input)
             .aggregate(
                 vec![col("k0")],
-                vec![Expr::AggregateFunction(AggregateFunction {
-                    func: last_value_udaf(),
-                    params: AggregateFunctionParams {
-                        args: vec![col("v0")],
-                        distinct: false,
-                        filter: None,
-                        order_by: vec![Sort {
-                            expr: col("ts"),
-                            asc: true,
-                            nulls_first: true,
-                        }],
-                        null_treatment: None,
-                    },
-                })],
+                vec![
+                    Expr::AggregateFunction(AggregateFunction {
+                        func: last_value_udaf(),
+                        params: AggregateFunctionParams {
+                            args: vec![col("v0")],
+                            distinct: false,
+                            filter: None,
+                            order_by: vec![Sort {
+                                expr: col("ts"),
+                                asc: true,
+                                nulls_first: true,
+                            }],
+                            null_treatment: None,
+                        },
+                    }),
+                    Expr::AggregateFunction(AggregateFunction {
+                        func: last_value_udaf(),
+                        params: AggregateFunctionParams {
+                            args: vec![col("ts")],
+                            distinct: false,
+                            filter: None,
+                            order_by: vec![Sort {
+                                expr: col("ts"),
+                                asc: true,
+                                nulls_first: true,
+                            }],
+                            null_treatment: None,
+                        },
+                    }),
+                ],
             )
+            .unwrap()
+            .build()
+            .unwrap();
+        let timestamp = aggregate.schema().field(2).name().clone();
+
+        LogicalPlanBuilder::from(aggregate)
+            .project(vec![col("k0"), col(timestamp).alias("ts")])
             .unwrap()
             .build()
             .unwrap()
@@ -701,6 +719,7 @@ mod test {
                 1000,
                 1000,
                 1000,
+                0,
                 "ts".to_string(),
                 vec![],
                 Some("v0".to_string()),
@@ -730,6 +749,7 @@ mod test {
                 outer_end,
                 1000,
                 1000,
+                0,
                 "ts".to_string(),
                 vec![],
                 Some("v0".to_string()),
@@ -757,6 +777,7 @@ mod test {
                 end,
                 1000,
                 1000,
+                0,
                 "ts".to_string(),
                 vec![],
                 Some("v0".to_string()),
@@ -917,21 +938,39 @@ mod test {
                 None,
             )
             .unwrap()
+            .project(vec![
+                Expr::Column(Column::new(Some("left"), "ts")),
+                Expr::Column(Column::new(Some("left"), "v0")),
+            ])
+            .unwrap()
             .build()
             .unwrap();
         let nonlast_aggregate = LogicalPlanBuilder::from(scan_plan(provider(), "aggregate"))
             .aggregate(
                 vec![col("k0")],
-                vec![Expr::AggregateFunction(AggregateFunction {
-                    func: max_udaf(),
-                    params: AggregateFunctionParams {
-                        args: vec![col("v0")],
-                        distinct: false,
-                        filter: None,
-                        order_by: vec![],
-                        null_treatment: None,
-                    },
-                })],
+                vec![
+                    Expr::AggregateFunction(AggregateFunction {
+                        func: max_udaf(),
+                        params: AggregateFunctionParams {
+                            args: vec![col("v0")],
+                            distinct: false,
+                            filter: None,
+                            order_by: vec![],
+                            null_treatment: None,
+                        },
+                    }),
+                    Expr::AggregateFunction(AggregateFunction {
+                        func: max_udaf(),
+                        params: AggregateFunctionParams {
+                            args: vec![col("ts")],
+                            distinct: false,
+                            filter: None,
+                            order_by: vec![],
+                            null_treatment: None,
+                        },
+                    })
+                    .alias("ts"),
+                ],
             )
             .unwrap()
             .build()
@@ -942,6 +981,7 @@ mod test {
                     1000,
                     1000,
                     1000,
+                    0,
                     1000,
                     "ts".to_string(),
                     vec!["v0".to_string()],
@@ -1012,7 +1052,49 @@ mod test {
     }
 
     #[test]
-    fn single_evaluation_rejects_microsecond_and_nanosecond_time_index_casts() {
+    fn single_evaluation_uses_last_row_for_microsecond_and_nanosecond_time_indexes() {
+        for timestamp_type in [
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+        ] {
+            let direct_provider = Arc::new(mock_table_provider_with_timestamp(
+                RegionId::new(1, 1),
+                timestamp_type.clone(),
+            ));
+            let direct = ScanHintRule
+                .rewrite(
+                    single_evaluation(scan_plan(direct_provider, "direct")),
+                    &OptimizerContext::default(),
+                )
+                .unwrap()
+                .data;
+            assert_eq!(
+                scan_requests(&direct)[0].series_row_selector,
+                Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+            );
+
+            let projection_provider = Arc::new(mock_table_provider_with_timestamp(
+                RegionId::new(1, 1),
+                timestamp_type,
+            ));
+            let projection = LogicalPlanBuilder::from(scan_plan(projection_provider, "projection"))
+                .project(vec![col("ts")])
+                .unwrap()
+                .build()
+                .unwrap();
+            let projected = ScanHintRule
+                .rewrite(single_evaluation(projection), &OptimizerContext::default())
+                .unwrap()
+                .data;
+            assert_eq!(
+                scan_requests(&projected)[0].series_row_selector,
+                Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+            );
+        }
+    }
+
+    #[test]
+    fn single_evaluation_rejects_lossy_microsecond_and_nanosecond_time_index_casts() {
         for timestamp_type in [
             ConcreteDataType::timestamp_microsecond_datatype(),
             ConcreteDataType::timestamp_nanosecond_datatype(),
@@ -1070,7 +1152,7 @@ mod test {
     #[test]
     fn single_evaluation_rejects_projection_expressions_that_change_rows() {
         let invalid_projections = [
-            vec![col("ts").alias("renamed")],
+            vec![col("ts").alias("renamed"), col("ts")],
             vec![
                 Expr::BinaryExpr(datafusion_expr::expr::BinaryExpr::new(
                     Box::new(col("v0")),
@@ -1078,6 +1160,7 @@ mod test {
                     Box::new(lit(1.0_f64)),
                 ))
                 .alias("v0"),
+                col("ts"),
             ],
             vec![
                 Expr::Cast(Cast::new(
@@ -1086,7 +1169,10 @@ mod test {
                 ))
                 .alias("ts"),
             ],
-            vec![Expr::Cast(Cast::new(Box::new(col("v0")), DataType::Int64)).alias("v0")],
+            vec![
+                Expr::Cast(Cast::new(Box::new(col("v0")), DataType::Int64)).alias("v0"),
+                col("ts"),
+            ],
             vec![
                 Expr::Cast(Cast::new(
                     Box::new(col("ts")),
@@ -1406,6 +1492,7 @@ mod test {
                 1000,
                 1000,
                 1000,
+                0,
                 "ts".to_string(),
                 vec![],
                 Some("v0".to_string()),
@@ -1430,6 +1517,7 @@ mod test {
                 2000,
                 1000,
                 1000,
+                0,
                 "ts".to_string(),
                 vec![],
                 Some("v0".to_string()),
