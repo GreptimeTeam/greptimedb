@@ -1827,7 +1827,7 @@ mod test {
 
     #[test]
     fn range_select_apply_expressions_visits_owned_roots() {
-        let input = Arc::new(prepare_test_data(true));
+        let input = Arc::new(prepare_test_data(true, false));
         let input_schema = input.schema().clone();
         let schema = Arc::new(Schema::new(vec![Field::new(
             "FIRST_VALUE(value)",
@@ -1883,7 +1883,7 @@ mod test {
                 .unwrap(),
             TreeNodeRecursion::Continue
         );
-        assert_eq!(visited, ["value", TIME_INDEX_COLUMN, "host"]);
+        assert_eq!(visited, ["value@1", "timestamp@0", "host@2"]);
 
         let mut stopped = Vec::new();
         assert_eq!(
@@ -1895,7 +1895,7 @@ mod test {
                 .unwrap(),
             TreeNodeRecursion::Stop
         );
-        assert_eq!(stopped, ["value"]);
+        assert_eq!(stopped, ["value@1"]);
 
         assert_eq!(
             range_select
