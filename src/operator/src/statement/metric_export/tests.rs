@@ -145,6 +145,7 @@ async fn routes_across_batches_and_writes_empty_files() {
             row_group_rows: 1,
             ..Default::default()
         },
+        &CancellationToken::new(),
         &mut None,
     )
     .await
@@ -223,9 +224,16 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
     ] {
         let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
         let mut active = None;
-        let err = export_stream(&unit, stream(batches), &store, limits, &mut active)
-            .await
-            .unwrap_err();
+        let err = export_stream(
+            &unit,
+            stream(batches),
+            &store,
+            limits,
+            &CancellationToken::new(),
+            &mut active,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains(message), "{err}");
         if let Some(mut writer) = active {
             writer.sink.abort().await.unwrap();
@@ -242,6 +250,7 @@ async fn existing_outputs_are_not_overwritten() {
         stream(vec![batch(vec![Some(1025)], vec![None])]),
         &store,
         MetricExportLimits::default(),
+        &CancellationToken::new(),
         &mut None,
     )
     .await
@@ -295,7 +304,8 @@ fn validates_membership_and_projects_only_selected_columns() {
         vec![Field::new("a", DataType::Float64, true)],
         false,
     );
-    let one = MetricExportUnit::try_new(unit.physical.clone(), &[selected.clone()]).unwrap();
+    let one =
+        MetricExportUnit::try_new(unit.physical.clone(), std::slice::from_ref(&selected)).unwrap();
     assert_eq!(one.projection, vec![0, 3]);
     assert_eq!(one.logical[&1025].projection, vec![1]);
     assert!(
@@ -421,9 +431,153 @@ async fn native_histogram_parquet_roundtrip() {
         writer.encoder = Some(encoder);
         writer.write(bytes).await.unwrap();
     }
-    finish_active(&mut active).await.unwrap();
+    finish_active(&mut active, &CancellationToken::new())
+        .await
+        .unwrap();
     let (actual_schema, batches) = read(&store, "histogram.parquet").await;
     assert_eq!(actual_schema.fields(), schema.fields());
     let actual = arrow::compute::concat_batches(&actual_schema, &batches).unwrap();
     assert_eq!(actual, batch);
+}
+
+struct PausedFileWriter {
+    inner: Option<object_store::layers::mock::oio::Writer>,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl object_store::layers::mock::oio::Write for PausedFileWriter {
+    async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+        let mut inner = self.inner.take().unwrap();
+        let started = self.started.clone();
+        let release = self.release.clone();
+        // Like SecureFs's blocking open, this task survives a dropped I/O future.
+        let (inner, result) = tokio::spawn(async move {
+            started.notify_one();
+            release.notified().await;
+            let result = inner.write(bytes).await;
+            (inner, result)
+        })
+        .await
+        .unwrap();
+        self.inner = Some(inner);
+        result
+    }
+
+    async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+        self.inner.as_mut().unwrap().close().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        match self.inner.as_mut() {
+            Some(inner) => inner.abort().await,
+            None => Err(object_store::Error::new(
+                object_store::ErrorKind::Unsupported,
+                "open is pending",
+            )),
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancellation_waits_for_file_creation_before_cleanup() {
+    use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory};
+    let directory = common_test_util::temp_dir::create_temp_dir("metric_export_pending_open");
+    let access =
+        common_datasource::object_store::LocalFileAccess::sandboxed(directory.path()).unwrap();
+    let store = build_backend_for_write(
+        &format!("{}/", directory.path().display()),
+        &HashMap::new(),
+        &access,
+    )
+    .await
+    .unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let factory: MockWriterFactory = Arc::new({
+        let started = started.clone();
+        let release = release.clone();
+        move |_, _, inner| {
+            Box::new(PausedFileWriter {
+                inner: Some(inner),
+                started: started.clone(),
+                release: release.clone(),
+            })
+        }
+    });
+    let store = store.layer(
+        MockLayerBuilder::default()
+            .writer_factory(factory)
+            .build()
+            .unwrap(),
+    );
+    let cancellation = CancellationToken::new();
+    let unit = unit();
+    let export = export_cancellable_stream(
+        &unit,
+        stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
+        &store,
+        MetricExportLimits::default(),
+        &cancellation,
+    );
+    tokio::pin!(export);
+    tokio::select! {
+        result = &mut export => panic!("export completed before the file open: {result:?}"),
+        _ = started.notified() => {},
+    }
+    cancellation.cancel();
+    assert!(futures::poll!(&mut export).is_pending());
+    release.notify_one();
+    let result = export.await;
+    assert!(matches!(
+        result,
+        Err(error::Error::MetricExportCancelled { .. })
+    ));
+    assert!(!store.exists("cpu.v1.parquet").await.unwrap());
+}
+
+struct FailedAbortWriter(object_store::layers::mock::oio::Writer);
+
+impl object_store::layers::mock::oio::Write for FailedAbortWriter {
+    async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+        self.0.write(bytes).await
+    }
+    async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+        self.0.close().await
+    }
+    async fn abort(&mut self) -> object_store::Result<()> {
+        Err(object_store::Error::new(
+            object_store::ErrorKind::PermissionDenied,
+            "injected abort failure",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn cleanup_failure_preserves_resource_error() {
+    use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory};
+    let factory: MockWriterFactory = Arc::new(|_, _, inner| Box::new(FailedAbortWriter(inner)));
+    let store = ObjectStore::new(object_store::services::Memory::default())
+        .unwrap()
+        .layer(
+            MockLayerBuilder::default()
+                .writer_factory(factory)
+                .build()
+                .unwrap(),
+        );
+    let result = export_cancellable_stream(
+        &unit(),
+        stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
+        &store,
+        MetricExportLimits {
+            conversion_bytes: 1,
+            ..Default::default()
+        },
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(error::Error::MetricExportResource { .. })
+    ));
 }

@@ -70,8 +70,8 @@ async fn roundtrip(instance: &Instance) {
     for (physical, encoding) in [("phy", "dense"), ("other_phy", "sparse")] {
         sql(instance, &format!("CREATE TABLE {physical} (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm') ENGINE=metric WITH (physical_metric_table='', primary_key_encoding='{encoding}')")).await;
         for (suffix, extra, key) in [
-            ("cpu.v1", "zone STRING,", ", zone"),
-            ("requests", "service STRING,", ", service"),
+            ("cpu.v1", "zone_tag STRING,", ", zone_tag"),
+            ("requests", "service_tag STRING,", ", service_tag"),
             ("empty", "", ""),
         ] {
             let name = format!("{physical}_{suffix}");
@@ -84,7 +84,7 @@ async fn roundtrip(instance: &Instance) {
         sql(instance, &format!("CREATE TABLE {physical}_excluded (host STRING, huge_tag STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, huge_tag)) ENGINE=metric WITH (on_physical_table='{physical}')")).await;
         sql(
             instance,
-            &format!("INSERT INTO {physical}_excluded VALUES ('z','ignore',9,2)"),
+            &format!("INSERT INTO {physical}_excluded (host, huge_tag, val, ts) VALUES ('z','ignore',9,2)"),
         )
         .await;
         let names = ["cpu.v1", "requests", "empty"].map(|suffix| format!("{physical}_{suffix}"));
@@ -127,8 +127,8 @@ async fn roundtrip(instance: &Instance) {
             for (index, name) in names.iter().enumerate() {
                 let restored = format!("restore_{physical}_{partitions}_{index}");
                 let (extra, key) = [
-                    ("zone STRING,", ", zone"),
-                    ("service STRING,", ", service"),
+                    ("zone_tag STRING,", ", zone_tag"),
+                    ("service_tag STRING,", ", service_tag"),
                     ("", ""),
                 ][index];
                 sql(instance, &format!("CREATE TABLE {restored} (host STRING, {extra} val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host{key})) ENGINE=metric WITH (on_physical_table='target_{physical}')")).await;
@@ -141,11 +141,16 @@ async fn roundtrip(instance: &Instance) {
                     ),
                 )
                 .await;
+                let timestamp_index = table(instance, name)
+                    .await
+                    .schema()
+                    .column_index_by_name("ts")
+                    .unwrap();
                 let expected = values(instance, name)
                     .await
                     .into_iter()
                     .filter(|row| {
-                        let ts = row.last().unwrap();
+                        let ts = &row[timestamp_index];
                         *ts == datatypes::value::Value::Timestamp(Timestamp::new_millisecond(2))
                             || *ts
                                 == datatypes::value::Value::Timestamp(Timestamp::new_millisecond(3))

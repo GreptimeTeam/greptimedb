@@ -270,8 +270,9 @@ pub struct MetricExportSummary {
 impl StatementExecutor {
     /// Export an authorized unit to a fresh directory using one physical query.
     /// The caller bounds concurrent units and owns retry/cleanup of this directory.
-    /// Cancellation aborts the active upload; previously closed files remain an
-    /// incomplete chunk until the caller publishes its completion state.
+    /// Cancellation waits for in-flight I/O before aborting the active upload.
+    /// Closed files remain an incomplete chunk until the caller publishes its
+    /// completion state.
     #[allow(clippy::too_many_arguments)]
     pub async fn export_metric_unit(
         &self,
@@ -312,35 +313,45 @@ async fn export_cancellable_stream(
     cancellation: &CancellationToken,
 ) -> Result<MetricExportSummary> {
     let mut active = None;
-    let result = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => error::MetricExportCancelledSnafu.fail(),
-        result = export_stream(unit, stream, store, limits, &mut active) => result,
-    };
-    if result.is_err() {
-        if let Some(mut writer) = active {
-            let aborted = writer.sink.abort().await;
-            if aborted
-                .as_ref()
-                .is_err_and(|e| e.kind() == object_store::ErrorKind::Unsupported)
-            {
-                // Secure filesystem writes are not atomic and cannot abort. Drop
-                // the handle before removing this attempt's unfinished file.
-                let path = writer.path.clone();
-                drop(writer);
-                store
-                    .delete(&path)
-                    .await
-                    .context(common_datasource::error::WriteObjectSnafu { path: &path })
-                    .context(error::WriteStreamToFileSnafu { path: &path })?;
-            } else {
-                aborted
-                    .context(common_datasource::error::WriteObjectSnafu { path: &writer.path })
-                    .context(error::WriteStreamToFileSnafu { path: &writer.path })?;
-            }
-        }
+    let result = export_stream(unit, stream, store, limits, cancellation, &mut active).await;
+    if result.is_err()
+        && let Some(writer) = active
+        && let Err(cleanup_error) = abort_active(writer, store).await
+    {
+        common_telemetry::warn!(cleanup_error; "Failed to clean up incomplete Metric export file");
     }
     result
+}
+
+fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
+    ensure!(
+        !cancellation.is_cancelled(),
+        error::MetricExportCancelledSnafu
+    );
+    Ok(())
+}
+
+async fn abort_active(mut writer: LogicalWriter, store: &ObjectStore) -> Result<()> {
+    let aborted = writer.sink.abort().await;
+    if aborted
+        .as_ref()
+        .is_err_and(|e| e.kind() == object_store::ErrorKind::Unsupported)
+    {
+        // Secure filesystem writes cannot abort. All writes have completed before
+        // this handle is dropped, so no detached creation can race with deletion.
+        let path = writer.path.clone();
+        drop(writer);
+        store
+            .delete(&path)
+            .await
+            .context(common_datasource::error::WriteObjectSnafu { path: &path })
+            .context(error::WriteStreamToFileSnafu { path: &path })?;
+    } else {
+        aborted
+            .context(common_datasource::error::WriteObjectSnafu { path: &writer.path })
+            .context(error::WriteStreamToFileSnafu { path: &writer.path })?;
+    }
+    Ok(())
 }
 
 async fn export_stream(
@@ -348,6 +359,7 @@ async fn export_stream(
     mut stream: SendableRecordBatchStream,
     store: &ObjectStore,
     limits: MetricExportLimits,
+    cancellation: &CancellationToken,
     active: &mut Option<LogicalWriter>,
 ) -> Result<MetricExportSummary> {
     let id_index =
@@ -360,7 +372,15 @@ async fn export_stream(
     let mut summary = MetricExportSummary::default();
     let mut previous = None;
     let mut written = BTreeSet::new();
-    while let Some(batch) = stream.next().await {
+    loop {
+        let batch = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return error::MetricExportCancelledSnafu.fail(),
+            batch = stream.next() => batch,
+        };
+        let Some(batch) = batch else {
+            break;
+        };
         let batch = batch
             .context(error::BuildRecordBatchSnafu)?
             .into_df_record_batch();
@@ -385,6 +405,7 @@ async fn export_stream(
         );
         let mut start = 0;
         while start < batch.num_rows() {
+            check_cancelled(cancellation)?;
             let id = ids.value(start);
             ensure!(
                 previous.is_none_or(|last| last <= id),
@@ -398,8 +419,9 @@ async fn export_stream(
                 end += 1;
             }
             if active.as_ref().is_some_and(|writer| writer.id != id) {
-                finish_active(active).await?;
+                finish_active(active, cancellation).await?;
             }
+            check_cancelled(cancellation)?;
             if let Some(file) = unit.logical.get(&id) {
                 if active.is_none() {
                     *active = Some(LogicalWriter::open(id, file, store, limits).await?);
@@ -426,7 +448,11 @@ async fn export_stream(
                     )
                     .await?;
                     writer.encoder = Some(encoder);
+                    check_cancelled(cancellation)?;
+                    // Do not drop an in-flight sink operation: filesystem creation
+                    // and writes may run on a blocking worker after its future drops.
                     writer.write(bytes).await?;
+                    check_cancelled(cancellation)?;
                     offset += consumed;
                     summary.rows += consumed;
                 }
@@ -436,14 +462,16 @@ async fn export_stream(
             start = end;
         }
     }
-    finish_active(active).await?;
+    finish_active(active, cancellation).await?;
     for (&id, file) in &unit.logical {
         if !written.contains(&id) {
+            check_cancelled(cancellation)?;
             *active = Some(LogicalWriter::open(id, file, store, limits).await?);
-            finish_active(active).await?;
+            finish_active(active, cancellation).await?;
             summary.files += 1;
         }
     }
+    check_cancelled(cancellation)?;
     Ok(summary)
 }
 
@@ -518,7 +546,10 @@ impl LogicalWriter {
     }
 }
 
-async fn finish_active(active: &mut Option<LogicalWriter>) -> Result<()> {
+async fn finish_active(
+    active: &mut Option<LogicalWriter>,
+    cancellation: &CancellationToken,
+) -> Result<()> {
     if let Some(writer) = active.as_mut() {
         let mut encoder = writer.encoder.take().context(error::UnexpectedSnafu {
             violated: "missing Parquet encoder",
@@ -531,12 +562,14 @@ async fn finish_active(active: &mut Option<LogicalWriter>) -> Result<()> {
         .await
         .context(error::JoinTaskSnafu)??;
         writer.write(bytes).await?;
+        check_cancelled(cancellation)?;
         writer
             .sink
             .close()
             .await
             .context(common_datasource::error::WriteObjectSnafu { path: &writer.path })
             .context(error::WriteStreamToFileSnafu { path: &writer.path })?;
+        check_cancelled(cancellation)?;
         *active = None;
     }
     Ok(())
