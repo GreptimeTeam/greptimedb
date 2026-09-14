@@ -56,7 +56,6 @@ use crate::error::{
     ArrowSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, PlanSnafu, TimeSnafu,
     UnexpectedSnafu,
 };
-use crate::expr::error::DataTypeSnafu;
 
 /// Represents a test timestamp in seconds since the Unix epoch.
 const DEFAULT_TEST_TIMESTAMP: Timestamp = Timestamp::new_second(17_0000_0000);
@@ -291,9 +290,10 @@ impl TimeWindowExpr {
             let mut vector = cdt.create_mutable_vector(rows.rows.len());
             for row in rows.rows {
                 let value = pb_value_to_value_ref(&row.values[ts_col_index], None);
-                vector.try_push_value_ref(&value).context(DataTypeSnafu {
-                    msg: "Failed to convert rows to columns",
-                })?;
+                vector
+                    .try_push_value_ref(&value)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
             }
             let vector = vector.to_vector();
 

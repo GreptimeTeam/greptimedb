@@ -65,6 +65,7 @@ use common_telemetry::{debug, info, tracing, warn};
 use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
+use datafusion_expr::logical_plan::Distinct;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
@@ -301,12 +302,32 @@ fn determine_flow_type_for_source_state(
         return Ok(Some(FlowType::Batching));
     }
 
-    if has_instant_ttl_source_table {
-        return Ok(Some(FlowType::Streaming));
-    }
-
     Ok(None)
 }
+
+/// The stateless streaming runtime accepts only a single source scan wrapped by
+/// projections and filters. Keep this check local to the operator: the flow
+/// validator is intentionally private to the flow crate.
+fn is_stateless_flow_plan(plan: &LogicalPlan) -> bool {
+    let mut scans = 0;
+    let mut supported_nodes = true;
+    let result = plan.apply_with_subqueries(|node| {
+        match node {
+            LogicalPlan::TableScan(_) => scans += 1,
+            LogicalPlan::Projection(_) | LogicalPlan::Filter(_) => {}
+            LogicalPlan::Distinct(Distinct::All(_)) => {}
+            _ => supported_nodes = false,
+        }
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    });
+
+    result.is_ok() && supported_nodes && scans == 1
+}
+
+const INSTANT_TTL_FLOW_QUERY_ERROR: &str = "instant-TTL flow sources support only stateless projection/filter queries over one source; non-stateless queries require a persisted source";
+
+const STATELESS_FLOW_QUERY_ERROR: &str =
+    "flow streaming supports only stateless projection/filter queries over one source";
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -858,6 +879,9 @@ impl StatementExecutor {
 
     /// Determines the flow type from source-table state, schedule requirements,
     /// and SQL shape.
+    ///
+    /// Aggregates and persisted-source DISTINCT use batching. Plain DISTINCT is request-local only
+    /// for instant-TTL sources, where it retains the legacy streaming compatibility behavior.
     async fn determine_flow_type(
         &self,
         expr: &CreateFlowExpr,
@@ -941,17 +965,31 @@ impl StatementExecutor {
         );
         let stmt = &stmts[0];
 
-        if is_tql(query_ctx.sql_dialect(), &expr.sql)
+        let is_tql_query = is_tql(query_ctx.sql_dialect(), &expr.sql)
             .map_err(BoxedError::new)
-            .context(ExternalSnafu)?
-        {
+            .context(ExternalSnafu)?;
+        if is_tql_query {
+            if has_instant_ttl_source_table {
+                return InvalidSqlSnafu {
+                    err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
+                }
+                .fail();
+            }
             return Ok(FlowType::Batching);
         }
 
-        // support tql parse too
+        // Plan before selecting a mode. In particular, instant-TTL sources
+        // must not bypass validation of the stateless streaming subset.
         let plan = match stmt {
-            // prom ql is only supported in batching mode
-            Statement::Tql(_) => return Ok(FlowType::Batching),
+            Statement::Tql(_) => {
+                if has_instant_ttl_source_table {
+                    return InvalidSqlSnafu {
+                        err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
+                    }
+                    .fail();
+                }
+                return Ok(FlowType::Batching);
+            }
             _ => engine
                 .planner()
                 .plan(&QueryStatement::Sql(stmt.clone()), query_ctx)
@@ -960,12 +998,15 @@ impl StatementExecutor {
                 .context(ExternalSnafu)?,
         };
 
-        /// Visitor to find aggregation or distinct
-        struct FindAggr {
+        /// Visitor to classify aggregation and DISTINCT separately. Plain DISTINCT is request
+        /// local only for instant-TTL sources; persisted-source DISTINCT keeps batching semantics.
+        struct FindQueryShape {
             is_aggr: bool,
+            is_distinct: bool,
+            has_distinct_on: bool,
         }
 
-        impl TreeNodeVisitor<'_> for FindAggr {
+        impl TreeNodeVisitor<'_> for FindQueryShape {
             type Node = LogicalPlan;
             fn f_down(
                 &mut self,
@@ -973,25 +1014,58 @@ impl StatementExecutor {
             ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion>
             {
                 match node {
-                    LogicalPlan::Aggregate(_) | LogicalPlan::Distinct(_) => {
-                        self.is_aggr = true;
-                        return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
-                    }
+                    LogicalPlan::Aggregate(_) => self.is_aggr = true,
+                    LogicalPlan::Distinct(Distinct::All(_)) => self.is_distinct = true,
+                    LogicalPlan::Distinct(Distinct::On(_)) => self.has_distinct_on = true,
                     _ => (),
                 }
                 Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
             }
         }
 
-        let mut find_aggr = FindAggr { is_aggr: false };
+        let mut query_shape = FindQueryShape {
+            is_aggr: false,
+            is_distinct: false,
+            has_distinct_on: false,
+        };
 
-        plan.visit_with_subqueries(&mut find_aggr)
+        plan.visit_with_subqueries(&mut query_shape)
             .context(BuildDfLogicalPlanSnafu)?;
-        if find_aggr.is_aggr {
-            Ok(FlowType::Batching)
-        } else {
-            Ok(FlowType::Streaming)
+        if query_shape.has_distinct_on {
+            return InvalidSqlSnafu {
+                err_msg: if has_instant_ttl_source_table {
+                    INSTANT_TTL_FLOW_QUERY_ERROR.to_string()
+                } else {
+                    STATELESS_FLOW_QUERY_ERROR.to_string()
+                },
+            }
+            .fail();
         }
+        if query_shape.is_aggr {
+            return if has_instant_ttl_source_table {
+                InvalidSqlSnafu {
+                    err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
+                }
+                .fail()
+            } else {
+                Ok(FlowType::Batching)
+            };
+        }
+        if query_shape.is_distinct && !has_instant_ttl_source_table {
+            return Ok(FlowType::Batching);
+        }
+
+        ensure!(
+            is_stateless_flow_plan(&plan),
+            InvalidSqlSnafu {
+                err_msg: if has_instant_ttl_source_table {
+                    INSTANT_TTL_FLOW_QUERY_ERROR.to_string()
+                } else {
+                    STATELESS_FLOW_QUERY_ERROR.to_string()
+                },
+            }
+        );
+        Ok(FlowType::Streaming)
     }
 
     #[tracing::instrument(skip_all)]
@@ -2868,6 +2942,7 @@ mod test {
 
     #[cfg(feature = "enterprise")]
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
     #[cfg(feature = "enterprise")]
     use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef};
     #[cfg(feature = "enterprise")]
@@ -2890,6 +2965,9 @@ mod test {
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
+    use datafusion::functions_aggregate::expr_fn::count;
+    use datafusion::logical_expr::builder::LogicalTableSource;
+    use datafusion::logical_expr::{LogicalPlanBuilder, col};
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -3281,6 +3359,77 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         );
     }
 
+    fn stateless_test_scan(name: &str) -> LogicalPlan {
+        let schema = arrow::datatypes::Schema::new(vec![ArrowField::new(
+            "value",
+            ArrowDataType::Int32,
+            true,
+        )]);
+        LogicalPlanBuilder::scan(
+            name,
+            Arc::new(LogicalTableSource::new(Arc::new(schema))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    #[test]
+    fn test_is_stateless_flow_plan_accepts_scan_projection_and_filter() {
+        let scan = stateless_test_scan("source");
+        assert!(is_stateless_flow_plan(&scan));
+
+        let projection = LogicalPlanBuilder::from(scan.clone())
+            .project(vec![col("value")])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(is_stateless_flow_plan(&projection));
+
+        let filter = LogicalPlanBuilder::from(projection)
+            .filter(col("value").gt(datafusion_expr::lit(0)))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(is_stateless_flow_plan(&filter));
+    }
+
+    #[test]
+    fn test_is_stateless_flow_plan_rejects_aggregate_and_multiple_scans() {
+        let scan = stateless_test_scan("source");
+        let aggregate = LogicalPlanBuilder::from(scan.clone())
+            .aggregate(
+                Vec::<datafusion_expr::Expr>::new(),
+                vec![count(col("value"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!is_stateless_flow_plan(&aggregate));
+
+        let distinct = LogicalPlanBuilder::from(scan.clone())
+            .distinct()
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(is_stateless_flow_plan(&distinct));
+
+        let distinct_on_aggregate = LogicalPlanBuilder::from(aggregate)
+            .distinct()
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!is_stateless_flow_plan(&distinct_on_aggregate));
+
+        let multiple_scans = LogicalPlanBuilder::from(stateless_test_scan("left"))
+            .cross_join(stateless_test_scan("right"))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!is_stateless_flow_plan(&multiple_scans));
+    }
+
     // --- Schedule option tests ---
 
     #[test]
@@ -3370,11 +3519,11 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
-    fn test_determine_flow_type_for_source_state_instant_ttl_without_missing_sources() {
+    fn test_determine_flow_type_for_source_state_existing_sources_require_plan() {
         assert_eq!(
             determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true, false)
                 .unwrap(),
-            Some(FlowType::Streaming)
+            None
         );
     }
 
