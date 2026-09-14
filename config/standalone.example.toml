@@ -635,9 +635,9 @@ manifest_checkpoint_distance = 10
 ## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
 
-## Under development; do not enable. Root directory for local series indexes.
-## Empty disables the feature. Relative paths resolve under `data_home`.
-#+ experimental_series_index_root = ""
+## Under development; do not enable. Whether to enable series indexes.
+## Indexes are stored on the local filesystem under `{data_home}/series_index`.
+#+ experimental_enable_series_index = false
 
 ## Interval between series-index maintenance runs. Zero uses the default of 5 min.
 #+ experimental_series_index_maintenance_interval = "5m"
