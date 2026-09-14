@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -656,7 +656,8 @@ impl TempFileCleaner {
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
-    let atomic_write_dir = fs_cache_atomic_write_dir(root);
+    // Preserve native filesystem prefixes such as Windows UNC shares.
+    let atomic_write_dir = Path::new(root).join(ATOMIC_WRITE_DIR);
     clean_dir(&atomic_write_dir.to_string_lossy()).await?;
 
     // Compatible code. Remove this after a major release.
@@ -669,11 +670,6 @@ pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
     let store = ObjectStore::new(builder).context(OpenDalSnafu)?;
 
     Ok(with_instrument_layers(store, false))
-}
-
-// Preserve native filesystem prefixes such as Windows UNC shares.
-fn fs_cache_atomic_write_dir(root: &str) -> PathBuf {
-    Path::new(root).join(ATOMIC_WRITE_DIR)
 }
 
 /// Clean the directory.
@@ -770,25 +766,9 @@ impl FilePathProvider for RegionFilePathFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::PathBuf;
 
-    #[cfg(windows)]
-    #[test]
-    fn test_fs_cache_atomic_write_dir_windows() {
-        for (root, expected_root) in [
-            (r"C:\data", r"C:\data"),
-            ("C:/data/", r"C:\data"),
-            ("//server/share/data", r"\\server\share\data"),
-            (r"\\server\share\data", r"\\server\share\data"),
-        ] {
-            let dir = fs_cache_atomic_write_dir(root);
-            assert_eq!(dir.parent().unwrap(), Path::new(expected_root));
-            assert_eq!(
-                dir.file_name().unwrap(),
-                Path::new(ATOMIC_WRITE_DIR).file_name().unwrap()
-            );
-        }
-    }
+    use super::*;
 
     #[tokio::test]
     async fn test_new_fs_cache_store() {

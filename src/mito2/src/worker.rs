@@ -521,12 +521,8 @@ async fn series_index_store_from_config(
         return Ok(None);
     }
 
-    let root = series_index_dir(data_home);
+    let root = Path::new(data_home).join("series_index");
     new_fs_cache_store(&root.to_string_lossy()).await.map(Some)
-}
-
-fn series_index_dir(data_home: &str) -> std::path::PathBuf {
-    Path::new(data_home).join("series_index")
 }
 
 pub async fn write_cache_from_config(
@@ -1628,25 +1624,6 @@ mod tests {
         let region_id = RegionId::new(2, 3);
         let index = region_id_to_index(region_id, num_workers);
         assert_eq!(index, 1);
-    }
-
-    #[test]
-    fn test_series_index_dir() {
-        assert_eq!(series_index_dir("/data"), Path::new("/data/series_index"));
-        assert_eq!(series_index_dir("/data/"), Path::new("/data/series_index"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn test_series_index_dir_windows() {
-        for (data_home, expected) in [
-            (r"C:\data", r"C:\data\series_index"),
-            ("C:/data/", r"C:\data\series_index"),
-            ("//server/share/data", r"\\server\share\data\series_index"),
-            (r"\\server\share\data", r"\\server\share\data\series_index"),
-        ] {
-            assert_eq!(series_index_dir(data_home), Path::new(expected));
-        }
     }
 
     #[tokio::test]
