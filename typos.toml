@@ -12,6 +12,9 @@ consts = "consts"
 # We need to extend the word list to avoid typos in our codebase.
 Exceded = "Exceded"
 
+[default.extend-identifiers]
+allocatedp = "allocatedp"
+
 [files]
 extend-exclude = [
     "corrupted",
