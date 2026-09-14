@@ -391,9 +391,9 @@ TQL EXPLAIN (0, 10, '5s') test_nano;
 |               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                                                     |
 |               |   PromSeriesDivide: tags=["k"]                                                                                                                                  |
 |               |     Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST                                                                                              |
-|               |       Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j                                                                             |
-|               |         Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)                                |
-|               |           TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|               |       Projection: test_nano.i, test_nano.k, test_nano.j                                                                                                         |
+|               |         Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)                                |
+|               |           TableScan: test_nano, partial_filters=[test_nano.j > TimestampNanosecond(-300000000000, None), test_nano.j <= TimestampNanosecond(10000000000, None)] |
 |               | ]]                                                                                                                                                              |
 | physical_plan | CooperativeExec                                                                                                                                                 |
 |               |   MergeScanExec: REDACTED
@@ -415,8 +415,8 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | initial_logical_plan_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
-|_|_Filter: test_nano.j >= TimestampMillisecond(-299999, None) AND test_nano.j <= TimestampMillisecond(10000, None)_|
-|_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
+|_|_Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)_|
+|_|_Projection: test_nano.i, test_nano.k, test_nano.j_|
 |_|_TableScan: test_nano_|
 | logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
@@ -430,9 +430,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
-|_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
-|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
-|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|_|_Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j > TimestampNanosecond(-300000000000, None), test_nano.j <= TimestampNanosecond(10000000000, None)] |
 |_| ]]_|
 | logical_plan after JsonSchemaConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
@@ -464,9 +464,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
-|_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
-|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
-|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|_|_Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j > TimestampNanosecond(-300000000000, None), test_nano.j <= TimestampNanosecond(10000000000, None)] |
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
@@ -500,9 +500,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
-|_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
-|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
-|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|_|_Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j > TimestampNanosecond(-300000000000, None), test_nano.j <= TimestampNanosecond(10000000000, None)] |
 |_| ]]_|
 | initial_physical_plan_| MergeScanExec: REDACTED
 |_|_|
