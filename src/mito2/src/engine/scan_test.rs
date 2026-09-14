@@ -2792,9 +2792,9 @@ async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format
 }
 
 /// Compaction rewrites a legacy (unmarked) input as an untrusted output with
-/// the region-local admission barrier. Its physical rows retain the known
-/// input maximum, while exact scans skip it once C reaches that barrier and
-/// fail closed while C is below it.
+/// the region-local admission barrier. Compaction retains effective input row
+/// sequences without restoring trust: exact scans skip the
+/// output once C reaches that barrier and fail closed while C is below it.
 #[tokio::test]
 async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
     let mut env =
@@ -2910,7 +2910,7 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         "legacy input must not be laundered into a marked output"
     );
 
-    // The compacted output is sequence-less and carries the current region's
+    // The compacted output is untrusted and carries the current region's
     // admission barrier rather than any source-domain sequence.
     let barrier = outputs[0]
         .meta_ref()
@@ -2919,9 +2919,9 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         .get();
     assert_eq!(8, barrier);
 
-    // Reinstalling the legacy input assigns it sequence 7, so the physical
-    // parquet retains that known input maximum rather than encoding either
-    // zero or the output admission barrier 8. The manifest marker stays false.
+    // Reinstalling the legacy input assigns its metadata sequence 7, but the
+    // reader's effective sequences remain 1..=6. Compaction must keep those
+    // values, independently of the false trust marker.
     let mut sequence_meta = outputs[0].meta_ref().clone();
     sequence_meta.sequence = None;
     let sequence_handle = FileHandle::new(
@@ -2935,22 +2935,17 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         .await
         .unwrap()
         .expect("compaction output reader");
-    let batch = reader
-        .next_record_batch()
-        .await
-        .unwrap()
-        .expect("compaction output batch");
-    let sequence = batch
-        .column(batch.num_columns() - 2)
-        .as_any()
-        .downcast_ref::<datatypes::arrow::array::UInt64Array>()
-        .expect("sequence column");
-    assert!(
-        sequence
-            .values()
-            .iter()
-            .all(|sequence| *sequence == barrier - 1)
-    );
+    let mut sequences = Vec::new();
+    while let Some(batch) = reader.next_record_batch().await.unwrap() {
+        let sequence = batch
+            .column(batch.num_columns() - 2)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+            .expect("sequence column");
+        sequences.extend_from_slice(sequence.values());
+    }
+    sequences.sort_unstable();
+    assert_eq!(vec![1, 2, 3, 4, 5, 6], sequences);
 
     // A cursor before the barrier must fail closed.
     let err = engine
@@ -2968,7 +2963,7 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         .expect("newer barrier must disable exact scanning");
     assert!(matches!(err, Error::SequenceRangeUnsupported { .. }));
 
-    // Once C reaches the barrier the sequence-less file is skipped, so exact
+    // Once C reaches the barrier the untrusted file is skipped, so exact
     // capability is restored without attempting row-level filtering.
     let scanner = engine
         .scanner(

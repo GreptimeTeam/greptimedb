@@ -567,6 +567,8 @@ pub struct SstWriteRequest {
     pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub storage: Option<String>,
+    /// Optional uniform row sequence for writes that do not preserve sequences.
+    /// Compaction passes `None` to retain the reader's effective input sequences.
     pub max_sequence: Option<SequenceNumber>,
     pub sst_write_format: FormatType,
 

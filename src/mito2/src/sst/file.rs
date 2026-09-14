@@ -243,10 +243,12 @@ pub struct FileMeta {
     /// the default value `0` doesn't means the file doesn't contains any rows,
     /// but instead means the number of rows is unknown.
     pub num_row_groups: u64,
-    /// Sequence in this file.
+    /// File-level sequence bound or admission marker in the target region.
     ///
-    /// This sequence is the only sequence in this file. And it's retrieved from the max
-    /// sequence of the rows on generating this file.
+    /// Flush records the maximum input row sequence. Trusted compaction outputs
+    /// inherit the known maximum input bound; untrusted outputs use an admission
+    /// marker. This does not imply that every physical row has this sequence.
+    /// Readers also use it to normalize foreign and legacy all-zero files.
     pub sequence: Option<NonZeroU64>,
     /// Partition expression from the region metadata when the file is created.
     ///
@@ -284,6 +286,8 @@ pub struct FileMeta {
     pub primary_key_max: Option<Bytes>,
     /// Whether the file preserves per-row sequence numbers usable for exact
     /// row-level sequence filtering.
+    /// Merely retaining physical input sequences during compaction does not
+    /// restore this capability for untrusted inputs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
 }
