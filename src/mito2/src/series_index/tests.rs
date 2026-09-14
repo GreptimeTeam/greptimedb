@@ -480,6 +480,51 @@ async fn test_reconcile_publishes_after_region_version_changes() {
 }
 
 #[tokio::test]
+async fn test_reconcile_cleans_up_after_region_drop() {
+    let mut env = TestEnv::with_prefix("series-reconcile-drop").await;
+    let (engine, region) = prepare_region(&mut env).await;
+    let (test, mut receiver) = IndexTest::new(region.clone());
+    let store = test.store.clone();
+    let target_region = region.clone();
+    let catalog_path = range_catalog_path(region.region_id);
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _, inner| {
+            if path == catalog_path {
+                // Simulate drop cleanup after building indexes but before persisting the
+                // first catalog. Neither catalog exists yet, so deletion is a no-op.
+                target_region
+                    .set_dropping(crate::region::RegionLeaderState::Writable)
+                    .unwrap();
+                target_region.version_control.mark_dropped();
+                target_region.series_index_version_control.mark_dropped();
+            }
+            inner
+        }))
+        .build()
+        .unwrap();
+    let stats = test.reconcile(store.clone().layer(layer)).await.unwrap();
+
+    assert_eq!((0, 0), (stats.built_range, stats.built_series));
+    for path in [
+        range_catalog_path(region.region_id),
+        series_catalog_path(region.region_id),
+    ] {
+        assert!(!store.exists(&path).await.unwrap());
+    }
+    let published = region.series_index_version();
+    assert!(published.range_indexes.is_empty());
+    assert!(published.series_indexes.is_empty());
+    let retired = receiver.try_recv().unwrap();
+    assert!(receiver.try_recv().is_err());
+    let series_path = series_index_path(region.region_id, retired.file_id.file_id());
+    test.purger.purge(retired);
+    drop(test);
+    super::purger::run_index_purge_task(0, store.clone(), receiver).await;
+    assert!(!store.exists(&series_path).await.unwrap());
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_failed_reconcile_retires_only_unpublished_series() {
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;

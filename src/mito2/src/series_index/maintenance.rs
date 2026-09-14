@@ -25,14 +25,15 @@ use store_api::storage::RegionId;
 use crate::error::Result;
 use crate::metrics::{SERIES_INDEX_RECONCILE_ELAPSED, SERIES_INDEX_RECONCILE_TOTAL};
 use crate::read::series_candidate::is_sparse_metric_metadata;
-use crate::region::MitoRegionRef;
 use crate::region::version::VersionRef;
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::series_index::bucket::{
     group_files_into_series_buckets, plan_series_indexes, rounded_bucket_width,
 };
 use crate::series_index::builder::{build_range_index, build_series_index};
 use crate::series_index::catalog::{
-    RangeIndexCatalog, SeriesIndexCatalog, range_catalog_path, series_catalog_path, store_catalog,
+    RangeIndexCatalog, SeriesIndexCatalog, delete_catalogs, range_catalog_path,
+    series_catalog_path, store_catalog,
 };
 use crate::series_index::purger::IndexFilePurger;
 use crate::series_index::version::{SeriesIndexFileHandle, SeriesIndexVersion};
@@ -92,7 +93,7 @@ pub(crate) async fn reconcile_series_indexes(
     }
     let build_start = Instant::now();
     let mut unpublished = UnpublishedSeriesFiles::default();
-    let (next, stats) = build_index_version(
+    let (next, mut stats) = build_index_version(
         worker_id,
         &store,
         &region,
@@ -107,11 +108,24 @@ pub(crate) async fn reconcile_series_indexes(
         .with_label_values(&["build"])
         .observe(build_start.elapsed().as_secs_f64());
     // Persist both catalogs before making the new snapshot visible to readers.
-    if let Some(next) = next {
-        persist_index_catalogs(&store, region.region_id, &next).await?;
-        publish_index_version(&region, Arc::new(next));
+    let publish_result: Result<()> = async {
+        if let Some(next) = next {
+            persist_index_catalogs(&store, region.region_id, &next).await?;
+            publish_index_version(&region, Arc::new(next));
+            unpublished.disarm();
+        }
+        Ok(())
     }
-    unpublished.disarm();
+    .await;
+    // Drop may have cleaned up while catalogs were being written, even if a write failed.
+    // If dropping starts after this check, the normal drop path cleans up our publication.
+    // This assumes the region ID is not reopened or replaced during cleanup.
+    if region.state() == RegionRoleState::Leader(RegionLeaderState::Dropping) {
+        delete_catalogs(&store, region.region_id).await;
+        region.series_index_version_control.mark_dropped();
+        stats = ReconcileStats::default();
+    }
+    publish_result?;
     let result = if stats.changed() { "changed" } else { "noop" };
     SERIES_INDEX_RECONCILE_TOTAL
         .with_label_values(&[result])
