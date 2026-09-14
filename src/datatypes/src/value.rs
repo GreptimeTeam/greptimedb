@@ -1085,11 +1085,21 @@ impl StructValue {
     }
 
     fn try_to_scalar_value(&self, output_type: &StructType) -> Result<ScalarValue> {
+        let output_fields = output_type.fields();
+        ensure!(
+            self.items.len() == output_fields.len(),
+            InconsistentStructFieldsAndItemsSnafu {
+                field_len: output_fields.len(),
+                item_len: self.items.len()
+            }
+        );
         let arrays = self
             .items
             .iter()
-            .map(|value| {
-                let scalar_value = value.try_to_scalar_value(&value.data_type())?;
+            .zip(output_fields.iter())
+            .map(|(value, field)| {
+                // Null values need the declared field type to produce a typed null array.
+                let scalar_value = value.try_to_scalar_value(field.data_type())?;
                 scalar_value
                     .to_array()
                     .context(ConvertScalarToArrowArraySnafu)
@@ -1097,7 +1107,13 @@ impl StructValue {
             .collect::<Result<Vec<Arc<dyn Array>>>>()?;
 
         let fields = output_type.as_arrow_fields();
-        let struct_array = StructArray::new(fields, arrays, None);
+        let struct_array =
+            StructArray::try_new_with_length(fields, arrays, None, 1).map_err(|error| {
+                error::ToScalarValueSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
         Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
 }
@@ -3080,6 +3096,66 @@ pub(crate) mod tests {
             }
             _ => panic!("Unexpected value type"),
         }
+    }
+
+    #[test]
+    fn test_struct_scalar_null_fields() {
+        let struct_type = StructType::from([
+            StructField::new("x", ConcreteDataType::int32_datatype(), true),
+            StructField::new("name", ConcreteDataType::string_datatype(), true),
+        ]);
+        let value = StructValue::new(vec![Value::Null, Value::from("hello")], struct_type.clone());
+        let ScalarValue::Struct(array) = value.try_to_scalar_value(&struct_type).unwrap() else {
+            panic!("Expected struct scalar");
+        };
+        assert_eq!(1, array.len());
+        assert_eq!(0, array.null_count());
+        assert_eq!(&struct_type.as_arrow_fields(), array.fields());
+        assert_eq!(
+            ScalarValue::Int32(None),
+            ScalarValue::try_from_array(array.column(0), 0).unwrap()
+        );
+
+        let nested_type = StructType::from([StructField::new(
+            "nested",
+            ConcreteDataType::struct_datatype(struct_type),
+            true,
+        )]);
+        for child in [Value::Struct(value), Value::Null] {
+            let nested = StructValue::new(vec![child.clone()], nested_type.clone());
+            let ScalarValue::Struct(array) = nested.try_to_scalar_value(&nested_type).unwrap()
+            else {
+                panic!("Expected struct scalar");
+            };
+            let vector = crate::vectors::Helper::try_into_vector(array.column(0).clone()).unwrap();
+            assert_eq!(child, vector.get(0));
+        }
+
+        let empty_type = StructType::default();
+        let empty = StructValue::new(vec![], empty_type.clone());
+        let ScalarValue::Struct(array) = empty.try_to_scalar_value(&empty_type).unwrap() else {
+            panic!("Expected struct scalar");
+        };
+        assert_eq!(1, array.len());
+        assert_eq!(0, array.num_columns());
+        assert_eq!(0, array.null_count());
+    }
+
+    #[test]
+    fn test_struct_scalar_invalid_fields() {
+        let struct_type = StructType::from([StructField::new(
+            "x",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]);
+        for child in [Value::Null, Value::from("wrong type")] {
+            let value = StructValue::new(vec![child], struct_type.clone());
+            assert!(value.try_to_scalar_value(&struct_type).is_err());
+        }
+        let value = StructValue::new(vec![Value::Int32(1)], struct_type.clone());
+        assert!(value.try_to_scalar_value(&StructType::default()).is_err());
+        let empty = StructValue::new(vec![], StructType::default());
+        assert!(empty.try_to_scalar_value(&struct_type).is_err());
     }
 
     #[test]

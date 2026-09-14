@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod binary;
 mod ctx;
 mod if_func;
 mod is_null;
 mod unary;
 
-pub use binary::scalar_binary_op;
 pub use ctx::EvalContext;
 pub use unary::scalar_unary_op;
 
