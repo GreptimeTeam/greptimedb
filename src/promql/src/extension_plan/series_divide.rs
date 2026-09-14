@@ -17,8 +17,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{Array, ArrayRef, UInt32Array, UInt64Array};
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::array::{
+    Array, ArrayRef, DictionaryArray, LargeStringArray, PrimitiveArray, StringArray,
+    StringViewArray, UInt32Array, UInt64Array,
+};
+use datafusion::arrow::buffer::NullBuffer;
+use datafusion::arrow::datatypes::{ArrowDictionaryKeyType, DataType, SchemaRef};
+use datafusion::arrow::downcast_dictionary_array;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::Result as DataFusionResult;
@@ -490,6 +495,26 @@ impl RecordBatchStream for SeriesDivideStream {
     }
 }
 
+fn constant_string_dictionary<K: ArrowDictionaryKeyType>(
+    dictionary: &DictionaryArray<K>,
+    total_rows: usize,
+) -> DataFusionResult<ArrayRef> {
+    let key = dictionary.key(0);
+    let value = key.and_then(|key| string_array_value_at_index(dictionary.values(), key));
+    let values: ArrayRef = match dictionary.values().data_type() {
+        DataType::Utf8 => Arc::new(StringArray::from(vec![value])),
+        DataType::LargeUtf8 => Arc::new(LargeStringArray::from(vec![value])),
+        DataType::Utf8View => Arc::new(StringViewArray::from(vec![value])),
+        _ => unreachable!("dictionary values must be strings"),
+    };
+    let keys = PrimitiveArray::<K>::new(
+        vec![K::Native::default(); total_rows].into(),
+        key.is_none().then(|| NullBuffer::new_null(total_rows)),
+    );
+
+    Ok(Arc::new(DictionaryArray::try_new(keys, values)?))
+}
+
 /// Concatenates batches from one isolated series; every designated tag is constant.
 fn concat_series_batches(
     schema: &SchemaRef,
@@ -511,13 +536,22 @@ fn concat_series_batches(
         .enumerate()
         .map(|(index, field)| -> DataFusionResult<ArrayRef> {
             if tag_indices.contains(&index) {
-                if matches!(field.data_type(), DataType::Dictionary(_, _)) {
-                    ScalarValue::try_from_array(first_batch.column(index), 0)?
-                        .to_array_of_size(total_rows)
-                } else {
-                    let take_indices =
-                        take_indices.get_or_insert_with(|| UInt32Array::from(vec![0; total_rows]));
-                    compute::take(first_batch.column(index), take_indices, None).map_err(Into::into)
+                let array = first_batch.column(index);
+                match field.data_type() {
+                    DataType::Dictionary(_, value_type) if value_type.is_string() => {
+                        downcast_dictionary_array! {
+                            array => constant_string_dictionary(array, total_rows),
+                            _ => unreachable!("dictionary keys must be integers"),
+                        }
+                    }
+                    DataType::Dictionary(_, _) => {
+                        ScalarValue::try_from_array(array, 0)?.to_array_of_size(total_rows)
+                    }
+                    _ => {
+                        let take_indices = take_indices
+                            .get_or_insert_with(|| UInt32Array::from(vec![0; total_rows]));
+                        compute::take(array, take_indices, None).map_err(Into::into)
+                    }
                 }
             } else {
                 compute::concat(
@@ -850,12 +884,33 @@ mod test {
     fn test_concat_series_batches_dictionary_tags() {
         macro_rules! dictionary_cases {
             ($($key_type:ty, $key:expr),+ $(,)?) => {
-                $(assert_dictionary_concat::<$key_type>(
-                    vec![Some(($key)(1)), Some(($key)(1))],
-                    Arc::new(StringArray::from(vec!["other", "tag"])),
-                    vec![Some(($key)(0))],
-                    Arc::new(StringArray::from(vec!["tag", "other"])),
-                );)+
+                $(for (values, other_values) in [
+                    (
+                        Arc::new(StringArray::from(vec!["other", "tag"])) as ArrayRef,
+                        Arc::new(StringArray::from(vec!["tag", "other"])) as ArrayRef,
+                    ),
+                    (
+                        Arc::new(LargeStringArray::from(vec!["other", "tag"])) as ArrayRef,
+                        Arc::new(LargeStringArray::from(vec!["tag", "other"])) as ArrayRef,
+                    ),
+                    (
+                        Arc::new(StringViewArray::from(vec![
+                            "other",
+                            "view tag longer than twelve bytes",
+                        ])) as ArrayRef,
+                        Arc::new(StringViewArray::from(vec![
+                            "view tag longer than twelve bytes",
+                            "other",
+                        ])) as ArrayRef,
+                    ),
+                ] {
+                    assert_dictionary_concat::<$key_type>(
+                        vec![Some(($key)(1)), Some(($key)(1))],
+                        values,
+                        vec![Some(($key)(0))],
+                        other_values,
+                    );
+                })+
             };
         }
         dictionary_cases!(
@@ -891,15 +946,9 @@ mod test {
         );
         assert_dictionary_concat::<UInt32Type>(
             vec![Some(1), Some(1)],
-            Arc::new(StringViewArray::from(vec![
-                "other",
-                "view tag longer than twelve bytes",
-            ])),
+            Arc::new(Int32Array::from(vec![1, 2])),
             vec![Some(0)],
-            Arc::new(StringViewArray::from(vec![
-                "view tag longer than twelve bytes",
-                "other",
-            ])),
+            Arc::new(Int32Array::from(vec![2, 1])),
         );
     }
 
@@ -907,7 +956,7 @@ mod test {
     fn test_concat_series_batches_dictionary_tag_drops_unused_values() {
         let active = "active view tag longer than twelve bytes";
         let unused = "unused view tag ".repeat(1024);
-        let values = Arc::new(StringViewArray::from(vec![active, unused.as_str()])) as ArrayRef;
+        let values = Arc::new(StringViewArray::from(vec![unused.as_str(), active])) as ArrayRef;
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "tag",
@@ -916,7 +965,7 @@ mod test {
             ),
             Field::new("value", DataType::Int64, false),
         ]));
-        let batches = [vec![0, 0], vec![0]]
+        let batches = [vec![1, 1], vec![1]]
             .into_iter()
             .enumerate()
             .map(|(batch, keys)| {
