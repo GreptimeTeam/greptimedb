@@ -20,7 +20,7 @@ use datafusion::arrow::array::{Array, ArrayRef, UInt32Array, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -507,14 +507,21 @@ fn concat_series_batches(
         return Ok(compute::concat_batches(schema, batches)?);
     };
     let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
-    let take_indices = UInt32Array::from(vec![0; total_rows]);
+    let mut take_indices = None;
     let columns = schema
         .fields()
         .iter()
         .enumerate()
-        .map(|(index, _)| {
+        .map(|(index, field)| -> DataFusionResult<ArrayRef> {
             if tag_indices.contains(&index) {
-                compute::take(first_batch.column(index), &take_indices, None)
+                if matches!(field.data_type(), DataType::Dictionary(_, _)) {
+                    ScalarValue::try_from_array(first_batch.column(index), 0)?
+                        .to_array_of_size(total_rows)
+                } else {
+                    let take_indices =
+                        take_indices.get_or_insert_with(|| UInt32Array::from(vec![0; total_rows]));
+                    compute::take(first_batch.column(index), take_indices, None).map_err(Into::into)
+                }
             } else {
                 compute::concat(
                     &batches
@@ -522,9 +529,10 @@ fn concat_series_batches(
                         .map(|batch| batch.column(index).as_ref())
                         .collect::<Vec<_>>(),
                 )
+                .map_err(Into::into)
             }
         })
-        .collect::<datafusion::arrow::error::Result<Vec<_>>>()?;
+        .collect::<DataFusionResult<Vec<_>>>()?;
 
     RecordBatch::try_new(schema.clone(), columns).map_err(Into::into)
 }
@@ -897,6 +905,65 @@ mod test {
                 "view tag longer than twelve bytes",
                 "other",
             ])),
+        );
+    }
+
+    #[test]
+    fn test_concat_series_batches_dictionary_tag_drops_unused_values() {
+        let active = "active view tag longer than twelve bytes";
+        let unused = "unused view tag ".repeat(1024);
+        let values = Arc::new(StringViewArray::from(vec![active, unused.as_str()])) as ArrayRef;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "tag",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8View)),
+                false,
+            ),
+            Field::new("value", DataType::Int64, false),
+        ]));
+        let batches = [vec![0, 0], vec![0]]
+            .into_iter()
+            .enumerate()
+            .map(|(batch, keys)| {
+                let num_rows = keys.len();
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(DictionaryArray::<UInt32Type>::new(
+                            UInt32Array::from(keys),
+                            values.clone(),
+                        )),
+                        Arc::new(Int64Array::from_iter_values(
+                            (0..num_rows).map(|row| (batch * 10 + row) as i64),
+                        )),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert_concat_matches_reference(schema.clone(), batches.clone(), &[0]);
+
+        let actual = concat_series_batches(&schema, &batches, &[0]).unwrap();
+        let tag = actual
+            .column(0)
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap();
+        let values = tag
+            .values()
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values.value(0), active);
+        assert_eq!(
+            values
+                .data_buffers()
+                .iter()
+                .map(|buffer| buffer.len())
+                .sum::<usize>(),
+            active.len()
         );
     }
 
