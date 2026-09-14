@@ -89,11 +89,9 @@ pub struct MitoConfig {
     // Background job configs:
     /// Max number of running background index build jobs (default: 1/8 of cpu cores).
     pub max_background_index_builds: usize,
-    // TODO: Document both series-index settings in the example configs and regenerate configuration
-    // docs before exposing the feature.
-    /// Under development; do not enable. Root directory for loading series indexes, currently stored
-    /// on the local filesystem. Empty disables the feature. Relative paths resolve under `data_home`.
-    pub experimental_series_index_root: String,
+    /// Under development; do not enable. Whether to enable series indexes (default false).
+    /// Indexes are stored on the local filesystem under `{data_home}/series_index`.
+    pub experimental_enable_series_index: bool,
     /// Interval between series-index maintenance runs (default 5 min). Zero uses the default.
     #[serde(with = "humantime_serde")]
     pub experimental_series_index_maintenance_interval: Duration,
@@ -214,7 +212,7 @@ impl Default for MitoConfig {
             experimental_manifest_keep_removed_file_ttl: Duration::from_secs(60 * 60),
             compress_manifest: false,
             max_background_index_builds: divide_num_cpus(8),
-            experimental_series_index_root: String::new(),
+            experimental_enable_series_index: false,
             experimental_series_index_maintenance_interval:
                 DEFAULT_SERIES_INDEX_MAINTENANCE_INTERVAL,
             max_background_flushes: divide_num_cpus(2),
@@ -310,15 +308,6 @@ impl MitoConfig {
             warn!("Sanitize series-index maintenance interval 0 to 5 minutes");
             self.experimental_series_index_maintenance_interval =
                 DEFAULT_SERIES_INDEX_MAINTENANCE_INTERVAL;
-        }
-
-        if !self.experimental_series_index_root.trim().is_empty()
-            && Path::new(&self.experimental_series_index_root).is_relative()
-        {
-            self.experimental_series_index_root = Path::new(data_home)
-                .join(&self.experimental_series_index_root)
-                .display()
-                .to_string();
         }
 
         if self.global_write_buffer_reject_size <= self.global_write_buffer_size {
@@ -430,36 +419,6 @@ mod tests {
         config.adjust_buffer_and_cache_size(ReadableSize::gb(64));
         assert_eq!(ReadableSize::mb(512), config.sst_meta_cache_size);
         assert_eq!(ReadableSize::mb(128), config.prefilter_result_cache_size);
-    }
-
-    #[test]
-    fn test_series_index_config() {
-        assert!(
-            MitoConfig::default()
-                .experimental_series_index_root
-                .is_empty()
-        );
-        let mut config: MitoConfig = toml::from_str(
-            "experimental_series_index_root = 'indexes'
-             experimental_series_index_maintenance_interval = '30s'",
-        )
-        .unwrap();
-        config.sanitize("/data").unwrap();
-        assert_eq!(config.experimental_series_index_root, "/data/indexes");
-        assert_eq!(
-            config.experimental_series_index_maintenance_interval,
-            Duration::from_secs(30)
-        );
-        let restored: MitoConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
-        assert_eq!(config, restored);
-
-        let mut config: MitoConfig =
-            toml::from_str("experimental_series_index_maintenance_interval = '0s'").unwrap();
-        config.sanitize("/data").unwrap();
-        assert_eq!(
-            config.experimental_series_index_maintenance_interval,
-            MitoConfig::default().experimental_series_index_maintenance_interval
-        );
     }
 
     #[test]
