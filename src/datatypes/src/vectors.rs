@@ -27,7 +27,6 @@ use crate::vectors::operations::VectorOp;
 
 mod binary;
 mod boolean;
-mod constant;
 mod date;
 mod decimal;
 mod dictionary;
@@ -48,7 +47,6 @@ mod validity;
 
 pub use binary::{BinaryVector, BinaryVectorBuilder};
 pub use boolean::{BooleanVector, BooleanVectorBuilder};
-pub use constant::ConstantVector;
 pub use date::{DateVector, DateVectorBuilder};
 pub use decimal::{Decimal128Vector, Decimal128VectorBuilder};
 pub(crate) use dictionary::StringDictionaryVectorBuilder;
@@ -125,11 +123,6 @@ pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     /// # Implementation
     /// This is `O(1)`.
     fn null_count(&self) -> usize;
-
-    /// Returns true when it's a ConstantColumn
-    fn is_const(&self) -> bool {
-        false
-    }
 
     /// Returns whether row is null.
     fn is_null(&self, row: usize) -> bool;

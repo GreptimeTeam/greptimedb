@@ -73,6 +73,20 @@ impl SecureFsRoot {
         &self.path
     }
 
+    /// Checks for a regular file without following the final symbolic link.
+    pub async fn is_file(&self, path: &str) -> Result<bool> {
+        let path = backend_path(path).map_err(new_std_io_error)?;
+        let root = self.clone();
+        common_runtime::spawn_blocking_global(move || {
+            root.dir
+                .symlink_metadata(path)
+                .map(|metadata| metadata.is_file())
+        })
+        .await
+        .map_err(new_task_join_error)?
+        .map_err(new_std_io_error)
+    }
+
     /// Opens a descendant directory without leaving this capability root.
     pub fn open_subdir(&self, path: impl AsRef<Path>) -> io::Result<Self> {
         let path = normalize_relative_path(path.as_ref())?;

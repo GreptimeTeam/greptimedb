@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use common_recordbatch::error::DataTypesSnafu;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Helper, VectorRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -82,12 +82,21 @@ pub(crate) fn new_repeated_vector(
     value: &Value,
     num_rows: usize,
 ) -> common_recordbatch::error::Result<VectorRef> {
-    let mut mutable_vector = data_type.create_mutable_vector(1);
-    mutable_vector
-        .try_push_value_ref(&value.as_value_ref())
-        .context(DataTypesSnafu)?;
-    let base_vector = mutable_vector.to_vector();
-    Ok(base_vector.replicate(&[num_rows]))
+    if let Ok(vector) = value
+        .try_to_scalar_value(data_type)
+        .and_then(|scalar| Helper::try_from_scalar_value(scalar, num_rows, Some(data_type)))
+    {
+        return Ok(vector);
+    }
+
+    // Preserve extension types that cannot safely round-trip through ScalarValue.
+    let mut mutable_vector = data_type.create_mutable_vector(num_rows);
+    for _ in 0..num_rows {
+        mutable_vector
+            .try_push_value_ref(&value.as_value_ref())
+            .context(DataTypesSnafu)?;
+    }
+    Ok(mutable_vector.to_vector())
 }
 
 #[cfg(test)]
@@ -109,6 +118,51 @@ mod tests {
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::read_columns::ReadColumns;
+
+    #[test]
+    fn test_repeated_struct_null_fields_and_json() {
+        use datatypes::types::{StructField, StructType};
+        use datatypes::value::StructValue;
+
+        let inner_type = StructType::from([StructField::new(
+            "x",
+            ConcreteDataType::int32_datatype(),
+            true,
+        )]);
+        let inner = Value::Struct(StructValue::new(vec![Value::Null], inner_type));
+        let json = datatypes::json::JsonSettings::default()
+            .encode(serde_json::json!({"answer": 42}))
+            .unwrap();
+        let nested_type = StructType::from([StructField::new("nested", inner.data_type(), true)]);
+        let json_type = StructType::from([StructField::new("json", json.data_type(), true)]);
+        let values = [
+            inner.clone(),
+            Value::Struct(StructValue::new(vec![inner], nested_type)),
+            Value::Struct(StructValue::new(vec![], StructType::default())),
+            Value::Struct(StructValue::new(vec![json], json_type)),
+        ];
+        for value in values {
+            let data_type = value.data_type();
+            // JSON children are read back as their underlying struct values.
+            let expected = serde_json::Value::try_from(value.clone()).unwrap();
+            for num_rows in [0, 1, 3] {
+                let vector = new_repeated_vector(&data_type, &value, num_rows).unwrap();
+                assert_eq!(data_type, vector.data_type());
+                assert_eq!(
+                    data_type.as_arrow_type(),
+                    *vector.to_arrow_array().data_type()
+                );
+                assert_eq!(num_rows, vector.len());
+                assert_eq!(0, vector.null_count());
+                for row in 0..num_rows {
+                    assert_eq!(
+                        expected,
+                        serde_json::Value::try_from(vector.get(row)).unwrap()
+                    );
+                }
+            }
+        }
+    }
 
     fn print_record_batch(record_batch: RecordBatch) -> String {
         pretty::pretty_format_batches(&[record_batch.into_df_record_batch()])
