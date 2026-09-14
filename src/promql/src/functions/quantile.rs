@@ -353,4 +353,29 @@ mod tests {
             vec![Some(2.5), None, None]
         );
     }
+
+    #[test]
+    fn quantile_over_time_keeps_nan_for_an_invalid_quantile() {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values([0i64, 1000]));
+        let values_array = Arc::new(Float64Array::from_iter_values([1.0, 4.0]));
+        let ranges = [(0, 2)];
+
+        let input = vec![
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(ts_array, ranges)
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(values_array, ranges)
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Scalar(ScalarValue::Float64(None)),
+        ];
+        let output = extract_array(&QuantileOverTime::quantile_over_time(&input).unwrap()).unwrap();
+        let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+
+        assert!(output.value(0).is_nan());
+    }
 }
