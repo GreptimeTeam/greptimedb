@@ -635,13 +635,6 @@ manifest_checkpoint_distance = 10
 ## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
 
-## Under development; do not enable. Series indexes are stored on the local filesystem
-## under `{data_home}/series_index` when enabled.
-experimental_enable_series_index = false
-
-## Interval between series-index maintenance runs. Zero uses the default of 5 minutes.
-experimental_series_index_maintenance_interval = "5m"
-
 ## Max number of running background flush jobs (default: 1/2 of cpu cores).
 ## @toml2docs:none-default="Auto"
 #+ max_background_flushes = 4
