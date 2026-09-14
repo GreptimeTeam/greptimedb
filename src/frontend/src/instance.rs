@@ -22,6 +22,7 @@ mod log_handler;
 mod logs;
 mod opentsdb;
 mod otlp;
+pub use otlp::{OtlpMetricIngestor, OtlpMetricIngestorRef};
 pub mod prom_store;
 mod promql;
 mod region_query;

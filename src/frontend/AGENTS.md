@@ -47,6 +47,7 @@ remote datanodes via `operator`/`client`.
 ## Public surface
 
 - `Instance` (`instance.rs`) — the business-logic container.
+- `OtlpMetricIngestor` (`instance/otlp.rs`, re-exported by `instance`) — optional converted-metric storage hook, after OTLP permission checks and translation.
 - `Frontend` (`frontend.rs`) — lifecycle wrapper around `Instance` + servers + heartbeat.
 - Created from `cmd`: `src/cmd/src/frontend.rs` (distributed) and
   `src/cmd/src/standalone.rs` (standalone, with embedded datanode).

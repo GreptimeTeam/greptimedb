@@ -82,6 +82,7 @@ pub struct Datanode {
     heartbeat_task: Option<HeartbeatTask>,
     region_event_receiver: Option<RegionServerEventReceiver>,
     region_server: RegionServer,
+    object_store_manager: ObjectStoreManagerRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
@@ -149,6 +150,10 @@ impl Datanode {
 
     pub fn region_server(&self) -> RegionServer {
         self.region_server.clone()
+    }
+
+    pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
+        &self.object_store_manager
     }
 
     pub fn plugins(&self) -> Plugins {
@@ -293,8 +298,10 @@ impl DatanodeBuilder {
             Some(node_id),
             gc_enabled,
         ));
+        let object_store_manager = Self::build_object_store_manager(&self.opts.storage).await?;
         let region_server = self
             .new_region_server(
+                object_store_manager.clone(),
                 schema_metadata_manager,
                 region_event_listener,
                 file_ref_manager,
@@ -359,6 +366,7 @@ impl DatanodeBuilder {
             services: ServerHandlers::default(),
             heartbeat_task,
             region_server,
+            object_store_manager,
             greptimedb_telemetry_task,
             region_event_receiver,
             leases_notifier,
@@ -434,6 +442,7 @@ impl DatanodeBuilder {
 
     async fn new_region_server(
         &mut self,
+        object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         event_listener: RegionServerEventListenerRef,
         file_ref_manager: FileReferenceManagerRef,
@@ -470,7 +479,6 @@ impl DatanodeBuilder {
         );
         region_server.install_remote_dyn_filter_receiver_injector(&self.plugins);
 
-        let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
         let engines = self
             .build_store_engines(
                 object_store_manager,

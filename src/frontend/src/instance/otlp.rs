@@ -18,6 +18,7 @@ pub mod trace_types;
 
 use std::sync::Arc;
 
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::{
     OTLP_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
@@ -51,6 +52,20 @@ use table::requests::{
 use self::trace_ingest::trace_conventions;
 use crate::instance::Instance;
 use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_RESOURCE_INFO_WRITE_ERRORS};
+
+/// Optional storage path for converted OTLP metrics, after protocol and table permissions.
+#[async_trait]
+pub trait OtlpMetricIngestor: Send + Sync {
+    async fn check_write(&self) -> ServerResult<()>;
+
+    async fn ingest(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output>;
+}
+
+pub type OtlpMetricIngestorRef = Arc<dyn OtlpMetricIngestor>;
 
 fn trace_permission_targets(
     table_name: &str,
@@ -101,6 +116,10 @@ impl OpenTelemetryProtocolHandler for Instance {
             .plugins
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
+        let metric_ingestor = self.plugins.get::<OtlpMetricIngestorRef>();
+        if let Some(ingestor) = &metric_ingestor {
+            ingestor.check_write().await?;
+        }
         let ctx = Arc::new(ctx.fork());
 
         let input_names = request
@@ -121,6 +140,9 @@ impl OpenTelemetryProtocolHandler for Instance {
         metric_ctx.is_legacy = is_legacy;
         metric_ctx.resource_info = self.otlp_resource_info;
 
+        let conversion_timer = servers::metrics::METRIC_OTLP_METRICS_STAGE_ELAPSED
+            .with_label_values(&["convert"])
+            .start_timer();
         let otlp::metrics::MetricsConversion {
             requests,
             rows,
@@ -128,6 +150,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             resource_info,
             mut outcome,
         } = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
+        drop(conversion_timer);
         if outcome.rejected_data_points > 0 {
             warn!(
                 "Rejected {} OTLP metrics data points: {}",
@@ -161,7 +184,9 @@ impl OpenTelemetryProtocolHandler for Instance {
         };
 
         // OTLP tables have one sample field in both the legacy and physical paths.
-        let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+        let output = if let Some(ingestor) = metric_ingestor {
+            ingestor.ingest(requests, ctx.clone()).await
+        } else if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
             self.handle_row_inserts(requests, ctx.clone(), false, true)
                 .await
                 .map_err(BoxedError::new)

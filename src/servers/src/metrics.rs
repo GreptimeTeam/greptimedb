@@ -51,6 +51,13 @@ pub(crate) const METRIC_FAILURE_VALUE: &str = "failure";
 
 lazy_static! {
 
+    pub static ref METRIC_OTLP_METRICS_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_servers_otlp_metrics_stage_seconds",
+        "OTLP metrics decoding and conversion duration in seconds",
+        &["stage"],
+        prometheus::exponential_buckets(0.00001, 4.0, 12).unwrap()
+    ).unwrap();
+
     pub static ref HTTP_REQUEST_COUNTER: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_http_request_counter",
         "servers http request counter",

@@ -100,11 +100,15 @@ pub async fn metrics(
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
+    let decode_timer = crate::metrics::METRIC_OTLP_METRICS_STAGE_ELAPSED
+        .with_label_values(&["http_decode"])
+        .start_timer();
     let request = ExportMetricsServiceRequest::decode(bytes).with_context(|_| {
         error::DecodeOtlpRequestSnafu {
             content_type: content_type_to_string(content_type.as_ref()),
         }
     })?;
+    drop(decode_timer);
 
     let OtlpState {
         with_metric_engine,
