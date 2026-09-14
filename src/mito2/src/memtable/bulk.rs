@@ -1807,7 +1807,7 @@ mod tests {
         let second = mock_bulk_part_with_json2_values(
             &metadata,
             vec![3000, 4000],
-            vec![json!({"b": 3}), json!({"b": 4})],
+            vec![json!({"a": 3, "b": 3}), json!({"a": 4, "b": 4})],
             200,
         )?;
         let parts = vec![
@@ -1879,9 +1879,15 @@ mod tests {
             unreachable!()
         };
         assert_eq!(
-            vec![JSON2_REMAINDER_FIELD_NAME, "a", "b"],
+            vec![JSON2_REMAINDER_FIELD_NAME],
             fields.iter().map(|x| x.name().as_str()).collect::<Vec<_>>()
         );
+        // Neither path is explicit in every source; keep both opaque without losing values.
+        let json = datatypes::vectors::json::array::JsonArray::from(batch.column(0));
+        let restored = json.project_to_v2(schema.field(0), &ArrowDataType::Binary)?;
+        let restored = datatypes::vectors::json::array::JsonArray::from(&restored);
+        assert_eq!(json!({"a": 1}), restored.try_get_value(0)?);
+        assert_eq!(json!({"a": 2}), restored.try_get_value(1)?);
         Ok(())
     }
 

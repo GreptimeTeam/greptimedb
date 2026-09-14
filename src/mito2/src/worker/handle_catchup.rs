@@ -133,7 +133,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .open(&self.config, &self.wal)
         .await?;
         debug_assert!(!reopened_region.is_writable());
-        self.regions.insert_region(reopened_region.clone());
+        self.register_region(reopened_region.clone());
 
         Ok(reopened_region)
     }

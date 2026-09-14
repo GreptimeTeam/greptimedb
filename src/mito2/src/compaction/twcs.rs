@@ -3157,6 +3157,25 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(vec![(0, 1), (0, 0), (1, 3), (1, 2), (1, 5)], pop_priority);
+        let units = crate::compaction::unit::CompactionUnit::from_picker(PickerOutput {
+            outputs: output,
+            time_window_size: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let unit_priority = units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.outputs[0].inputs[0].level(),
+                    output_window(&unit.outputs[0]),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pop_priority, unit_priority,
+            "local FIFO must follow the picker's execution priority"
+        );
     }
 
     #[tokio::test]
