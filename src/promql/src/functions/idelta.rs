@@ -101,12 +101,12 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
             .unwrap()
             .values();
 
-        let value_values = value_range.values();
-        let value_values = value_values
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .values();
+        let value_array = value_range.values();
+        let value_array = value_array.as_any().downcast_ref::<Float64Array>().unwrap();
+        // A NULL field value means the series has no sample at that timestamp, so the last two
+        // samples are not necessarily the last two slots.
+        let has_nulls = value_array.null_count() > 0;
+        let value_values = value_array.values();
 
         let mut result_builder = Float64Builder::with_capacity(ts_range.len());
 
@@ -122,20 +122,29 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
                     value_len
                 )),
             )?;
-            if len < 2 {
-                result_builder.append_null();
-                continue;
-            }
+            let (last_position, prev_position) = if has_nulls {
+                match last_two_samples(value_array, value_offset, len) {
+                    Some(positions) => positions,
+                    None => {
+                        result_builder.append_null();
+                        continue;
+                    }
+                }
+            } else {
+                if len < 2 {
+                    result_builder.append_null();
+                    continue;
+                }
+                (len - 1, len - 2)
+            };
 
-            let last_offset = ts_offset + len - 1;
-            let prev_offset = last_offset - 1;
+            let last_offset = ts_offset + last_position;
+            let prev_offset = ts_offset + prev_position;
             let sampled_interval =
                 (ts_values[last_offset] - ts_values[prev_offset]) as f64 / 1000.0;
 
-            let last_value_offset = value_offset + len - 1;
-            let prev_value_offset = last_value_offset - 1;
-            let last_value = value_values[last_value_offset];
-            let prev_value = value_values[prev_value_offset];
+            let last_value = value_values[value_offset + last_position];
+            let prev_value = value_values[value_offset + prev_position];
 
             if !IS_RATE {
                 result_builder.append_value(last_value - prev_value);
@@ -157,6 +166,22 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
     }
 }
 
+/// Locates the last two samples inside `[offset, offset + len)`, returning their positions
+/// relative to `offset`. Returns `None` when the window holds fewer than two samples.
+fn last_two_samples(values: &Float64Array, offset: usize, len: usize) -> Option<(usize, usize)> {
+    let mut last = None;
+    for position in (0..len).rev() {
+        if values.is_null(offset + position) {
+            continue;
+        }
+        match last {
+            None => last = Some(position),
+            Some(last) => return Some((last, position)),
+        }
+    }
+    None
+}
+
 impl<const IS_RATE: bool> Display for IDelta<IS_RATE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PromQL Idelta Function (is_rate: {IS_RATE})",)
@@ -165,6 +190,8 @@ impl<const IS_RATE: bool> Display for IDelta<IS_RATE> {
 
 #[cfg(test)]
 mod test {
+
+    use datafusion::arrow::buffer::NullBuffer;
 
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
@@ -205,6 +232,35 @@ mod test {
             vec![],
             // the second point represent counter reset
             vec![Some(0.5), Some(0.0), None, Some(3.0), None, None],
+        );
+    }
+
+    #[test]
+    fn idelta_uses_last_two_samples_not_last_two_slots() {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values([
+            0i64, 1000, 2000, 3000,
+        ]));
+        // Samples are 1.0@0 and 4.0@1000; the trailing slots only carry padding.
+        let values_array = Arc::new(Float64Array::new(
+            vec![1.0, 4.0, 100.0, 200.0].into(),
+            Some(NullBuffer::from_iter([true, true, false, false])),
+        ));
+        let ranges = [(0, 4), (2, 2), (3, 1)];
+
+        simple_range_udf_runner(
+            IDelta::<false>::scalar_udf(),
+            RangeArray::from_ranges(ts_array.clone(), ranges).unwrap(),
+            RangeArray::from_ranges(values_array.clone(), ranges).unwrap(),
+            vec![],
+            vec![Some(3.0), None, None],
+        );
+
+        simple_range_udf_runner(
+            IDelta::<true>::scalar_udf(),
+            RangeArray::from_ranges(ts_array, ranges).unwrap(),
+            RangeArray::from_ranges(values_array, ranges).unwrap(),
+            vec![],
+            vec![Some(3.0), None, None],
         );
     }
 }
