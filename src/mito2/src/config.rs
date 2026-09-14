@@ -23,6 +23,7 @@ use common_base::readable_size::ReadableSize;
 use common_memory_manager::OnExhaustedPolicy;
 use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
+use object_store::util::join_dir;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -315,10 +316,8 @@ impl MitoConfig {
         if !self.experimental_series_index_root.trim().is_empty()
             && Path::new(&self.experimental_series_index_root).is_relative()
         {
-            self.experimental_series_index_root = Path::new(data_home)
-                .join(&self.experimental_series_index_root)
-                .display()
-                .to_string();
+            self.experimental_series_index_root =
+                join_dir(data_home, &self.experimental_series_index_root);
         }
 
         if self.global_write_buffer_reject_size <= self.global_write_buffer_size {
@@ -445,7 +444,7 @@ mod tests {
         )
         .unwrap();
         config.sanitize("/data").unwrap();
-        assert_eq!(config.experimental_series_index_root, "/data/indexes");
+        assert_eq!(config.experimental_series_index_root, "/data/indexes/");
         assert_eq!(
             config.experimental_series_index_maintenance_interval,
             Duration::from_secs(30)
