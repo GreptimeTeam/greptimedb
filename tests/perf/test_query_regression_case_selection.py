@@ -150,6 +150,108 @@ class QueryRegressionCpuProfileTest(unittest.TestCase):
             self.assertEqual("chosen", manifest["query"]["selected"]["name"])
             self.assertEqual(["base", "candidate"], [target["role"] for target in manifest["targets"]])
 
+    def test_constant_tag_concat_cases_time_and_profile_ordinary_tql_eval(self) -> None:
+        for name in ("promql_constant_tag_concat", "promql_constant_tag_concat_ms"):
+            case_path = Path(__file__).parent / "query_cases" / name / "case.toml"
+            queries = [
+                line.removeprefix('query = "').removesuffix('"')
+                for line in case_path.read_text().splitlines()
+                if line.startswith('query = "')
+            ]
+            self.assertTrue(queries)
+            self.assertTrue(all(query.startswith("TQL EVAL ") for query in queries))
+
+            plan = {"scenario": {"kind": "direct_readable_sst", "tables": [{"database": "public"}], "queries": [
+                {"kind": "tql", "query": query, "iterations": 1} for query in queries
+            ]}}
+            profile_query, reason = runner.select_cpu_profile_query(plan)
+            self.assertIsNone(reason)
+            self.assertTrue(profile_query["query"].startswith("TQL EVAL "))
+
+    def test_constant_tag_concat_analyze_is_postmeasurement_and_has_its_own_full_response_artifact(self) -> None:
+        from tempfile import TemporaryDirectory
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            work_dir = root / "work"
+            case_path = root / "promql_constant_tag_concat" / "case.toml"
+            events: list[str] = []
+            plan = {
+                "scenario": {
+                    "kind": "direct_readable_sst",
+                    "tables": [{"database": "public"}],
+                    "queries": [{"name": "selected", "kind": "tql", "query": "TQL EVAL (1, 2, '1s') metric", "iterations": 1}],
+                },
+            }
+
+            def run(command: list[str], **_kwargs: object) -> object:
+                if "prepare-direct" in command:
+                    Path(command[command.index("--output") + 1]).write_text(json.dumps({"fixtures": []}))
+                if "measure" in command:
+                    events.append("measure")
+                    Path(command[command.index("--output") + 1]).write_text(json.dumps({"samples": ["ordinary"]}))
+                return SimpleNamespace(returncode=0)
+
+            def profile(*_args: object, **_kwargs: object) -> str:
+                events.append("profile")
+                return "success"
+
+            def post(_target: object, query: dict[str, str], _timeout: float) -> tuple[bool, None, dict[str, object]]:
+                events.append("analyze")
+                self.assertEqual("TQL ANALYZE VERBOSE (1, 2, '1s') metric", query["query"])
+                return True, None, {"output": [{"rows": [["all diagnostic rows"]]}]}
+
+            def stop(*_args: object) -> None:
+                events.append("cleanup")
+
+            with (
+                patch.object(runner, "allocate_ports", return_value=list(range(1000, 1016))),
+                patch.object(runner, "start_component"),
+                patch.object(runner, "stop_component", side_effect=stop),
+                patch.object(runner.subprocess, "run", side_effect=run),
+                patch.object(runner, "collect_cpu_profiles", side_effect=profile),
+                patch.object(runner, "post_query", side_effect=post),
+            ):
+                status = runner.run_direct_case(
+                    SimpleNamespace(http_timeout="1", allow_large_fixture="false"),
+                    case_path, work_dir, Path("base"), Path("candidate"), Path("fixture"), Path("runner"), plan,
+                )
+
+            self.assertEqual(0, status)
+            self.assertLess(events.index("measure"), events.index("profile"))
+            self.assertLess(events.index("profile"), events.index("analyze"))
+            self.assertLess(events.index("analyze"), len(events) - 1 - events[::-1].index("cleanup"))
+            self.assertEqual(["ordinary"], json.loads((work_dir / "query-regression-report.json").read_text())["samples"])
+            manifest = json.loads((work_dir / runner.POSTMEASUREMENT_ANALYZE_MANIFEST).read_text())
+            self.assertEqual("success", manifest["status"])
+            self.assertEqual({"base", "candidate"}, {target["role"] for target in manifest["targets"]})
+            self.assertEqual(
+                {"output": [{"rows": [["all diagnostic rows"]]}]},
+                manifest["targets"][0]["queries"][0]["response"],
+            )
+
+    def test_constant_tag_concat_analyze_failure_is_reported_and_fails_the_case(self) -> None:
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = self.make_target("base", root, 1000)
+            plan = {"scenario": {"kind": "direct_readable_sst", "tables": [{"database": "public"}], "queries": [
+                {"name": "selected", "kind": "tql", "query": "TQL EVAL (1, 2, '1s') metric", "iterations": 1},
+            ]}}
+            with patch.object(runner, "post_query", return_value=(False, "HTTP 500", None)):
+                status = runner.collect_postmeasurement_analyze(
+                    root / "promql_constant_tag_concat" / "case.toml", plan, root, [target], 1.0,
+                )
+
+            self.assertEqual("failure", status)
+            manifest = json.loads((root / runner.POSTMEASUREMENT_ANALYZE_MANIFEST).read_text())
+            self.assertEqual("failure", manifest["status"])
+            self.assertIn("HTTP 500", manifest["errors"][0])
+
     def test_profile_query_response_errors_are_failures(self) -> None:
         self.assertIsNone(runner.query_response_error({"code": 0}))
         self.assertEqual("query response error: denied", runner.query_response_error({"error": "denied"}))

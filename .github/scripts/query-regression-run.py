@@ -302,6 +302,11 @@ CPU_PROFILE_SECONDS = 10
 CPU_PROFILE_FREQUENCY = 49
 CPU_PROFILE_TIMEOUT_SECONDS = 180
 CPU_PROFILE_MANIFEST = Path("logs/cpu-profile-manifest.json")
+POSTMEASUREMENT_ANALYZE_MANIFEST = Path("logs/postmeasurement-analyze-manifest.json")
+POSTMEASUREMENT_ANALYZE_CASES = {
+    "promql_constant_tag_concat",
+    "promql_constant_tag_concat_ms",
+}
 
 
 def select_cpu_profile_query(plan: dict[str, Any]) -> tuple[dict[str, str] | None, str | None]:
@@ -388,11 +393,12 @@ def query_response_error(payload: Any) -> str | None:
     return None
 
 
-def post_profile_query(
+def post_query(
     target: RunTarget,
     query: dict[str, str],
     timeout_s: float,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, Any | None]:
+    """Execute a SQL endpoint query and retain its complete JSON response."""
     body = urllib.parse.urlencode(
         {"sql": query["query"], "db": query["database"], "format": "json"},
     ).encode()
@@ -405,11 +411,22 @@ def post_profile_query(
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             payload = response.read()
             if response.status >= 400:
-                return False, f"HTTP {response.status}"
-        error = query_response_error(json.loads(payload))
-        return error is None, error
-    except Exception as err:  # noqa: BLE001 - request diagnostics belong in the profile manifest
-        return False, repr(err)
+                return False, f"HTTP {response.status}", None
+        response_json = json.loads(payload)
+        error = query_response_error(response_json)
+        return error is None, error, response_json
+    except Exception as err:  # noqa: BLE001 - request diagnostics belong in runner artifacts
+        return False, repr(err), None
+
+
+def post_profile_query(
+    target: RunTarget,
+    query: dict[str, str],
+    timeout_s: float,
+) -> tuple[bool, str | None]:
+    """Execute the selected ordinary query while CPU profiling."""
+    ok, error, _response = post_query(target, query, timeout_s)
+    return ok, error
 
 
 def download_cpu_profile(port: int, output: Path) -> None:
@@ -548,6 +565,79 @@ def collect_cpu_profiles(args: argparse.Namespace, plan: dict[str, Any], work_di
         print(f"CPU profile {manifest['status']}: {reason}; manifest: {manifest_path}", flush=True)
     return manifest["status"]
 
+
+def collect_postmeasurement_analyze(
+    case_path: Path,
+    plan: dict[str, Any],
+    work_dir: Path,
+    targets: list[RunTarget],
+    http_timeout: float,
+) -> str:
+    """Save ANALYZE VERBOSE diagnostics after ordinary-query measurement and profiling."""
+    manifest: dict[str, Any] = {
+        "status": "not_applicable",
+        "targets": [],
+        "errors": [],
+    }
+    if case_slug(case_path) not in POSTMEASUREMENT_ANALYZE_CASES:
+        return manifest["status"]
+
+    selected, reason = select_cpu_profile_query(plan)
+    scenario = plan.get("scenario")
+    configured_queries = scenario.get("queries") if isinstance(scenario, dict) else None
+    diagnostics: list[dict[str, str]] = []
+    if selected is not None and isinstance(configured_queries, list):
+        for query in configured_queries:
+            if not isinstance(query, dict) or query.get("kind") != "tql":
+                reason = f"postmeasurement query is not TQL: {query!r}"
+                diagnostics = []
+                break
+            statement = query.get("query")
+            if not isinstance(statement, str) or not statement.startswith("TQL EVAL "):
+                reason = f"postmeasurement query is not an ordinary TQL EVAL query: {statement!r}"
+                break
+            name = query.get("name")
+            diagnostics.append({
+                "name": name if isinstance(name, str) else statement,
+                "database": selected["database"],
+                "source_query": statement,
+                "query": statement.replace("TQL EVAL ", "TQL ANALYZE VERBOSE ", 1),
+            })
+    if selected is None or reason is not None or not diagnostics:
+        manifest["status"] = "failure"
+        manifest["errors"].append(reason or "no TQL queries are configured for postmeasurement analysis")
+    else:
+        for target in targets:
+            target_manifest: dict[str, Any] = {"role": target.name, "queries": []}
+            manifest["targets"].append(target_manifest)
+            for diagnostic in diagnostics:
+                ok, error, response = post_query(target, diagnostic, http_timeout)
+                result: dict[str, Any] = {
+                    "name": diagnostic["name"],
+                    "source_query": diagnostic["source_query"],
+                    "query": diagnostic["query"],
+                    "status": "success" if ok else "failure",
+                }
+                if response is not None:
+                    # Keep the full server result; these diagnostics are not benchmark samples.
+                    result["response"] = response
+                if not ok:
+                    result["error"] = error
+                    manifest["errors"].append(f"{target.name}/{diagnostic['name']}: {error}")
+                target_manifest["queries"].append(result)
+        manifest["status"] = "failure" if manifest["errors"] else "success"
+
+    manifest_path = work_dir / POSTMEASUREMENT_ANALYZE_MANIFEST
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if manifest["status"] != "success":
+        print(
+            f"Postmeasurement ANALYZE {manifest['status']}: {manifest['errors']}; manifest: {manifest_path}",
+            flush=True,
+        )
+    return manifest["status"]
+
+
 def run_direct_case(
     args: argparse.Namespace,
     case_path: Path,
@@ -634,7 +724,11 @@ def run_direct_case(
             status = subprocess.run(measure, check=False).returncode
         if status != 0:
             return status
-        return 0 if collect_cpu_profiles(args, plan, work_dir, targets) == "success" else 1
+        profile_status = collect_cpu_profiles(args, plan, work_dir, targets)
+        analyze_status = collect_postmeasurement_analyze(
+            case_path, plan, work_dir, targets, float(args.http_timeout),
+        )
+        return 0 if profile_status == "success" and analyze_status in {"success", "not_applicable"} else 1
     finally:
         stop_all(targets, procs)
 
