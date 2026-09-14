@@ -208,6 +208,7 @@ async fn test_gc_basic(store_type: &StorageType) {
     let procedure = BatchGcProcedure::new(
         metasrv.mailbox().clone(),
         metasrv.table_metadata_manager().clone(),
+        metasrv.runtime_switch_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         regions.clone(),
         false,                   // full_file_listing

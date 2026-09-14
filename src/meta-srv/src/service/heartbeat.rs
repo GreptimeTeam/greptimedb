@@ -206,7 +206,13 @@ where
 
     /// Handles the incoming heartbeat request, and returns whether to continue the session.
     async fn handle_request(&mut self, req: HeartbeatRequest, is_handshake: bool) -> bool {
-        debug!("Receiving heartbeat request: {:?}", req);
+        let mailbox_message_id = req.mailbox_message.as_ref().map(|msg| msg.id);
+        debug!(
+            sender_id = %self.sender_id,
+            ?mailbox_message_id,
+            is_handshake,
+            "Receiving heartbeat request"
+        );
 
         let sender_id = self.sender_id.to_string();
         METRIC_META_HEARTBEAT_RECV
@@ -224,7 +230,12 @@ where
 
         let is_not_leader = res.as_ref().is_ok_and(|r| r.is_not_leader());
 
-        debug!("Sending heartbeat response: {:?}", res);
+        debug!(
+            sender_id = %self.sender_id,
+            success = res.is_ok(),
+            is_not_leader,
+            "Sending heartbeat response"
+        );
 
         if self.tx.send(res).await.is_err() {
             info!(
