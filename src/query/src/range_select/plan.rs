@@ -34,7 +34,7 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    SendableRecordBatchStream, apply_expression_roots,
 };
 use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_common::tree_node::TreeNodeRecursion;
@@ -823,9 +823,15 @@ impl ExecutionPlan for RangeSelectExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
     ) -> DfResult<TreeNodeRecursion> {
-        Ok(TreeNodeRecursion::Continue)
+        apply_expression_roots(
+            self.range_exec
+                .iter()
+                .flat_map(RangeFnExec::expressions)
+                .chain(self.by.iter().cloned()),
+            f,
+        )
     }
 
     fn with_new_children(
@@ -1317,7 +1323,7 @@ mod test {
     };
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
-    use datafusion::functions_aggregate::min_max;
+    use datafusion::functions_aggregate::{first_last, min_max};
     use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::prelude::SessionContext;
     use datafusion_physical_expr::PhysicalSortExpr;
@@ -1817,6 +1823,89 @@ mod test {
             expected,
         )
         .await;
+    }
+
+    #[test]
+    fn range_select_apply_expressions_visits_owned_roots() {
+        let input = Arc::new(prepare_test_data(true));
+        let input_schema = input.schema().clone();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "FIRST_VALUE(value)",
+            DataType::Float64,
+            true,
+        )]));
+        let range_select = RangeSelectExec {
+            input,
+            range_exec: vec![RangeFnExec {
+                expr: Arc::new(
+                    AggregateExprBuilder::new(
+                        first_last::first_value_udaf(),
+                        vec![Arc::new(Column::new("value", 1))],
+                    )
+                    .schema(input_schema)
+                    .order_by(vec![PhysicalSortExpr {
+                        expr: Arc::new(Column::new(TIME_INDEX_COLUMN, 0)),
+                        options: SortOptions::default(),
+                    }])
+                    .alias("FIRST_VALUE(value)")
+                    .build()
+                    .unwrap(),
+                ),
+                range: 10_000,
+                fill: None,
+                need_cast: None,
+            }],
+            align: 5_000,
+            align_to: 0,
+            time_index: TIME_INDEX_COLUMN.to_string(),
+            by: vec![Arc::new(Column::new("host", 2))],
+            schema: schema.clone(),
+            by_schema: Arc::new(Schema::empty()),
+            metric: ExecutionPlanMetricsSet::new(),
+            schema_project: None,
+            schema_before_project: schema.clone(),
+            cache: Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(schema),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )),
+        };
+        assert_eq!(range_select.range_exec[0].expr.order_bys().len(), 1);
+
+        let mut visited = Vec::new();
+        assert_eq!(
+            range_select
+                .apply_expressions(&mut |expr| {
+                    visited.push(expr.to_string());
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap(),
+            TreeNodeRecursion::Continue
+        );
+        assert_eq!(visited, ["value", TIME_INDEX_COLUMN, "host"]);
+
+        let mut stopped = Vec::new();
+        assert_eq!(
+            range_select
+                .apply_expressions(&mut |expr| {
+                    stopped.push(expr.to_string());
+                    Ok(TreeNodeRecursion::Stop)
+                })
+                .unwrap(),
+            TreeNodeRecursion::Stop
+        );
+        assert_eq!(stopped, ["value"]);
+
+        assert_eq!(
+            range_select
+                .apply_expressions(&mut |_| {
+                    Err(DataFusionError::Execution("apply failure".into()))
+                })
+                .unwrap_err()
+                .to_string(),
+            "Execution error: apply failure"
+        );
     }
 
     #[tokio::test]

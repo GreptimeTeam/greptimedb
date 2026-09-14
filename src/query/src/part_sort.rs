@@ -235,6 +235,13 @@ impl ExecutionPlan for PartSortExec {
         )
     }
 
+    fn dynamic_expressions_produced(&self) -> Vec<Arc<dyn PhysicalExpr>> {
+        self.dynamic_filter
+            .iter()
+            .map(|filter| filter.clone() as Arc<dyn PhysicalExpr>)
+            .collect()
+    }
+
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
@@ -1856,6 +1863,63 @@ mod test {
             None,
         )
         .await;
+    }
+
+    #[test]
+    fn dynamic_expressions_produced_returns_topk_filter_arc() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+        let partition_range = PartitionRange {
+            start: Timestamp::new(0, unit.into()),
+            end: Timestamp::new(10, unit.into()),
+            num_rows: 0,
+            identifier: 0,
+        };
+        let sort_expr = PhysicalSortExpr {
+            expr: Arc::new(Column::new("ts", 0)),
+            options: SortOptions::default(),
+        };
+
+        let limited = PartSortExec::try_new(
+            sort_expr.clone(),
+            Some(1),
+            vec![vec![partition_range]],
+            Arc::new(MockInputExec::new(vec![vec![]], schema.clone())),
+        )
+        .unwrap();
+        let expected = limited.dynamic_filter.as_ref().unwrap().clone() as Arc<dyn PhysicalExpr>;
+        let produced = limited.dynamic_expressions_produced();
+        assert_eq!(produced.len(), 1);
+        assert!(Arc::ptr_eq(&produced[0], &expected));
+
+        let mut applied_dynamic_filter = None;
+        limited
+            .apply_expressions(&mut |expr| {
+                if expr.expression_id().is_some() {
+                    applied_dynamic_filter = Some(expr.clone());
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        let applied_dynamic_filter = applied_dynamic_filter.unwrap();
+        assert!(Arc::ptr_eq(&produced[0], &applied_dynamic_filter));
+        assert_eq!(
+            produced[0].expression_id(),
+            applied_dynamic_filter.expression_id()
+        );
+
+        let unlimited = PartSortExec::try_new(
+            sort_expr,
+            None,
+            vec![vec![partition_range]],
+            Arc::new(MockInputExec::new(vec![vec![]], schema)),
+        )
+        .unwrap();
+        assert!(unlimited.dynamic_expressions_produced().is_empty());
     }
 
     #[test]
