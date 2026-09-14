@@ -124,6 +124,7 @@ impl MetricEngineInner {
         let aligned_schema_version = Some(self.physical_schema_version(data_region_id).await?);
 
         let request = RegionBulkInsertsRequest {
+            skip_wal: request.skip_wal,
             region_id: data_region_id,
             payload: modified_batch,
             raw_data: ArrowIpc {
@@ -245,14 +246,20 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
     use mito2::config::MitoConfig;
-    use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
+    use store_api::metric_engine_consts::{
+        METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY, PRIMARY_KEY_ENCODING,
+    };
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{RegionBulkInsertsRequest, RegionPutRequest, RegionRequest};
+    use store_api::region_request::{
+        PathType, RegionBulkInsertsRequest, RegionCloseRequest, RegionOpenRequest,
+        RegionPutRequest, RegionRequest,
+    };
     use store_api::storage::{RegionId, ScanRequest};
 
     use super::record_batch_to_ipc;
     use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
+    use crate::engine::MetricEngine;
     use crate::error::Error;
     use crate::test_util::{self, TestEnv};
 
@@ -287,9 +294,14 @@ mod tests {
         .unwrap()
     }
 
-    fn build_bulk_request(logical_region_id: RegionId, batch: RecordBatch) -> RegionRequest {
+    fn build_bulk_request(
+        logical_region_id: RegionId,
+        batch: RecordBatch,
+        skip_wal: bool,
+    ) -> RegionRequest {
         let (schema, data_header, payload) = record_batch_to_ipc(&batch).unwrap();
         RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+            skip_wal,
             region_id: logical_region_id,
             payload: batch,
             raw_data: ArrowIpc {
@@ -332,6 +344,7 @@ mod tests {
 
         let batch = build_logical_batch(0, 0);
         let request = RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+            skip_wal: false,
             region_id: logical_region_id,
             payload: batch,
             raw_data: ArrowIpc::default(),
@@ -348,6 +361,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_insert_physical_region_passthrough() {
+        check_bulk_insert_physical_region_passthrough(false).await;
+        check_bulk_insert_physical_region_passthrough(true).await;
+    }
+
+    async fn check_bulk_insert_physical_region_passthrough(skip_wal: bool) {
         // Use flat format so that BulkMemtable is used (supports write_bulk).
         let mito_config = MitoConfig {
             default_flat_format: true,
@@ -355,12 +373,13 @@ mod tests {
         };
         let env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
         env.init_metric_region().await;
+        env.metric().inner.flush_task.stop().await.unwrap();
         let physical_region_id = env.default_physical_region_id();
         let logical_region_id = env.default_logical_region_id();
 
         // First, do a normal logical bulk insert so we can compare results.
         let logical_batch = build_logical_batch(0, 3);
-        let logical_request = build_bulk_request(logical_region_id, logical_batch.clone());
+        let logical_request = build_bulk_request(logical_region_id, logical_batch, skip_wal);
         let response = env
             .metric()
             .handle_request(logical_region_id, logical_request)
@@ -385,7 +404,7 @@ mod tests {
             &non_tag_indices,
         )
         .unwrap();
-        let request = build_bulk_request(physical_region_id, physical_batch);
+        let request = build_bulk_request(physical_region_id, physical_batch, skip_wal);
         let response = env
             .metric()
             .handle_request(physical_region_id, request)
@@ -401,6 +420,48 @@ mod tests {
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 6);
+
+        // Closing without a flush must recover only WAL-backed data. Recreate
+        // the wrapper too, so its metadata cache cannot hide missing metadata.
+        let stat = env.mito().region_statistic(physical_region_id).unwrap();
+        assert_eq!(stat.sst_num, 0);
+        env.metric()
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest {
+                    flush_on_close: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let reopened = MetricEngine::try_new(env.mito(), Default::default()).unwrap();
+        reopened.inner.flush_task.stop().await.unwrap();
+        reopened
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: METRIC_ENGINE_NAME.to_string(),
+                    table_dir: TestEnv::default_table_dir(),
+                    path_type: PathType::Bare,
+                    options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+                        .into_iter()
+                        .collect(),
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let stream = reopened
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            if skip_wal { 0 } else { 6 },
+        );
     }
 
     #[tokio::test]
@@ -415,7 +476,7 @@ mod tests {
         let physical_region_id = env.default_physical_region_id();
 
         let batch = build_logical_batch(0, 0);
-        let request = build_bulk_request(physical_region_id, batch);
+        let request = build_bulk_request(physical_region_id, batch, false);
         let response = env
             .metric()
             .handle_request(physical_region_id, request)
@@ -449,7 +510,7 @@ mod tests {
         )
         .unwrap();
 
-        let request = build_bulk_request(logical_region_id, batch);
+        let request = build_bulk_request(logical_region_id, batch, false);
         let err = env
             .metric()
             .handle_request(logical_region_id, request)
@@ -499,7 +560,7 @@ mod tests {
         )
         .unwrap();
 
-        let request = build_bulk_request(logical_region_id, batch);
+        let request = build_bulk_request(logical_region_id, batch, false);
         let response = env
             .metric()
             .handle_request(logical_region_id, request)
@@ -522,7 +583,7 @@ mod tests {
         env.init_metric_region().await;
         let logical_region_id = env.default_logical_region_id();
 
-        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 3));
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 3), false);
         let response = env
             .metric()
             .handle_request(logical_region_id, request)
@@ -530,7 +591,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.affected_rows, 3);
 
-        let request = build_bulk_request(logical_region_id, build_logical_batch(3, 5));
+        let request = build_bulk_request(logical_region_id, build_logical_batch(3, 5), false);
         let response = env
             .metric()
             .handle_request(logical_region_id, request)
@@ -553,7 +614,7 @@ mod tests {
         env.init_metric_region().await;
         let logical_region_id = env.default_logical_region_id();
 
-        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 4));
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 4), false);
         let response = env
             .metric()
             .handle_request(logical_region_id, request)
@@ -575,7 +636,7 @@ mod tests {
         let env = TestEnv::new().await;
         let logical_region_id = init_dense_metric_region(&env).await;
 
-        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 2));
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 2), false);
         let err = env
             .metric()
             .handle_request(logical_region_id, request)
@@ -617,7 +678,7 @@ mod tests {
 
         let env_bulk = TestEnv::new().await;
         env_bulk.init_metric_region().await;
-        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 5));
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 5), false);
         env_bulk
             .metric()
             .handle_request(logical_region_id, request)
