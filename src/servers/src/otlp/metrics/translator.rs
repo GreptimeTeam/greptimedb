@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
+
 use ahash::HashMap;
 use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::Metric;
@@ -88,11 +90,11 @@ pub fn translate_metric_name(
     }
 }
 
-pub fn translate_label_name(name: &str, strategy: OtlpMetricTranslationStrategy) -> String {
+pub fn translate_label_name(name: &str, strategy: OtlpMetricTranslationStrategy) -> Cow<'_, str> {
     if strategy.should_escape() {
         normalize_label_name(name)
     } else {
-        name.to_string()
+        Cow::Borrowed(name)
     }
 }
 
@@ -269,21 +271,34 @@ pub(crate) fn clean_unit_name(name: &str) -> String {
 }
 
 // See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_label.go#L27
-pub fn normalize_label_name(name: &str) -> String {
-    if name.is_empty() {
-        return name.to_string();
-    }
-
-    let n = NON_ALPHA_NUM_CHAR.replace_all(name, UNDERSCORE);
-    if let Some((_, first)) = n.char_indices().next()
-        && first.is_ascii_digit()
+pub fn normalize_label_name(name: &str) -> Cow<'_, str> {
+    // Most attribute names already use the Prometheus ASCII alphabet. Borrow
+    // them so an existing column does not allocate a fresh name for every row.
+    let normalized = if name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     {
-        return format!("key_{}", n);
+        Cow::Borrowed(name)
+    } else {
+        // Match the old Unicode regex: each invalid code point, not each UTF-8
+        // byte, becomes one underscore. Consecutive replacements stay distinct.
+        Cow::Owned(
+            name.chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>(),
+        )
+    };
+    if normalized
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_digit)
+    {
+        return Cow::Owned(format!("key_{normalized}"));
     }
-    if n.starts_with(UNDERSCORE) && !n.starts_with(DOUBLE_UNDERSCORE) {
-        return format!("key{}", n);
+    if normalized.starts_with(UNDERSCORE) && !normalized.starts_with(DOUBLE_UNDERSCORE) {
+        return Cow::Owned(format!("key{normalized}"));
     }
-    n.to_string()
+    normalized
 }
 
 /// Normalize otlp instrumentation, metric and attribute names
@@ -305,6 +320,33 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn label_scan_matches_regex_normalization() {
+        fn reference(name: &str) -> String {
+            let normalized = NON_ALPHA_NUM_CHAR.replace_all(name, UNDERSCORE);
+            if normalized.starts_with(|ch: char| ch.is_ascii_digit()) {
+                format!("key_{normalized}")
+            } else if normalized.starts_with('_') && !normalized.starts_with("__") {
+                format!("key{normalized}")
+            } else {
+                normalized.into_owned()
+            }
+        }
+        // Covers prefix rules and one replacement per Unicode scalar, including
+        // adjacent invalid characters and already-normalized underscores.
+        let alphabet = [
+            "", "a", "Z", "0", "_", ".", "-", ":", " ", "\n", "\0", "é", "汉", "💡", "\u{0301}",
+        ];
+        for first in alphabet {
+            for second in alphabet {
+                for third in alphabet {
+                    let name = format!("{first}{second}{third}");
+                    assert_eq!(normalize_label_name(&name), reference(&name), "{name:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_legacy_normalize_otlp_name() {

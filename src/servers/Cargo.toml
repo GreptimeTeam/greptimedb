@@ -182,6 +182,10 @@ name = "bench_prom"
 harness = false
 
 [[bench]]
+name = "bench_otlp_decode"
+harness = false
+
+[[bench]]
 name = "prom_decode"
 harness = false
 required-features = ["testing"]

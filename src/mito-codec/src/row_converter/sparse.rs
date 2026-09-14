@@ -301,13 +301,33 @@ impl SparsePrimaryKeyCodec {
         Ok(())
     }
 
+    /// Exact length of a sparse metric key, including table id and TSID.
+    pub fn encoded_raw_key_len<'a>(
+        tag_values: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<usize> {
+        tag_values.into_iter().try_fold(22usize, |length, value| {
+            value
+                .len()
+                .div_ceil(8)
+                .checked_mul(9)
+                .and_then(|encoded| encoded.checked_add(6))
+                .and_then(|encoded| length.checked_add(encoded))
+                .ok_or_else(|| {
+                    InvalidSparsePrimaryKeySnafu {
+                        reason: "encoded primary key length overflows usize",
+                    }
+                    .build()
+                })
+        })
+    }
+
     pub fn encode_raw_tag_value<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
     where
         I: Iterator<Item = (ColumnId, &'a [u8])>,
     {
         for (tag_column_id, tag_value) in row {
             let value_len = tag_value.len();
-            buffer.reserve(6 + value_len / 8 * 9);
+            buffer.reserve(6 + value_len.div_ceil(8) * 9);
             buffer.put_u32(tag_column_id);
             buffer.put_u8(1);
             buffer.put_u8(!tag_value.is_empty() as u8);
@@ -629,6 +649,38 @@ mod tests {
     use store_api::storage::{ColumnId, RegionId};
 
     use super::*;
+
+    #[test]
+    fn raw_key_length_matches_encoding_at_chunk_boundaries() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        for lengths in [
+            vec![],
+            vec![0],
+            vec![1, 7, 8, 9],
+            vec![15, 16, 17],
+            vec![0, 128, 257],
+        ] {
+            let values: Vec<_> = lengths
+                .into_iter()
+                .map(|length| vec![b'x'; length])
+                .collect();
+            let length =
+                SparsePrimaryKeyCodec::encoded_raw_key_len(values.iter().map(Vec::as_slice))
+                    .unwrap();
+            let mut encoded = Vec::with_capacity(length);
+            codec.encode_internal(42, 99, &mut encoded).unwrap();
+            codec
+                .encode_raw_tag_value(
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| (index as u32 + 10, value.as_slice())),
+                    &mut encoded,
+                )
+                .unwrap();
+            assert_eq!(length, encoded.len());
+        }
+    }
 
     fn test_region_metadata() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
