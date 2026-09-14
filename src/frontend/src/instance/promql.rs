@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -34,7 +34,7 @@ use servers::prometheus;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, is_metric_engine_internal_column,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, is_metric_engine_internal_column,
 };
 use store_api::storage::TableId;
 use table::TableRef;
@@ -177,58 +177,51 @@ impl Instance {
             .with_label_values(&[ctx.get_db_string().as_str()])
             .start_timer();
 
-        let (physical_tables, logical_names) = self
-            .metric_engine_tables(ctx.current_catalog(), schema, ctx)
-            .await?;
-
+        let catalog = ctx.current_catalog();
         let mut table_ids = HashSet::new();
-        for physical in physical_tables {
+        for physical in self.physical_metric_tables(catalog, schema, ctx).await? {
             table_ids.extend(
                 self.scan_matching_table_ids(physical, &matchers, start, end, ctx)
                     .await?,
             );
         }
 
-        // A table id without a name was dropped after the catalog scan.
-        let mut names = table_ids
+        // Batch-resolve only the ids the scan produced. An id dropped between the
+        // scan and here simply has no entry.
+        let table_ids = table_ids.into_iter().collect::<Vec<_>>();
+        let mut names = self
+            .catalog_manager
+            .tables_by_ids(catalog, schema, &table_ids)
+            .await
+            .context(CatalogSnafu)?
             .into_iter()
-            .filter_map(|id| logical_names.get(&id).cloned())
+            .map(|table| table.table_info().name.clone())
             .collect::<Vec<_>>();
         names.sort_unstable();
         Ok(names)
     }
 
-    /// Splits a schema's metric engine tables into the physical tables to scan
-    /// and the `__table_id` to metric name mapping of their logical tables.
+    /// Returns the metric engine physical tables of a schema.
     ///
-    /// A logical table always lives in the schema of its physical table, so this
-    /// single pass sees both sides of every pair.
-    async fn metric_engine_tables(
+    /// Their data regions carry the union of their logical tables' label columns,
+    /// so scanning these covers every metric of the schema.
+    async fn physical_metric_tables(
         &self,
         catalog: &str,
         schema: &str,
         ctx: &QueryContextRef,
-    ) -> Result<(Vec<TableRef>, HashMap<TableId, String>)> {
+    ) -> Result<Vec<TableRef>> {
         let mut tables = self.catalog_manager.tables(catalog, schema, Some(ctx));
         let mut physical_tables = Vec::new();
-        let mut logical_names = HashMap::new();
 
         while let Some(table) = tables.next().await {
             let table = table.context(CatalogSnafu)?;
-            let info = table.table_info();
-            if info.is_physical_table() {
-                physical_tables.push(table.clone());
-            } else if info
-                .meta
-                .options
-                .extra_options
-                .contains_key(LOGICAL_TABLE_METADATA_KEY)
-            {
-                logical_names.insert(info.ident.table_id, info.name.clone());
+            if table.table_info().is_physical_table() {
+                physical_tables.push(table);
             }
         }
 
-        Ok((physical_tables, logical_names))
+        Ok(physical_tables)
     }
 
     /// Returns the `__table_id`s of `physical` carrying a row that matches every
