@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_time::Timestamp;
 use smallvec::SmallVec;
 use store_api::metadata::RegionMetadataRef;
 
@@ -149,6 +150,17 @@ impl MemtableVersion {
             .map(|mem| mem.stats().num_rows as u64)
             .sum::<u64>()
             + self.mutable.num_rows()
+    }
+
+    /// Returns the time range covered by the memtables, if any hold data.
+    pub(crate) fn time_range(&self) -> Option<(Timestamp, Timestamp)> {
+        let mut mutables = Vec::new();
+        self.mutable.list_memtables(&mut mutables);
+        self.immutables
+            .iter()
+            .chain(mutables.iter())
+            .filter_map(|mem| mem.stats().time_range())
+            .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
 
     /// Returns true if the memtable version is empty.
