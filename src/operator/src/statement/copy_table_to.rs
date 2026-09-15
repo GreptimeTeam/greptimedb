@@ -25,8 +25,8 @@ use common_datasource::object_store::build_backend_for_write_with_path;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::{
-    RecordBatchStream, SendableRecordBatchMapper, SendableRecordBatchStream,
-    map_json_type_to_string, map_json_type_to_string_schema,
+    SendableRecordBatchMapper, SendableRecordBatchStream, map_json_type_to_string,
+    map_json_type_to_string_schema,
 };
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::DefaultTableSource;
@@ -85,18 +85,14 @@ impl StatementExecutor {
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
-            Format::Parquet(_) => {
-                let schema = stream.schema();
-                stream_to_parquet(
-                    Box::pin(DfRecordBatchStreamAdapter::new(stream)),
-                    schema,
-                    object_store,
-                    path,
-                    WRITE_CONCURRENCY,
-                )
-                .await
-                .context(error::WriteStreamToFileSnafu { path })
-            }
+            Format::Parquet(_) => stream_to_parquet(
+                Box::pin(DfRecordBatchStreamAdapter::new(stream)),
+                object_store,
+                path,
+                WRITE_CONCURRENCY,
+            )
+            .await
+            .context(error::WriteStreamToFileSnafu { path }),
             _ => error::UnsupportedFormatSnafu {
                 format: format.clone(),
             }
