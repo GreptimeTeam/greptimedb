@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn post_creation_write_failure_keeps_body_without_reference() {
+    fn parent_directory_creation_failure_keeps_body_without_reference() {
         let tempdir = tempfile::tempdir().unwrap();
         let report = tempdir.path().join("query-regression-report.json");
         let artifacts = ResponseArtifacts::new(&report).unwrap();
