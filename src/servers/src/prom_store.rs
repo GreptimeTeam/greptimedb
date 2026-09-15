@@ -362,22 +362,59 @@ pub fn recordbatches_to_timeseries(
     value_column_name: &str,
     recordbatches: RecordBatches,
 ) -> Result<Vec<TimeSeries>> {
-    Ok(recordbatches
-        .take()
-        .into_iter()
-        .map(|x| recordbatch_to_timeseries(table_name, timestamp_column_name, value_column_name, x))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect())
+    let mut timeseries: Vec<TimeSeries> = Vec::new();
+    let mut timeseries_by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
+
+    for recordbatch in recordbatches.take() {
+        append_recordbatch_to_timeseries(
+            table_name,
+            timestamp_column_name,
+            value_column_name,
+            recordbatch,
+            &mut timeseries,
+            &mut timeseries_by_hash,
+        )?;
+    }
+
+    for ts in &mut timeseries {
+        ts.samples.sort_by_key(|s| s.timestamp);
+    }
+
+    timeseries
+        .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
+    Ok(timeseries)
 }
 
+#[cfg(test)]
 fn recordbatch_to_timeseries(
     table: &str,
     timestamp_column_name: &str,
     value_column_name: &str,
     recordbatch: RecordBatch,
 ) -> Result<Vec<TimeSeries>> {
+    let mut timeseries = Vec::new();
+    let mut timeseries_by_hash = HashMap::new();
+    append_recordbatch_to_timeseries(
+        table,
+        timestamp_column_name,
+        value_column_name,
+        recordbatch,
+        &mut timeseries,
+        &mut timeseries_by_hash,
+    )?;
+    timeseries
+        .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
+    Ok(timeseries)
+}
+
+fn append_recordbatch_to_timeseries(
+    table: &str,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+    recordbatch: RecordBatch,
+    timeseries: &mut Vec<TimeSeries>,
+    timeseries_by_hash: &mut HashMap<u64, Vec<usize>>,
+) -> Result<()> {
     let ts_column = recordbatch
         .column_by_name(timestamp_column_name)
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
@@ -409,8 +446,6 @@ fn recordbatch_to_timeseries(
         })?;
 
     let columns = label_columns(&recordbatch, timestamp_column_name, value_column_name)?;
-    let mut timeseries: Vec<TimeSeries> = Vec::new();
-    let mut timeseries_by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut previous_timeseries: Option<usize> = None;
 
     for row in 0..recordbatch.num_rows() {
@@ -447,9 +482,7 @@ fn recordbatch_to_timeseries(
         timeseries[timeseries_index].samples.push(sample);
     }
 
-    timeseries
-        .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
-    Ok(timeseries)
+    Ok(())
 }
 
 pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertRequests, usize)> {
@@ -1119,6 +1152,121 @@ mod tests {
                 value: 7.0,
                 timestamp: 2000,
             }]
+        );
+    }
+
+    #[test]
+    fn test_recordbatches_to_timeseries_merges_across_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                greptime_timestamp(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
+        ]));
+
+        let recordbatches = RecordBatches::try_new(
+            schema.clone(),
+            vec![
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![3000, 1500])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![30.0, 15.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1", "host2"])) as _,
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![10.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1"])) as _,
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![2000, 2500])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![20.0, 25.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1", "host2"])) as _,
+                    ],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let timeseries = recordbatches_to_timeseries(
+            "cpu_usage",
+            greptime_timestamp(),
+            greptime_value(),
+            recordbatches,
+        )
+        .unwrap();
+
+        assert_eq!(2, timeseries.len());
+
+        assert_eq!(
+            vec![
+                Label {
+                    name: METRIC_NAME_LABEL.to_string(),
+                    value: "cpu_usage".to_string(),
+                },
+                Label {
+                    name: "instance".to_string(),
+                    value: "host1".to_string(),
+                },
+            ],
+            timeseries[0].labels
+        );
+        assert_eq!(
+            vec![
+                Sample {
+                    value: 10.0,
+                    timestamp: 1000,
+                },
+                Sample {
+                    value: 20.0,
+                    timestamp: 2000,
+                },
+                Sample {
+                    value: 30.0,
+                    timestamp: 3000,
+                },
+            ],
+            timeseries[0].samples
+        );
+
+        assert_eq!(
+            vec![
+                Label {
+                    name: METRIC_NAME_LABEL.to_string(),
+                    value: "cpu_usage".to_string(),
+                },
+                Label {
+                    name: "instance".to_string(),
+                    value: "host2".to_string(),
+                },
+            ],
+            timeseries[1].labels
+        );
+        assert_eq!(
+            vec![
+                Sample {
+                    value: 15.0,
+                    timestamp: 1500,
+                },
+                Sample {
+                    value: 25.0,
+                    timestamp: 2500,
+                },
+            ],
+            timeseries[1].samples
         );
     }
 
