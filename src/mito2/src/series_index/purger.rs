@@ -60,7 +60,7 @@ impl IndexFilePurger {
     pub(crate) fn purge(&self, request: PurgeRequest) {
         if let Err(error) = self.sender.send(request) {
             let store = self.store.clone();
-            common_runtime::spawn_global(async move {
+            common_runtime::spawn_compact(async move {
                 purge_file(&store, error.0).await;
             });
         }

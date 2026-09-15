@@ -65,7 +65,7 @@ impl SeriesIndexTaskState {
     }
 }
 
-/// Starts both tasks, detaching purge and returning the maintenance handle.
+/// Starts both tasks on the compaction runtime, detaching purge and returning the maintenance handle.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_series_index_tasks(
     worker_id: u32,
@@ -79,12 +79,12 @@ pub(crate) fn spawn_series_index_tasks(
     time_provider: TimeProviderRef,
 ) -> JoinHandle<()> {
     // Snapshots may retain senders after the worker stops; purge until all senders drop.
-    common_runtime::spawn_global(run_index_purge_task(
+    common_runtime::spawn_compact(run_index_purge_task(
         worker_id,
         store.clone(),
         purge_receiver,
     ));
-    common_runtime::spawn_global(async move {
+    common_runtime::spawn_compact(async move {
         SeriesIndexTask {
             worker_id,
             store,
