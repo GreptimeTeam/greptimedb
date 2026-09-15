@@ -671,7 +671,7 @@ mod test {
             panic!("expected affected rows output");
         };
         assert_eq!(affected_rows, 9);
-        assert!(result.metrics.is_ready());
+        result.metrics.wait_ready().await;
         assert!(result.region_watermark_map().is_none());
 
         let err = client
@@ -697,6 +697,7 @@ mod test {
             panic!("expected affected rows output");
         };
         assert_eq!(affected_rows, 9);
+        result.metrics.wait_ready().await;
         assert_eq!(
             result.region_watermark_map(),
             Some(std::collections::HashMap::from([previous_watermark]))
