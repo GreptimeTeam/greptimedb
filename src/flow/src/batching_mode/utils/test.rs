@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use catalog::RegisterTableRequest;
@@ -19,6 +20,7 @@ use common_query::OutputData;
 use common_recordbatch::recordbatch::merge_record_batches;
 use common_recordbatch::{RecordBatch, util};
 use common_time::Timestamp;
+use datafusion_common::ScalarValue;
 use datafusion_common::tree_node::TreeNode as _;
 use datafusion_expr::GroupingSet;
 use datatypes::arrow::array::{Array, AsArray};
@@ -743,6 +745,105 @@ async fn test_gen_plan_with_matching_schema_allows_null_positional_alias() {
         vec!["number".to_string(), "label".to_string()]
     );
     assert!(sql.contains("NULL AS label"), "{sql}");
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_and_values_injects_physical_sink_order() {
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("marker", ConcreteDataType::uint8_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("epoch", ConcreteDataType::uint64_datatype(), true),
+    ]));
+    let plan = gen_plan_with_matching_schema_and_values(
+        "SELECT number, ts FROM numbers_with_ts",
+        QueryContext::arc(),
+        create_test_query_engine(),
+        sink_schema,
+        &[],
+        false,
+        &BTreeMap::from([
+            ("epoch".to_string(), ScalarValue::UInt64(Some(7))),
+            ("marker".to_string(), ScalarValue::UInt8(None)),
+        ]),
+    )
+    .await
+    .unwrap();
+    let names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["number", "marker", "ts", "epoch"]);
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_and_values_rejects_unknown_collision_and_type() {
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("marker", ConcreteDataType::uint8_datatype(), true),
+    ]));
+    for (values, expected) in [
+        (
+            BTreeMap::from([("unknown".to_string(), ScalarValue::UInt8(None))]),
+            "is not found in sink schema",
+        ),
+        (
+            BTreeMap::from([("number".to_string(), ScalarValue::UInt32(None))]),
+            "collides with flow output",
+        ),
+        (
+            BTreeMap::from([("marker".to_string(), ScalarValue::UInt64(None))]),
+            "has type UInt64",
+        ),
+    ] {
+        let err = gen_plan_with_matching_schema_and_values(
+            "SELECT number, ts FROM numbers_with_ts",
+            QueryContext::arc(),
+            create_test_query_engine(),
+            sink_schema.clone(),
+            &[],
+            false,
+            &values,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(expected), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_and_values_rejects_duplicate_output() {
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("marker", ConcreteDataType::uint8_datatype(), true),
+    ]));
+    let err = gen_plan_with_matching_schema_and_values(
+        "SELECT number, number AS number FROM numbers_with_ts",
+        QueryContext::arc(),
+        create_test_query_engine(),
+        sink_schema,
+        &[],
+        false,
+        &BTreeMap::from([("marker".to_string(), ScalarValue::UInt8(None))]),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate column"), "{err}");
 }
 
 #[tokio::test]

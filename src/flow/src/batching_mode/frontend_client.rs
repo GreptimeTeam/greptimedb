@@ -674,7 +674,7 @@ fn wrap_standalone_output_with_terminal_metrics(
 
 /// Describe a peer of frontend
 #[derive(Debug, Default, Clone)]
-pub(crate) enum PeerDesc {
+pub enum PeerDesc {
     /// The query failed before a frontend peer was selected.
     #[default]
     Unknown,
