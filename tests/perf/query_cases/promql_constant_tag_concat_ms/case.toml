@@ -62,7 +62,7 @@ series_layout = "timestamp_major"
 [[scenario.queries]]
 name = "selector_full"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') promql_constant_tag_concat_ms"
+query = "TQL EVAL (1704069000, 1704069900, '15s') promql_constant_tag_concat_ms"
 warmup = 3
 iterations = 9
 
@@ -72,7 +72,7 @@ max_candidate_latency_regression_pct = 10
 [[scenario.queries]]
 name = "selector_host1"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') promql_constant_tag_concat_ms{host='host1'}"
+query = "TQL EVAL (1704069000, 1704069900, '15s') promql_constant_tag_concat_ms{host='host1'}"
 warmup = 3
 iterations = 9
 
@@ -82,7 +82,7 @@ max_candidate_latency_regression_pct = 10
 [[scenario.queries]]
 name = "topk_5_full"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') topk(5, promql_constant_tag_concat_ms)"
+query = "TQL EVAL (1704069000, 1704069900, '15s') topk(5, promql_constant_tag_concat_ms)"
 warmup = 3
 iterations = 9
 
@@ -92,7 +92,7 @@ max_candidate_latency_regression_pct = 10
 [[scenario.queries]]
 name = "topk_5_host1"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') topk(5, promql_constant_tag_concat_ms{host='host1'})"
+query = "TQL EVAL (1704069000, 1704069900, '15s') topk(5, promql_constant_tag_concat_ms{host='host1'})"
 warmup = 3
 iterations = 9
 
@@ -102,7 +102,7 @@ max_candidate_latency_regression_pct = 10
 [[scenario.queries]]
 name = "topk_100_full"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') topk(100, promql_constant_tag_concat_ms)"
+query = "TQL EVAL (1704069000, 1704069900, '15s') topk(100, promql_constant_tag_concat_ms)"
 warmup = 3
 iterations = 9
 
@@ -112,7 +112,7 @@ max_candidate_latency_regression_pct = 10
 [[scenario.queries]]
 name = "bottomk_5_full"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') bottomk(5, promql_constant_tag_concat_ms)"
+query = "TQL EVAL (1704069000, 1704069900, '15s') bottomk(5, promql_constant_tag_concat_ms)"
 warmup = 3
 iterations = 9
 
@@ -124,7 +124,7 @@ max_candidate_latency_regression_pct = 10
 [[scenario.queries]]
 name = "instant_selector_single_evaluation_control"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704069000, 1704069000, '15s') promql_constant_tag_concat_ms"
+query = "TQL EVAL (1704069000, 1704069000, '15s') promql_constant_tag_concat_ms"
 warmup = 3
 iterations = 9
 
