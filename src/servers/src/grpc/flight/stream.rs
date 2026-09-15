@@ -986,7 +986,7 @@ mod test {
         assert!(matches!(messages[1], Ok(FlightMessage::RecordBatch(_))));
         assert!(matches!(messages[2], Ok(FlightMessage::RecordBatch(_))));
         assert!(matches!(messages[3], Ok(FlightMessage::RecordBatch(_))));
-        assert!(matches!(messages[4], Err(_)));
+        assert!(messages[4].is_err());
         assert_eq!(messages.len(), 5);
     }
 
