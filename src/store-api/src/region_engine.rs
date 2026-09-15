@@ -306,9 +306,6 @@ pub struct ScannerProperties {
     /// [ScannerProperties::append_mode] is true.
     total_rows: usize,
 
-    /// Whether total_rows is exact before applying query predicates.
-    total_rows_is_exact: bool,
-
     /// Whether to yield an empty batch to distinguish partition ranges.
     pub distinguish_partition_range: bool,
 
@@ -337,19 +334,12 @@ impl ScannerProperties {
         self
     }
 
-    /// Sets whether the source row count is exact before query predicates.
-    pub fn with_total_rows_is_exact(mut self, exact: bool) -> Self {
-        self.total_rows_is_exact = exact;
-        self
-    }
-
     /// Creates a new [`ScannerProperties`] with the given partitioning.
     pub fn new(partitions: Vec<Vec<PartitionRange>>, append_mode: bool, total_rows: usize) -> Self {
         Self {
             partitions,
             append_mode,
             total_rows,
-            total_rows_is_exact: false,
             distinguish_partition_range: false,
             target_partitions: 0,
             logical_region: false,
@@ -382,11 +372,6 @@ impl ScannerProperties {
 
     pub fn total_rows(&self) -> usize {
         self.total_rows
-    }
-
-    /// Returns whether the source row count is exact before query predicates.
-    pub fn total_rows_is_exact(&self) -> bool {
-        self.total_rows_is_exact
     }
 
     /// Returns whether the scanner is scanning a logical region.
@@ -499,8 +484,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
-    /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
-    fn has_predicate_without_region(&self) -> bool;
+    /// Returns whether any predicate, including region partition expressions, may filter rows.
+    fn has_predicate(&self) -> bool;
 
     /// Add the given dynamic filter expressions to the predicate of the scanner.
     /// Returns a vector of booleans indicating which filter expressions were applied.
@@ -1119,7 +1104,7 @@ impl RegionScanner for SinglePartitionScanner {
         Ok(result.unwrap())
     }
 
-    fn has_predicate_without_region(&self) -> bool {
+    fn has_predicate(&self) -> bool {
         false
     }
 
