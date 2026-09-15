@@ -24,7 +24,7 @@ use common_procedure::{ProcedureContext, ProcedureWithId, watcher};
 use common_query::Output;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
-use common_test_util::temp_dir::create_temp_dir;
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use frontend::instance::Instance;
 use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions, GcTickerRef};
@@ -120,7 +120,7 @@ macro_rules! repartition_tests {
 /// COUNT must use visible rows rather than the full row counts of shared SSTs.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_append_count_file() {
-    let cluster = append_count_cluster("repartition_append_count").await;
+    let (cluster, _home_guard) = append_count_cluster("repartition_append_count").await;
     let instance = cluster.fe_instance();
     let table = "count_repartition";
     prepare_append_count_table(instance, table, "").await;
@@ -138,7 +138,7 @@ async fn test_repartition_append_count_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_split_append_count_file() {
-    let cluster = append_count_cluster("split_append_count").await;
+    let (cluster, _home_guard) = append_count_cluster("split_append_count").await;
     let instance = cluster.fe_instance();
     let table = "count_split";
     prepare_append_count_table(
@@ -159,13 +159,32 @@ async fn test_split_append_count_file() {
     check_append_count_after_write(instance, table, 1).await;
 }
 
-async fn append_count_cluster(name: &str) -> GreptimeDbCluster {
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repartition_append_count_memtable_file() {
+    let (cluster, home_guard) = append_count_cluster("repartition_append_count_memtable").await;
+    assert!(home_guard.path().is_dir());
+    let instance = cluster.fe_instance();
+    let table = "count_repartition_memtable";
+    prepare_append_count_table(instance, table, "").await;
+    assert_append_count(instance, table, 100, 1).await;
+
+    // Entering staging must flush the populated memtable before changing partitions.
+    let sql = "ALTER TABLE count_repartition_memtable PARTITION ON COLUMNS (device_id) \
+               (device_id < 50, device_id >= 50)";
+    run_sql(instance, sql, QueryContext::arc()).await.unwrap();
+    wait_for_append_count_regions(instance, table, 2).await;
+    assert_append_count(instance, table, 100, 0).await;
+    check_append_count_after_write(instance, table, 0).await;
+    assert!(home_guard.path().is_dir());
+}
+
+async fn append_count_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&StorageType::File);
-    let home_dir = create_temp_dir(name);
-    GreptimeDbClusterBuilder::new(name)
+    let home_dir = Arc::new(create_temp_dir(name));
+    let cluster = GreptimeDbClusterBuilder::new(name)
         .await
-        .with_shared_home_dir(Arc::new(home_dir))
+        .with_shared_home_dir(Arc::clone(&home_dir))
         .with_datanodes(3)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
@@ -178,7 +197,8 @@ async fn append_count_cluster(name: &str) -> GreptimeDbCluster {
             ..Default::default()
         })
         .build(true)
-        .await
+        .await;
+    (cluster, home_dir)
 }
 
 async fn prepare_append_count_table(instance: &Arc<Instance>, table: &str, partitions: &str) {
