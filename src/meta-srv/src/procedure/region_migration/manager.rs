@@ -510,17 +510,14 @@ impl RegionMigrationManager {
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
-        let procedure_manager = self.procedure_manager.clone();
+        let mut watcher = self
+            .procedure_manager
+            .submit(procedure_with_id)
+            .await
+            .context(error::SubmitProcedureSnafu)?;
         let num_region = task.region_ids.len();
 
         common_runtime::spawn_global(async move {
-            let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
-                Ok(watcher) => watcher,
-                Err(e) => {
-                    error!(e; "Failed to submit region migration procedure {procedure_id} for {task}");
-                    return;
-                }
-            };
             METRIC_META_REGION_MIGRATION_DATANODES
                 .with_label_values(&["src", &task.from_peer.id.to_string()])
                 .inc_by(num_region as u64);
@@ -528,7 +525,7 @@ impl RegionMigrationManager {
                 .with_label_values(&["desc", &task.to_peer.id.to_string()])
                 .inc_by(num_region as u64);
 
-            if let Err(e) = watcher::wait(watcher).await {
+            if let Err(e) = watcher::wait(&mut watcher).await {
                 error!(e; "Failed to wait region migration procedure {procedure_id} for {task}");
                 METRIC_META_REGION_MIGRATION_FAIL.inc();
                 return;
@@ -613,15 +610,12 @@ impl RegionMigrationManager {
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
-        let procedure_manager = self.procedure_manager.clone();
+        let mut watcher = self
+            .procedure_manager
+            .submit(procedure_with_id)
+            .await
+            .context(error::SubmitProcedureSnafu)?;
         common_runtime::spawn_global(async move {
-            let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
-                Ok(watcher) => watcher,
-                Err(e) => {
-                    error!(e; "Failed to submit region migration procedure {procedure_id} for {task}");
-                    return;
-                }
-            };
             METRIC_META_REGION_MIGRATION_DATANODES
                 .with_label_values(&["src", &task.from_peer.id.to_string()])
                 .inc();
@@ -629,7 +623,7 @@ impl RegionMigrationManager {
                 .with_label_values(&["desc", &task.to_peer.id.to_string()])
                 .inc();
 
-            if let Err(e) = watcher::wait(watcher).await {
+            if let Err(e) = watcher::wait(&mut watcher).await {
                 error!(e; "Failed to wait region migration procedure {procedure_id} for {task}");
                 METRIC_META_REGION_MIGRATION_FAIL.inc();
                 return;
@@ -649,9 +643,147 @@ mod test {
     use common_meta::key::table_route::LogicalTableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::rpc::router::Region;
+    use common_meta::state_store::KvStateStore;
+    use common_procedure::ProcedureManager;
+    use common_procedure::local::{LocalManager, ManagerConfig, PauseAware};
+    use common_procedure::test_util::InMemoryPoisonStore;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::procedure::region_migration::test_util::TestingEnv;
+
+    #[derive(Default)]
+    struct SubmissionGate {
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl PauseAware for SubmissionGate {
+        async fn is_paused(&self) -> std::result::Result<bool, common_error::ext::BoxedError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(false)
+        }
+    }
+
+    async fn check_submission_registration(batch: bool) {
+        let env = TestingEnv::new();
+        let gate = Arc::new(SubmissionGate::default());
+        let procedure_manager = Arc::new(LocalManager::new(
+            ManagerConfig::default(),
+            Arc::new(KvStateStore::new(env.kv_backend())),
+            Arc::new(InMemoryPoisonStore::default()),
+            Some(gate.clone()),
+            None,
+        ));
+        let manager = RegionMigrationManager::new(procedure_manager.clone(), env.context_factory());
+        let region_ids = if batch {
+            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)]
+        } else {
+            vec![RegionId::new(1024, 1)]
+        };
+        let region_routes = region_ids
+            .iter()
+            .map(|region_id| RegionRoute {
+                region: Region::new_test(*region_id),
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            })
+            .collect();
+        env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+            .await;
+
+        // A stopped manager must reject submission and release all migration guards.
+        // Starting it then allows the same regions to be submitted successfully.
+        for started in [false, true] {
+            if started {
+                procedure_manager.start().await.unwrap();
+            }
+            let submission = async {
+                if batch {
+                    let result = manager
+                        .submit_region_migration_task(RegionMigrationTaskBatch {
+                            region_ids: region_ids.clone(),
+                            from_peer: Peer::empty(1),
+                            to_peer: Peer::empty(2),
+                            timeout: Duration::from_secs(10),
+                            trigger_reason: RegionMigrationTriggerReason::Manual,
+                        })
+                        .await?;
+                    assert_eq!(result.submitted, region_ids);
+                    Ok(result.procedure_id)
+                } else {
+                    manager
+                        .submit_procedure(
+                            ProcedureContext::default(),
+                            RegionMigrationProcedureTask::new(
+                                region_ids[0],
+                                Peer::empty(1),
+                                Peer::empty(2),
+                                Duration::from_secs(10),
+                                RegionMigrationTriggerReason::Manual,
+                            ),
+                        )
+                        .await
+                }
+            };
+            tokio::pin!(submission);
+            tokio::select! {
+                biased;
+                result = &mut submission => panic!("Submission returned before registration: {result:?}"),
+                _ = gate.entered.notified() => {}
+            }
+            assert!(futures::poll!(&mut submission).is_pending());
+            assert!(
+                procedure_manager
+                    .list_procedures()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            for region_id in &region_ids {
+                assert!(manager.tracker.contains(*region_id));
+            }
+
+            gate.release.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(5), &mut submission)
+                .await
+                .expect("Submission should return after registration");
+            if started {
+                let procedure_id = result.unwrap().unwrap();
+                assert!(
+                    procedure_manager
+                        .procedure_state(procedure_id)
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+            } else {
+                assert_matches!(
+                    result.unwrap_err(),
+                    error::Error::SubmitProcedure {
+                        source: common_procedure::Error::ManagerNotStart { .. },
+                        ..
+                    }
+                );
+                for region_id in &region_ids {
+                    assert!(!manager.tracker.contains(*region_id));
+                }
+            }
+        }
+        procedure_manager.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure_registration() {
+        check_submission_registration(false).await;
+    }
+
+    #[tokio::test]
+    async fn test_submit_region_migration_task_registration() {
+        check_submission_registration(true).await;
+    }
 
     #[tokio::test]
     async fn test_insert_running_procedure() {
@@ -1039,6 +1171,7 @@ mod test {
     #[tokio::test]
     async fn test_running_regions() {
         let env = TestingEnv::new();
+        env.procedure_manager().start().await.unwrap();
         let context_factory = env.context_factory();
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
@@ -1072,5 +1205,6 @@ mod test {
         assert_eq!(result.migrating, vec![region_id]);
         assert_eq!(result.submitted, vec![RegionId::new(1024, 2)]);
         assert!(result.procedure_id.is_some());
+        env.procedure_manager().stop().await.unwrap();
     }
 }
