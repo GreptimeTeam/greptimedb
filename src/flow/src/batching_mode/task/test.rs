@@ -2190,6 +2190,7 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
         QueryOptions::default(),
     ));
     task.execute_logical_plan_unlocked(
+        &query_engine,
         &frontend_client,
         &plan_info.plan,
         &plan_info.dirty_restore,
@@ -2459,6 +2460,7 @@ async fn test_exact_required_unsupported_plan_keeps_exact_retry_state() {
     for _ in 0..2 {
         let err = task
             .execute_logical_plan_unlocked(
+                &query_engine,
                 &frontend_client,
                 &dml_plan,
                 &DirtyRestore::Unscoped(dirty_range(10, 15)),
@@ -2624,6 +2626,7 @@ async fn test_unsafe_incremental_plan_skip_restores_dirty_without_query() {
 
     let result = task
         .execute_logical_plan_unlocked(
+            &query_engine,
             &Arc::new(frontend_client),
             &dml_plan,
             &dirty_restore,
