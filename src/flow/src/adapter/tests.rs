@@ -520,6 +520,42 @@ fn mirror_request(table: u32, region: u32, values: &[i32]) -> api::v1::region::I
 }
 
 #[tokio::test]
+async fn stateless_rejects_aggregate_flow_with_actionable_diagnostic() {
+    let h = StreamingHarness::new().await;
+    h.table(1, "source").await;
+
+    let err = h
+        .engine
+        .create_flow_inner(CreateFlowArgs {
+            flow_id: 1,
+            source_table_ids: vec![1],
+            sink_table_name: ["greptime".into(), "public".into(), "sink".into()],
+            create_if_not_exists: true,
+            or_replace: true,
+            expire_after: None,
+            eval_interval: None,
+            comment: None,
+            sql: "SELECT number, count(*) FROM source GROUP BY number".into(),
+            flow_options: Default::default(),
+            query_ctx: Some(session::context::QueryContext::arc().as_ref().clone()),
+            eval_schedule: None,
+        })
+        .await
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains(
+        "Aggregation is unsupported in streaming flows. Recreate the flow to select batching mode."
+    ));
+    assert!(
+        message.contains("A source table with TTL=instant must use persisted retention first.")
+    );
+    assert!(message.contains("Aggregation SQL without a time window requires EVAL INTERVAL."));
+    assert!(!h.engine.flow_exist_inner(1).await.unwrap());
+    assert!(h.take_numbers().is_empty());
+}
+
+#[tokio::test]
 async fn stateless_failed_flow_and_table_do_not_starve_healthy_sinks() {
     let h = StreamingHarness::new().await;
     h.table(1, "source_a").await;

@@ -266,6 +266,11 @@ pub(crate) fn validate_plan(plan: &LogicalPlan) -> Result<(), Error> {
         match node {
             LogicalPlan::TableScan(_) => scans += 1,
             LogicalPlan::Projection(_) | LogicalPlan::Filter(_) => {}
+            LogicalPlan::Aggregate(_) => {
+                return Err(datafusion::error::DataFusionError::Plan(
+                    "Aggregation is unsupported in streaming flows. Recreate the flow to select batching mode. A source table with TTL=instant must use persisted retention first. Aggregation SQL without a time window requires EVAL INTERVAL.".into(),
+                ));
+            }
             // DISTINCT is evaluated against this request's transient input only. DISTINCT ON
             // has ordering/selection semantics beyond the supported stateless subset.
             LogicalPlan::Distinct(Distinct::All(_)) => {}
