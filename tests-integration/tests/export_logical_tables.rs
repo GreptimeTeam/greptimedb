@@ -94,7 +94,13 @@ async fn roundtrip(instance: &Instance) {
             table(instance, &names[1]).await,
             table(instance, &names[2]).await,
         ];
-        let unit = LogicalTableExport::try_new(table(instance, physical).await, &tables).unwrap();
+        let renamed = format!("renamed_{physical}");
+        sql(
+            instance,
+            &format!("ALTER TABLE {physical} RENAME {renamed}"),
+        )
+        .await;
+        let unit = LogicalTableExport::try_new(table(instance, &renamed).await, &tables).unwrap();
         let range =
             TimestampRange::new(Timestamp::new_millisecond(2), Timestamp::new_millisecond(4))
                 .unwrap();

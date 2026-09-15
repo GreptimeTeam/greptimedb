@@ -591,3 +591,33 @@ async fn cleanup_failure_preserves_resource_error() {
         Err(error::Error::LogicalTableExportResource { .. })
     ));
 }
+
+#[tokio::test]
+async fn validates_membership_by_table_route() {
+    use common_meta::kv_backend::TxnService;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+
+    let unit = unit();
+    for physical_id in [None, Some(2048), Some(1024)] {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TableRouteManager::new(kv.clone());
+        if let Some(physical_id) = physical_id {
+            for &table_id in unit.logical_tables.keys() {
+                let (txn, _) = manager
+                    .table_route_storage()
+                    .build_create_txn(table_id, &TableRouteValue::logical(physical_id))
+                    .unwrap();
+                assert!(kv.txn(txn).await.unwrap().succeeded);
+            }
+        }
+        let result = unit.validate_table_routes(&manager).await;
+        if physical_id == Some(1024) {
+            result.unwrap();
+        } else {
+            assert!(matches!(
+                result,
+                Err(error::Error::InvalidLogicalTableExport { .. })
+            ));
+        }
+    }
+}

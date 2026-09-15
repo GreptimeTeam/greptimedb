@@ -29,6 +29,7 @@ use arrow::downcast_dictionary_array;
 use arrow::record_batch::RecordBatch;
 use common_datasource::object_store::build_backend_for_write;
 use common_datasource::parquet_writer::{ParquetFileWriter, ParquetWriterLimits};
+use common_meta::key::table_route::{TableRouteManager, TableRouteValue};
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
 use common_time::range::TimestampRange;
@@ -106,7 +107,8 @@ struct LogicalTableProjection {
 }
 
 impl LogicalTableExport {
-    /// Validate associations and capture schemas from already selected table references.
+    /// Capture schemas from selected Metric table references.
+    /// Export validates their physical-table association against table routes.
     pub fn try_new(physical: TableRef, tables: &[TableRef]) -> Result<Self> {
         let physical_info = physical.table_info();
         ensure!(
@@ -146,10 +148,11 @@ impl LogicalTableExport {
                         .meta
                         .options
                         .extra_options
-                        .get(LOGICAL_TABLE_METADATA_KEY)
-                        == Some(&physical_info.name),
+                        .contains_key(LOGICAL_TABLE_METADATA_KEY),
                 InvalidLogicalTableExportSnafu {
-                    reason: format!("{name} does not belong to the physical table")
+                    reason: format!(
+                        "{name} is not a Metric logical table in the physical table schema"
+                    )
                 }
             );
             let schema = table.schema().arrow_schema().clone();
@@ -211,6 +214,27 @@ impl LogicalTableExport {
             scan_projection,
             logical_tables,
         })
+    }
+
+    async fn validate_table_routes(&self, manager: &TableRouteManager) -> Result<()> {
+        let table_ids = self.logical_tables.keys().copied().collect::<Vec<_>>();
+        let routes = manager
+            .table_route_storage()
+            .batch_get(&table_ids)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+        let physical_table_id = self.physical_table.table_info().table_id();
+        for (table_id, route) in table_ids.into_iter().zip(routes) {
+            ensure!(
+                matches!(route, Some(TableRouteValue::Logical(route)) if route.physical_table_id() == physical_table_id),
+                InvalidLogicalTableExportSnafu {
+                    reason: format!(
+                        "logical table {table_id} does not belong to physical table {physical_table_id}"
+                    )
+                }
+            );
+        }
+        Ok(())
     }
 
     fn build_plan(&self, time_range: Option<&TimestampRange>) -> Result<LogicalPlan> {
@@ -281,6 +305,7 @@ impl StatementExecutor {
             biased;
             _ = cancellation.cancelled() => return error::LogicalTableExportCancelledSnafu.fail(),
             result = async {
+                unit.validate_table_routes(self.table_metadata_manager.table_route_manager()).await?;
                 let store = build_backend_for_write(&format!("{}/", directory.trim_end_matches('/')), connection, &self.local_file_access)
                     .await.context(error::BuildBackendSnafu)?;
                 let output = self.query_engine.execute(unit.build_plan(time_range)?, query_ctx)
