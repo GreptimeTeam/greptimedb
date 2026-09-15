@@ -51,6 +51,9 @@ pub enum FlightRecordBatchSource {
     },
 }
 
+// Toggle only this constant for paired Flight coalescing diagnostics.
+const EXPERIMENTAL_FLIGHT_COALESCING_ENABLED: bool = false;
+
 /// Determines whether a Flight result is ready now or initialized asynchronously.
 pub enum FlightRecordBatchStreamInput<F = std::future::Ready<TonicResult<FlightRecordBatchSource>>>
 {
@@ -84,6 +87,16 @@ struct StreamMetrics {
     metrics_count: usize,
     total_rows: usize,
     total_bytes: usize,
+    output_record_batch_count: usize,
+    output_total_rows: usize,
+    coalesce_merge_attempt_count: usize,
+    coalesce_merge_success_count: usize,
+    coalesce_merge_failure_count: usize,
+    coalesce_merge_duration: Duration,
+    coalesce_pending_break_count: usize,
+    coalesce_budget_break_count: usize,
+    coalesce_lookahead_count: usize,
+    experimental_coalescing_enabled: bool,
     should_log: bool,
 }
 
@@ -98,6 +111,16 @@ impl StreamMetrics {
             metrics_count: 0,
             total_rows: 0,
             total_bytes: 0,
+            output_record_batch_count: 0,
+            output_total_rows: 0,
+            coalesce_merge_attempt_count: 0,
+            coalesce_merge_success_count: 0,
+            coalesce_merge_failure_count: 0,
+            coalesce_merge_duration: Duration::ZERO,
+            coalesce_pending_break_count: 0,
+            coalesce_budget_break_count: 0,
+            coalesce_lookahead_count: 0,
+            experimental_coalescing_enabled: EXPERIMENTAL_FLIGHT_COALESCING_ENABLED,
             should_log,
         }
     }
@@ -115,7 +138,17 @@ impl Drop for StreamMetrics {
                 record_batch_count={}, \
                 metrics_count={}, \
                 total_rows={}, \
-                total_bytes={}",
+                total_bytes={}, \
+                output_record_batch_count={}, \
+                output_total_rows={}, \
+                coalesce_merge_attempt_count={}, \
+                coalesce_merge_success_count={}, \
+                coalesce_merge_failure_count={}, \
+                coalesce_merge_duration={:?}, \
+                coalesce_pending_break_count={}, \
+                coalesce_budget_break_count={}, \
+                coalesce_lookahead_count={}, \
+                experimental_coalescing_enabled={}",
                 self.send_schema_duration,
                 self.send_record_batch_duration,
                 self.send_metrics_duration,
@@ -123,7 +156,17 @@ impl Drop for StreamMetrics {
                 self.record_batch_count,
                 self.metrics_count,
                 self.total_rows,
-                self.total_bytes
+                self.total_bytes,
+                self.output_record_batch_count,
+                self.output_total_rows,
+                self.coalesce_merge_attempt_count,
+                self.coalesce_merge_success_count,
+                self.coalesce_merge_failure_count,
+                self.coalesce_merge_duration,
+                self.coalesce_pending_break_count,
+                self.coalesce_budget_break_count,
+                self.coalesce_lookahead_count,
+                self.experimental_coalescing_enabled
             );
         }
     }
@@ -262,7 +305,7 @@ impl FlightRecordBatchStream {
         const MAX_BYTES: usize = 256 * 1024;
         const MAX_BATCHES: usize = 16;
 
-        let mut metrics = StreamMetrics::new(should_send_partial_metrics);
+        let mut metrics = StreamMetrics::new(true);
         let mut last_metrics_str = None;
         let recordbatch_schema = recordbatches.schema();
         let schema = recordbatch_schema.arrow_schema().clone();
@@ -311,10 +354,13 @@ impl FlightRecordBatchStream {
                 };
                 match batch_or_err {
                     Ok(recordbatch) => {
-                        metrics.total_rows += recordbatch.num_rows();
+                        let output_rows = recordbatch.num_rows();
+                        metrics.total_rows += output_rows;
                         metrics.record_batch_count += 1;
                         metrics.total_bytes +=
                             recordbatch.df_record_batch().get_array_memory_size();
+                        metrics.output_record_batch_count += 1;
+                        metrics.output_total_rows += output_rows;
                         let start = Instant::now();
                         if let Err(e) = tx
                             .send(Ok(FlightMessage::RecordBatch(
@@ -386,7 +432,13 @@ impl FlightRecordBatchStream {
                     metrics.total_bytes += batch_bytes;
                 }
 
-                if !sent_first_batch || batch_rows >= MAX_ROWS || batch_bytes >= MAX_BYTES {
+                if !EXPERIMENTAL_FLIGHT_COALESCING_ENABLED
+                    || !sent_first_batch
+                    || batch_rows >= MAX_ROWS
+                    || batch_bytes >= MAX_BYTES
+                {
+                    metrics.output_record_batch_count += 1;
+                    metrics.output_total_rows += batch_rows;
                     let start = Instant::now();
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
@@ -409,8 +461,10 @@ impl FlightRecordBatchStream {
                 let mut stream_error = None;
                 loop {
                     if batches.len() == MAX_BATCHES || rows >= MAX_ROWS || bytes >= MAX_BYTES {
+                        metrics.coalesce_budget_break_count += 1;
                         break;
                     }
+                    metrics.coalesce_lookahead_count += 1;
                     let start = Instant::now();
                     let next =
                         poll_fn(|cx| Poll::Ready(recordbatches.as_mut().poll_next(cx))).await;
@@ -420,6 +474,7 @@ impl FlightRecordBatchStream {
                             let batch_rows = recordbatch.num_rows();
                             let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
                             if batch_rows > MAX_ROWS - rows || batch_bytes > MAX_BYTES - bytes {
+                                metrics.coalesce_budget_break_count += 1;
                                 metrics.total_rows += batch_rows;
                                 metrics.record_batch_count += 1;
                                 metrics.total_bytes += batch_bytes;
@@ -441,19 +496,34 @@ impl FlightRecordBatchStream {
                             eof = true;
                             break;
                         }
-                        Poll::Pending => break,
+                        Poll::Pending => {
+                            metrics.coalesce_pending_break_count += 1;
+                            break;
+                        }
                     }
                 }
 
                 let batches = if batches.len() >= 2 {
-                    match merge_record_batches(recordbatch_schema.clone(), &batches) {
-                        Ok(merged) => vec![merged],
-                        Err(_) => batches,
+                    metrics.coalesce_merge_attempt_count += 1;
+                    let start = Instant::now();
+                    let merged = merge_record_batches(recordbatch_schema.clone(), &batches);
+                    metrics.coalesce_merge_duration += start.elapsed();
+                    match merged {
+                        Ok(merged) => {
+                            metrics.coalesce_merge_success_count += 1;
+                            vec![merged]
+                        }
+                        Err(_) => {
+                            metrics.coalesce_merge_failure_count += 1;
+                            batches
+                        }
                     }
                 } else {
                     batches
                 };
                 for recordbatch in batches {
+                    metrics.output_record_batch_count += 1;
+                    metrics.output_total_rows += recordbatch.num_rows();
                     let start = Instant::now();
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
