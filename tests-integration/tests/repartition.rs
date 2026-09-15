@@ -117,6 +117,146 @@ macro_rules! repartition_tests {
     };
 }
 
+/// COUNT must use visible rows rather than the full row counts of shared SSTs.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repartition_append_count_file() {
+    common_telemetry::init_default_ut_logging();
+    let (store_config, _guard) = get_test_store_config(&StorageType::File);
+    let home_dir = create_temp_dir("repartition_append_count");
+    let cluster = GreptimeDbClusterBuilder::new("repartition_append_count")
+        .await
+        .with_shared_home_dir(Arc::new(home_dir))
+        .with_datanodes(3)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            ..Default::default()
+        })
+        .build(true)
+        .await;
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+
+    for (table, partitions) in [
+        ("count_repartition", ""),
+        (
+            "count_split",
+            "PARTITION ON COLUMNS (device_id) (device_id < 50, device_id >= 50)",
+        ),
+    ] {
+        for sql in [
+            format!(
+                "CREATE TABLE {table} (ts TIMESTAMP TIME INDEX, device_id INT) {partitions} ENGINE=mito WITH(append_mode='true')"
+            ),
+            format!(
+                "INSERT INTO {table} SELECT to_timestamp_millis(value), CAST(value AS INT) FROM generate_series(0, 99)"
+            ),
+        ] {
+            run_sql(instance, &sql, ctx.clone()).await.unwrap();
+        }
+        let initial_statistics_regions = if partitions.is_empty() { 1 } else { 2 };
+        assert_append_count(instance, table, 100, initial_statistics_regions).await;
+        run_sql(
+            instance,
+            &format!("ADMIN flush_table('{table}')"),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_append_count(instance, table, 100, initial_statistics_regions).await;
+        let ddl = if partitions.is_empty() {
+            format!(
+                "ALTER TABLE {table} PARTITION ON COLUMNS (device_id) (device_id < 50, device_id >= 50)"
+            )
+        } else {
+            format!(
+                "ALTER TABLE {table} SPLIT PARTITION (device_id < 50) INTO (device_id < 25, device_id >= 25 AND device_id < 50)"
+            )
+        };
+        run_sql(instance, &ddl, ctx.clone()).await.unwrap();
+
+        // Wait for frontend routing to observe the new regions, not for COUNT to become correct.
+        let expected_regions = if partitions.is_empty() { 2 } else { 3 };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let plan =
+                    append_count_query(instance, &format!("EXPLAIN ANALYZE SELECT * FROM {table}"))
+                        .await;
+                if plan.matches("UnorderedScan: region=").count() == expected_regions {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("new partition routes must become visible");
+        let remaining_statistics_regions = if partitions.is_empty() { 0 } else { 1 };
+        assert_append_count(instance, table, 100, remaining_statistics_regions).await;
+        // Mix new writes with shared historical SSTs, then flush the new writes.
+        run_sql(
+            instance,
+            &format!("INSERT INTO {table} VALUES (to_timestamp_millis(100), 100)"),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_append_count(instance, table, 101, remaining_statistics_regions).await;
+        run_sql(
+            instance,
+            &format!("ADMIN flush_table('{table}')"),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_append_count(instance, table, 101, remaining_statistics_regions).await;
+    }
+}
+
+async fn append_count_query(instance: &Arc<Instance>, sql: &str) -> String {
+    let output = run_sql(instance, sql, QueryContext::arc()).await.unwrap();
+    let batches = match output.data {
+        common_query::OutputData::Stream(stream) => {
+            common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+        }
+        common_query::OutputData::RecordBatches(batches) => batches,
+        _ => panic!("expected query output: {sql}"),
+    };
+    batches.pretty_print().unwrap()
+}
+
+async fn assert_append_count(
+    instance: &Arc<Instance>,
+    table: &str,
+    rows: usize,
+    statistics_regions: usize,
+) {
+    let expected = format!("+-----+\n| n   |\n+-----+\n| {rows:<3} |\n+-----+");
+    for sql in [
+        format!("SELECT count(*) AS n FROM {table}"),
+        format!("SELECT count(*) AS n FROM (SELECT * FROM {table} LIMIT 1000)"),
+    ] {
+        assert_eq!(append_count_query(instance, &sql).await, expected, "{sql}");
+    }
+    // Include datanode plans to check that safe scans retain the statistics fast path.
+    let plan = append_count_query(
+        instance,
+        &format!("EXPLAIN ANALYZE SELECT count(*) FROM {table}"),
+    )
+    .await;
+    assert_eq!(
+        plan.matches("PlaceholderRowExec").count(),
+        statistics_regions,
+        "{plan}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_multi_hop_fulltext_index_gc_file() {
     if StorageType::File.test_on() {
