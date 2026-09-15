@@ -249,21 +249,215 @@ fn inherited_partitioning_to_restore(
 
 #[cfg(test)]
 mod tests {
-    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::array::{Array, Int32Array};
     use datafusion::arrow::compute::SortOptions;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::execution::TaskContext;
     use datafusion::physical_expr::expressions::{col, lit};
+    use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
+    use datafusion::physical_plan::aggregates::{
+        AggregateExec, AggregateMode, LimitOptions, PhysicalGroupBy,
+    };
     use datafusion::physical_plan::filter::FilterExecBuilder;
     use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
-    use datafusion::physical_plan::limit::GlobalLimitExec;
+    use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
     use datafusion::physical_plan::projection::ProjectionExec;
     use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::physical_plan::test::TestMemoryExec;
     use datafusion_common::{JoinType, NullEquality};
     use datafusion_physical_expr::{LexOrdering, Partitioning, PhysicalSortExpr};
 
     use super::*;
+
+    async fn optimize_and_collect_twice(
+        mut plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Vec<Vec<i32>> {
+        let mut results = Vec::with_capacity(2);
+        for _ in 0..2 {
+            for rule in PhysicalOptimizer::new().rules {
+                plan = rule.optimize(plan, config).unwrap();
+            }
+            let batches = datafusion::physical_plan::collect(
+                Arc::clone(&plan),
+                Arc::new(TaskContext::default()),
+            )
+            .await
+            .unwrap();
+            results.push(
+                batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
+                            .unwrap()
+                            .values()
+                            .to_vec()
+                    })
+                    .collect(),
+            );
+        }
+        results
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_global_distinct_limit_across_two_passes() {
+        for soft_limit in [false, true] {
+            let mut config = ConfigOptions::new();
+            config.execution.target_partitions = 3;
+            config.optimizer.enable_distinct_aggregation_soft_limit = soft_limit;
+
+            for mode in [
+                AggregateMode::FinalPartitioned,
+                AggregateMode::SinglePartitioned,
+            ] {
+                // The query limit is the only initial limit. Cover both final
+                // aggregate modes with keys in every hash partition.
+                let input = input_with_all_hash_partitions();
+                let aggregate = match mode {
+                    AggregateMode::FinalPartitioned => {
+                        agg(agg(input, AggregateMode::Partial), mode)
+                    }
+                    AggregateMode::SinglePartitioned => agg(hash_repartition(input), mode),
+                    _ => unreachable!(),
+                };
+                let plan =
+                    Arc::new(GlobalLimitExec::new(aggregate, 0, Some(1))) as Arc<dyn ExecutionPlan>;
+
+                let results = optimize_and_collect_twice(plan, &config).await;
+                assert_eq!(
+                    results.iter().map(Vec::len).collect::<Vec<_>>(),
+                    vec![1, 1],
+                    "soft limit enabled: {soft_limit}, mode: {mode:?}",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_count_over_distinct_limit_across_two_passes() {
+        use datafusion::datasource::MemTable;
+        use datafusion::execution::context::{SessionConfig, SessionContext as DFSessionContext};
+        use datafusion_common::ScalarValue;
+
+        for soft_limit in [false, true] {
+            let mut config = SessionConfig::new().with_target_partitions(3);
+            config
+                .options_mut()
+                .optimizer
+                .enable_distinct_aggregation_soft_limit = soft_limit;
+            let ctx = DFSessionContext::new_with_config(config.clone());
+            let schema = schema();
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Int32Array::from((0..100).collect::<Vec<_>>()))],
+            )
+            .unwrap();
+            let table = MemTable::try_new(schema, vec![vec![batch]; 3]).unwrap();
+            ctx.register_table("t", Arc::new(table)).unwrap();
+            let mut plan = ctx
+                .sql("SELECT COUNT(*) FROM (SELECT DISTINCT a FROM t LIMIT 1) AS limited")
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+
+            for pass in 0..=2 {
+                if pass > 0 {
+                    for rule in PhysicalOptimizer::new().rules {
+                        plan = rule.optimize(plan, config.options()).unwrap();
+                    }
+                }
+                let batches = datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx())
+                    .await
+                    .unwrap();
+                let values = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        (0..batch.num_rows()).map(|row| {
+                            ScalarValue::try_from_array(batch.column(0).as_ref(), row).unwrap()
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    values,
+                    vec![ScalarValue::Int64(Some(1))],
+                    "soft limit enabled: {soft_limit}, additional optimizer passes: {pass}",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_local_limit_per_partition_across_two_passes() {
+        let mut config = ConfigOptions::new();
+        config.execution.target_partitions = 3;
+        let input = input_with_all_hash_partitions();
+        let local_limit = Arc::new(LocalLimitExec::new(
+            agg_with_limit(hash_repartition(input), AggregateMode::SinglePartitioned, 2),
+            1,
+        )) as Arc<dyn ExecutionPlan>;
+
+        let results = optimize_and_collect_twice(local_limit, &config).await;
+        assert_eq!(results.iter().map(Vec::len).collect::<Vec<_>>(), vec![3, 3]);
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_ordered_topk_across_two_passes() {
+        let schema = schema();
+        let losing =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![100]))])
+                .unwrap();
+        let winning =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))])
+                .unwrap();
+        let input = Arc::new(
+            TestMemoryExec::try_new(&[vec![losing], vec![winning]], schema.clone(), None).unwrap(),
+        );
+        let ordering = ordering(schema.as_ref(), false);
+        let topk = Arc::new(
+            SortExec::new(
+                ordering,
+                agg_with_limit_options(
+                    input,
+                    AggregateMode::FinalPartitioned,
+                    Some(LimitOptions::new_with_order(1, false)),
+                ),
+            )
+            .with_fetch(Some(1)),
+        ) as Arc<dyn ExecutionPlan>;
+
+        let mut config = ConfigOptions::new();
+        config.execution.target_partitions = 3;
+        assert_eq!(
+            optimize_and_collect_twice(topk, &config).await,
+            vec![vec![1], vec![1]],
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_ordered_offset_limit_across_two_passes() {
+        let mut config = ConfigOptions::new();
+        config.execution.target_partitions = 3;
+        let offset = Arc::new(GlobalLimitExec::new(
+            Arc::new(SortExec::new(
+                ordering(schema().as_ref(), false),
+                unordered_input(),
+            )),
+            3,
+            Some(1),
+        )) as Arc<dyn ExecutionPlan>;
+
+        assert_eq!(
+            optimize_and_collect_twice(offset, &config).await,
+            vec![vec![2], vec![2]],
+        );
+    }
 
     #[test]
     fn adds_global_limit_for_multi_partition_filter_fetch() {
@@ -561,6 +755,46 @@ mod tests {
         let batch = batch(schema.clone());
         let partitions = vec![vec![batch.clone()], vec![batch.clone()], vec![batch]];
         Arc::new(TestMemoryExec::try_new(&partitions, schema, None).unwrap())
+    }
+
+    fn input_with_all_hash_partitions() -> Arc<dyn ExecutionPlan> {
+        let schema = schema();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from((0..100).collect::<Vec<_>>()))],
+        )
+        .unwrap();
+        let partitions = vec![vec![batch.clone()], vec![batch.clone()], vec![batch]];
+        Arc::new(TestMemoryExec::try_new(&partitions, schema, None).unwrap())
+    }
+
+    fn agg(input: Arc<dyn ExecutionPlan>, mode: AggregateMode) -> Arc<dyn ExecutionPlan> {
+        agg_with_limit_options(input, mode, None)
+    }
+
+    fn agg_with_limit(
+        input: Arc<dyn ExecutionPlan>,
+        mode: AggregateMode,
+        limit: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        agg_with_limit_options(input, mode, Some(LimitOptions::new(limit)))
+    }
+
+    fn agg_with_limit_options(
+        input: Arc<dyn ExecutionPlan>,
+        mode: AggregateMode,
+        limit_options: Option<LimitOptions>,
+    ) -> Arc<dyn ExecutionPlan> {
+        let schema = input.schema();
+        let group_by = PhysicalGroupBy::new_single(vec![(
+            col("a", schema.as_ref()).unwrap(),
+            "a".to_string(),
+        )]);
+        Arc::new(
+            AggregateExec::try_new(mode, group_by, vec![], vec![], input, schema)
+                .unwrap()
+                .with_limit_options(limit_options),
+        )
     }
 
     fn ordered_input() -> (Arc<dyn ExecutionPlan>, LexOrdering) {
