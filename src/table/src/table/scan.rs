@@ -853,6 +853,7 @@ mod test {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_count_statistics_require_exact_source_rows() {
         for (append_mode, exact, expected) in [
             (true, false, Precision::Absent),
