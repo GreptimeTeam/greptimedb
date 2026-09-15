@@ -133,6 +133,9 @@ fn files_may_overlap(lhs: &FileHandle, rhs: &FileHandle, metadata: &RegionMetada
 
     // FileMeta does not record the PK schema/encoding. Adding a tag can change
     // encoded keys without changing the logical keys of old rows.
+    // TODO: Use schema-aware PK bounds before relaxing this fallback. Appending
+    // defaults to dense keys can make raw ranges miss logical overlaps, breaking
+    // closure picking and risking premature tombstone removal in TWCS.
     if metadata.schema_version != 0
         || lhs.region_id() != metadata.region_id
         || rhs.region_id() != metadata.region_id

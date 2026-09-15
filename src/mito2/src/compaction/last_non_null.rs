@@ -26,9 +26,21 @@ use crate::compaction::twcs::TwcsPicker;
 use crate::error::{JoinSnafu, Result};
 use crate::sst::file::{FileHandle, RegionFileId};
 
-/// LastNonNull fills older non-null fields into a row carrying a newer sequence.
-/// Every potentially overlapping SST must participate in the same merge, otherwise
-/// the filled fields can hide an intermediate version left in an unselected SST.
+/// Picker for [`MergeMode::LastNonNull`](crate::region::options::MergeMode).
+///
+/// LastNonNull fills null fields of a newer row from older non-null values when
+/// rows with the same key and timestamp are merged. That fill is only correct if
+/// every SST that can contribute to the same logical row is merged together:
+/// once a value is promoted into an output, an intermediate version left behind
+/// in a separately compacted SST is invisible, so it can no longer override the
+/// promoted value on a later read.
+///
+/// TWCS alone cannot guarantee this: it schedules independent windows and seeds,
+/// while an L1 or cross-window SST can overlap several of them. This picker
+/// therefore delegates seed selection to [TwcsPicker] and then closes each seed
+/// over the whole snapshot: it absorbs every overlapping file and every seed
+/// connected through those overlaps, so a merge stream is never split across
+/// outputs, and defers a closure whose inputs are already compacting.
 #[derive(Debug)]
 pub(super) struct LastNonNullPicker {
     base_picker: TwcsPicker,
@@ -45,7 +57,8 @@ impl Picker for LastNonNullPicker {
     async fn pick(&self, region: &CompactionRegion) -> Result<Option<PickerOutput>> {
         let max_outputs = self.base_picker.max_background_tasks;
 
-        let Some(mut all_candidates) = self
+        // Find all possible compaction seeds
+        let Some(mut all_seeds) = self
             .base_picker
             .pick_with_output_limit(region, None)
             .await?
@@ -54,7 +67,7 @@ impl Picker for LastNonNullPicker {
         };
         let version = region.current_version.clone();
         common_runtime::spawn_blocking_compact(move || {
-            let expired: HashSet<_> = all_candidates
+            let expired: HashSet<_> = all_seeds
                 .expired_ssts
                 .iter()
                 .map(FileHandle::file_id)
@@ -69,19 +82,19 @@ impl Picker for LastNonNullPicker {
                 .filter(|file| !expired.contains(&file.file_id()))
                 .cloned()
                 .collect();
-            all_candidates.outputs =
-                close_outputs(all_candidates.outputs, all_files, &version.metadata);
-            all_candidates.outputs.retain(|output| {
+            all_seeds.outputs =
+                build_closed_outputs(all_seeds.outputs, all_files, &version.metadata);
+            all_seeds.outputs.retain(|output| {
                 inputs_precede_memtables(&output.inputs, version.memtable_min_sequence)
             });
             if let Some(limit) = max_outputs {
                 // Only eligible closures consume the budget. Keep the high-priority
                 // tail because the compactor pops from the end of the output list.
-                let excess = all_candidates.outputs.len().saturating_sub(limit);
-                all_candidates.outputs.drain(..excess);
+                let excess = all_seeds.outputs.len().saturating_sub(limit);
+                all_seeds.outputs.drain(..excess);
             }
-            (!all_candidates.outputs.is_empty() || !all_candidates.expired_ssts.is_empty())
-                .then_some(all_candidates)
+            (!all_seeds.outputs.is_empty() || !all_seeds.expired_ssts.is_empty())
+                .then_some(all_seeds)
         })
         .await
         .context(JoinSnafu)
@@ -106,40 +119,28 @@ pub(super) fn inputs_precede_memtables(
 /// Each seed and snapshot file is consumed at most once. Absorbing a seed also
 /// absorbs its disconnected members: a merge stream must never be split across
 /// independently scheduled outputs.
-fn close_outputs(
+fn build_closed_outputs(
     seeds: Vec<CompactionOutput>,
     files: Vec<FileHandle>,
     metadata: &RegionMetadata,
 ) -> Vec<CompactionOutput> {
+    // Maps every seed input to its seed, so a closure that reaches that input
+    // can absorb the rest of the seed instead of letting it schedule separately.
     let seed_by_file: HashMap<_, _> = seeds
         .iter()
         .enumerate()
         .flat_map(|(i, seed)| seed.inputs.iter().map(move |file| (file.file_id(), i)))
         .collect();
+    // `None` marks a seed already absorbed by an earlier closure.
     let mut seeds: Vec<_> = seeds.into_iter().map(Some).collect();
     let mut remaining = FileOverlapIndex::new(files, metadata);
     let mut outputs = Vec::new();
     // The compactor pops from the end; retain TWCS's seed priority.
-    for i in (0..seeds.len()).rev() {
-        let Some(mut output) = seeds[i].take() else {
+    for seed_index in (0..seeds.len()).rev() {
+        let Some(output) = seeds[seed_index].take() else {
             continue;
         };
-        let mut selected = HashSet::new();
-        let inputs = std::mem::take(&mut output.inputs);
-        extend_inputs(&mut output, inputs, &mut selected, &mut remaining);
-        let mut cursor = 0;
-        while cursor < output.inputs.len() {
-            let input = output.inputs[cursor].clone();
-            if let Some(&seed_index) = seed_by_file.get(&input.file_id())
-                && let Some(seed) = seeds[seed_index].take()
-            {
-                output.filter_deleted &= seed.filter_deleted;
-                extend_inputs(&mut output, seed.inputs, &mut selected, &mut remaining);
-            }
-            let dependencies = remaining.drain_overlaps(&input);
-            extend_inputs(&mut output, dependencies, &mut selected, &mut remaining);
-            cursor += 1;
-        }
+        let output = expand_closure(output, &mut seeds, &seed_by_file, &mut remaining);
         // Defer the entire closure rather than truncate it around busy files.
         if !output.inputs.iter().any(FileHandle::compacting) {
             outputs.push(output);
@@ -149,6 +150,38 @@ fn close_outputs(
     outputs
 }
 
+/// Expands one seed into its full merge closure: absorb every connected seed
+/// and every overlapping snapshot file, transitively. Growing `output.inputs`
+/// while iterating is what makes the expansion transitive.
+fn expand_closure(
+    mut output: CompactionOutput,
+    seeds: &mut [Option<CompactionOutput>],
+    seed_by_file: &HashMap<RegionFileId, usize>,
+    remaining_files: &mut FileOverlapIndex<'_>,
+) -> CompactionOutput {
+    let mut selected = HashSet::new();
+    let inputs = std::mem::take(&mut output.inputs);
+    extend_inputs(&mut output, inputs, &mut selected, remaining_files);
+
+    let mut cursor = 0;
+    while cursor < output.inputs.len() {
+        let input = output.inputs[cursor].clone();
+        if let Some(&seed_index) = seed_by_file.get(&input.file_id())
+            && let Some(seed) = seeds[seed_index].take()
+        {
+            // AND the tombstone policies so the merged stream stays conservative.
+            output.filter_deleted &= seed.filter_deleted;
+            extend_inputs(&mut output, seed.inputs, &mut selected, remaining_files);
+        }
+        let dependencies = remaining_files.drain_overlaps(&input);
+        extend_inputs(&mut output, dependencies, &mut selected, remaining_files);
+        cursor += 1;
+    }
+    output
+}
+
+/// Appends never-seen inputs and removes them from the overlap index so the
+/// same file is neither expanded nor scheduled twice.
 fn extend_inputs(
     output: &mut CompactionOutput,
     inputs: Vec<FileHandle>,
@@ -320,7 +353,8 @@ mod tests {
                 )
             })
             .collect();
-        let outputs = close_outputs(vec![seed(vec![files[0].clone()])], files.clone(), &metadata);
+        let outputs =
+            build_closed_outputs(vec![seed(vec![files[0].clone()])], files.clone(), &metadata);
         assert_eq!(1, outputs.len());
         assert_eq!(files.len(), outputs[0].inputs.len());
         assert_eq!(file_ids(&files), file_ids(&outputs[0].inputs));
@@ -344,7 +378,7 @@ mod tests {
             priority_seed,
         ];
 
-        let mut outputs = close_outputs(seeds, files.clone(), &metadata);
+        let mut outputs = build_closed_outputs(seeds, files.clone(), &metadata);
         assert_eq!(if busy { 1 } else { 2 }, outputs.len());
         if !busy {
             let first = outputs.pop().unwrap();
@@ -397,7 +431,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let outputs = close_outputs(vec![seed(vec![files[0].clone()])], files.clone(), &metadata);
+        let outputs =
+            build_closed_outputs(vec![seed(vec![files[0].clone()])], files.clone(), &metadata);
         assert_eq!(1, outputs.len());
         assert_eq!(expected_count, outputs[0].inputs.len());
         assert_eq!(

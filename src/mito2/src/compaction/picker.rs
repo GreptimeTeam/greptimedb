@@ -157,6 +157,8 @@ pub fn new_picker(
             },
         };
         if region_options.merge_mode() == MergeMode::LastNonNull {
+            // LastNonNull correctness spans windows and levels, so wrap the seed
+            // picker instead of trusting TWCS's independent windows.
             Arc::new(LastNonNullPicker::new(picker))
         } else {
             Arc::new(picker)
