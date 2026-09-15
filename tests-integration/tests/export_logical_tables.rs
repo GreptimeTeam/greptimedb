@@ -14,26 +14,18 @@
 
 use std::sync::Arc;
 
-use common_datasource::parquet_writer::ParquetWriterLimits;
-use common_query::{Output, OutputData};
+use common_query::OutputData;
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use frontend::instance::Instance;
 use operator::statement::export_logical_tables::{LogicalTableExport, LogicalTableExportLimits};
-use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
+use tests_integration::test_util::execute_sql as sql;
 use tokio_util::sync::CancellationToken;
 
-async fn sql(instance: &Instance, sql: &str) -> Output {
-    SqlQueryHandler::do_query(instance, sql, QueryContext::arc())
-        .await
-        .remove(0)
-        .unwrap()
-}
-
-async fn table(instance: &Instance, name: &str) -> table::TableRef {
+async fn table(instance: &Arc<Instance>, name: &str) -> table::TableRef {
     instance
         .catalog_manager()
         .table("greptime", "public", name, Some(&QueryContext::arc()))
@@ -42,12 +34,8 @@ async fn table(instance: &Instance, name: &str) -> table::TableRef {
         .unwrap()
 }
 
-async fn values(instance: &Instance, name: &str) -> Vec<Vec<datatypes::value::Value>> {
-    let output = sql(
-        instance,
-        &format!("SELECT * FROM \"{name}\" ORDER BY host, ts"),
-    )
-    .await;
+async fn values(instance: &Arc<Instance>, query: &str) -> Vec<Vec<datatypes::value::Value>> {
+    let output = sql(instance, query).await;
     let batches = match output.data {
         OutputData::Stream(stream) => common_recordbatch::util::collect_batches(stream)
             .await
@@ -66,7 +54,7 @@ async fn values(instance: &Instance, name: &str) -> Vec<Vec<datatypes::value::Va
         .collect()
 }
 
-async fn roundtrip(instance: &Instance) {
+async fn roundtrip(instance: &Arc<Instance>) {
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     for (physical, encoding) in [("phy", "dense"), ("other_phy", "sparse")] {
         sql(instance, &format!("CREATE TABLE {physical} (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm') ENGINE=metric WITH (physical_metric_table='', primary_key_encoding='{encoding}')")).await;
@@ -105,6 +93,8 @@ async fn roundtrip(instance: &Instance) {
             TimestampRange::new(Timestamp::new_millisecond(2), Timestamp::new_millisecond(4))
                 .unwrap();
         sql(instance, &format!("CREATE TABLE target_{physical} (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE=metric WITH (physical_metric_table='')")).await;
+        let mut limits = LogicalTableExportLimits::default();
+        limits.writer.row_group_rows = 1;
         for partitions in [1, 2, 4] {
             let directory = destination.path().join(format!("{physical}_{partitions}"));
             let mut ctx = QueryContext::with("greptime", "public");
@@ -119,13 +109,7 @@ async fn roundtrip(instance: &Instance) {
                     directory.to_str().unwrap(),
                     &Default::default(),
                     Some(&range),
-                    LogicalTableExportLimits {
-                        writer: ParquetWriterLimits {
-                            row_group_rows: 1,
-                            ..LogicalTableExportLimits::default().writer
-                        },
-                        ..Default::default()
-                    },
+                    limits,
                     &CancellationToken::new(),
                     Arc::new(ctx),
                 )
@@ -151,22 +135,17 @@ async fn roundtrip(instance: &Instance) {
                     ),
                 )
                 .await;
-                let timestamp_index = table(instance, name)
-                    .await
-                    .schema()
-                    .column_index_by_name("ts")
-                    .unwrap();
-                let expected = values(instance, name)
-                    .await
-                    .into_iter()
-                    .filter(|row| {
-                        let ts = &row[timestamp_index];
-                        *ts == datatypes::value::Value::Timestamp(Timestamp::new_millisecond(2))
-                            || *ts
-                                == datatypes::value::Value::Timestamp(Timestamp::new_millisecond(3))
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(values(instance, &restored).await, expected);
+                let expected = values(
+                    instance,
+                    &format!("SELECT * FROM \"{name}\" WHERE ts >= 2 AND ts < 4 ORDER BY host, ts"),
+                )
+                .await;
+                let actual = values(
+                    instance,
+                    &format!("SELECT * FROM {restored} ORDER BY host, ts"),
+                )
+                .await;
+                assert_eq!(actual, expected);
             }
         }
         let cancellation = CancellationToken::new();

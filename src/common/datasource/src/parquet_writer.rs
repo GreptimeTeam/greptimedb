@@ -260,7 +260,6 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Int64Array, TimestampMillisecondArray};
-    use arrow::datatypes::{Field, Schema, TimeUnit};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -270,76 +269,71 @@ mod tests {
     use crate::file_format::parquet::stream_to_parquet;
 
     fn batch() -> RecordBatch {
-        RecordBatch::try_new(
-            Arc::new(Schema::new(vec![
-                Field::new("value", DataType::Int64, true),
-                Field::new(
-                    "ts",
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
-                    false,
-                ),
-            ])),
-            vec![
-                Arc::new(Int64Array::from(vec![Some(1), None, Some(3), Some(4)])),
+        RecordBatch::try_from_iter([
+            (
+                "value",
+                Arc::new(Int64Array::from(vec![Some(1), None, Some(3), Some(4)]))
+                    as arrow::array::ArrayRef,
+            ),
+            (
+                "ts",
                 Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])),
-            ],
-        )
+            ),
+        ])
         .unwrap()
     }
 
+    async fn read(store: &ObjectStore, path: &str) -> ParquetRecordBatchReaderBuilder<Bytes> {
+        ParquetRecordBatchReaderBuilder::try_new(store.read(path).await.unwrap().to_bytes())
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn row_group_limits_cross_batch_boundaries() {
+    async fn row_and_byte_limits_split_batches() {
         let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
         let batch = batch();
-        let mut writer = ParquetFileWriter::open(
-            batch.schema(),
-            store.clone(),
-            "groups.parquet",
-            1,
-            Some(ParquetWriterLimits {
-                row_group_rows: 2,
-                flush_threshold_bytes: usize::MAX,
-                max_row_groups: 2,
-            }),
-        )
-        .await
-        .unwrap();
-        writer.write(batch.slice(0, 3), None).await.unwrap();
-        writer.write(batch.slice(3, 1), None).await.unwrap();
-        writer.finish(None).await.unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(
-            store.read("groups.parquet").await.unwrap().to_bytes(),
-        )
-        .unwrap();
-        assert_eq!(reader.metadata().num_row_groups(), 2);
-        for group in reader.metadata().row_groups() {
-            assert_eq!(group.num_rows(), 2);
-            assert!(
-                group
-                    .column(1)
-                    .encodings()
-                    .any(|encoding| encoding == Encoding::DELTA_BINARY_PACKED)
-            );
-            assert!(
-                !group
-                    .column(1)
-                    .encodings()
-                    .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
-            );
+        for (row_group_rows, flush_threshold_bytes, split) in [(2, usize::MAX, 3), (100, 1, 2)] {
+            let mut writer = ParquetFileWriter::open(
+                batch.schema(),
+                store.clone(),
+                "groups.parquet",
+                1,
+                Some(ParquetWriterLimits {
+                    row_group_rows,
+                    flush_threshold_bytes,
+                    max_row_groups: 2,
+                }),
+            )
+            .await
+            .unwrap();
+            writer.write(batch.slice(0, split), None).await.unwrap();
+            writer
+                .write(batch.slice(split, batch.num_rows() - split), None)
+                .await
+                .unwrap();
+            writer.finish(None).await.unwrap();
+            let reader = read(&store, "groups.parquet").await;
+            assert_eq!(reader.metadata().num_row_groups(), 2);
+            for group in reader.metadata().row_groups() {
+                assert_eq!(group.num_rows(), 2);
+                let encodings = group.column(1).encodings().collect::<Vec<_>>();
+                assert!(encodings.contains(&Encoding::DELTA_BINARY_PACKED));
+                assert!(!encodings.contains(&Encoding::RLE_DICTIONARY));
+                assert_eq!(
+                    group.column(0).compression(),
+                    Compression::ZSTD(ZstdLevel::default())
+                );
+            }
+            let actual = reader
+                .build()
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
             assert_eq!(
-                group.column(0).compression(),
-                Compression::ZSTD(ZstdLevel::default())
+                arrow::compute::concat_batches(&batch.schema(), &actual).unwrap(),
+                batch
             );
         }
-        let actual = reader
-            .build()
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            arrow::compute::concat_batches(&batch.schema(), &actual).unwrap(),
-            batch
-        );
     }
 
     #[tokio::test]
@@ -367,77 +361,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encoder_threshold_flushes_before_row_limit() {
-        let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-        let batch = batch();
-        let mut writer = ParquetFileWriter::open(
-            batch.schema(),
-            store.clone(),
-            "flush.parquet",
-            1,
-            Some(ParquetWriterLimits {
-                row_group_rows: 100,
-                flush_threshold_bytes: 1,
-                max_row_groups: 2,
-            }),
-        )
-        .await
-        .unwrap();
-        writer.write(batch.slice(0, 2), None).await.unwrap();
-        writer.write(batch.slice(2, 2), None).await.unwrap();
-        writer.finish(None).await.unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(
-            store.read("flush.parquet").await.unwrap().to_bytes(),
-        )
-        .unwrap();
-        assert_eq!(reader.metadata().num_row_groups(), 2);
-        assert!(
-            reader
-                .metadata()
-                .row_groups()
-                .iter()
-                .all(|group| group.num_rows() == 2)
-        );
-    }
-
-    #[tokio::test]
     async fn copy_stream_preserves_values_and_empty_schema() {
         let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
         let batch = batch();
-        for empty in [false, true] {
-            let batches = if empty {
-                vec![]
-            } else {
-                vec![Ok(batch.clone())]
-            };
-            let stream =
-                RecordBatchStreamAdapter::new(batch.schema(), futures::stream::iter(batches));
-            let path = if empty {
-                "empty.parquet"
-            } else {
-                "copy.parquet"
-            };
+        for (path, batches) in [
+            ("copy.parquet", vec![batch.clone()]),
+            ("empty.parquet", vec![]),
+        ] {
+            let stream = RecordBatchStreamAdapter::new(
+                batch.schema(),
+                futures::stream::iter(batches.clone().into_iter().map(Ok)),
+            );
             assert_eq!(
                 stream_to_parquet(Box::pin(stream), store.clone(), path, 2)
                     .await
                     .unwrap(),
-                if empty { 0 } else { 4 }
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>()
             );
-            let reader = ParquetRecordBatchReaderBuilder::try_new(
-                store.read(path).await.unwrap().to_bytes(),
-            )
-            .unwrap();
+            let reader = read(&store, path).await;
             assert_eq!(reader.schema().fields(), batch.schema().fields());
             let actual = reader
                 .build()
                 .unwrap()
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .unwrap();
-            if empty {
-                assert!(actual.is_empty());
-            } else {
-                assert_eq!(actual, vec![batch.clone()]);
-            }
+            assert_eq!(actual, batches);
         }
     }
 

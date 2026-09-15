@@ -41,6 +41,12 @@ fn table(id: u32, name: &str, fields: Vec<Field>, physical: bool) -> TableRef {
     EmptyTable::from_table_info(&info)
 }
 
+fn export_limits() -> LogicalTableExportLimits {
+    let mut limits = LogicalTableExportLimits::default();
+    limits.writer.row_group_rows = 1;
+    limits
+}
+
 fn unit() -> LogicalTableExport {
     let ts = Field::new(
         "ts",
@@ -79,27 +85,21 @@ fn batch(ids: Vec<Option<u32>>, hosts: Vec<Option<&str>>) -> RecordBatch {
     use arrow::array::TimestampMillisecondArray;
     let rows = ids.len();
     let host: DictionaryArray<UInt32Type> = hosts.into_iter().collect();
-    let fields = vec![
-        Field::new(TABLE_ID, DataType::UInt32, true),
-        Field::new(
+    RecordBatch::try_from_iter_with_nullable([
+        (TABLE_ID, Arc::new(UInt32Array::from(ids)) as ArrayRef, true),
+        (
             "ts",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            Arc::new(TimestampMillisecondArray::from(vec![100; rows])),
             false,
         ),
-        Field::new("host", host.data_type().clone(), true),
-        Field::new("a", DataType::Float64, true),
-        Field::new("b", DataType::Float64, true),
-    ];
-    RecordBatch::try_new(
-        Arc::new(Schema::new(fields)),
-        vec![
-            Arc::new(UInt32Array::from(ids)),
-            Arc::new(TimestampMillisecondArray::from(vec![100; rows])),
-            Arc::new(host),
+        ("host", Arc::new(host), true),
+        (
+            "a",
             Arc::new(Float64Array::from(vec![Some(1.5); rows])),
-            Arc::new(Float64Array::from(vec![None; rows])),
-        ],
-    )
+            true,
+        ),
+        ("b", Arc::new(Float64Array::from(vec![None; rows])), true),
+    ])
     .unwrap()
 }
 
@@ -141,13 +141,7 @@ async fn routes_across_batches_and_writes_empty_files() {
         &unit,
         stream(batches),
         &store,
-        LogicalTableExportLimits {
-            writer: ParquetWriterLimits {
-                row_group_rows: 1,
-                ..LogicalTableExportLimits::default().writer
-            },
-            ..Default::default()
-        },
+        export_limits(),
         &CancellationToken::new(),
         &mut None,
     )
@@ -215,18 +209,6 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
             },
             "one expanded logical row",
         ),
-        (
-            vec![batch(vec![Some(1025); 2], vec![Some("a"); 2])],
-            LogicalTableExportLimits {
-                writer: ParquetWriterLimits {
-                    row_group_rows: 1,
-                    max_row_groups: 1,
-                    ..LogicalTableExportLimits::default().writer
-                },
-                ..Default::default()
-            },
-            "metadata budget",
-        ),
     ] {
         let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
         let mut active = None;
@@ -281,28 +263,23 @@ fn dictionary_and_nested_histogram_values_are_bounded_before_expansion() {
         Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
         None,
     );
-    let fields = vec![Arc::new(Field::new(
-        "buckets",
-        nested.data_type().clone(),
-        true,
-    ))];
-    let histogram = StructArray::new(fields.into(), vec![Arc::new(nested)], None);
-    let arrays: Vec<ArrayRef> = vec![Arc::new(dictionary), Arc::new(histogram)];
-    let schema = Arc::new(Schema::new(
-        arrays
-            .iter()
-            .enumerate()
-            .map(|(i, a)| Field::new(i.to_string(), a.data_type().clone(), true))
-            .collect::<Vec<_>>(),
-    ));
-    let batch = RecordBatch::try_new(schema, arrays).unwrap();
+    let histogram = StructArray::from(vec![(
+        Arc::new(Field::new("buckets", nested.data_type().clone(), true)),
+        Arc::new(nested) as ArrayRef,
+    )]);
+    let batch = RecordBatch::try_from_iter([
+        ("tag", Arc::new(dictionary) as ArrayRef),
+        ("histogram", Arc::new(histogram)),
+    ])
+    .unwrap();
     assert_eq!(rows_within_budget(&batch, 0, 3, 4300).unwrap(), 1);
-    assert!(rows_within_budget(&batch, 0, 3, 4096).is_err());
+    // The dictionary and container overhead fit; the nested list elements do not.
+    assert!(rows_within_budget(&batch, 0, 3, 4180).is_err());
     assert_eq!(rows_within_budget(&batch, 0, 3, 15000).unwrap(), 3);
 }
 
 #[test]
-fn validates_membership_and_projects_only_selected_columns() {
+fn validates_selected_schemas_and_projects_only_selected_columns() {
     let unit = unit();
     let selected = table(
         1025,
@@ -332,60 +309,34 @@ fn validates_membership_and_projects_only_selected_columns() {
 
 #[tokio::test]
 async fn cancellation_drops_input_and_aborts_active_upload() {
-    let directory = common_test_util::temp_dir::create_temp_dir("metric_export_cancel");
-    let access =
-        common_datasource::object_store::LocalFileAccess::sandboxed(directory.path()).unwrap();
-    let file_store = build_backend_for_write(
-        &format!("{}/", directory.path().display()),
-        &HashMap::new(),
-        &access,
-    )
-    .await
-    .unwrap();
-    let memory_store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-    for store in [memory_store, file_store] {
-        let unit = unit();
-        let batch = batch(vec![Some(1025)], vec![Some("a")]);
-        let schema = batch.schema();
-        let token = CancellationToken::new();
-        let trigger = token.clone();
-        let batches = async_stream::stream! {
-            yield Ok(batch);
-            // Resuming the source proves the previous batch reached the writer.
-            trigger.cancel();
-            std::future::pending::<()>().await;
-        };
-        let df_stream =
-            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(schema, batches);
-        let stream =
-            common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(Box::pin(df_stream))
-                .unwrap();
-        let result = export_stream(
-            &unit,
-            Box::pin(stream),
-            &store,
-            LogicalTableExportLimits {
-                writer: ParquetWriterLimits {
-                    row_group_rows: 1,
-                    ..LogicalTableExportLimits::default().writer
-                },
-                ..Default::default()
-            },
-            &token,
-        )
-        .await;
-        assert!(matches!(
-            result,
-            Err(error::Error::LogicalTableExportCancelled { .. })
-        ));
-        assert!(!store.exists("cpu.v1.parquet").await.unwrap());
-        assert!(!store.exists("empty.parquet").await.unwrap());
-    }
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let unit = unit();
+    let batch = batch(vec![Some(1025)], vec![Some("a")]);
+    let schema = batch.schema();
+    let token = CancellationToken::new();
+    let trigger = token.clone();
+    let batches = async_stream::stream! {
+        yield Ok(batch);
+        // Resuming the source proves the previous batch reached the writer.
+        trigger.cancel();
+        std::future::pending::<()>().await;
+    };
+    let df_stream =
+        datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(schema, batches);
+    let stream =
+        common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(Box::pin(df_stream))
+            .unwrap();
+    let result = export_stream(&unit, Box::pin(stream), &store, export_limits(), &token).await;
+    assert!(matches!(
+        result,
+        Err(error::Error::LogicalTableExportCancelled { .. })
+    ));
+    assert!(!store.exists("cpu.v1.parquet").await.unwrap());
+    assert!(!store.exists("empty.parquet").await.unwrap());
 }
 
 #[tokio::test]
 async fn native_histogram_parquet_roundtrip() {
-    use datatypes::data_type::DataType as _;
     fn sample(data_type: &DataType) -> ArrayRef {
         match data_type {
             DataType::Struct(fields) => Arc::new(StructArray::new(
@@ -411,43 +362,44 @@ async fn native_histogram_parquet_roundtrip() {
             other => panic!("unexpected histogram field {other}"),
         }
     }
-    let data_type = common_query::native_histogram::native_histogram_value_type().as_arrow_type();
-    let histogram = sample(&data_type);
-    let schema = Arc::new(Schema::new(vec![Field::new("histogram", data_type, true)]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![histogram]).unwrap();
+    let data_type = common_query::native_histogram::native_histogram_arrow_type();
+    let field = Field::new("histogram", data_type.clone(), true);
+    let unit = LogicalTableExport::try_new(
+        table(
+            1024,
+            "phy",
+            vec![Field::new(TABLE_ID, DataType::UInt32, false), field.clone()],
+            true,
+        ),
+        &[table(1025, "histogram", vec![field], false)],
+    )
+    .unwrap();
+    let batch = RecordBatch::try_from_iter_with_nullable([
+        (
+            TABLE_ID,
+            Arc::new(UInt32Array::from(vec![1025; 2])) as ArrayRef,
+            false,
+        ),
+        ("histogram", sample(&data_type), true),
+    ])
+    .unwrap();
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-    let file = LogicalTableProjection {
-        name: "histogram".into(),
-        schema: schema.clone(),
-        projection: vec![0],
-    };
-    let limits = LogicalTableExportLimits {
-        writer: ParquetWriterLimits {
-            row_group_rows: 1,
-            ..LogicalTableExportLimits::default().writer
-        },
-        ..Default::default()
-    };
-    let mut active = Some(ActiveWriter::open(1, &file, &store, limits).await.unwrap());
-    let (expanded, rows) =
-        expand_bounded_slice(batch.clone(), schema.clone(), 0, 2, limits.conversion_bytes)
-            .await
-            .unwrap();
-    assert_eq!(rows, 2);
-    active
-        .as_mut()
-        .unwrap()
-        .writer
-        .write(expanded, None)
-        .await
-        .unwrap();
-    finish_active(&mut active, &CancellationToken::new())
-        .await
-        .unwrap();
-    let (actual_schema, batches) = read(&store, "histogram.parquet").await;
-    assert_eq!(actual_schema.fields(), schema.fields());
-    let actual = arrow::compute::concat_batches(&actual_schema, &batches).unwrap();
-    assert_eq!(actual, batch);
+    let summary = export_stream(
+        &unit,
+        stream(vec![batch.clone()]),
+        &store,
+        export_limits(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rows, 2);
+    let (schema, batches) = read(&store, "histogram.parquet").await;
+    assert_eq!(schema.fields(), unit.logical_tables[&1025].schema.fields());
+    assert_eq!(
+        arrow::compute::concat_batches(&schema, &batches).unwrap(),
+        batch.project(&[1]).unwrap()
+    );
 }
 
 struct PausedFileWriter {
@@ -575,14 +527,13 @@ async fn cleanup_failure_preserves_resource_error() {
                 .build()
                 .unwrap(),
         );
+    let mut limits = export_limits();
+    limits.writer.max_row_groups = 1;
     let result = export_stream(
         &unit(),
-        stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
+        stream(vec![batch(vec![Some(1025); 2], vec![Some("a"); 2])]),
         &store,
-        LogicalTableExportLimits {
-            conversion_bytes: 1,
-            ..Default::default()
-        },
+        limits,
         &CancellationToken::new(),
     )
     .await;
@@ -598,11 +549,15 @@ async fn validates_membership_by_table_route() {
     use common_meta::kv_backend::memory::MemoryKvBackend;
 
     let unit = unit();
-    for physical_id in [None, Some(2048), Some(1024)] {
+    for later_physical_id in [None, Some(2048), Some(1024)] {
         let kv = Arc::new(MemoryKvBackend::default());
         let manager = TableRouteManager::new(kv.clone());
-        if let Some(physical_id) = physical_id {
-            for &table_id in unit.logical_tables.keys() {
+        for (&table_id, physical_id) in
+            unit.logical_tables
+                .keys()
+                .zip([Some(1024), later_physical_id, Some(1024)])
+        {
+            if let Some(physical_id) = physical_id {
                 let (txn, _) = manager
                     .table_route_storage()
                     .build_create_txn(table_id, &TableRouteValue::logical(physical_id))
@@ -611,7 +566,7 @@ async fn validates_membership_by_table_route() {
             }
         }
         let result = unit.validate_table_routes(&manager).await;
-        if physical_id == Some(1024) {
+        if later_physical_id == Some(1024) {
             result.unwrap();
         } else {
             assert!(matches!(
