@@ -1114,6 +1114,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::ExecuteOnceOutcome;
     use crate::test_utils::create_test_query_engine;
 
     struct DropNotify(Option<oneshot::Sender<()>>);

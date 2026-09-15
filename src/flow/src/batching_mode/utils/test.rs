@@ -841,9 +841,12 @@ async fn test_gen_plan_with_matching_schema_and_values_rejects_duplicate_output(
         &BTreeMap::from([("marker".to_string(), ScalarValue::UInt8(None))]),
     )
     .await
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("duplicate column"), "{err}");
+    .unwrap_err();
+    let err = format!("{err:?}");
+    assert!(
+        err.contains("Projections require unique expression names"),
+        "DataFusion should reject duplicate output aliases during query planning: {err}"
+    );
 }
 
 #[tokio::test]

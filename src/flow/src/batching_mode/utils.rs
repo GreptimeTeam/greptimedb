@@ -1371,8 +1371,8 @@ impl ColumnMatcherRewriter {
     ) -> DfResult<Vec<Expr>> {
         self.validate_values(&exprs)?;
         if self.allow_partial {
-            return self
-                .inject_values_in_physical_order(self.modify_project_exprs_with_partial(exprs)?);
+            let exprs = self.modify_project_exprs_with_partial(exprs)?;
+            return self.inject_values_in_physical_order(exprs);
         }
 
         let original_exprs = exprs.clone();
