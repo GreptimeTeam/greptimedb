@@ -1577,6 +1577,7 @@ impl ScanInput {
         let reader = self
             .access_layer
             .read_sst(file.clone())
+            .series_index(self.series_index.clone())
             .predicate(predicate)
             .projection(Some(self.read_cols.clone()))
             .json2_rewrite_targets(self.json2_rewrite_targets.clone())

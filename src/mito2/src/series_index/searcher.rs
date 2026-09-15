@@ -31,13 +31,16 @@ use table::predicate::Predicate;
 use crate::error::{InvalidRecordBatchSnafu, RecordBatchSnafu, Result, UnexpectedSnafu};
 use crate::series_index::{
     MAX_TS_COLUMN, METRIC_SERIES_ID_BATCH_SIZE, MIN_TS_COLUMN, MetricSeriesId,
-    MetricSeriesIdStream, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN, series_index_schema,
+    MetricSeriesIdStream, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
+    series_index_path, series_index_schema,
 };
 use crate::sst::parquet::index_reader::ParquetIndexReader;
 use crate::sst::parquet::prefilter::simple_tag_filters;
 
 /// Searches a series-index file for metric series matching query predicates.
 pub struct SeriesIndexSearcher {
+    /// Pins the index file until this searcher and all of its streams are dropped.
+    file_handle: SeriesIndexFileHandle,
     /// The file to search, or `None` when an empty time range rules out
     /// every series without opening the file.
     reader: Option<ParquetIndexReader>,
@@ -47,14 +50,14 @@ pub struct SeriesIndexSearcher {
 }
 
 impl SeriesIndexSearcher {
-    /// Creates a searcher for the series-index file of `metadata` at `path`.
+    /// Creates a searcher for the series-index file protected by `file_handle`.
     /// Predicates are built from the unit recorded in the file's schema, so a
     /// file written before a time index unit widening keeps being interpreted
     /// in its own unit.
-    pub async fn try_new(
+    pub(crate) async fn try_new(
         metadata: RegionMetadataRef,
         object_store: ObjectStore,
-        path: &str,
+        file_handle: SeriesIndexFileHandle,
         predicate: Option<&Predicate>,
         time_range: Option<TimestampRange>,
     ) -> Result<Self> {
@@ -62,13 +65,16 @@ impl SeriesIndexSearcher {
         series_index_schema(&metadata)?;
         if time_range.as_ref().is_some_and(TimestampRange::is_empty) {
             return Ok(Self {
+                file_handle,
                 reader: None,
                 pruning_predicate: Predicate::new(Vec::new()),
                 filters: Vec::new(),
             });
         }
 
-        let reader = ParquetIndexReader::open(object_store, path).await?;
+        let file_id = file_handle.file_id();
+        let path = series_index_path(file_id.region_id(), file_id.file_id());
+        let reader = ParquetIndexReader::open(object_store, &path).await?;
         let unit = validate_index_schema(reader.schema())?;
 
         let mut filters = simple_tag_filters(&metadata, None, predicate);
@@ -83,6 +89,7 @@ impl SeriesIndexSearcher {
         let (pruning_predicate, filters) = filters_for_schema(reader.schema(), &filters);
 
         Ok(Self {
+            file_handle,
             reader: Some(reader),
             pruning_predicate,
             filters,
@@ -100,6 +107,7 @@ impl SeriesIndexSearcher {
         projection_columns.extend(self.filters.iter().map(SimpleFilterEvaluator::column_name));
         let mut batches = reader.read(&self.pruning_predicate, &projection_columns)?;
         let filters = self.filters.clone();
+        let file_handle = self.file_handle.clone();
 
         Ok(Box::pin(try_stream! {
             let mut last_series = None;
@@ -149,6 +157,7 @@ impl SeriesIndexSearcher {
             if !output.is_empty() {
                 yield output;
             }
+            drop(file_handle);
         }))
     }
 }
@@ -283,13 +292,39 @@ mod tests {
     use object_store::services::Memory;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::FileId;
+    use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
-    use crate::series_index::{SeriesIndexWriter, SeriesIndexWriterOptions};
+    use crate::series_index::purger::PurgeRequest;
+    use crate::series_index::{
+        SeriesIndexEntry, SeriesIndexWriter, SeriesIndexWriterOptions, series_index_channel,
+    };
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn object_store() -> ObjectStore {
         ObjectStore::new(Memory::default()).unwrap()
+    }
+
+    fn index_handle(
+        metadata: &RegionMetadataRef,
+        store: &ObjectStore,
+    ) -> (SeriesIndexFileHandle, UnboundedReceiver<PurgeRequest>) {
+        let (purger, receiver) = series_index_channel(store.clone());
+        let entry = SeriesIndexEntry {
+            index_uuid: FileId::random(),
+            bucket_start: common_time::Timestamp::new_second(0),
+            bucket_end: common_time::Timestamp::new_second(60),
+            source_file_ids: Vec::new(),
+            min_file_sequence: 0,
+            max_file_sequence: 0,
+            compaction_window_secs: 60,
+            window_sequences: Default::default(),
+        };
+        (
+            SeriesIndexFileHandle::new(metadata.region_id, entry, purger),
+            receiver,
+        )
     }
 
     fn flat_batch_with_time_unit(
@@ -334,14 +369,12 @@ mod tests {
     async fn write_index(
         metadata: RegionMetadataRef,
         object_store: ObjectStore,
-        path: &str,
         rows: &[(u32, u64, &str, &str, i64)],
         row_group_size: usize,
-    ) {
+    ) -> (SeriesIndexFileHandle, UnboundedReceiver<PurgeRequest>) {
         write_index_with_time_unit(
             metadata,
             object_store,
-            path,
             rows,
             row_group_size,
             ArrowTimeUnit::Millisecond,
@@ -352,11 +385,13 @@ mod tests {
     async fn write_index_with_time_unit(
         metadata: RegionMetadataRef,
         object_store: ObjectStore,
-        path: &str,
         rows: &[(u32, u64, &str, &str, i64)],
         row_group_size: usize,
         unit: ArrowTimeUnit,
-    ) {
+    ) -> (SeriesIndexFileHandle, UnboundedReceiver<PurgeRequest>) {
+        let (file_handle, receiver) = index_handle(&metadata, &object_store);
+        let file_id = file_handle.file_id();
+        let path = series_index_path(file_id.region_id(), file_id.file_id());
         let primary_keys = rows
             .iter()
             .map(|(table_id, tsid, tag_0, tag_1, _)| {
@@ -367,7 +402,7 @@ mod tests {
         let mut writer = SeriesIndexWriter::try_new(
             metadata,
             object_store,
-            path,
+            &path,
             SeriesIndexWriterOptions { row_group_size },
             None,
         )
@@ -378,6 +413,7 @@ mod tests {
             .await
             .unwrap();
         writer.finish().await.unwrap();
+        (file_handle, receiver)
     }
 
     async fn collect_ids(stream: MetricSeriesIdStream) -> Vec<MetricSeriesId> {
@@ -396,11 +432,9 @@ mod tests {
             PrimaryKeyEncoding::Sparse,
         ));
         let object_store = object_store();
-        let path = "search.parquet";
-        write_index(
+        let (index, _receiver) = write_index(
             metadata.clone(),
             object_store.clone(),
-            path,
             &[
                 (1, 10, "a", "x", 10),
                 (1, 20, "b", "x", 20),
@@ -424,7 +458,7 @@ mod tests {
         let searcher = SeriesIndexSearcher::try_new(
             metadata.clone(),
             object_store.clone(),
-            path,
+            index.clone(),
             Some(&predicate),
             Some(time_range),
         )
@@ -449,7 +483,7 @@ mod tests {
         let searcher = SeriesIndexSearcher::try_new(
             metadata.clone(),
             object_store.clone(),
-            path,
+            index.clone(),
             None,
             Some(time_range),
         )
@@ -472,7 +506,7 @@ mod tests {
         )
         .unwrap();
         let searcher =
-            SeriesIndexSearcher::try_new(metadata, object_store, path, None, Some(time_range))
+            SeriesIndexSearcher::try_new(metadata, object_store, index, None, Some(time_range))
                 .await
                 .unwrap();
         let ids = collect_ids(searcher.search().unwrap()).await;
@@ -491,11 +525,9 @@ mod tests {
             PrimaryKeyEncoding::Sparse,
         ));
         let object_store = object_store();
-        let path = "schema-evolution.parquet";
-        write_index(
+        let (index, _receiver) = write_index(
             old_metadata.clone(),
             object_store.clone(),
-            path,
             &[
                 (1, 10, "a", "x", 10),
                 (1, 20, "b", "x", 20),
@@ -521,7 +553,7 @@ mod tests {
         let searcher = SeriesIndexSearcher::try_new(
             current_metadata,
             object_store,
-            path,
+            index,
             Some(&predicate),
             None,
         )
@@ -550,11 +582,9 @@ mod tests {
             PrimaryKeyEncoding::Sparse,
         ));
         let object_store = object_store();
-        let path = "widen.parquet";
-        write_index(
+        let (index, _receiver) = write_index(
             metadata.clone(),
             object_store.clone(),
-            path,
             &[
                 (1, 10, "a", "x", 10),
                 (1, 20, "b", "x", 20),
@@ -585,7 +615,7 @@ mod tests {
         let searcher = SeriesIndexSearcher::try_new(
             widened,
             object_store.clone(),
-            path,
+            index.clone(),
             None,
             Some(time_range),
         )
@@ -608,7 +638,7 @@ mod tests {
         )
         .unwrap();
         let searcher =
-            SeriesIndexSearcher::try_new(metadata, object_store, path, None, Some(time_range))
+            SeriesIndexSearcher::try_new(metadata, object_store, index, None, Some(time_range))
                 .await
                 .unwrap();
         let ids = collect_ids(searcher.search().unwrap()).await;
@@ -629,10 +659,9 @@ mod tests {
             PrimaryKeyEncoding::Sparse,
         ));
         let object_store = object_store();
-        write_index(
+        let (index, _receiver) = write_index(
             metadata.clone(),
             object_store.clone(),
-            "old_ms.parquet",
             &[(1, 10, "a", "x", 10), (1, 20, "b", "x", 20)],
             2,
         )
@@ -647,10 +676,9 @@ mod tests {
             }
         }
         let widened = Arc::new(widened);
-        write_index_with_time_unit(
+        let (new_index, _new_receiver) = write_index_with_time_unit(
             widened.clone(),
             object_store.clone(),
-            "new_us.parquet",
             &[(1, 30, "c", "x", 15_000), (1, 40, "d", "x", 15)],
             2,
             ArrowTimeUnit::Microsecond,
@@ -671,7 +699,7 @@ mod tests {
         let searcher = SeriesIndexSearcher::try_new(
             widened.clone(),
             object_store.clone(),
-            "old_ms.parquet",
+            index,
             None,
             Some(time_range),
         )
@@ -685,15 +713,10 @@ mod tests {
                 tsid: 20
             }]
         );
-        let searcher = SeriesIndexSearcher::try_new(
-            widened,
-            object_store,
-            "new_us.parquet",
-            None,
-            Some(time_range),
-        )
-        .await
-        .unwrap();
+        let searcher =
+            SeriesIndexSearcher::try_new(widened, object_store, new_index, None, Some(time_range))
+                .await
+                .unwrap();
         let ids = collect_ids(searcher.search().unwrap()).await;
         assert_eq!(
             ids,
@@ -761,19 +784,12 @@ mod tests {
         let rows = (0..501_u64)
             .map(|tsid| (1, tsid, "a", "x", tsid as i64))
             .collect::<Vec<_>>();
-        write_index(
-            metadata.clone(),
-            object_store.clone(),
-            "batching.parquet",
-            &rows,
-            100,
-        )
-        .await;
+        let (index, _receiver) =
+            write_index(metadata.clone(), object_store.clone(), &rows, 100).await;
 
-        let searcher =
-            SeriesIndexSearcher::try_new(metadata, object_store, "batching.parquet", None, None)
-                .await
-                .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(metadata, object_store, index, None, None)
+            .await
+            .unwrap();
         let batches = searcher
             .search()
             .unwrap()
@@ -798,16 +814,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_streams_pin_deleted_index_until_released() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let store = object_store();
+        let rows = (0..501_u64)
+            .map(|tsid| (1, tsid, "a", "x", tsid as i64))
+            .collect::<Vec<_>>();
+        let (index, mut receiver) = write_index(metadata.clone(), store.clone(), &rows, 100).await;
+        let file_id = index.file_id();
+        let searcher = SeriesIndexSearcher::try_new(metadata, store, index.clone(), None, None)
+            .await
+            .unwrap();
+        index.mark_deleted();
+        drop(index);
+        assert!(receiver.try_recv().is_err());
+
+        let mut stream = searcher.search().unwrap();
+        let cancelled = searcher.search().unwrap();
+        drop(searcher);
+        // Even a stream that has not been polled must pin its file.
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(stream.try_next().await.unwrap().unwrap().len(), 500);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            collect_ids(stream).await,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 500
+            }]
+        );
+        assert!(receiver.try_recv().is_err());
+
+        // The unpolled stream is now the final owner; cancellation releases it.
+        drop(cancelled);
+        assert_eq!(receiver.try_recv().unwrap().file_id, file_id);
+    }
+
+    #[tokio::test]
     async fn search_prunes_row_groups_and_empty_ranges() {
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
         let object_store = object_store();
-        let path = "pruning.parquet";
-        write_index(
+        let (index, _receiver) = write_index(
             metadata.clone(),
             object_store.clone(),
-            path,
             &[
                 (1, 0, "a", "x", 0),
                 (1, 1, "b", "x", 1),
@@ -820,7 +873,9 @@ mod tests {
         )
         .await;
 
-        let reader = ParquetIndexReader::open(object_store.clone(), path)
+        let file_id = index.file_id();
+        let path = series_index_path(file_id.region_id(), file_id.file_id());
+        let reader = ParquetIndexReader::open(object_store.clone(), &path)
             .await
             .unwrap();
         let unit = validate_index_schema(reader.schema()).unwrap();
@@ -850,10 +905,11 @@ mod tests {
         assert_eq!(reader.row_groups_to_read(&pruning_predicate), vec![1]);
 
         // An empty time range yields no series without opening the file.
+        let (missing_index, _receiver) = index_handle(&metadata, &object_store);
         let empty = SeriesIndexSearcher::try_new(
             metadata,
             object_store,
-            "does-not-need-to-exist.parquet",
+            missing_index,
             None,
             Some(TimestampRange::empty()),
         )
