@@ -51,7 +51,7 @@ fn encode_string_to_jsonb_binary(value_data: ValueData) -> Result<ValueData> {
     }
 }
 
-/// Prepares row insertion requests by converting any JSON values to binary JSONB format.
+/// Converts legacy JSON strings to binary JSONB and preserves native JSON2 values.
 pub fn preprocess_row_insert_requests(requests: &mut Vec<RowInsertRequest>) -> Result<()> {
     for request in requests {
         validate_rows(&request.rows)?;
@@ -61,7 +61,7 @@ pub fn preprocess_row_insert_requests(requests: &mut Vec<RowInsertRequest>) -> R
     Ok(())
 }
 
-/// Prepares row deletion requests by converting any JSON values to binary JSONB format.
+/// Converts legacy JSON strings to binary JSONB and preserves native JSON2 values.
 pub fn preprocess_row_delete_requests(requests: &mut Vec<RowDeleteRequest>) -> Result<()> {
     for request in requests {
         validate_rows(&request.rows)?;
