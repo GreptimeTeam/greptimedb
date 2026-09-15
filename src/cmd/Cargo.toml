@@ -119,12 +119,12 @@ tracing-appender.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
-pprof = { version = "0.14", features = [
+pprof = { version = "0.15", features = [
     "flamegraph",
 ] }
 
 [target.'cfg(not(windows))'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 
 [dev-dependencies]
 api.workspace = true

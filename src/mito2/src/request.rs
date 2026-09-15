@@ -76,6 +76,8 @@ pub struct WriteRequest {
     pub name_to_index: HashMap<String, usize>,
     /// Whether each column has null.
     pub has_null: Vec<bool>,
+    /// Whether this insert should skip WAL. Never applies to deletes.
+    pub skip_wal: bool,
     /// Write hint.
     pub hint: Option<WriteHint>,
     /// Region metadata on the time of this request is created.
@@ -137,9 +139,16 @@ impl WriteRequest {
             name_to_index,
             has_null,
             hint: None,
+            skip_wal: false,
             region_metadata,
             partition_expr_version: None,
         })
+    }
+
+    /// Sets the request-level WAL policy.
+    pub fn with_skip_wal(mut self, skip_wal: bool) -> Self {
+        self.skip_wal = skip_wal;
+        self
     }
 
     /// Sets the write hint.
@@ -551,6 +560,7 @@ pub(crate) struct SenderWriteRequest {
 }
 
 pub(crate) struct SenderBulkRequest {
+    pub(crate) skip_wal: bool,
     pub(crate) sender: OptionOutputTx,
     pub(crate) region_id: RegionId,
     pub(crate) request: BulkPart,
@@ -672,6 +682,7 @@ impl WorkerRequest {
                 let mut write_request =
                     WriteRequest::new(region_id, OpType::Put, v.rows, region_metadata.clone())?
                         .with_hint(v.hint)
+                        .with_skip_wal(v.skip_wal)
                         .with_partition_expr_version(v.partition_expr_version);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
@@ -1871,6 +1882,25 @@ mod tests {
             &err,
             "column f1 expect type Int64(Int64Type), given: STRING(12)",
         );
+    }
+
+    #[test]
+    fn test_delete_request_defaults_to_writing_wal() {
+        let (request, _receiver) = WorkerRequest::try_from_region_request(
+            RegionId::new(1, 1),
+            RegionRequest::Delete(store_api::region_request::RegionDeleteRequest {
+                rows: Rows::default(),
+                hint: None,
+                partition_expr_version: None,
+            }),
+            None,
+        )
+        .unwrap();
+        let WorkerRequest::Write(request) = request else {
+            panic!("expected a write request");
+        };
+        assert_eq!(request.request.op_type, OpType::Delete);
+        assert!(!request.request.skip_wal);
     }
 
     #[test]

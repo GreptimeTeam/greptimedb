@@ -44,6 +44,7 @@ impl Inserter {
         raw_flight_data: FlightData,
         record_batch: RecordBatch,
         schema_bytes: Bytes,
+        skip_wal: bool,
     ) -> error::Result<AffectedRows> {
         let table_info = table.table_info();
         let table_id = table_info.table_id();
@@ -103,6 +104,7 @@ impl Inserter {
                     ..Default::default()
                 }),
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                    skip_wal,
                     region_id: region_id.as_u64(),
                     partition_expr_version: partition_expr_version
                         .map(|value| PartitionExprVersion { value }),
@@ -218,6 +220,7 @@ impl Inserter {
                                 ..Default::default()
                             }),
                             body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                                skip_wal,
                                 region_id: region_id.as_u64(),
                                 partition_expr_version: partition_expr_version
                                     .map(|value| PartitionExprVersion { value }),

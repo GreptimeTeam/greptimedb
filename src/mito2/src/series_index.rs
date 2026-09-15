@@ -17,10 +17,18 @@
 // These components are consumed by the upcoming query and maintenance integration.
 #[allow(dead_code)]
 mod catalog;
+// Consumed by the follow-up background-maintenance integration.
+#[allow(dead_code)]
+mod bucket;
+// Consumed by the follow-up background-maintenance integration.
+#[allow(dead_code)]
+mod builder;
 #[allow(dead_code)]
 mod purger;
 mod searcher;
 mod task;
+#[cfg(test)]
+mod tests;
 #[allow(dead_code)]
 mod version;
 mod writer;

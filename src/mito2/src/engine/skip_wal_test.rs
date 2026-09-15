@@ -522,6 +522,7 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: Rows {
                     schema: rows_schema(&request),
                     rows: build_rows(3, 4),
@@ -553,6 +554,7 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: rows_schema(&request_cloned),
                         rows: build_rows(4, 5),
@@ -579,6 +581,7 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: rows_schema(&request_cloned),
                         rows: build_rows(5, 6),

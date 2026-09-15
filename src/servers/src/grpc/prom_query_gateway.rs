@@ -135,11 +135,15 @@ impl PrometheusGatewayService {
         };
         let (metric_name, mut result_type) = retrieve_metric_name_and_result_type(query.expr());
         let query_id = ctx.remote_query_id().map(str::to_string);
-        let result = self.handler.do_query_parsed(query, ctx).await;
-        // range query only returns matrix
-        if is_range_query {
+        // A range query only returns a matrix, and matrix serialization sorts
+        // samples and series, so execution order never reaches the response.
+        let query = if is_range_query {
             result_type = ValueType::Matrix;
+            query.with_unordered_output()
+        } else {
+            query
         };
+        let result = self.handler.do_query_parsed(query, ctx).await;
 
         PrometheusJsonResponse::from_query_result(
             result,

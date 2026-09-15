@@ -34,6 +34,7 @@ impl<'a> Partitioner<'a> {
         &self,
         table_info: &TableInfo,
         rows: Rows,
+        skip_wal: bool,
     ) -> Result<Vec<InsertRequest>> {
         let table_id = table_info.table_id();
         let requests = self
@@ -44,6 +45,7 @@ impl<'a> Partitioner<'a> {
             .into_iter()
             .map(
                 |(region_number, (rows, partition_expr_version))| InsertRequest {
+                    skip_wal,
                     region_id: RegionId::new(table_id, region_number).into(),
                     rows: Some(rows),
                     partition_expr_version: partition_expr_version

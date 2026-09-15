@@ -13,67 +13,21 @@ One engine, on your infrastructure.</h2>
 > Apache-2.0 licensed core.
 
 <div align="center">
-<h3 align="center">
-  <a href="https://docs.greptime.com/user-guide/overview/">User Guide</a> |
-  <a href="https://greptimedb.rs/">API Docs</a> |
-  <a href="https://github.com/GreptimeTeam/greptimedb/issues/7685">Roadmap 2026</a>
-</h3>
 
-<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
-<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?filter=!*-*&label=stable&color=brightgreen" alt="Stable"/>
-</a>
-<a href="https://github.com/GreptimeTeam/greptimedb/releases">
-<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=!*-*-*&label=canary&color=blueviolet" alt="Canary"/>
-</a>
-<a href="https://github.com/GreptimeTeam/greptimedb/releases">
-<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=*-nightly-*&label=nightly&color=orange" alt="Nightly"/>
-</a>
+<a href="https://docs.greptime.com/user-guide/overview/">User Guide</a> &nbsp;·&nbsp;
+<a href="https://greptimedb.rs/">API Docs</a> &nbsp;·&nbsp;
+<a href="https://github.com/GreptimeTeam/greptimedb/issues/7685">Roadmap 2026</a> &nbsp;·&nbsp;
+<a href="https://greptime.com/slack">Slack</a>
+
+<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest"><img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?filter=!*-*&sort=semver&label=stable&color=brightgreen" alt="Stable"/></a>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases"><img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=!*-*-*&sort=semver&label=canary&color=blueviolet" alt="Canary"/></a>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases"><img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=*-nightly-*&label=nightly&color=orange" alt="Nightly"/></a>
+<a href="https://hub.docker.com/r/greptime/greptimedb/"><img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/></a>
+<a href="https://github.com/GreptimeTeam/greptimedb/blob/main/LICENSE"><img src="https://img.shields.io/github/license/GreptimeTeam/greptimedb" alt="License"/></a>
 
 <sub><b>stable</b> for production &nbsp;·&nbsp; <b>canary</b> includes pre-releases &nbsp;·&nbsp; <b>nightly</b> is a weekly snapshot of <code>main</code></sub>
 
-<a href="https://hub.docker.com/r/greptime/greptimedb/">
-<img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/>
-</a>
-<a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml">
-<img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml/badge.svg" alt="GitHub Actions"/>
-</a>
-<a href="https://codecov.io/gh/GreptimeTeam/greptimedb">
-<img src="https://codecov.io/gh/GreptimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C" alt="Codecov"/>
-</a>
-<a href="https://github.com/GreptimeTeam/greptimedb/blob/main/LICENSE">
-<img src="https://img.shields.io/github/license/GreptimeTeam/greptimedb" alt="License"/>
-</a>
-
-<br/>
-
-<a href="https://greptime.com/slack">
-<img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack&style=for-the-badge" alt="Slack"/>
-</a>
-<a href="https://twitter.com/greptime">
-<img src="https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg?style=for-the-badge" alt="Twitter"/>
-</a>
-<a href="https://www.linkedin.com/company/greptime/">
-<img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=for-the-badge" alt="LinkedIn"/>
-</a>
 </div>
-
-- [Introduction](#introduction)
-- [Why You Might Use It](#why-you-might-use-it)
-- [Overview](#overview)
-- [What's Supported](#whats-supported)
-- [Compatibility and Migration](#compatibility-and-migration)
-- [Limitations and Edition Boundary](#limitations-and-edition-boundary)
-- [Architecture](#architecture)
-- [Try GreptimeDB](#try-greptimedb)
-- [Getting Started](#getting-started)
-- [Build From Source](#build-from-source)
-- [Tools & Extensions](#tools--extensions)
-- [Project Status](#project-status)
-- [Community](#community)
-- [License](#license)
-- [Commercial Support](#commercial-support)
-- [Contributing](#contributing)
-- [Acknowledgement](#acknowledgement)
 
 ## Introduction
 
@@ -81,26 +35,42 @@ One engine, on your infrastructure.</h2>
 
 Ingest through OpenTelemetry, Prometheus Remote Write, Loki Push, or Elasticsearch Bulk. Use SQL across observability data and PromQL for metrics. Migrate ingestion one signal at a time without rebuilding your collectors.
 
+## One Query Across Signals
+
+OpenTelemetry ingestion writes spans to `opentelemetry_traces` and log records to
+`opentelemetry_logs`. Both tables carry `trace_id`, so correlating them is a join:
+
+```sql
+-- The slowest failed spans in the last hour,
+-- with the log lines emitted inside those same traces.
+SELECT
+    t.service_name,
+    t.span_name,
+    t.duration_nano / 1000000 AS duration_ms,
+    l.timestamp AS log_time,
+    l.severity_text,
+    l.body
+FROM opentelemetry_traces t
+JOIN opentelemetry_logs l ON l.trace_id = t.trace_id
+WHERE t.timestamp > now() - INTERVAL '1' HOUR
+  AND t.span_status_code = 'STATUS_CODE_ERROR'
+ORDER BY t.duration_nano DESC
+LIMIT 20;
+```
+
+Metrics join the same way, on any tag the tables share, such as `service`,
+`host`, or `pod`.
+
 ## Why You Might Use It
 
 - You run Prometheus plus Loki or Elasticsearch and want one backend instead of three
 - You have outgrown Prometheus on cardinality or retention and don't want the Thanos/Mimir operational surface
+- You are hitting Loki's query performance limits as log volume grows
 - You need long retention on object storage without a separate analytics stack
 - You want to query telemetry with SQL, not only a domain query language
 - You are storing GenAI or agent telemetry ([OTel GenAI conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)) alongside infrastructure signals
-- You need the same engine and semantics on resource-constrained devices
 
 Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb).
-
-## Overview
-
-A quick overview of what GreptimeDB ingests, how it connects to other systems, and what its distributed engine lets you do.
-
-<p align="center">
-  <a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/overview.png" target="_blank" rel="noopener">
-    <img alt="GreptimeDB Overview" src="docs/overview.png" width="900px">
-  </a>
-</p>
 
 ## What's Supported
 
@@ -113,6 +83,22 @@ A quick overview of what GreptimeDB ingests, how it connects to other systems, a
 
 Compute and storage are disaggregated: object storage holds the data, while memory and local-disk caches keep recent and frequently queried data close to compute.
 
+<p align="center">
+  <a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/overview.png" target="_blank" rel="noopener">
+    <img alt="GreptimeDB Overview" src="docs/overview.png" width="900px">
+  </a>
+</p>
+
+## Benchmarks
+
+* [Agent RCA Bench](https://rca-bench.greptime.com/): LLM agents doing root cause analysis
+  over GreptimeDB versus Prometheus + Loki + Tempo. 40% fewer wrong diagnoses, 48% fewer
+  input tokens, 45% lower cost
+  ([write-up](https://greptime.com/blogs/2026-09-08-agent-rca-bench-interface-semantic-layer))
+* [GreptimeDB tops JSONBench's billion-record cold run test](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)
+* [TSBS Benchmark](https://github.com/GreptimeTeam/greptimedb/tree/main/docs/benchmarks/tsbs)
+* [More benchmark reports](https://docs.greptime.com/user-guide/concepts/features-that-you-concern#how-is-greptimedbs-performance-compared-to-other-solutions)
+
 ## Compatibility and Migration
 
 Compatibility is per protocol, and query-side coverage is narrower than ingestion.
@@ -122,11 +108,6 @@ Compatibility is per protocol, and query-side coverage is narrower than ingestio
 | **Prometheus** | Remote Write ingestion; PromQL queries | Gaps are listed in [PromQL compatibility](https://docs.greptime.com/user-guide/query-data/promql/) |
 | **Loki** | Push ingestion; dual-write through Grafana Alloy makes the [cutover gradual](https://greptime.com/blogs/2026-07-23-from-loki-to-greptimedb-dual-write-migration) | LogQL and the rest of the Loki query API |
 | **Elasticsearch** | `_bulk` ingestion in the open-source core; [QueryDSL](https://docs.greptime.com/enterprise/elasticsearch-compatible/query/) partially, in Enterprise | Most other Elasticsearch APIs |
-
-**Benchmarks:**
-* [GreptimeDB tops JSONBench's billion-record cold run test](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)
-* [TSBS Benchmark](https://github.com/GreptimeTeam/greptimedb/tree/main/docs/benchmarks/tsbs)
-* [More benchmark reports](https://docs.greptime.com/user-guide/concepts/features-that-you-concern#how-is-greptimedbs-performance-compared-to-other-solutions)
 
 ## Limitations and Edition Boundary
 
@@ -221,11 +202,7 @@ See the [Contribution Guidelines](CONTRIBUTING.md) for the full developer workfl
 
 GreptimeDB is generally available, with stable APIs and regular releases. It runs in production at scale — [OceanBase Cloud](https://greptime.com/blogs/2025-07-22-user-case-obcloud-log-management-greptimedb) operates 80+ GreptimeDB clusters managing 300 TB of logs, cutting log storage cost by 60%+ after migrating from Grafana Loki. See more in [case studies](https://greptime.com/blogs/?category=Use%20Case).
 
-Read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) and [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026), or browse the [version reference](https://docs.greptime.com/nightly/reference/about-greptimedb-version).
-
-If GreptimeDB is useful to you, please star the repo.
-
-<img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>
+Release lines and support windows are in the [version reference](https://docs.greptime.com/nightly/reference/about-greptimedb-version). For where the project is going, read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) and the [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026).
 
 ## Community
 
@@ -238,6 +215,10 @@ We invite you to engage and contribute!
 - [LinkedIn](https://www.linkedin.com/company/greptime/)
 - [X (Twitter)](https://X.com/greptime)
 - [YouTube](https://www.youtube.com/@greptime)
+
+If GreptimeDB is useful to you, please star the repo.
+
+<img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>
 
 ## License
 
@@ -261,6 +242,9 @@ security, and support layer for production deployments.
 - Read our [Contribution Guidelines](CONTRIBUTING.md).
 - Explore [Internal Concepts](https://docs.greptime.com/contributor-guide/overview.html) and [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb).
 - Pick up a [good first issue](https://github.com/GreptimeTeam/greptimedb/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and join the #contributors [Slack](https://greptime.com/slack) channel.
+
+[![Integration CI](https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml/badge.svg)](https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml)
+[![Codecov](https://codecov.io/gh/GreptimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C)](https://codecov.io/gh/GreptimeTeam/greptimedb)
 
 ## Acknowledgement
 

@@ -133,10 +133,8 @@ TQL EVAL (0, 15, '5s') avg_over_time(host_sec{host="host1"}[5s]) + avg_over_time
 
 -- Verify that PromQL time predicates on non-millisecond time indexes are
 -- pushed into the scan as native timestamp range filters.
--- Original instant selector filter is built on the millisecond alias:
---   host = "host1" AND ts_ms >= -299999ms AND ts_ms <= 10000ms
--- After pushing through `CAST(raw_ts AS Timestamp(ms)) AS ts` and applying
--- DataFusion cast preimage, it becomes a native half-open range on raw_ts.
+-- Instant selection compares raw timestamps before millisecond output conversion:
+--   host = "host1" AND ts_us > -300000000us AND ts_us <= 10000000us.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -152,17 +150,17 @@ TQL EXPLAIN (0, 10, '5s') host_micro{host="host1"};
 |               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts]                                                                                                      |
 |               |   PromSeriesDivide: tags=["host"]                                                                                                                                                                 |
 |               |     Sort: host_micro.host ASC NULLS FIRST, host_micro.ts ASC NULLS FIRST                                                                                                                          |
-|               |       Projection: host_micro.val, host_micro.host, CAST(host_micro.ts AS Timestamp(ms)) AS ts                                                                                                     |
-|               |         Filter: host_micro.host = Utf8("host1") AND host_micro.ts >= TimestampMicrosecond(-299999999, None) AND host_micro.ts < TimestampMicrosecond(10001000, None)                              |
-|               |           TableScan: host_micro, partial_filters=[host_micro.host = Utf8("host1"), host_micro.ts >= TimestampMicrosecond(-299999999, None), host_micro.ts < TimestampMicrosecond(10001000, None)] |
+|               |       Projection: host_micro.val, host_micro.host, host_micro.ts                                                                                                                                  |
+|               |         Filter: host_micro.host = Utf8("host1") AND host_micro.ts > TimestampMicrosecond(-300000000, None) AND host_micro.ts <= TimestampMicrosecond(10000000, None)                              |
+|               |           TableScan: host_micro, partial_filters=[host_micro.host = Utf8("host1"), host_micro.ts > TimestampMicrosecond(-300000000, None), host_micro.ts <= TimestampMicrosecond(10000000, None)] |
 |               | ]]                                                                                                                                                                                                |
 | physical_plan | CooperativeExec                                                                                                                                                                                   |
 |               |   MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                   |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
--- The same instant-selector cast-preimage path should work for nanosecond indexes.
--- Expected native bounds: ts_ns >= -299999999999ns AND ts_ns < 10001000000ns.
+-- The same exclusive-lower, inclusive-upper window applies to nanosecond indexes.
+-- Expected native bounds: ts_ns > -300000000000ns AND ts_ns <= 10000000000ns.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -177,9 +175,9 @@ TQL EXPLAIN (0, 10, '5s') host_nano{host="host1"};
 |               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts]                                                                                                      |
 |               |   PromSeriesDivide: tags=["host"]                                                                                                                                                                 |
 |               |     Sort: host_nano.host ASC NULLS FIRST, host_nano.ts ASC NULLS FIRST                                                                                                                            |
-|               |       Projection: host_nano.val, host_nano.host, CAST(host_nano.ts AS Timestamp(ms)) AS ts                                                                                                        |
-|               |         Filter: host_nano.host = Utf8("host1") AND host_nano.ts >= TimestampNanosecond(-299999999999, None) AND host_nano.ts < TimestampNanosecond(10001000000, None)                             |
-|               |           TableScan: host_nano, partial_filters=[host_nano.host = Utf8("host1"), host_nano.ts >= TimestampNanosecond(-299999999999, None), host_nano.ts < TimestampNanosecond(10001000000, None)] |
+|               |       Projection: host_nano.val, host_nano.host, host_nano.ts                                                                                                                                     |
+|               |         Filter: host_nano.host = Utf8("host1") AND host_nano.ts > TimestampNanosecond(-300000000000, None) AND host_nano.ts <= TimestampNanosecond(10000000000, None)                             |
+|               |           TableScan: host_nano, partial_filters=[host_nano.host = Utf8("host1"), host_nano.ts > TimestampNanosecond(-300000000000, None), host_nano.ts <= TimestampNanosecond(10000000000, None)] |
 |               | ]]                                                                                                                                                                                                |
 | physical_plan | CooperativeExec                                                                                                                                                                                   |
 |               |   MergeScanExec: REDACTED
@@ -187,8 +185,8 @@ TQL EXPLAIN (0, 10, '5s') host_nano{host="host1"};
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- Range selectors use their range window instead of the default lookback.
--- Original range selector filter for [5s]:
---   host = "host1" AND ts_ms >= -4999ms AND ts_ms <= 10000ms
+-- Native range selector filter for [5s]:
+--   host = "host1" AND ts_us > -5000000us AND ts_us <= 10000000us
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -206,17 +204,17 @@ TQL EXPLAIN (0, 10, '5s') avg_over_time(host_micro{host="host1"}[5s]);
 |               |       PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                                            |
 |               |         PromSeriesDivide: tags=["host"]                                                                                                                                                               |
 |               |           Sort: host_micro.host ASC NULLS FIRST, host_micro.ts ASC NULLS FIRST                                                                                                                        |
-|               |             Projection: host_micro.val, host_micro.host, CAST(host_micro.ts AS Timestamp(ms)) AS ts                                                                                                   |
-|               |               Filter: host_micro.host = Utf8("host1") AND host_micro.ts >= TimestampMicrosecond(-4999999, None) AND host_micro.ts < TimestampMicrosecond(10001000, None)                              |
-|               |                 TableScan: host_micro, partial_filters=[host_micro.host = Utf8("host1"), host_micro.ts >= TimestampMicrosecond(-4999999, None), host_micro.ts < TimestampMicrosecond(10001000, None)] |
+|               |             Projection: host_micro.val, host_micro.host, host_micro.ts                                                                                                                                |
+|               |               Filter: host_micro.host = Utf8("host1") AND host_micro.ts > TimestampMicrosecond(-5000000, None) AND host_micro.ts <= TimestampMicrosecond(10000000, None)                              |
+|               |                 TableScan: host_micro, partial_filters=[host_micro.host = Utf8("host1"), host_micro.ts > TimestampMicrosecond(-5000000, None), host_micro.ts <= TimestampMicrosecond(10000000, None)] |
 |               | ]]                                                                                                                                                                                                    |
 | physical_plan | CooperativeExec                                                                                                                                                                                       |
 |               |   MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                       |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
--- The same range-selector cast-preimage path should work for nanosecond indexes.
--- Expected native bounds: ts_ns >= -4999999999ns AND ts_ns < 10001000000ns.
+-- Range membership also retains nanosecond precision.
+-- Expected native bounds: ts_ns > -5000000000ns AND ts_ns <= 10000000000ns.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -234,9 +232,9 @@ TQL EXPLAIN (0, 10, '5s') avg_over_time(host_nano{host="host1"}[5s]);
 |               |       PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                                            |
 |               |         PromSeriesDivide: tags=["host"]                                                                                                                                                               |
 |               |           Sort: host_nano.host ASC NULLS FIRST, host_nano.ts ASC NULLS FIRST                                                                                                                          |
-|               |             Projection: host_nano.val, host_nano.host, CAST(host_nano.ts AS Timestamp(ms)) AS ts                                                                                                      |
-|               |               Filter: host_nano.host = Utf8("host1") AND host_nano.ts >= TimestampNanosecond(-4999999999, None) AND host_nano.ts < TimestampNanosecond(10001000000, None)                             |
-|               |                 TableScan: host_nano, partial_filters=[host_nano.host = Utf8("host1"), host_nano.ts >= TimestampNanosecond(-4999999999, None), host_nano.ts < TimestampNanosecond(10001000000, None)] |
+|               |             Projection: host_nano.val, host_nano.host, host_nano.ts                                                                                                                                   |
+|               |               Filter: host_nano.host = Utf8("host1") AND host_nano.ts > TimestampNanosecond(-5000000000, None) AND host_nano.ts <= TimestampNanosecond(10000000000, None)                             |
+|               |                 TableScan: host_nano, partial_filters=[host_nano.host = Utf8("host1"), host_nano.ts > TimestampNanosecond(-5000000000, None), host_nano.ts <= TimestampNanosecond(10000000000, None)] |
 |               | ]]                                                                                                                                                                                                    |
 | physical_plan | CooperativeExec                                                                                                                                                                                       |
 |               |   MergeScanExec: REDACTED

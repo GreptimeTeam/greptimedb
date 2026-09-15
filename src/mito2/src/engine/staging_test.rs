@@ -285,6 +285,7 @@ async fn test_staging_reject_all_writes_rejects_put() {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows,
                 hint: None,
                 partition_expr_version: None,
@@ -355,6 +356,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: bad_rows,
                 hint: None,
                 partition_expr_version: Some(origin_version),
@@ -376,6 +378,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: compat_rows,
                 hint: None,
                 partition_expr_version: None,
@@ -393,6 +396,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: ok_rows,
                 hint: None,
                 partition_expr_version: Some(expected_version),
@@ -440,6 +444,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: exit_rows,
                 hint: None,
                 partition_expr_version: Some(origin_version),
@@ -457,6 +462,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: compat_rows,
                 hint: None,
                 partition_expr_version: None,
@@ -483,6 +489,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: commit_rows,
                 hint: None,
                 partition_expr_version: Some(expected_version),

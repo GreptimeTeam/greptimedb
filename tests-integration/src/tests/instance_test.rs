@@ -1174,6 +1174,55 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
     check_output_stream(output, expect).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_copy_from_inherits_skip_wal() {
+    use crate::test_util::{MockInstanceImpl, assert_wal_delta};
+
+    // Local COPY access is intentionally restricted to the standalone harness.
+    let mut env = MockInstanceImpl::new("copy_from_skip_wal", false).await;
+    let instance = env.frontend();
+    let directory = create_local_file_test_dir("copy_from_skip_wal");
+    let csv_path = directory.path().join("copy_skip_wal.csv");
+    std::fs::copy(
+        find_testing_resource("/tests/data/csv/headerless.csv"),
+        &csv_path,
+    )
+    .unwrap();
+    execute_sql(
+        &instance,
+        "CREATE TABLE copy_skip_wal(host_id INT, host_name STRING, reading_value DOUBLE, ts TIMESTAMP TIME INDEX);",
+    )
+    .await;
+
+    let commands = [
+        format!(
+            "COPY copy_skip_wal FROM '{}' WITH (FORMAT='csv', HEADERS='false');",
+            prepare_path(&csv_path.display().to_string())
+        ),
+        format!(
+            "COPY DATABASE public FROM '{}/' WITH (FORMAT='csv', HEADERS='false');",
+            prepare_path(&directory.path().display().to_string())
+        ),
+    ];
+    for command in commands {
+        for skip_wal in [Some(true), Some(false), None] {
+            let ctx = QueryContext::arc();
+            if let Some(skip_wal) = skip_wal {
+                ctx.set_skip_wal(skip_wal);
+            }
+            let before = env.flush_and_snapshot_wal().await;
+            let output = execute_sql_with(&instance, &command, ctx).await;
+            assert!(matches!(output.data, OutputData::AffectedRows(2)));
+            assert_wal_delta(
+                &before,
+                &env.flush_and_snapshot_wal().await,
+                skip_wal == Some(true),
+            );
+        }
+    }
+    env.shutdown().await;
+}
+
 #[apply(standalone_instance_case)]
 async fn test_execute_copy_from_headerless_csv(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();

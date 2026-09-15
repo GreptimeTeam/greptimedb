@@ -952,6 +952,7 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: unflushed_rows,
                 hint: None,
                 partition_expr_version: Some(expected_version),

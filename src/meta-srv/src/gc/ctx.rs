@@ -27,6 +27,7 @@ use common_meta::ddl_manager::DdlManagerRef;
 #[cfg(feature = "enterprise")]
 use common_meta::key::DroppedTableName;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 #[cfg(feature = "enterprise")]
@@ -155,6 +156,8 @@ pub(crate) struct DefaultGcSchedulerCtx {
     pub(crate) table_metadata_manager: TableMetadataManagerRef,
     /// Procedure manager.
     pub(crate) procedure_manager: ProcedureManagerRef,
+    /// Runtime switch manager used by recovered and newly submitted GC procedures.
+    pub(crate) runtime_switch_manager: RuntimeSwitchManagerRef,
     /// DDL manager used to submit the existing purge procedure.
     #[cfg(feature = "enterprise")]
     pub(crate) ddl_manager: DdlManagerRef,
@@ -176,6 +179,7 @@ impl DefaultGcSchedulerCtx {
     pub fn try_new(
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
+        runtime_switch_manager: RuntimeSwitchManagerRef,
         #[cfg(feature = "enterprise")] ddl_manager: DdlManagerRef,
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
@@ -184,6 +188,7 @@ impl DefaultGcSchedulerCtx {
         Ok(Self {
             table_metadata_manager,
             procedure_manager,
+            runtime_switch_manager,
             #[cfg(feature = "enterprise")]
             ddl_manager,
             #[cfg(feature = "enterprise")]
@@ -320,6 +325,7 @@ impl DefaultGcSchedulerCtx {
         let procedure = BatchGcProcedure::new(
             self.mailbox.clone(),
             self.table_metadata_manager.clone(),
+            self.runtime_switch_manager.clone(),
             self.server_addr.clone(),
             region_ids.to_vec(),
             full_file_listing,

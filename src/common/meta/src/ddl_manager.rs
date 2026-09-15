@@ -2036,20 +2036,25 @@ mod tests {
 
         // The repartition hint drives physical repartitioning; on a logical
         // route it stays rejected by the guard.
-        let err = ddl_manager
-            .submit_ddl_task(
-                ExecutorContext {
-                    query_context: Some(QueryContext::default()),
-                    ..Default::default()
-                },
-                SubmitDdlTaskRequest::new(DdlTask::new_alter_table(set_options_expr(
-                    "logical",
-                    &[("repartition.column.hint", "host")],
-                ))),
-            )
-            .await
-            .unwrap_err();
-        let msg = common_error::ext::ErrorExt::output_msg(&err);
-        assert!(msg.contains("non-physical TableRouteValue"), "{msg}");
+        for (key, value) in [
+            (table::requests::REPARTITION_COLUMN_HINT_KEY, "host"),
+            (table::requests::REPARTITION_PARTITION_NUM_HINT_KEY, "8"),
+        ] {
+            let err = ddl_manager
+                .submit_ddl_task(
+                    ExecutorContext {
+                        query_context: Some(QueryContext::default()),
+                        ..Default::default()
+                    },
+                    SubmitDdlTaskRequest::new(DdlTask::new_alter_table(set_options_expr(
+                        "logical",
+                        &[(key, value)],
+                    ))),
+                )
+                .await
+                .unwrap_err();
+            let msg = common_error::ext::ErrorExt::output_msg(&err);
+            assert!(msg.contains("non-physical TableRouteValue"), "{msg}");
+        }
     }
 }

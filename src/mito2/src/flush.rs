@@ -451,6 +451,7 @@ impl RegionFlushTask {
 
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
+            float_field_encoding: version.options.float_field_encoding,
             ..Default::default()
         };
         if let Some(row_group_size) = self.row_group_size {
@@ -1728,6 +1729,7 @@ mod tests {
 
         (
             SenderBulkRequest {
+                skip_wal: false,
                 sender: OptionOutputTx::from(sender),
                 region_id,
                 request: converter.convert().unwrap(),

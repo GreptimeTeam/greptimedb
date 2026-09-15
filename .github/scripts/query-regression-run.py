@@ -33,12 +33,14 @@ from typing import Any
 
 DEFAULT_CASES = [
     "tests/perf/query_cases/smoke_direct_sst/case.toml",
+    "tests/perf/query_cases/sst_float_bss/case.toml",
     "tests/perf/query_cases/prom_remote_write_seeded_random/case.toml",
     "tests/perf/query_cases/prom_remote_write_run_heavy/case.toml",
     "tests/perf/query_cases/prom_remote_write_mixed_every/case.toml",
     "tests/perf/query_cases/prom_remote_write_integer_counter/case.toml",
     "tests/perf/query_cases/promql_range_boundary/case.toml",
     "tests/perf/query_cases/promql_instant_last_row_9034/case.toml",
+    "tests/perf/query_cases/mito_prefilter_all_match/case.toml",
 ]
 
 HEAVY_CASES = [

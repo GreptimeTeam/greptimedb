@@ -395,6 +395,167 @@ async fn test_json2_v1_region_reopen_and_compaction() -> WhateverResult<()> {
 }
 
 #[tokio::test]
+async fn test_json2_mixed_subject_compaction_preserves_values() -> WhateverResult<()> {
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("append_mode", "true")
+        .insert_option("memtable.type", "bulk")
+        .insert_option("sst_format", "flat")
+        .build();
+    let table_dir = request.table_dir.clone();
+    let schema = test_util::rows_schema(&request);
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: std::time::Duration::from_secs(3600),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1027, 0);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    // #9133: the second SST stores a heterogeneous subject in its remainder.
+    let values = [
+        json!({"subject": {"cid": "first", "uri": "at://first"}}),
+        json!({"subject": "did:plc:x"}),
+        json!({"subject": {"cid": "last", "uri": "at://last"}}),
+        json!({"subject": {"cid": 42}}),
+    ];
+    for (offset, batch) in [(0, &values[..1]), (1, &values[1..])] {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: batch
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| {
+                        row(vec![
+                            ValueData::StringValue("tag".into()),
+                            ValueData::JsonValue(encode_json_value(JsonValue::from(value.clone()))),
+                            ValueData::TimestampMillisecondValue((offset + i) as i64 * 1000),
+                        ])
+                    })
+                    .collect(),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let old_ids = engine
+        .scanner(region_id, ScanRequest::default())
+        .await?
+        .file_ids();
+    assert_eq!(2, old_ids.len());
+    for _ in 0..2 {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 86400,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            1,
+            scanner.num_files(),
+            "a swallowed merge failure must not pass"
+        );
+        assert!(scanner.file_ids().iter().all(|id| !old_ids.contains(id)));
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut actual = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                actual.push(JsonArray::from(&array).try_get_value(i)?);
+            }
+        }
+        assert_eq!(values.as_slice(), actual.as_slice());
+        reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    json_type_hint: HashMap::from([(
+                        "field_0".into(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "subject".into(),
+                            JsonNativeType::String,
+                        )])),
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut subjects = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                subjects.push(JsonArray::from(&array).try_get_value(i)?);
+            }
+        }
+        let expected = values.iter().map(|value| {
+            let subject = &value["subject"];
+            json!({"subject": subject.as_str().map(str::to_string).unwrap_or_else(|| subject.to_string())})
+        }).collect::<Vec<_>>();
+        assert_eq!(
+            expected, subjects,
+            "projection must read values spilled to remainder"
+        );
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    json_type_hint: HashMap::from([(
+                        "field_0".into(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "subject".into(),
+                            JsonNativeType::Object(JsonObjectType::from([(
+                                "cid".into(),
+                                JsonNativeType::String,
+                            )])),
+                        )])),
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut cids = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                cids.push(JsonArray::from(&array).try_get_value(i)?["subject"]["cid"].clone());
+            }
+        }
+        assert_eq!(
+            vec![json!("first"), json!(null), json!("last"), json!("42")],
+            cids
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_flush_aligns_different_json2_layouts() -> WhateverResult<()> {
     let mut request = CreateRequestBuilder::new()
         .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
@@ -1129,6 +1290,7 @@ async fn test_two_phase_series_scan() {
     };
     let put = |rows| {
         RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows,
             hint: Some(WriteHint {
                 primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
@@ -2389,6 +2551,7 @@ fn build_bulk_insert_request(
     let (schema, record_batch) = encode_to_flight_data(payload.clone());
 
     RegionBulkInsertsRequest {
+        skip_wal: false,
         region_id,
         payload,
         raw_data: ArrowIpc {
@@ -2398,6 +2561,139 @@ fn build_bulk_insert_request(
         },
         partition_expr_version: None,
         aligned_schema_version: None,
+    }
+}
+
+#[tokio::test]
+async fn test_bulk_skip_wal_recovery() {
+    check_bulk_skip_wal_recovery(false, false).await;
+    check_bulk_skip_wal_recovery(false, true).await;
+    check_bulk_skip_wal_recovery(true, false).await;
+    check_bulk_skip_wal_recovery(true, true).await;
+}
+
+async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut request = build_bulk_insert_request(region_id, 0, 4);
+    request.skip_wal = skip_wal;
+    let affected = engine
+        .handle_request(region_id, RegionRequest::BulkInserts(request))
+        .await
+        .unwrap();
+    assert_eq!(affected.affected_rows, 4);
+    let region = engine.get_region(region_id).unwrap();
+    let current = region.version_control.current();
+    assert_eq!(current.committed_sequence, 4);
+    assert_eq!(current.last_entry_id, u64::from(!skip_wal));
+    assert_eq!(current.version.flushed_entry_id, 0);
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>(),
+        4
+    );
+    if flush {
+        test_util::flush_region(&engine, region_id, None).await;
+        let current = region.version_control.current();
+        assert_eq!(current.last_entry_id, u64::from(!skip_wal));
+        assert_eq!(current.version.flushed_sequence, 4);
+        assert_eq!(
+            engine
+                .region_statistic(region_id)
+                .unwrap()
+                .manifest
+                .data_flushed_entry_id(),
+            u64::from(!skip_wal)
+        );
+    }
+    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>(),
+        if skip_wal && !flush { 0 } else { 4 }
+    );
+}
+
+#[tokio::test]
+async fn test_bulk_skip_wal_flush_watermarks() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(
+                CreateRequestBuilder::new()
+                    .insert_option("memtable.type", "bulk")
+                    .build(),
+            ),
+        )
+        .await
+        .unwrap();
+    // Establish a persisted baseline, skip one bulk write, then resume WAL.
+    for (round, skip_wal) in [false, true, false].into_iter().enumerate() {
+        let region = engine.get_region(region_id).unwrap();
+        let before = region.version_control.current();
+        let mut request = build_bulk_insert_request(region_id, round * 4, (round + 1) * 4);
+        request.skip_wal = skip_wal;
+        let affected = engine
+            .handle_request(region_id, RegionRequest::BulkInserts(request))
+            .await
+            .unwrap();
+        assert_eq!(affected.affected_rows, 4);
+        let expected_entry_id = before.last_entry_id + u64::from(!skip_wal);
+        let after = region.version_control.current();
+        assert_eq!(after.last_entry_id, expected_entry_id);
+        assert_eq!(after.committed_sequence, before.committed_sequence + 4);
+        assert_eq!(
+            after.version.flushed_sequence,
+            before.version.flushed_sequence
+        );
+        assert_eq!(
+            engine
+                .region_statistic(region_id)
+                .unwrap()
+                .manifest
+                .data_flushed_entry_id(),
+            before.version.flushed_entry_id
+        );
+        test_util::flush_region(&engine, region_id, None).await;
+        let after = region.version_control.current();
+        assert_eq!(after.last_entry_id, expected_entry_id);
+        assert_eq!(after.version.flushed_sequence, (round as u64 + 1) * 4);
+        assert_eq!(
+            engine
+                .region_statistic(region_id)
+                .unwrap()
+                .manifest
+                .data_flushed_entry_id(),
+            expected_entry_id
+        );
     }
 }
 
@@ -3234,6 +3530,7 @@ async fn build_sparse_exact_metric_engine(
     };
     let put = |rows| {
         RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows,
             hint: Some(WriteHint {
                 primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
@@ -3509,6 +3806,7 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
             panic!("sparse metric scan must use SeriesScan");
         };
         assert_eq!("two_phase", scanner.mode());
+        assert_eq!(1, scanner.properties().num_partitions());
         let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
             .await
             .unwrap();
@@ -3520,25 +3818,27 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
 
     let (cold, _) = scan(restrictive.clone()).await;
     // Cache insertion is performed by the range stream's async concat task.
-    // Wait for a completed cache read rather than assuming a fixed number of
-    // scheduler yields. The aggregate metric includes candidate-stage hits, so
-    // output-isolation assertions below remain the data-stage acceptance check.
-    let (warm, warm_verbose) = tokio::time::timeout(Duration::from_secs(5), async {
+    // Wait for the SeriesReader's data-stage entry, rather than treating a
+    // candidate-stage cache hit as evidence that the reader replayed its data.
+    let warm = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (rows, verbose) = scan(restrictive.clone()).await;
-            if verbose.contains("\"range_cache_hit\"") {
-                return (rows, verbose);
+            // The single output partition is 0; the candidate distributor uses
+            // synthetic partition 1. Only a partition-0 hit proves data replay.
+            let data_metrics = verbose
+                .split("\"partition\":0, \"metrics\":")
+                .nth(1)
+                .and_then(|metrics| metrics.split("\"partition\":").next())
+                .expect("missing two-phase data-reader metrics");
+            if data_metrics.contains("\"range_cache_hit\":") {
+                return rows;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("range cache did not complete within timeout");
+    .expect("series-data range cache did not complete and replay within timeout");
     assert_eq!(cold, warm);
-    assert!(
-        warm_verbose.contains("\"range_cache_hit\":"),
-        "warm two-phase scan did not report a range-cache hit: {warm_verbose}"
-    );
 
     assert_eq!(
         vec![

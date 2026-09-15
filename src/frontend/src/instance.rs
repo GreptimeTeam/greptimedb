@@ -1329,6 +1329,7 @@ impl PrometheusHandler for Instance {
         self.check_query_target_permission(targets, &query_ctx)
             .await?;
 
+        let requires_output_ordering = query.requires_output_ordering();
         let (query, stmt) = query.into_parts();
 
         let QueryStatement::Promql(eval_stmt, _) = &stmt else {
@@ -1341,6 +1342,12 @@ impl PrometheusHandler for Instance {
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
+
+        let plan = if requires_output_ordering {
+            plan
+        } else {
+            promql::remove_output_sort(plan)
+        };
 
         interceptor.pre_execute(&query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
 

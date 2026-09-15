@@ -453,6 +453,7 @@ async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
                         2_000,
                         2_000,
                         1_000,
+                        0,
                         2_000,
                         "ts".to_string(),
                         planner.ctx.field_columns.clone(),
@@ -756,4 +757,122 @@ async fn binary_joins_align_only_the_temporality_marker() {
     assert!(set.schema().field_with_unqualified_name(marker).is_err());
     let (_, batches) = execute(set, &build_query_engine_state()).await;
     assert_eq!(1, batches.iter().map(RecordBatch::num_rows).sum::<usize>());
+}
+
+#[tokio::test]
+async fn delta_offsets_survive_optimized_plan_serialization() {
+    let eval_time = UNIX_EPOCH.checked_add(Duration::from_secs(120)).unwrap();
+    for (name, query, expected) in [
+        (
+            "selector positive offset",
+            r#"delta_metric{series="cumulative"} offset 60s"#,
+            10.0,
+        ),
+        (
+            "selector negative offset",
+            r#"delta_metric{series="cumulative"} offset -60s"#,
+            30.0,
+        ),
+        (
+            "timestamp positive offset",
+            r#"timestamp(delta_metric{series="cumulative"} offset 60s)"#,
+            120.0,
+        ),
+        (
+            "timestamp negative offset",
+            r#"timestamp(delta_metric{series="cumulative"} offset -60s)"#,
+            120.0,
+        ),
+        (
+            "range positive offset",
+            r#"last_over_time(delta_metric{series="cumulative"}[60s] offset 60s)"#,
+            10.0,
+        ),
+        (
+            "range negative offset",
+            r#"last_over_time(delta_metric{series="cumulative"}[60s] offset -60s)"#,
+            30.0,
+        ),
+        (
+            "subquery positive offset",
+            r#"last_over_time((delta_metric{series="cumulative"} offset 60s)[60s:60s])"#,
+            10.0,
+        ),
+        (
+            "subquery negative offset",
+            r#"last_over_time((delta_metric{series="cumulative"} offset -60s)[60s:60s])"#,
+            30.0,
+        ),
+    ] {
+        let eval_stmt = EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: eval_time,
+            end: eval_time,
+            interval: Duration::from_secs(60),
+            lookback_delta: Duration::from_secs(300),
+        };
+        let (provider, state, datafusion_table) = delta_temporality_table_provider();
+        let raw = PromPlanner::stmt_to_plan(provider, &eval_stmt, &state)
+            .await
+            .unwrap();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        let optimized = state.optimize_by_extension_rules(raw, &context).unwrap();
+        let optimized = state.optimize_logical_plan(optimized).unwrap();
+
+        let context = SessionContext::new_with_state(state.session_state());
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        let schema = Arc::new(MemorySchemaProvider::new());
+        schema
+            .register_table("delta_metric".to_string(), datafusion_table)
+            .unwrap();
+        catalog
+            .register_schema(DEFAULT_SCHEMA_NAME, schema)
+            .unwrap();
+        context.register_catalog("datafusion", catalog);
+        let decoder = DefaultPlanDecoder::new(context.state(), &QueryContext::arc()).unwrap();
+        let decoded = decoder
+            .decode(
+                DFLogicalSubstraitConvertor
+                    .encode(&optimized, DefaultSerializer)
+                    .unwrap(),
+                context.state().catalog_list().clone(),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut outputs = Vec::new();
+        for plan in [optimized, decoded] {
+            let (_, batches) = execute(plan, &state).await;
+            let mut output = Vec::new();
+            for batch in batches {
+                let value_field = batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .find(|field| field.data_type() == &ArrowDataType::Float64)
+                    .unwrap()
+                    .name()
+                    .clone();
+                let values = batch
+                    .column_by_name(&value_field)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                let timestamps = batch
+                    .column_by_name(greptime_timestamp())
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                for row in 0..batch.num_rows() {
+                    output.push((timestamps.value(row), values.value(row)));
+                }
+            }
+            assert_eq!(vec![(120_000, expected)], output, "{name}");
+            outputs.push(output);
+        }
+        assert_eq!(outputs[0], outputs[1], "{name}");
+    }
 }

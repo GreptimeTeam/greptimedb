@@ -2587,6 +2587,7 @@ fn validate_and_normalize_annotations(
         CheckError::ColumnNotFound { column } => ColumnNotFoundSnafu { msg: column }.build(),
         e @ (CheckError::UnknownKey { .. }
         | CheckError::InvalidValue { .. }
+        | CheckError::InvalidPartitionNumHint { .. }
         | CheckError::ColumnNotStringForm { .. }) => InvalidSqlSnafu {
             err_msg: e.to_string(),
         }
@@ -3522,6 +3523,36 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
                 expr_helper::create_to_expr(create, &QueryContext::arc()).unwrap()
             }
             _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_create_table_with_repartition_partition_num_hint() {
+        let key = table::requests::REPARTITION_PARTITION_NUM_HINT_KEY;
+        for (value, expected) in [
+            (" 8 ", Some("8")),
+            ("0", None),
+            ("-1", None),
+            ("4294967296", None),
+        ] {
+            let expr = create_expr_from_sql(&format!(
+                "CREATE TABLE metrics (host STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) WITH ('{key}' = '{value}')"
+            ));
+            let result = create_table_info(&expr, vec![]);
+            if let Some(expected) = expected {
+                let info = result.unwrap();
+                assert_eq!(
+                    info.meta.options.extra_options.get(key).map(String::as_str),
+                    Some(expected)
+                );
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("expects a positive integer")
+                );
+            }
         }
     }
 

@@ -825,7 +825,17 @@ impl Database {
     /// Ingest a stream of [RecordBatch]es that belong to a table, using Arrow Flight's "`DoPut`"
     /// method. The return value is also a stream, produces [DoPutResponse]s.
     pub async fn do_put(&self, stream: FlightDataStream) -> Result<DoPutResponseStream> {
+        self.do_put_with_hints(stream, &[]).await
+    }
+
+    /// Ingest a stream of [RecordBatch]es using Arrow Flight's `DoPut` with request hints.
+    pub async fn do_put_with_hints(
+        &self,
+        stream: FlightDataStream,
+        hints: &[(&str, &str)],
+    ) -> Result<DoPutResponseStream> {
         let mut request = tonic::Request::new(stream);
+        Self::put_hints(request.metadata_mut(), hints)?;
 
         if let Some(AuthHeader {
             auth_scheme: Some(AuthScheme::Basic(Basic { username, password })),

@@ -2018,6 +2018,7 @@ mod tests {
 
         assert!(RegionServerInner::is_ingest_request(&RegionRequest::Put(
             RegionPutRequest {
+                skip_wal: false,
                 rows: rows(),
                 hint: None,
                 partition_expr_version: None,

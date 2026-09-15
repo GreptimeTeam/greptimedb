@@ -75,6 +75,10 @@ pub fn as_aggr_func_creator(args: TokenStream, input: TokenStream) -> TokenStrea
 /// - `name`: The name of the generated `ScalarUDF` struct.
 /// - `ret`: The return type of the generated UDF function.
 /// - `display_name`: The display name of the generated UDF function.
+/// - `evaluator`: Optional path to a specialized evaluator with the calling convention
+///   `fn(&[ColumnarValue], &str) -> Result<ColumnarValue, DataFusionError>`. When supplied,
+///   the generated UDF `calc` delegates directly to it; without it, the default expansion is
+///   unchanged.
 #[proc_macro_attribute]
 pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_range_fn(args, input)

@@ -221,6 +221,7 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
                     RegionRequest::Put(RegionPutRequest {
                         rows,
                         hint: None,
+                        skip_wal: r.skip_wal,
                         partition_expr_version: r.partition_expr_version.map(|v| v.value),
                     }),
                 )
@@ -471,6 +472,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = request.region_id.into();
+    let skip_wal = request.skip_wal;
     let partition_expr_version = request.partition_expr_version.map(|v| v.value);
     let aligned_schema_version = request.aligned_schema_version.map(|v| v.schema_version);
     let Some(Body::ArrowIpc(request)) = request.body else {
@@ -492,6 +494,7 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             region_id,
             payload,
             raw_data: request,
+            skip_wal,
             partition_expr_version,
             aligned_schema_version,
         }),
@@ -524,6 +527,9 @@ pub struct RegionPutRequest {
     pub rows: Rows,
     /// Write hint.
     pub hint: Option<WriteHint>,
+    /// Skip WAL for this insert without changing region options.
+    /// Metadata writes must not inherit this option from user inserts.
+    pub skip_wal: bool,
     /// Partition expression version for the region.
     pub partition_expr_version: Option<u64>,
 }
@@ -1751,6 +1757,8 @@ pub struct RegionCatchupRequest {
 
 #[derive(Debug, Clone)]
 pub struct RegionBulkInsertsRequest {
+    /// Whether this request should skip WAL.
+    pub skip_wal: bool,
     pub region_id: RegionId,
     pub payload: DfRecordBatch,
     pub raw_data: ArrowIpc,
@@ -1863,6 +1871,36 @@ mod tests {
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_make_region_puts_preserves_skip_wal() {
+        let region_id = RegionId::new(42, 3);
+        let rows = Rows::default();
+        let requests = make_region_puts(InsertRequests {
+            requests: [false, true, false]
+                .into_iter()
+                .map(|skip_wal| api::v1::region::InsertRequest {
+                    region_id: region_id.as_u64(),
+                    rows: Some(rows.clone()),
+                    partition_expr_version: Some(api::v1::PartitionExprVersion { value: 7 }),
+                    skip_wal,
+                })
+                .collect(),
+        })
+        .unwrap();
+
+        assert_eq!(3, requests.len());
+        for ((id, request), skip_wal) in requests.into_iter().zip([false, true, false]) {
+            assert_eq!(region_id, id);
+            let RegionRequest::Put(request) = request else {
+                panic!("expected a put request");
+            };
+            assert_eq!(rows, request.rows);
+            assert_eq!(skip_wal, request.skip_wal);
+            assert_eq!(Some(7), request.partition_expr_version);
+            assert!(request.hint.is_none());
+        }
+    }
 
     #[test]
     fn test_make_region_compact_with_time_range() {

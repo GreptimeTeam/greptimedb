@@ -88,6 +88,31 @@ pub const MAX_ROW_GROUP_ROW_COUNT: &str = "max_row_group_row_count";
 pub const MAX_ROW_GROUP_ROW_COUNT_LIMIT: usize = 10 * 1024 * 1024;
 /// Option key for preserving per-row sequence numbers through flush and compaction.
 pub const PRESERVE_ROW_SEQUENCE: &str = "preserve_row_sequence";
+/// Option key for experimental Parquet float field encoding.
+pub const EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING: &str = "experimental_sst_float_field_encoding";
+
+/// Encoding policy for direct floating-point field columns in Parquet SSTs.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum FloatFieldEncoding {
+    /// The existing Parquet writer behavior.
+    #[default]
+    Default,
+    /// Parquet byte-stream-split encoding.
+    ByteStreamSplit,
+}
 // Note: Adding new options here should also check if this option should be removed in [metric_engine::engine::create::region_options_for_metadata_region].
 
 /// Conflicting values supplied through the legacy and canonical TWCS trigger options.
@@ -155,6 +180,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         SST_FORMAT_KEY,
         MAX_ROW_GROUP_ROW_COUNT,
         PRESERVE_ROW_SEQUENCE,
+        EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
     ]
     .contains(&key)
 }
@@ -217,7 +243,27 @@ mod tests {
         assert!(is_mito_engine_option_key("append_mode"));
         assert!(is_mito_engine_option_key("max_row_group_row_count"));
         assert!(is_mito_engine_option_key("preserve_row_sequence"));
+        assert!(is_mito_engine_option_key(
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING
+        ));
         assert!(!is_mito_engine_option_key("foo"));
+    }
+
+    #[test]
+    fn test_float_field_encoding_values() {
+        assert_eq!(
+            "default".parse::<FloatFieldEncoding>(),
+            Ok(FloatFieldEncoding::Default)
+        );
+        assert_eq!(
+            "byte_stream_split".parse::<FloatFieldEncoding>(),
+            Ok(FloatFieldEncoding::ByteStreamSplit)
+        );
+        assert_eq!(
+            serde_json::from_str::<FloatFieldEncoding>("\"byte_stream_split\"").unwrap(),
+            FloatFieldEncoding::ByteStreamSplit
+        );
+        assert!(serde_json::from_str::<FloatFieldEncoding>("\"unknown\"").is_err());
     }
 
     #[test]

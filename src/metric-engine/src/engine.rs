@@ -636,6 +636,7 @@ mod test {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: row_schema_with_tags(&["job"]),
                         rows: build_rows(1, 5),

@@ -28,6 +28,216 @@ const CATALOG: &str = "greptime";
 const DATABASE: &str = "reconciliation_event_database";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_catalog_and_database_reconciliation_events() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = GreptimeDbClusterBuilder::new("catalog_database_reconciliation_events")
+        .await
+        .with_datanodes(1)
+        .build(true)
+        .await;
+    let frontend = cluster.fe_instance().clone();
+    run_sql(frontend.as_ref(), &format!("CREATE DATABASE {DATABASE}")).await;
+    run_sql(
+        frontend.as_ref(),
+        &format!("CREATE TABLE {DATABASE}.metrics (ts TIMESTAMP TIME INDEX)"),
+    )
+    .await;
+
+    let catalog_procedure_id = cluster
+        .metasrv
+        .reconciliation_manager()
+        .reconcile_catalog(CATALOG.to_string(), ResolveStrategy::UseLatest, 1)
+        .await
+        .unwrap();
+    let mut procedure_watcher = cluster
+        .metasrv
+        .procedure_manager()
+        .procedure_watcher(catalog_procedure_id)
+        .unwrap();
+    watcher::wait(&mut procedure_watcher).await.unwrap();
+    let catalog_procedure_id = catalog_procedure_id.to_string();
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) AS event_count, \
+                 json_get_int(payload, 'version') AS version, \
+                 json_get_string(payload, 'resolve_strategy') AS resolve_strategy, \
+                 json_get_bool(payload, 'fail_fast') AS fail_fast, \
+                 json_get_int(payload, 'parallelism') AS parallelism \
+             FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_catalog' AND procedure_id = '{catalog_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Submitted' \
+             AND catalog_name = '{CATALOG}' AND schema_name IS NULL AND table_name IS NULL \
+             AND table_id IS NULL AND physical_table_id IS NULL \
+             GROUP BY json_get_int(payload, 'version'), \
+                 json_get_string(payload, 'resolve_strategy'), \
+                 json_get_bool(payload, 'fail_fast'), \
+                 json_get_int(payload, 'parallelism')"
+        ),
+        "\
++-------------+---------+------------------+-----------+-------------+
+| event_count | version | resolve_strategy | fail_fast | parallelism |
++-------------+---------+------------------+-----------+-------------+
+| 1           | 1       | use_latest       | false     | 1           |
++-------------+---------+------------------+-----------+-------------+",
+    )
+    .await;
+
+    let catalog_result_payload = find_eventually_string(
+        &frontend,
+        &format!(
+            "SELECT json_to_string(payload) AS payload FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_catalog' AND procedure_id = '{catalog_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Succeeded' \
+             AND catalog_name = '{CATALOG}' AND schema_name IS NULL AND table_name IS NULL \
+             AND table_id IS NULL AND physical_table_id IS NULL LIMIT 1"
+        ),
+        "payload",
+    )
+    .await;
+    let catalog_result: serde_json::Value = serde_json::from_str(&catalog_result_payload).unwrap();
+    assert_eq!(catalog_result["version"], serde_json::json!(1));
+    assert_eq!(catalog_result["complete"], serde_json::json!(true));
+    let processed_database_count = catalog_result["processed_database_count"].as_u64().unwrap();
+    let succeeded_database_count = catalog_result["succeeded_database_count"].as_u64().unwrap();
+    let failed_database_count = catalog_result["failed_database_count"].as_u64().unwrap();
+    assert_eq!(
+        processed_database_count,
+        succeeded_database_count + failed_database_count
+    );
+    assert!(processed_database_count > 0);
+    assert_eq!(failed_database_count, 0);
+
+    let database_procedure_id = find_eventually_string(
+        &frontend,
+        &format!(
+            "SELECT procedure_id FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_database' AND catalog_name = '{CATALOG}' \
+             AND schema_name = '{DATABASE}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Submitted' LIMIT 1"
+        ),
+        "procedure_id",
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT parent.procedure_id AS parent_procedure_id, \
+                 child.procedure_id AS child_procedure_id, \
+                 parent.type AS parent_event_type, \
+                 child.type AS child_event_type, \
+                 parent.catalog_name AS parent_catalog_name, \
+                 parent.schema_name AS parent_schema_name, \
+                 child.catalog_name AS child_catalog_name, \
+                 child.schema_name AS child_schema_name \
+             FROM {EVENTS_TABLE} AS parent \
+             JOIN {EVENTS_TABLE} AS child \
+               ON json_get_string(parent.procedure_trigger, 'procedure_id') = child.procedure_id \
+             WHERE parent.procedure_id = '{catalog_procedure_id}' \
+             AND json_get_string(parent.procedure_trigger, 'type') = 'ChildSubmitted' \
+             AND child.procedure_id = '{database_procedure_id}' \
+             AND json_get_string(child.procedure_trigger, 'type') = 'Submitted'"
+        ),
+        &format!(
+            "\
++--------------------------------------+--------------------------------------+-------------------+--------------------+---------------------+--------------------+--------------------+-------------------------------+
+| parent_procedure_id                  | child_procedure_id                   | parent_event_type | child_event_type   | parent_catalog_name | parent_schema_name | child_catalog_name | child_schema_name             |
++--------------------------------------+--------------------------------------+-------------------+--------------------+---------------------+--------------------+--------------------+-------------------------------+
+| {catalog_procedure_id} | {database_procedure_id} | reconcile_catalog | reconcile_database | greptime            |                    | greptime           | reconciliation_event_database |
++--------------------------------------+--------------------------------------+-------------------+--------------------+---------------------+--------------------+--------------------+-------------------------------+"
+        ),
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) AS event_count, \
+                 json_get_string(procedure_trigger, 'outcome') AS outcome \
+             FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_catalog' AND procedure_id = '{catalog_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'ChildSubmitted' \
+             AND json_get_string(procedure_trigger, 'procedure_id') = '{database_procedure_id}' \
+             AND catalog_name = '{CATALOG}' AND schema_name IS NULL \
+             AND json_is_null(payload) \
+             GROUP BY json_get_string(procedure_trigger, 'outcome')"
+        ),
+        "\
++-------------+----------+
+| event_count | outcome  |
++-------------+----------+
+| 1           | Accepted |
++-------------+----------+",
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) AS event_count, \
+                 json_get_int(payload, 'version') AS version, \
+                 json_get_string(payload, 'resolve_strategy') AS resolve_strategy, \
+                 json_get_bool(payload, 'fail_fast') AS fail_fast, \
+                 json_get_int(payload, 'parallelism') AS parallelism, \
+                 json_get_bool(payload, 'is_subprocedure') AS is_subprocedure \
+             FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_database' AND procedure_id = '{database_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Submitted' \
+             AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
+             AND table_name IS NULL AND table_id IS NULL AND physical_table_id IS NULL \
+             GROUP BY json_get_int(payload, 'version'), \
+                 json_get_string(payload, 'resolve_strategy'), \
+                 json_get_bool(payload, 'fail_fast'), \
+                 json_get_int(payload, 'parallelism'), \
+                 json_get_bool(payload, 'is_subprocedure')"
+        ),
+        "\
++-------------+---------+------------------+-----------+-------------+-----------------+
+| event_count | version | resolve_strategy | fail_fast | parallelism | is_subprocedure |
++-------------+---------+------------------+-----------+-------------+-----------------+
+| 1           | 1       | use_latest       | false     | 1           | true            |
++-------------+---------+------------------+-----------+-------------+-----------------+",
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) AS event_count, \
+                 json_get_int(payload, 'version') AS version, \
+                 json_get_bool(payload, 'complete') AS complete, \
+                 json_get_int(payload, 'processed_table_count') AS processed_count, \
+                 json_get_int(payload, 'succeeded_table_count') AS succeeded_count, \
+                 json_get_int(payload, 'failed_table_count') AS failed_count, \
+                 json_get_int(payload, 'succeeded_subprocedure_count') AS succeeded_child_count, \
+                 json_get_int(payload, 'failed_subprocedure_count') AS failed_child_count \
+             FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_database' AND procedure_id = '{database_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Succeeded' \
+             AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
+             AND table_name IS NULL AND table_id IS NULL AND physical_table_id IS NULL \
+             GROUP BY json_get_int(payload, 'version'), \
+                 json_get_bool(payload, 'complete'), \
+                 json_get_int(payload, 'processed_table_count'), \
+                 json_get_int(payload, 'succeeded_table_count'), \
+                 json_get_int(payload, 'failed_table_count'), \
+                 json_get_int(payload, 'succeeded_subprocedure_count'), \
+                 json_get_int(payload, 'failed_subprocedure_count')"
+        ),
+        "\
++-------------+---------+----------+-----------------+-----------------+--------------+-----------------------+--------------------+
+| event_count | version | complete | processed_count | succeeded_count | failed_count | succeeded_child_count | failed_child_count |
++-------------+---------+----------+-----------------+-----------------+--------------+-----------------------+--------------------+
+| 1           | 1       | true     | 1               | 1               | 0            | 1                     | 0                  |
++-------------+---------+----------+-----------------+-----------------+--------------+-----------------------+--------------------+",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_table_reconciliation_events() {
     common_telemetry::init_default_ut_logging();
 

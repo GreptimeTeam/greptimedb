@@ -49,7 +49,7 @@ pub fn parse_json2_type_hint_path(path: &str) -> Result<Vec<String>> {
     Ok(path)
 }
 
-pub(super) fn parse_json2_type_and_options(
+pub(crate) fn parse_json2_type_and_options(
     parser: &mut Parser<'_>,
 ) -> Result<Option<(DataType, Option<Json2Options>)>> {
     let token = parser.peek_token();

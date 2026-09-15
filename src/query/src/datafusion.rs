@@ -392,6 +392,7 @@ impl DatafusionQueryEngine {
             schema_name,
             table_name,
             columns_values: column_vectors,
+            skip_wal: query_ctx.skip_wal(),
         };
 
         self.state

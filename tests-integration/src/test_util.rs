@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
@@ -26,7 +29,10 @@ use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
 use client::{Client, Database};
 use common_base::Plugins;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::Configurable;
+#[cfg(test)]
+use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
@@ -38,8 +44,13 @@ use common_test_util::ports;
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
+#[cfg(test)]
+use datanode::datanode::Datanode;
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
+#[cfg(test)]
+use meta_srv::metasrv::Metasrv;
+use mito2::engine::MitoEngine;
 use mito2::gc::GcConfig;
 use object_store::config::{
     AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
@@ -62,8 +73,177 @@ use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
 use session::context::QueryContext;
+use store_api::metric_engine_consts::METRIC_METADATA_REGION_GROUP;
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::{RegionFlushRequest, RegionRequest};
+use store_api::storage::RegionId;
 
+use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+
+/// Maps `(node_id, region_id)` to `(flushed_sequence, flushed_entry_id)`.
+pub type WalSnapshot = BTreeMap<(u64, RegionId), (u64, u64)>;
+
+/// Flush user data regions before observing their persisted WAL watermarks.
+/// Metadata regions write WAL independently and are excluded from this check.
+async fn flush_and_snapshot_region_wal(engine: &MitoEngine) -> WalSnapshot {
+    let mut snapshot = BTreeMap::new();
+    for region in engine.regions() {
+        let id = region.region_id();
+        if id.table_id() < MIN_USER_TABLE_ID || id.region_group() == METRIC_METADATA_REGION_GROUP {
+            continue;
+        }
+        engine
+            .handle_request(id, RegionRequest::Flush(RegionFlushRequest::default()))
+            .await
+            .unwrap();
+        let statistic = engine.region_statistic(id).unwrap();
+        snapshot.insert(
+            (0, id),
+            (
+                region.flushed_sequence(),
+                statistic.manifest.data_flushed_entry_id(),
+            ),
+        );
+    }
+    snapshot
+}
+
+/// Require a real write, then check WAL policy independently of row deduplication.
+pub fn assert_wal_delta(before: &WalSnapshot, after: &WalSnapshot, skip_wal: bool) {
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>(),
+        "warm up table creation before taking the snapshot"
+    );
+    let mut written = 0;
+    for (id, &(flushed_sequence, flushed_entry_id)) in after {
+        let (previous_flushed_sequence, previous_flushed_entry_id) = before[id];
+        if flushed_sequence > previous_flushed_sequence {
+            written += 1;
+            if skip_wal {
+                assert_eq!(
+                    flushed_entry_id, previous_flushed_entry_id,
+                    "region {id:?} wrote WAL despite the request policy"
+                );
+            } else {
+                assert!(
+                    flushed_entry_id > previous_flushed_entry_id,
+                    "region {id:?} did not write WAL"
+                );
+            }
+        }
+    }
+    assert!(
+        written > 0,
+        "request must reach a data region, not merely return success"
+    );
+}
+
+/// A test instance backed by embedded storage or a distributed cluster.
+pub enum MockInstanceImpl {
+    Standalone(GreptimeDbStandalone),
+    Distributed(GreptimeDbCluster),
+}
+
+impl MockInstanceImpl {
+    /// Returns the metasrv of a distributed instance.
+    ///
+    /// # Panics
+    /// Panics if this is a standalone instance.
+    #[cfg(test)]
+    pub(crate) fn metasrv(&self) -> &Arc<Metasrv> {
+        match self {
+            Self::Standalone(_) => unreachable!(),
+            Self::Distributed(instance) => &instance.metasrv,
+        }
+    }
+
+    /// Returns the datanodes of a distributed instance.
+    ///
+    /// # Panics
+    /// Panics if this is a standalone instance.
+    #[cfg(test)]
+    pub(crate) fn datanodes(&self) -> &HashMap<DatanodeId, Datanode> {
+        match self {
+            Self::Standalone(_) => unreachable!(),
+            Self::Distributed(instance) => &instance.datanode_instances,
+        }
+    }
+
+    /// Creates a standalone instance or a three-datanode cluster using local storage.
+    pub async fn new(name: &str, distributed: bool) -> Self {
+        let name = format!(
+            "{name}_{}",
+            if distributed {
+                "distributed"
+            } else {
+                "standalone"
+            }
+        );
+        if distributed {
+            // The repository cluster harness uses real tonic/protobuf services
+            // over duplex transports between FE and datanodes, not direct calls.
+            Self::Distributed(
+                GreptimeDbClusterBuilder::new(&name)
+                    .await
+                    .with_datanodes(3)
+                    .build(false)
+                    .await,
+            )
+        } else {
+            Self::Standalone(GreptimeDbStandaloneBuilder::new(&name).build().await)
+        }
+    }
+
+    /// Returns the frontend instance.
+    pub fn frontend(&self) -> Arc<Instance> {
+        match self {
+            Self::Standalone(instance) => instance.fe_instance().clone(),
+            Self::Distributed(cluster) => cluster.fe_instance().clone(),
+        }
+    }
+
+    /// Flushes user data regions and returns their write and WAL watermarks.
+    pub async fn flush_and_snapshot_wal(&self) -> WalSnapshot {
+        match self {
+            Self::Standalone(instance) => {
+                flush_and_snapshot_region_wal(&instance.mito_engine).await
+            }
+            Self::Distributed(cluster) => {
+                let mut result = BTreeMap::new();
+                for (node_id, datanode) in &cluster.datanode_instances {
+                    let engine = datanode.region_server().mito_engine().unwrap();
+                    result.extend(
+                        flush_and_snapshot_region_wal(&engine)
+                            .await
+                            .into_iter()
+                            .map(|((_, region_id), watermarks)| {
+                                ((*node_id, region_id), watermarks)
+                            }),
+                    );
+                }
+                result
+            }
+        }
+    }
+
+    /// Shuts down cluster services and removes the test storage.
+    pub async fn shutdown(&mut self) {
+        match self {
+            Self::Standalone(instance) => instance.guard.remove_all().await,
+            Self::Distributed(cluster) => {
+                cluster.metasrv.shutdown().await.unwrap();
+                for datanode in cluster.datanode_instances.values_mut() {
+                    datanode.shutdown().await.unwrap();
+                }
+                for guard in &mut cluster.guards {
+                    guard.remove_all().await;
+                }
+            }
+        }
+    }
+}
 
 pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";
 
@@ -663,11 +843,27 @@ async fn setup_test_prom_app_with_frontend_inner(
     let sql = "INSERT INTO mito(host, val, ts) VALUES (1, 1.1, 0)";
     run_sql(sql, &instance).await;
 
+    let http_server = build_test_prom_server(
+        instance.fe_instance().clone(),
+        enable_batcher,
+        experimental_enable_prometheus_native_histogram,
+    )
+    .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+    .build();
+    let app = http_server.build(http_server.make_app()).unwrap();
+    (app, instance.guard)
+}
+
+/// Builds Prometheus HTTP routes for either a standalone or distributed frontend.
+pub fn build_test_prom_server(
+    frontend_ref: Arc<Instance>,
+    enable_batcher: bool,
+    experimental_enable_prometheus_native_histogram: bool,
+) -> HttpServerBuilder {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
     };
-    let frontend_ref = instance.fe_instance().clone();
     // Mirror the production wiring at `frontend::server`: build the batcher from the
     // instance's managers. A short flush interval keeps the test responsive.
     let pending_rows_batcher = if enable_batcher {
@@ -688,9 +884,10 @@ async fn setup_test_prom_app_with_frontend_inner(
     } else {
         None
     };
-    let http_server = HttpServerBuilder::new(http_opts)
+    assert_eq!(pending_rows_batcher.is_some(), enable_batcher);
+    HttpServerBuilder::new(http_opts)
         .with_sql_handler(frontend_ref.clone())
-        .with_logs_handler(instance.fe_instance().clone())
+        .with_logs_handler(frontend_ref.clone())
         .with_prom_handler(
             frontend_ref.clone(),
             Some(frontend_ref.clone()),
@@ -700,10 +897,6 @@ async fn setup_test_prom_app_with_frontend_inner(
             pending_rows_batcher,
         )
         .with_prometheus_handler(frontend_ref)
-        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
-        .build();
-    let app = http_server.build(http_server.make_app()).unwrap();
-    (app, instance.guard)
 }
 
 pub async fn setup_grpc_server(

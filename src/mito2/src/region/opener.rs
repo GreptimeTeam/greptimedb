@@ -953,6 +953,7 @@ where
                 OptionOutputTx::none(),
                 // We should respect the sequence in WAL during replay.
                 Some(mutation.sequence),
+                false,
             );
         }
 
@@ -974,7 +975,8 @@ where
                 region_write_ctx.push_bulk(
                     OptionOutputTx::none(),
                     part,
-                    Some(bulk_sequence_from_wal)
+                    Some(bulk_sequence_from_wal),
+                    false
                 ),
                 RegionCorruptedSnafu {
                     region_id,

@@ -154,7 +154,7 @@ impl<'a> StatementToRegion<'a> {
         }
 
         let requests = Partitioner::new(self.partition_manager)
-            .partition_insert_requests(&table_info, Rows { schema, rows })
+            .partition_insert_requests(&table_info, Rows { schema, rows }, query_ctx.skip_wal())
             .await?;
         let requests = RegionInsertRequests { requests };
         if table_info.is_ttl_instant_table() {

@@ -153,6 +153,15 @@ impl QueryContextBuilder {
         self
     }
 
+    pub fn skip_wal(mut self, skip_wal: bool) -> Self {
+        self.mutable_session_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .skip_wal = skip_wal;
+        self
+    }
+
     pub fn read_preference(mut self, read_preference: ReadPreference) -> Self {
         self.mutable_session_data
             .get_or_insert_default()
@@ -346,6 +355,15 @@ impl QueryContext {
 
     pub fn set_timezone(&self, timezone: Timezone) {
         self.mutable_session_data.write().unwrap().timezone = timezone;
+    }
+
+    /// Returns whether ordinary inserts in this request should skip WAL.
+    pub fn skip_wal(&self) -> bool {
+        self.mutable_session_data.read().unwrap().skip_wal
+    }
+
+    pub fn set_skip_wal(&self, skip_wal: bool) {
+        self.mutable_session_data.write().unwrap().skip_wal = skip_wal;
     }
 
     pub fn read_preference(&self) -> ReadPreference {
@@ -737,6 +755,37 @@ mod test {
 
         assert_eq!(context.current_schema(), "public");
         assert_eq!(fork.current_schema(), "private");
+    }
+
+    #[test]
+    fn test_skip_wal_default_builder_and_fork() {
+        let default_context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(!default_context.skip_wal());
+        assert!(!QueryContextBuilder::default().build().skip_wal());
+        let context = QueryContextBuilder::default().skip_wal(true).build();
+        assert!(context.skip_wal());
+        let fork = context.fork();
+        assert!(fork.skip_wal());
+        fork.set_skip_wal(false);
+        assert!(context.skip_wal());
+        assert!(!fork.skip_wal());
+        context.set_skip_wal(false);
+        fork.set_skip_wal(true);
+        assert!(!context.skip_wal());
+        assert!(fork.skip_wal());
+    }
+
+    #[test]
+    fn test_skip_wal_is_not_serialized_in_query_context() {
+        let context = QueryContextBuilder::default().skip_wal(true).build();
+        let api_context: api::v1::QueryContext = context.into();
+        assert!(
+            !api_context
+                .extensions
+                .contains_key(crate::hints::INSERT_SKIP_WAL_HINT)
+        );
+        let restored: QueryContext = api_context.into();
+        assert!(!restored.skip_wal());
     }
 
     #[test]

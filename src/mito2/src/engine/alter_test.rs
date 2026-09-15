@@ -3003,6 +3003,7 @@ fn build_schema_v0_bulk_request(region_id: RegionId) -> RegionBulkInsertsRequest
     let raw_data = encode_arrow_ipc(&payload);
 
     RegionBulkInsertsRequest {
+        skip_wal: false,
         region_id,
         payload,
         raw_data,
@@ -3411,6 +3412,7 @@ async fn test_alter_time_index_widen_sparse_compaction() {
     };
     let put_sparse = |rows| {
         RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows,
             hint: Some(WriteHint {
                 primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
