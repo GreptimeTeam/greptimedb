@@ -32,8 +32,9 @@ use crate::test_util::{
 
 #[rstest::rstest]
 #[tokio::test]
-async fn test_partial_compaction_preserves_last_row_put_versions(
+async fn test_partial_compaction_preserves_put_versions(
     #[values(false, true)] flat_format: bool,
+    #[values("last_row", "last_non_null")] merge_mode: &str,
 ) {
     let mut env = TestEnv::new().await;
     let config = MitoConfig {
@@ -57,7 +58,7 @@ async fn test_partial_compaction_preserves_last_row_put_versions(
         .field_num(2)
         .insert_option("compaction.type", "twcs")
         .insert_option("compaction.twcs.time_window", "1h")
-        .insert_option("merge_mode", "last_row")
+        .insert_option("merge_mode", merge_mode)
         .build();
     let table_dir = request.table_dir.clone();
     let region_opts = request.options.clone();
@@ -67,8 +68,9 @@ async fn test_partial_compaction_preserves_last_row_put_versions(
         .await
         .unwrap();
 
-    // A(x=1), B(x=2) share a key and timestamp; C is unrelated.
-    // Promoting A when merging A+C must not hide the unselected B.
+    // Issue #9146: A(x=1), B(x=2) share a key and timestamp. For LastNonNull,
+    // C(y=3) also shares that key: merging A+C must not promote A's x above B.
+    // For LastRow, C is unrelated and B must remain outside the partial pick.
     let a = build_rows_with_fields("a", &[10], &[(Some(1), None)]);
     put_rows(
         &engine,
@@ -110,7 +112,12 @@ async fn test_partial_compaction_preserves_last_row_put_versions(
         .find(|file| file.meta_ref().num_rows == 3001)
         .unwrap()
         .file_id();
-    let c = build_rows_with_fields("z", &[10], &[(None, Some(3))]);
+    let last_non_null = merge_mode == "last_non_null";
+    let c = build_rows_with_fields(
+        if last_non_null { "a" } else { "z" },
+        &[10],
+        &[(None, Some(3))],
+    );
     put_rows(
         &engine,
         region_id,
@@ -146,12 +153,21 @@ async fn test_partial_compaction_preserves_last_row_put_versions(
             .unwrap()
             .pretty_print()
             .unwrap();
-    let expected = "\
+    let expected = if last_non_null {
+        "\
++-------+---------+---------+---------------------+
+| tag_0 | field_0 | field_1 | ts                  |
++-------+---------+---------+---------------------+
+| a     | 2.0     | 3.0     | 1970-01-01T00:00:10 |
++-------+---------+---------+---------------------+"
+    } else {
+        "\
 +-------+---------+---------+---------------------+
 | tag_0 | field_0 | field_1 | ts                  |
 +-------+---------+---------+---------------------+
 | a     | 2.0     |         | 1970-01-01T00:00:10 |
-+-------+---------+---------+---------------------+";
++-------+---------+---------+---------------------+"
+    };
     assert_eq!(expected, before);
     engine
         .handle_request(
@@ -165,7 +181,10 @@ async fn test_partial_compaction_preserves_last_row_put_versions(
         .unwrap()
         .pretty_print()
         .unwrap();
-    assert_eq!(expected, after, "flat_format={flat_format}");
+    assert_eq!(
+        expected, after,
+        "flat_format={flat_format}, mode={merge_mode}"
+    );
     let version = engine.get_region(region_id).unwrap().version();
     let files: Vec<_> = version
         .ssts
@@ -173,8 +192,11 @@ async fn test_partial_compaction_preserves_last_row_put_versions(
         .iter()
         .flat_map(|level| level.files())
         .collect();
-    assert_eq!(2, files.len());
-    assert!(files.iter().any(|file| file.file_id() == b_id));
+    assert_eq!(if last_non_null { 1 } else { 2 }, files.len());
+    assert_eq!(
+        !last_non_null,
+        files.iter().any(|file| file.file_id() == b_id)
+    );
     assert!(
         files
             .iter()

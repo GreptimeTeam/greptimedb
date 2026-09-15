@@ -13,13 +13,23 @@
 // limitations under the License.
 
 use std::num::NonZeroU64;
+use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
+use common_base::Plugins;
 use common_time::Timestamp;
 use store_api::storage::FileId;
 
+use crate::cache::CacheManager;
+use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
+use crate::config::MitoConfig;
+use crate::region::options::RegionOptions;
 use crate::sst::file::{FileHandle, FileMeta, Level};
+use crate::sst::version::SstVersion;
+use crate::test_util::memtable_util::metadata_for_test;
 use crate::test_util::new_noop_file_purger;
+use crate::test_util::scheduler_util::SchedulerEnv;
 
 /// Test util to create file handles.
 pub fn new_file_handle(
@@ -127,4 +137,38 @@ pub fn new_file_handle_with_size_sequence_and_primary_key_range(
         file_purger,
         primary_key_range,
     )
+}
+
+pub(crate) async fn compaction_region_with_ssts(
+    files: impl IntoIterator<Item = FileMeta>,
+    ttl: Duration,
+) -> CompactionRegion {
+    let env = SchedulerEnv::new().await;
+    let metadata = metadata_for_test();
+    let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+    let mut ssts = SstVersion::new();
+    ssts.add_files(
+        Arc::new(crate::sst::file_purger::NoopFilePurger),
+        files.into_iter(),
+    );
+
+    CompactionRegion {
+        region_id: metadata.region_id,
+        region_options: RegionOptions::default(),
+        engine_config: Arc::new(MitoConfig::default()),
+        region_metadata: metadata.clone(),
+        cache_manager: Arc::new(CacheManager::default()),
+        access_layer: env.access_layer,
+        manifest_ctx,
+        current_version: CompactionVersion {
+            metadata,
+            options: RegionOptions::default(),
+            ssts: Arc::new(ssts),
+            compaction_time_window: None,
+        },
+        file_purger: None,
+        ttl: Some(ttl.into()),
+        max_parallelism: 1,
+        plugins: Plugins::new(),
+    }
 }

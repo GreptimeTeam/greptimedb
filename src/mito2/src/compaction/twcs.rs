@@ -1042,7 +1042,8 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::compaction::compactor::CompactionVersion;
     use crate::compaction::test_util::{
-        new_file_handle, new_file_handle_with_sequence, new_file_handle_with_size_and_sequence,
+        compaction_region_with_ssts, new_file_handle, new_file_handle_with_sequence,
+        new_file_handle_with_size_and_sequence,
         new_file_handle_with_size_sequence_and_primary_key_range,
     };
     use crate::config::MitoConfig;
@@ -1061,40 +1062,6 @@ mod tests {
     fn test_invalid_max_input_files_env_falls_back_to_default() {
         for env_value in [None, Some(""), Some("invalid"), Some("0"), Some("1")] {
             assert_eq!(16, parse_max_input_files(env_value));
-        }
-    }
-
-    async fn compaction_region_with_ssts(
-        files: impl IntoIterator<Item = FileMeta>,
-        ttl: Duration,
-    ) -> CompactionRegion {
-        let env = SchedulerEnv::new().await;
-        let metadata = metadata_for_test();
-        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        let mut ssts = SstVersion::new();
-        ssts.add_files(
-            Arc::new(crate::sst::file_purger::NoopFilePurger),
-            files.into_iter(),
-        );
-
-        CompactionRegion {
-            region_id: metadata.region_id,
-            region_options: RegionOptions::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            region_metadata: metadata.clone(),
-            cache_manager: Arc::new(CacheManager::default()),
-            access_layer: env.access_layer,
-            manifest_ctx,
-            current_version: CompactionVersion {
-                metadata,
-                options: RegionOptions::default(),
-                ssts: Arc::new(ssts),
-                compaction_time_window: None,
-            },
-            file_purger: None,
-            ttl: Some(ttl.into()),
-            max_parallelism: 1,
-            plugins: Plugins::new(),
         }
     }
 
