@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::alter_table_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::value::ValueData;
 use api::v1::{
-    AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef,
+    AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef, ColumnSchema,
     CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
-    PromqlRequest, RequestHeader, Row, RowInsertRequest, RowInsertRequests, SemanticType, Value,
-    column,
+    PromqlRequest, RequestHeader, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+    Value, column,
 };
 use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -43,9 +45,12 @@ use servers::http::prometheus::{
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::{TlsMode, TlsOption};
+use tests_integration::cluster::GreptimeDbClusterBuilder;
+use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::{
-    StorageType, setup_grpc_server, setup_grpc_server_with,
-    setup_grpc_server_with_auto_create_table_disabled, setup_grpc_server_with_user_provider,
+    StorageType, setup_grpc_server, setup_grpc_server_for_frontend_instance,
+    setup_grpc_server_with, setup_grpc_server_with_auto_create_table_disabled,
+    setup_grpc_server_with_user_provider,
 };
 use tonic::Request;
 use tonic::metadata::MetadataValue;
@@ -536,6 +541,142 @@ fn expect_data() -> (Column, Column, Column, Column) {
         expected_mem_col,
         expected_ts_col,
     )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_grpc_json2_row_inserts_standalone() {
+    let standalone = GreptimeDbStandaloneBuilder::new("grpc_json2_row_inserts_standalone")
+        .build()
+        .await;
+    test_grpc_json2_row_inserts(standalone.fe_instance().clone()).await;
+    drop(standalone);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_grpc_json2_row_inserts_distributed() {
+    let cluster = GreptimeDbClusterBuilder::new("grpc_json2_row_inserts_distributed")
+        .await
+        .with_datanodes(1)
+        .build(false)
+        .await;
+    test_grpc_json2_row_inserts(cluster.fe_instance().clone()).await;
+    drop(cluster);
+}
+
+async fn test_grpc_json2_row_inserts(instance: Arc<frontend::instance::Instance>) {
+    let server = setup_grpc_server_for_frontend_instance(instance, None).await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let database = Database::new_with_dbname("greptime-public", Client::with_urls(vec![addr]));
+    database
+        .sql(
+            "CREATE TABLE grpc_json2 (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, j JSON2) \
+             WITH (append_mode='true', 'memtable.type'='bulk')",
+        )
+        .await
+        .unwrap();
+
+    let (datatype, extension) =
+        api::helper::ColumnDataTypeWrapper::try_from(datatypes::prelude::ConcreteDataType::json2(
+            datatypes::types::json_type::JsonNativeType::Null,
+        ))
+        .unwrap()
+        .into_parts();
+
+    // Send the all-NULL JSON2 batch separately to check its type marker.
+    for (index, (host, payload)) in [
+        (
+            "host-a",
+            Some(serde_json::json!({
+                "active": true,
+                "nested": {"items": [1, "two", null, {"ok": false}], "ratio": 1.5},
+                "tags": ["api", "prod"]
+            })),
+        ),
+        (
+            "host-b",
+            Some(serde_json::json!({
+                "active": false,
+                "nested": {"items": [-2, "three", null, {"ok": true}], "ratio": -0.25},
+                "tags": ["worker"]
+            })),
+        ),
+        ("host-a", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = database
+            .row_inserts(RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: "grpc_json2".into(),
+                    rows: Some(Rows {
+                        schema: vec![
+                            ColumnSchema {
+                                column_name: "ts".into(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "host".into(),
+                                datatype: ColumnDataType::String as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "j".into(),
+                                datatype: datatype as i32,
+                                datatype_extension: extension.clone(),
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            },
+                        ],
+                        rows: vec![Row {
+                            values: vec![
+                                Value {
+                                    value_data: Some(ValueData::TimestampMillisecondValue(
+                                        index as i64,
+                                    )),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::StringValue(host.into())),
+                                },
+                                Value {
+                                    value_data: payload.map(|x| {
+                                        ValueData::JsonValue(api::helper::encode_json_value(
+                                            x.into(),
+                                        ))
+                                    }),
+                                },
+                            ],
+                        }],
+                    }),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(output, 1);
+    }
+
+    let output = database
+        .sql("SELECT host, j FROM grpc_json2 ORDER BY ts")
+        .await
+        .unwrap();
+    let batches = match output.data {
+        OutputData::RecordBatches(batches) => batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    let pretty = batches.pretty_print().unwrap();
+    let expected = r#"+--------+---------------------------------------------------------------------------------------------------+
+| host   | j                                                                                                 |
++--------+---------------------------------------------------------------------------------------------------+
+| host-a | {"active":true,"nested":{"items":[1,"two",null,{"ok":false}],"ratio":1.5},"tags":["api","prod"]}  |
+| host-b | {"active":false,"nested":{"items":[-2,"three",null,{"ok":true}],"ratio":-0.25},"tags":["worker"]} |
+| host-a |                                                                                                   |
++--------+---------------------------------------------------------------------------------------------------+"#;
+    assert_eq!(pretty, expected);
+    server.shutdown().await.unwrap();
 }
 
 pub async fn test_insert_and_select(store_type: StorageType) {
