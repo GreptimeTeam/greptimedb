@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::ops::Range;
 
-use datatypes::extension::json::JSON2_REMAINDER_FIELD_NAME;
+use datatypes::arrow::datatypes::Schema as ArrowSchema;
+use datatypes::extension::json::{JSON2_REMAINDER_FIELD_NAME, is_json2_extension_type};
 use parquet::arrow::ProjectionMask;
 use parquet::basic::{ConvertedType, Type as PhysicalType};
 use parquet::schema::types::{ColumnDescriptor, SchemaDescriptor};
+
+use crate::error::Result as MitoResult;
 
 /// A nested field access path inside one parquet root column.
 pub type ParquetNestedPath = Vec<String>;
@@ -147,6 +151,32 @@ impl ParquetReadColumn {
     }
 }
 
+/// Nested leaf selection semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NestedSelectionPolicy {
+    /// Also read the nearest JSONB Variant ancestor, or the remainder when it may
+    /// contain an unresolved path or children of a materialized object.
+    ///
+    /// For example, if `j.cold` has no matching field or Variant ancestor, read the
+    /// remainder because it may contain `j.cold`. When requesting a materialized
+    /// object such as `j.commit`, also read the remainder because it may contain
+    /// unmaterialized children of `j.commit`.
+    Json2V2,
+}
+
+impl NestedSelectionPolicy {
+    /// Selects all leaves needed for one JSON2 root, including fallback data.
+    fn select_leaves(
+        self,
+        schema: &SchemaDescriptor,
+        leaf_range: Range<usize>,
+        col: &ParquetReadColumn,
+        selected: &mut HashSet<usize>,
+    ) {
+        select_json2_v2_leaves(schema, leaf_range, col, selected);
+    }
+}
+
 /// Projection plan built for a parquet file.
 #[derive(Clone)]
 pub struct ProjectionMaskPlan {
@@ -173,6 +203,9 @@ pub struct ProjectionMaskPlan {
 /// file. It is used to resolve requested nested paths to actual leaf
 /// column indices.
 ///
+/// `source_schema` is the Arrow schema of the current parquet file. It is used
+/// only for nested projections to identify JSON2 root fields.
+///
 /// See [`ProjectionMaskPlan`] for the returned value.
 ///
 /// For example, if the query requests `j.a` and `k`, but the current
@@ -183,18 +216,20 @@ pub struct ProjectionMaskPlan {
 pub(crate) fn build_projection_plan(
     parquet_read_cols: &ParquetReadColumns,
     parquet_schema_desc: &SchemaDescriptor,
-) -> ProjectionMaskPlan {
+    source_schema: &ArrowSchema,
+) -> MitoResult<ProjectionMaskPlan> {
     if !parquet_read_cols.has_nested() {
         let mask =
             ProjectionMask::roots(parquet_schema_desc, parquet_read_cols.root_indices_iter());
-        return ProjectionMaskPlan {
+
+        return Ok(ProjectionMaskPlan {
             mask,
             projected_root_presence: vec![true; parquet_read_cols.columns().len()],
-        };
+        });
     }
 
     let (matched_leaves, matched_roots) =
-        build_parquet_leaves_indices(parquet_schema_desc, parquet_read_cols);
+        build_parquet_leaves_indices(parquet_schema_desc, parquet_read_cols, source_schema)?;
 
     let projected_root_presence = parquet_read_cols
         .columns()
@@ -203,10 +238,11 @@ pub(crate) fn build_projection_plan(
         .collect();
 
     let mask = ProjectionMask::leaves(parquet_schema_desc, matched_leaves);
-    ProjectionMaskPlan {
+
+    Ok(ProjectionMaskPlan {
         mask,
         projected_root_presence,
-    }
+    })
 }
 
 /// Builds parquet leaf-column indices for reading a parquet file.
@@ -217,89 +253,114 @@ pub(crate) fn build_projection_plan(
 fn build_parquet_leaves_indices(
     parquet_schema_desc: &SchemaDescriptor,
     projection: &ParquetReadColumns,
-) -> (Vec<usize>, HashSet<usize>) {
-    let mut map = HashMap::with_capacity(projection.cols.len());
-    for col in &projection.cols {
-        map.insert(col.root_index, col);
-    }
+    source_schema: &ArrowSchema,
+) -> MitoResult<(Vec<usize>, HashSet<usize>)> {
+    let root_leaf_ranges = group_requested_leaf_ranges(parquet_schema_desc, projection);
 
     let mut matched_leaves = HashSet::new();
-    let mut matched_roots = HashSet::with_capacity(projection.cols.len());
+    let mut matched_roots = HashSet::with_capacity(projection.columns().len());
 
-    // Tracks whether each requested nested path matched by prefix without fallback.
-    let mut prefix_matched = HashMap::<usize, Vec<bool>>::new();
-    for col in &projection.cols {
-        prefix_matched.insert(col.root_index, vec![false; col.nested_paths.len()]);
-    }
+    for col in projection.columns() {
+        let before = matched_leaves.len();
 
-    // First select root/nested prefix matches.
-    for (leaf_idx, leaf_col) in parquet_schema_desc.columns().iter().enumerate() {
-        let root_idx = parquet_schema_desc.get_column_root_idx(leaf_idx);
-        let Some(col) = map.get(&root_idx) else {
-            continue;
-        };
-        if col.nested_paths.is_empty() {
-            matched_leaves.insert(leaf_idx);
-            matched_roots.insert(root_idx);
-            continue;
+        let leaf_range = root_leaf_ranges[col.root_index()].clone();
+
+        if col.nested_paths().is_empty() {
+            matched_leaves.extend(leaf_range);
+        } else if is_json2_extension_type(&source_schema.fields()[col.root_index()]) {
+            NestedSelectionPolicy::Json2V2.select_leaves(
+                parquet_schema_desc,
+                leaf_range,
+                col,
+                &mut matched_leaves,
+            );
+        } else {
+            select_prefix_leaves(parquet_schema_desc, leaf_range, col, &mut matched_leaves);
         }
 
-        let leaf_path = leaf_col.path().parts();
-        let mut matched = false;
-        for (path_idx, _) in col
-            .nested_paths
-            .iter()
-            .enumerate()
-            .filter(|(_, nested_path)| leaf_path.starts_with(nested_path))
-        {
-            prefix_matched.get_mut(&root_idx).unwrap()[path_idx] = true;
-            matched = true;
-        }
-
-        if matched {
-            matched_leaves.insert(leaf_idx);
-            matched_roots.insert(root_idx);
-        }
-    }
-
-    // Then include v2 remainder leaves or fallback prefix misses to their nearest variant parent.
-    // TODO(fys): Gate fallback planning on the root being JSON2. A raw Binary
-    // leaf is a JSONB variant only under a JSON2 root; plain struct Binary
-    // children should not enter this fallback path.
-    for col in &projection.cols {
-        let path_matches = &prefix_matched[&col.root_index];
-        let mut needs_remainder = false;
-        for (matched, nested_path) in path_matches.iter().zip(&col.nested_paths) {
-            if *matched {
-                if !needs_remainder {
-                    needs_remainder =
-                        path_points_to_struct(parquet_schema_desc, col.root_index, nested_path);
-                }
-                continue;
-            }
-
-            if let Some(leaf_idx) =
-                find_nearest_variant_parent(parquet_schema_desc, col.root_index, nested_path)
-            {
-                matched_leaves.insert(leaf_idx);
-                matched_roots.insert(col.root_index);
-            } else {
-                needs_remainder = true;
-            }
-        }
-
-        if needs_remainder {
-            let remainder_leaves = find_remainder_leaves(parquet_schema_desc, col.root_index);
-            if !remainder_leaves.is_empty() {
-                matched_leaves.extend(remainder_leaves);
-                matched_roots.insert(col.root_index);
-            }
+        // Requested roots are unique, and leaves belong to exactly one root.
+        if matched_leaves.len() > before {
+            matched_roots.insert(col.root_index());
         }
     }
 
     let mut matched_leaves = matched_leaves.into_iter().collect::<Vec<_>>();
     matched_leaves.sort_unstable();
-    (matched_leaves, matched_roots)
+
+    Ok((matched_leaves, matched_roots))
+}
+
+/// Groups file-level leaf ranges for requested roots.
+fn group_requested_leaf_ranges(
+    schema: &SchemaDescriptor,
+    projection: &ParquetReadColumns,
+) -> Vec<Range<usize>> {
+    let root_count = schema.root_schema().get_fields().len();
+    let mut requested = vec![false; root_count];
+    for col in projection.columns() {
+        requested[col.root_index()] = true;
+    }
+
+    let mut ranges = vec![0..0; root_count];
+    let mut leaf_idx = 0;
+    while leaf_idx < schema.num_columns() {
+        let root_idx = schema.get_column_root_idx(leaf_idx);
+        let start = leaf_idx;
+        while leaf_idx < schema.num_columns() && schema.get_column_root_idx(leaf_idx) == root_idx {
+            leaf_idx += 1;
+        }
+        if requested[root_idx] {
+            ranges[root_idx] = start..leaf_idx;
+        }
+    }
+    ranges
+}
+
+/// V2 can additionally store missing paths and object children in the remainder.
+fn select_json2_v2_leaves(
+    schema: &SchemaDescriptor,
+    leaf_range: Range<usize>,
+    col: &ParquetReadColumn,
+    selected: &mut HashSet<usize>,
+) {
+    let prefix_matched = select_prefix_leaves(schema, leaf_range, col, selected);
+    let mut needs_remainder = false;
+    for (matched, path) in prefix_matched.iter().zip(&col.nested_paths) {
+        if *matched {
+            needs_remainder |= path_points_to_struct(schema, col.root_index, path);
+        } else if let Some(idx) = find_nearest_variant_parent(schema, col.root_index, path) {
+            selected.insert(idx);
+        } else {
+            needs_remainder = true;
+        }
+    }
+    if needs_remainder {
+        selected.extend(find_remainder_leaves(schema, col.root_index));
+    }
+}
+
+/// Selects prefix matches and returns a match flag for each requested nested path.
+fn select_prefix_leaves(
+    schema: &SchemaDescriptor,
+    leaf_range: Range<usize>,
+    col: &ParquetReadColumn,
+    selected: &mut HashSet<usize>,
+) -> Vec<bool> {
+    let mut prefix_matched = vec![false; col.nested_paths().len()];
+    for leaf_idx in leaf_range {
+        let leaf_path = schema.columns()[leaf_idx].path().parts();
+        let mut matched_leaf = false;
+        for (path, matched) in col.nested_paths().iter().zip(&mut prefix_matched) {
+            if leaf_path.starts_with(path) {
+                *matched = true;
+                matched_leaf = true;
+            }
+        }
+        if matched_leaf {
+            selected.insert(leaf_idx);
+        }
+    }
+    prefix_matched
 }
 
 /// Returns whether a nested path points to an explicitly materialized object.
@@ -386,7 +447,10 @@ fn is_variant_leaf(leaf_col: &ColumnDescriptor) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use parquet::basic::{ConvertedType, LogicalType, Repetition, VariantType};
+    use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema as ArrowSchema};
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
+    use parquet::basic::{LogicalType, Repetition, VariantType};
     use parquet::errors::ParquetError;
     use parquet::schema::types::Type;
 
@@ -397,7 +461,7 @@ mod tests {
         let parquet_schema_desc = build_test_nested_parquet_schema();
         let projection = ParquetReadColumns::from_deduped_root_indices([0, 1]);
 
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
+        let plan = build_projection_plan(&projection, &parquet_schema_desc, &[None; 2]);
 
         assert_eq!(vec![true, true], plan.projected_root_presence);
         assert_eq!(
@@ -412,8 +476,11 @@ mod tests {
 
         let projection = ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0)]);
 
-        let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        let (matched_leaves, matched_roots) = build_parquet_leaves_indices_with_policies(
+            &parquet_schema_desc,
+            &projection,
+            &[None; 2],
+        );
         assert_eq!(vec![0, 1, 2], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -428,8 +495,11 @@ mod tests {
             ParquetReadColumn::new(1),
         ]);
 
-        let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        let (matched_leaves, matched_roots) = build_parquet_leaves_indices_with_policies(
+            &parquet_schema_desc,
+            &projection,
+            &[None; 2],
+        );
         assert_eq!(vec![1, 2, 3], matched_leaves);
         assert_eq!(HashSet::from([0, 1]), matched_roots);
     }
@@ -443,8 +513,11 @@ mod tests {
                 .with_nested_paths(vec![vec!["j".to_string(), "b".to_string()]]),
         ]);
 
-        let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        let (matched_leaves, matched_roots) = build_parquet_leaves_indices_with_policies(
+            &parquet_schema_desc,
+            &projection,
+            &[None; 2],
+        );
         assert_eq!(vec![1, 2], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -460,8 +533,11 @@ mod tests {
         let read_column = ParquetReadColumn::new(0).with_nested_paths(nested_paths);
         let projection = ParquetReadColumns::from_deduped(vec![read_column]);
 
-        let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        let (matched_leaves, matched_roots) = build_parquet_leaves_indices_with_policies(
+            &parquet_schema_desc,
+            &projection,
+            &[None; 2],
+        );
         assert_eq!(vec![1, 2], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -475,8 +551,11 @@ mod tests {
                 vec![vec!["j".to_string(), "b".to_string(), "c".to_string()]],
             )]);
 
-        let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        let (matched_leaves, matched_roots) = build_parquet_leaves_indices_with_policies(
+            &parquet_schema_desc,
+            &projection,
+            &[None; 2],
+        );
         assert_eq!(vec![1], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -491,7 +570,7 @@ mod tests {
             ParquetReadColumn::new(1),
         ]);
 
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
+        let plan = build_projection_plan(&projection, &parquet_schema_desc, &[None; 2]);
 
         assert_eq!(vec![false, true], plan.projected_root_presence);
         assert_eq!(
@@ -511,7 +590,11 @@ mod tests {
                 ],
             )]);
 
-        let plan = build_projection_plan(&projection, &parquet);
+        let plan = build_projection_plan(
+            &projection,
+            &parquet,
+            &[Some(NestedSelectionPolicy::Json2V2)],
+        );
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [0, 1]), plan.mask);
@@ -526,7 +609,11 @@ mod tests {
                 .with_nested_paths(vec![vec!["j".to_string(), "hot".to_string()]]),
         ]);
 
-        let plan = build_projection_plan(&projection, &parquet);
+        let plan = build_projection_plan(
+            &projection,
+            &parquet,
+            &[Some(NestedSelectionPolicy::Json2V2)],
+        );
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [3]), plan.mask);
@@ -541,7 +628,11 @@ mod tests {
                 .with_nested_paths(vec![vec!["j".to_string(), "commit".to_string()]]),
         ]);
 
-        let plan = build_projection_plan(&projection, &parquet);
+        let plan = build_projection_plan(
+            &projection,
+            &parquet,
+            &[Some(NestedSelectionPolicy::Json2V2)],
+        );
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [0, 1, 2]), plan.mask);
@@ -563,7 +654,11 @@ mod tests {
                 ]],
             )]);
 
-        let plan = build_projection_plan(&projection, &parquet);
+        let plan = build_projection_plan(
+            &projection,
+            &parquet,
+            &[Some(NestedSelectionPolicy::Json2V2)],
+        );
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [4]), plan.mask);
@@ -582,8 +677,11 @@ mod tests {
                 ],
             )]);
 
-        let (matched_leaves, matched_roots) =
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        let (matched_leaves, matched_roots) = build_parquet_leaves_indices_with_policies(
+            &parquet_schema_desc,
+            &projection,
+            &[None; 2],
+        );
         assert_eq!(vec![0, 2], matched_leaves);
         assert_eq!(HashSet::from([0]), matched_roots);
     }
@@ -612,137 +710,6 @@ mod tests {
         col.merge_nested_paths(vec![]);
 
         assert!(col.nested_paths().is_empty());
-    }
-
-    #[test]
-    fn test_fallback_to_nearest_variant_parent() {
-        let parquet_schema_desc = build_test_variant_parent_schema();
-        let projection =
-            ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
-                vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
-            )]);
-
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
-
-        assert_eq!(vec![true], plan.projected_root_presence);
-        assert_eq!(
-            ProjectionMask::leaves(&parquet_schema_desc, vec![0]),
-            plan.mask
-        );
-    }
-
-    #[test]
-    fn test_prefix_match_prevents_variant_parent_fallback() {
-        let parquet_schema_desc = build_test_variant_parent_schema();
-        let projection =
-            ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
-                vec![vec!["j".to_string(), "b".to_string(), "x".to_string()]],
-            )]);
-
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
-
-        assert_eq!(vec![true], plan.projected_root_presence);
-        assert_eq!(
-            ProjectionMask::leaves(&parquet_schema_desc, vec![1]),
-            plan.mask
-        );
-    }
-
-    #[test]
-    fn test_mixed_prefix_and_fallback_paths() {
-        let parquet_schema_desc = build_test_variant_parent_schema();
-        let nested_paths = vec![
-            vec!["j".to_string(), "a".to_string(), "x".to_string()],
-            vec!["j".to_string(), "b".to_string(), "x".to_string()],
-        ];
-        let projection = ParquetReadColumns::from_deduped(vec![
-            ParquetReadColumn::new(0).with_nested_paths(nested_paths),
-        ]);
-
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
-
-        assert_eq!(vec![true], plan.projected_root_presence);
-        assert_eq!(
-            ProjectionMask::leaves(&parquet_schema_desc, vec![0, 1]),
-            plan.mask
-        );
-    }
-
-    #[test]
-    fn test_fallback_selects_multiple_variant_parents() {
-        let parquet_schema_desc = build_test_two_variant_parents_schema();
-        let nested_paths = vec![
-            vec!["j".to_string(), "a".to_string(), "y".to_string()],
-            vec!["j".to_string(), "b".to_string(), "d".to_string()],
-            vec!["j".to_string(), "a".to_string(), "x".to_string()],
-        ];
-        let projection = ParquetReadColumns::from_deduped(vec![
-            ParquetReadColumn::new(0).with_nested_paths(nested_paths),
-        ]);
-
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
-
-        assert_eq!(vec![true], plan.projected_root_presence);
-        assert_eq!(
-            ProjectionMask::leaves(&parquet_schema_desc, vec![0, 1]),
-            plan.mask
-        );
-    }
-
-    #[test]
-    fn test_nested_paths_fallback_to_variant_parent_by_default() {
-        let parquet_schema_desc = build_test_variant_parent_schema();
-        let projection =
-            ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
-                vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
-            )]);
-
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
-
-        assert_eq!(vec![true], plan.projected_root_presence);
-        assert_eq!(
-            ProjectionMask::leaves(&parquet_schema_desc, vec![0]),
-            plan.mask
-        );
-    }
-
-    #[test]
-    fn test_non_variant_parent_does_not_fallback() {
-        let parquet_schema_desc = build_test_nested_parquet_schema();
-        let projection =
-            ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
-                vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
-            )]);
-
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
-
-        assert_eq!(vec![false], plan.projected_root_presence);
-    }
-
-    #[test]
-    fn test_utf8_parent_does_not_fallback() {
-        let parquet_schema_desc = build_test_utf8_parent_schema();
-        let projection =
-            ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
-                vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
-            )]);
-
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
-
-        assert_eq!(vec![false], plan.projected_root_presence);
-    }
-
-    #[test]
-    fn test_root_variant_does_not_fallback() {
-        let parquet_schema_desc = build_test_root_variant_schema();
-        let projection = ParquetReadColumns::from_deduped(vec![
-            ParquetReadColumn::new(0)
-                .with_nested_paths(vec![vec!["j".to_string(), "a".to_string()]]),
-        ]);
-
-        let plan = build_projection_plan(&projection, &parquet_schema_desc);
-
-        assert_eq!(vec![false], plan.projected_root_presence);
     }
 
     // Test schema:
@@ -859,127 +826,44 @@ mod tests {
         )))
     }
 
-    // Test schema:
-    // schema
-    // `- j
-    //    |- a: BYTE_ARRAY
-    //    `- b
-    //       `- x: INT64
-    fn build_test_variant_parent_schema() -> SchemaDescriptor {
-        let leaf_a = Arc::new(
-            Type::primitive_type_builder("a", parquet::basic::Type::BYTE_ARRAY)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let leaf_x = Arc::new(
-            Type::primitive_type_builder("x", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let group_b = Arc::new(
-            Type::group_type_builder("b")
-                .with_repetition(Repetition::REQUIRED)
-                .with_fields(vec![leaf_x])
-                .build()
-                .unwrap(),
-        );
-        let root_j = Arc::new(
-            Type::group_type_builder("j")
-                .with_repetition(Repetition::REQUIRED)
-                .with_fields(vec![leaf_a, group_b])
-                .build()
-                .unwrap(),
-        );
-        let schema = Arc::new(
-            Type::group_type_builder("schema")
-                .with_fields(vec![root_j])
-                .build()
-                .unwrap(),
-        );
-
-        SchemaDescriptor::new(schema)
+    fn source_schema(policies: &[Option<NestedSelectionPolicy>]) -> ArrowSchema {
+        ArrowSchema::new(
+            policies
+                .iter()
+                .enumerate()
+                .map(|(index, policy)| {
+                    let field = Field::new(
+                        format!("root_{index}"),
+                        DataType::Struct(Fields::empty()),
+                        true,
+                    );
+                    match policy {
+                        None => field,
+                        Some(NestedSelectionPolicy::Json2V2) => {
+                            field.with_extension_type(Json2ExtensionType::new(Arc::new(
+                                JsonMetadata::new(JsonSettings::default()),
+                            )))
+                        }
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
     }
 
-    // Test schema:
-    // schema
-    // `- j
-    //    |- a: BYTE_ARRAY
-    //    `- b: BYTE_ARRAY
-    fn build_test_two_variant_parents_schema() -> SchemaDescriptor {
-        let leaf_a = Arc::new(
-            Type::primitive_type_builder("a", parquet::basic::Type::BYTE_ARRAY)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let leaf_b = Arc::new(
-            Type::primitive_type_builder("b", parquet::basic::Type::BYTE_ARRAY)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let root_j = Arc::new(
-            Type::group_type_builder("j")
-                .with_repetition(Repetition::REQUIRED)
-                .with_fields(vec![leaf_a, leaf_b])
-                .build()
-                .unwrap(),
-        );
-        let schema = Arc::new(
-            Type::group_type_builder("schema")
-                .with_fields(vec![root_j])
-                .build()
-                .unwrap(),
-        );
-
-        SchemaDescriptor::new(schema)
+    fn build_projection_plan(
+        cols: &ParquetReadColumns,
+        parquet_schema: &SchemaDescriptor,
+        policies: &[Option<NestedSelectionPolicy>],
+    ) -> ProjectionMaskPlan {
+        super::build_projection_plan(cols, parquet_schema, &source_schema(policies)).unwrap()
     }
 
-    fn build_test_utf8_parent_schema() -> SchemaDescriptor {
-        let leaf_a = Arc::new(
-            Type::primitive_type_builder("a", parquet::basic::Type::BYTE_ARRAY)
-                .with_repetition(Repetition::REQUIRED)
-                .with_logical_type(Some(LogicalType::String))
-                .with_converted_type(ConvertedType::UTF8)
-                .build()
-                .unwrap(),
-        );
-        let root_j = Arc::new(
-            Type::group_type_builder("j")
-                .with_repetition(Repetition::REQUIRED)
-                .with_fields(vec![leaf_a])
-                .build()
-                .unwrap(),
-        );
-        let schema = Arc::new(
-            Type::group_type_builder("schema")
-                .with_fields(vec![root_j])
-                .build()
-                .unwrap(),
-        );
-
-        SchemaDescriptor::new(schema)
-    }
-
-    // Test schema:
-    // schema
-    // `- j: BYTE_ARRAY
-    fn build_test_root_variant_schema() -> SchemaDescriptor {
-        let root_j = Arc::new(
-            Type::primitive_type_builder("j", parquet::basic::Type::BYTE_ARRAY)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let schema = Arc::new(
-            Type::group_type_builder("schema")
-                .with_fields(vec![root_j])
-                .build()
-                .unwrap(),
-        );
-
-        SchemaDescriptor::new(schema)
+    fn build_parquet_leaves_indices_with_policies(
+        parquet_schema: &SchemaDescriptor,
+        projection: &ParquetReadColumns,
+        policies: &[Option<NestedSelectionPolicy>],
+    ) -> (Vec<usize>, HashSet<usize>) {
+        super::build_parquet_leaves_indices(parquet_schema, projection, &source_schema(policies))
+            .unwrap()
     }
 }
