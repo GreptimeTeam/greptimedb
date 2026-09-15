@@ -75,9 +75,10 @@ impl MemtableVersion {
         time_window: Option<Duration>,
     ) -> Result<Option<MemtableVersion>> {
         if self.mutable.is_empty() {
-            // No need to freeze the mutable memtable, but we need to check the time window.
-            if Some(self.mutable.part_duration()) == time_window {
-                // If the time window is the same, we don't need to update it.
+            // No need to freeze an empty partition list with the same time window.
+            if Some(self.mutable.part_duration()) == time_window
+                && self.mutable.num_partitions() == 0
+            {
                 return Ok(None);
             }
 
@@ -157,5 +158,48 @@ impl MemtableVersion {
     /// immutable memtables.
     pub(crate) fn is_empty(&self) -> bool {
         self.mutable.is_empty() && self.immutables.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::memtable::time_partition::TimePartitions;
+    use crate::memtable::time_series::TimeSeriesMemtableBuilder;
+    use crate::test_util::memtable_util;
+
+    #[test]
+    fn test_freeze_empty_existing_partition_rebuilds_mutable() {
+        let metadata = memtable_util::metadata_for_test();
+        let partitions = TimePartitions::new(
+            metadata.clone(),
+            Arc::new(TimeSeriesMemtableBuilder::default()),
+            0,
+            Some(Duration::from_secs(5)),
+        );
+        let kvs = memtable_util::build_key_values(&metadata, "key".to_string(), 0, &[1000], 0);
+        partitions.write(&kvs).unwrap();
+        partitions.freeze().unwrap();
+
+        // Forking a non-empty partition creates a real, but empty, existing partition.
+        let mutable = Arc::new(partitions.fork(&metadata, None));
+        assert_eq!(1, mutable.num_partitions());
+        assert!(mutable.is_empty());
+        let mut memtables = Vec::new();
+        mutable.list_memtables(&mut memtables);
+        let old_memtable = memtables.pop().unwrap();
+
+        let version = MemtableVersion::new(mutable);
+        let frozen = version
+            .freeze_mutable(&metadata, Some(Duration::from_secs(5)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(0, frozen.mutable.num_partitions());
+        assert_eq!(2, frozen.mutable.next_memtable_id());
+        assert!(frozen.immutables().is_empty());
+        assert!(old_memtable.is_empty());
     }
 }
