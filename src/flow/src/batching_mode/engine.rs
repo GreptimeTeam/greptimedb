@@ -1458,16 +1458,17 @@ mod tests {
     async fn test_flow_option_parser_matrix() {
         let engine = new_test_engine().await;
         let cases = [
-            (None, Ok((false, false))),
-            (Some("true"), Ok((true, false))),
-            (Some("false"), Ok((false, false))),
+            (None, false, Ok(false)),
+            (Some("true"), false, Ok(true)),
+            (Some("false"), false, Ok(false)),
             (
                 Some(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE),
-                Ok((true, true)),
+                true,
+                Ok(true),
             ),
-            (Some("malformed"), Err(())),
+            (Some("malformed"), false, Err(())),
         ];
-        for (value, expected) in cases {
+        for (value, exact_sequence_range_required, expected) in cases {
             let options = value
                 .map(|value| {
                     HashMap::from([(
@@ -1476,18 +1477,12 @@ mod tests {
                     )])
                 })
                 .unwrap_or_default();
-            let exact_sequence_range_required = options
-                .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
-                .is_some_and(|value| {
-                    value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE
-                });
             match (
                 engine.batch_opts_for_flow_options(&options, exact_sequence_range_required),
                 expected,
             ) {
-                (Ok(opts), Ok((enabled, required))) => {
-                    assert_eq!(opts.experimental_enable_incremental_read, enabled);
-                    assert_eq!(exact_sequence_range_required, required);
+                (Ok(opts), Ok(expected)) => {
+                    assert_eq!(opts.experimental_enable_incremental_read, expected);
                 }
                 (Err(_), Err(())) => {}
                 (result, expected) => panic!(

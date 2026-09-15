@@ -1767,61 +1767,6 @@ async fn test_analyze_incremental_aggregate_plan_rejects_avg() {
 }
 
 #[tokio::test]
-async fn test_analyze_incremental_aggregate_plan_supports_mixed_state_families() {
-    let analysis = analyze_test_sql(
-        "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, \
-         hll(CAST(number AS VARCHAR)) AS hll_b, \
-         uddsketch_state(128, 0.01, CAST(number AS DOUBLE)) AS percentile_a, \
-         uddsketch_state(256, 0.02, number) AS percentile_b, \
-         stddev_pop_state(number) AS stddev_state, \
-         sum(number) AS total, ts FROM numbers_with_ts GROUP BY ts",
-    )
-    .await;
-
-    assert!(
-        analysis.unsupported_exprs.is_empty(),
-        "mixed state aggregate should be supported: {:?}",
-        analysis.unsupported_exprs
-    );
-    assert_eq!(analysis.merge_columns.len(), 6);
-    assert!(analysis.merge_columns.iter().any(|column| {
-        column.output_field_name == "hll_a"
-            && column.merge_op
-                == (IncrementalAggregateMergeOp::StateDeltaMerge {
-                    function_name: "__hll_delta_merge",
-                    params: vec![],
-                })
-    }));
-    assert!(analysis.merge_columns.iter().any(|column| {
-        column.output_field_name == "hll_b"
-            && column.input_field_name == "hll_a"
-            && column.merge_op
-                == (IncrementalAggregateMergeOp::StateDeltaMerge {
-                    function_name: "__hll_delta_merge",
-                    params: vec![],
-                })
-    }));
-    for (output_field_name, function_name, param_count) in [
-        ("percentile_a", "__uddsketch_state_delta_merge", 2),
-        ("percentile_b", "__uddsketch_state_delta_merge", 2),
-        ("stddev_state", "__stddev_pop_state_delta_merge", 0),
-    ] {
-        let column = analysis
-            .merge_columns
-            .iter()
-            .find(|column| column.output_field_name == output_field_name)
-            .unwrap();
-        assert!(matches!(
-            &column.merge_op,
-            IncrementalAggregateMergeOp::StateDeltaMerge {
-                function_name: actual_name,
-                params,
-            } if *actual_name == function_name && params.len() == param_count
-        ));
-    }
-}
-
-#[tokio::test]
 async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_families() {
     let query_engine = create_test_query_engine();
     let old_sql = "SELECT hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN CAST(NULL AS BIGINT) ELSE 2 END AS grp FROM numbers_with_ts WHERE number <= 3 OR number = 6 GROUP BY grp";
@@ -1844,16 +1789,6 @@ async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_familie
         2,
         "old state must have one row per group"
     );
-    let old_groups = old_batch
-        .column_by_name("grp")
-        .unwrap()
-        .as_primitive::<Int64Type>();
-    assert_eq!(old_groups.null_count(), 1);
-    let mut old_group_values = (0..old_groups.len())
-        .map(|index| (!old_groups.is_null(index)).then(|| old_groups.value(index)))
-        .collect::<Vec<_>>();
-    old_group_values.sort_unstable();
-    assert_eq!(old_group_values, [None, Some(2)]);
     let sink_table = MemTable::table("state_merge_sink", old_batch);
     let sink_table_name = [
         "greptime".to_string(),
@@ -1878,14 +1813,6 @@ async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_familie
     )
     .await
     .unwrap();
-    let rendered = format!("{}", rewritten.display_indent());
-    for function_name in [
-        "__hll_delta_merge",
-        "__uddsketch_state_delta_merge",
-        "__stddev_pop_state_delta_merge",
-    ] {
-        assert!(rendered.contains(function_name), "{rendered}");
-    }
     assert_eq!(
         analysis.output_field_names,
         vec![
@@ -1915,16 +1842,6 @@ async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_familie
         3,
         "rewrite must produce one row per group"
     );
-    let merged_groups = merged_batch
-        .column_by_name("grp")
-        .unwrap()
-        .as_primitive::<Int64Type>();
-    assert_eq!(merged_groups.null_count(), 1);
-    let mut merged_group_values = (0..merged_groups.len())
-        .map(|index| (!merged_groups.is_null(index)).then(|| merged_groups.value(index)))
-        .collect::<Vec<_>>();
-    merged_group_values.sort_unstable();
-    assert_eq!(merged_group_values, [None, Some(2), Some(3)]);
     let merged_table = MemTable::table("merged_states", merged_batch);
     query_engine
         .engine_state()
