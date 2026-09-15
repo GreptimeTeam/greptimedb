@@ -27,36 +27,41 @@ use crate::error::{JoinSnafu, Result};
 use crate::sst::file::{FileHandle, RegionFileId};
 
 /// LastNonNull fills older non-null fields into a row carrying a newer sequence.
-/// Every potentially overlapping SST must participate in the same merge, or the
-/// filled fields can hide an intermediate version left in an unselected SST.
+/// Every potentially overlapping SST must participate in the same merge, otherwise
+/// the filled fields can hide an intermediate version left in an unselected SST.
 #[derive(Debug)]
 pub(super) struct LastNonNullPicker {
-    seed_picker: TwcsPicker,
+    base_picker: TwcsPicker,
 }
 
 impl LastNonNullPicker {
-    pub(super) fn new(seed_picker: TwcsPicker) -> Self {
-        Self { seed_picker }
+    pub(super) fn new(base_picker: TwcsPicker) -> Self {
+        Self { base_picker }
     }
 }
 
 #[async_trait::async_trait]
 impl Picker for LastNonNullPicker {
     async fn pick(&self, region: &CompactionRegion) -> Result<Option<PickerOutput>> {
-        let max_outputs = self.seed_picker.max_background_tasks;
-        let Some(mut picked) = self.seed_picker.pick_all_seeds(region).await? else {
+        let max_outputs = self.base_picker.max_background_tasks;
+
+        let Some(mut all_candidates) = self
+            .base_picker
+            .pick_with_output_limit(region, None)
+            .await?
+        else {
             return Ok(None);
         };
         let version = region.current_version.clone();
         common_runtime::spawn_blocking_compact(move || {
-            let expired: HashSet<_> = picked
+            let expired: HashSet<_> = all_candidates
                 .expired_ssts
                 .iter()
                 .map(FileHandle::file_id)
                 .collect();
             // Include busy files and all levels/windows. Request ranges and
             // TWCS size/file-count limits only constrain seeds, not correctness.
-            let files = version
+            let all_files = version
                 .ssts
                 .levels()
                 .iter()
@@ -64,17 +69,19 @@ impl Picker for LastNonNullPicker {
                 .filter(|file| !expired.contains(&file.file_id()))
                 .cloned()
                 .collect();
-            picked.outputs = close_outputs(picked.outputs, files, &version.metadata);
-            picked.outputs.retain(|output| {
+            all_candidates.outputs =
+                close_outputs(all_candidates.outputs, all_files, &version.metadata);
+            all_candidates.outputs.retain(|output| {
                 inputs_precede_memtables(&output.inputs, version.memtable_min_sequence)
             });
             if let Some(limit) = max_outputs {
                 // Only eligible closures consume the budget. Keep the high-priority
                 // tail because the compactor pops from the end of the output list.
-                let excess = picked.outputs.len().saturating_sub(limit);
-                picked.outputs.drain(..excess);
+                let excess = all_candidates.outputs.len().saturating_sub(limit);
+                all_candidates.outputs.drain(..excess);
             }
-            (!picked.outputs.is_empty() || !picked.expired_ssts.is_empty()).then_some(picked)
+            (!all_candidates.outputs.is_empty() || !all_candidates.expired_ssts.is_empty())
+                .then_some(all_candidates)
         })
         .await
         .context(JoinSnafu)

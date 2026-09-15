@@ -790,16 +790,7 @@ impl Picker for TwcsPicker {
 }
 
 impl TwcsPicker {
-    /// Enumerates seeds without an output cap so LastNonNull can apply its cap
-    /// after closure validation. Window planning keeps the configured concurrency.
-    pub(super) async fn pick_all_seeds(
-        &self,
-        compaction_region: &CompactionRegion,
-    ) -> Result<Option<PickerOutput>> {
-        self.pick_with_output_limit(compaction_region, None).await
-    }
-
-    async fn pick_with_output_limit(
+    pub(crate) async fn pick_with_output_limit(
         &self,
         compaction_region: &CompactionRegion,
         max_outputs: Option<usize>,
