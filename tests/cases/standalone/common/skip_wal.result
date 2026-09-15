@@ -52,6 +52,11 @@ SELECT * FROM system_metrics;
 | host2 | idc_a | 80.0     | 70.3        | 90.0      | 2022-11-03T03:39:57.450 |
 +-------+-------+----------+-------------+-----------+-------------------------+
 
+-- A table created without a real WAL provider cannot enable WAL later.
+ALTER TABLE system_metrics SET 'skip_wal' = 'false';
+
+Error: 1001(Unsupported), Unsupported operation setting skip_wal = 'false' without an existing WAL provider
+
 DROP TABLE system_metrics;
 
 Affected Rows: 0
@@ -93,15 +98,45 @@ SHOW CREATE TABLE alter_skip_wal;
 |                | )                                             |
 +----------------+-----------------------------------------------+
 
+-- This row is intentionally not written to WAL.
+INSERT INTO alter_skip_wal VALUES ('host2', 2, 2000);
+
+Affected Rows: 1
+
 ALTER TABLE alter_skip_wal SET 'skip_wal' = 'false';
 
-Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: skip_wal, value: false
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_skip_wal;
+
++----------------+-----------------------------------------------+
+| Table          | Create Table                                  |
++----------------+-----------------------------------------------+
+| alter_skip_wal | CREATE TABLE IF NOT EXISTS "alter_skip_wal" ( |
+|                |   "host" STRING NULL,                         |
+|                |   "val" DOUBLE NULL,                          |
+|                |   "ts" TIMESTAMP(3) NOT NULL,                 |
+|                |   TIME INDEX ("ts"),                          |
+|                |   PRIMARY KEY ("host")                        |
+|                | )                                             |
+|                |                                               |
+|                | ENGINE=mito                                   |
+|                | WITH(                                         |
+|                |   skip_wal = 'false'                          |
+|                | )                                             |
++----------------+-----------------------------------------------+
+
+-- Repeating the transition is idempotent.
+ALTER TABLE alter_skip_wal SET 'skip_wal' = 'false';
+
+Affected Rows: 0
 
 ALTER TABLE alter_skip_wal UNSET 'skip_wal';
 
 Error: 1004(InvalidArguments), Invalid unset table option request: Invalid set region option request, key: skip_wal
 
-INSERT INTO alter_skip_wal VALUES ('host2', 2, 2000);
+-- This row uses the restored WAL provider.
+INSERT INTO alter_skip_wal VALUES ('host3', 3, 3000);
 
 Affected Rows: 1
 
@@ -112,9 +147,10 @@ SELECT * FROM alter_skip_wal ORDER BY ts;
 +-------+-----+---------------------+
 | host1 | 1.0 | 1970-01-01T00:00:01 |
 | host2 | 2.0 | 1970-01-01T00:00:02 |
+| host3 | 3.0 | 1970-01-01T00:00:03 |
 +-------+-----+---------------------+
 
--- The post-ALTER row can be lost because restart does not flush skip-WAL memtables.
+-- Re-enabling WAL does not retroactively write the skipped row to WAL.
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE alter_skip_wal;
 
@@ -131,7 +167,7 @@ SHOW CREATE TABLE alter_skip_wal;
 |                |                                               |
 |                | ENGINE=mito                                   |
 |                | WITH(                                         |
-|                |   skip_wal = 'true'                           |
+|                |   skip_wal = 'false'                          |
 |                | )                                             |
 +----------------+-----------------------------------------------+
 
@@ -141,6 +177,7 @@ SELECT * FROM alter_skip_wal ORDER BY ts;
 | host  | val | ts                  |
 +-------+-----+---------------------+
 | host1 | 1.0 | 1970-01-01T00:00:01 |
+| host3 | 3.0 | 1970-01-01T00:00:03 |
 +-------+-----+---------------------+
 
 DROP TABLE alter_skip_wal;
