@@ -43,7 +43,8 @@ impl LastNonNullPicker {
 #[async_trait::async_trait]
 impl Picker for LastNonNullPicker {
     async fn pick(&self, region: &CompactionRegion) -> Result<Option<PickerOutput>> {
-        let Some(mut picked) = self.seed_picker.pick(region).await? else {
+        let max_outputs = self.seed_picker.max_background_tasks;
+        let Some(mut picked) = self.seed_picker.pick_all_seeds(region).await? else {
             return Ok(None);
         };
         let version = region.current_version.clone();
@@ -67,6 +68,12 @@ impl Picker for LastNonNullPicker {
             picked.outputs.retain(|output| {
                 inputs_precede_memtables(&output.inputs, version.memtable_min_sequence)
             });
+            if let Some(limit) = max_outputs {
+                // Only eligible closures consume the budget. Keep the high-priority
+                // tail because the compactor pops from the end of the output list.
+                let excess = picked.outputs.len().saturating_sub(limit);
+                picked.outputs.drain(..excess);
+            }
             (!picked.outputs.is_empty() || !picked.expired_ssts.is_empty()).then_some(picked)
         })
         .await
@@ -178,6 +185,96 @@ mod tests {
 
     fn file_ids(files: &[FileHandle]) -> HashSet<RegionFileId> {
         files.iter().map(FileHandle::file_id).collect()
+    }
+
+    #[rstest::rstest]
+    #[case::memtable_barrier(2, Some(20), false, Some(1), vec![vec![1]])]
+    #[case::busy_dependency(2, None, true, Some(1), vec![vec![1]])]
+    #[case::highest_priority(2, None, false, Some(1), vec![vec![2]])]
+    #[case::priority_order(2, None, false, Some(2), vec![vec![2], vec![1]])]
+    #[case::unlimited(2, None, false, None, vec![vec![2], vec![1], vec![0]])]
+    #[case::fewer_eligible_outputs(2, Some(20), false, Some(3), vec![vec![1], vec![0]])]
+    #[case::absorbed_seeds(1, None, false, Some(2), vec![vec![2, 1], vec![0]])]
+    #[tokio::test]
+    async fn test_output_limit_counts_eligible_closures(
+        #[case] dependency_start_window: usize,
+        #[case] memtable_min: Option<u64>,
+        #[case] busy: bool,
+        #[case] limit: Option<usize>,
+        #[case] expected_windows: Vec<Vec<usize>>,
+    ) {
+        // Three independent, eligible L0 windows. A large L1 dependency is not
+        // a seed, but can reject the newest closure or connect two seeds.
+        let windows: Vec<Vec<_>> = (0..3)
+            .map(|window| {
+                (0..4)
+                    .map(|i| FileMeta {
+                        file_id: FileId::random(),
+                        time_range: (
+                            Timestamp::new_second(window * 3600),
+                            Timestamp::new_second(window * 3600 + 10),
+                        ),
+                        level: 0,
+                        file_size: 100,
+                        sequence: std::num::NonZeroU64::new((window * 4 + i + 1) as u64),
+                        ..Default::default()
+                    })
+                    .collect()
+            })
+            .collect();
+        let dependency = FileMeta {
+            file_id: FileId::random(),
+            time_range: (
+                Timestamp::new_second(dependency_start_window as i64 * 3600),
+                Timestamp::new_second(7210),
+            ),
+            level: 1,
+            file_size: 1_000_000,
+            sequence: std::num::NonZeroU64::new(20),
+            ..Default::default()
+        };
+        let dependency_id = dependency.file_id();
+        let files = windows.iter().flatten().cloned().chain([dependency]);
+        let mut region = compaction_region_with_ssts(files, Duration::from_secs(60)).await;
+        region.ttl = None;
+        region.region_options.merge_mode = Some(MergeMode::LastNonNull);
+        region.current_version.memtable_min_sequence = memtable_min;
+        let CompactionOptions::Twcs(opts) = &mut region.region_options.compaction;
+        opts.time_window = Some(Duration::from_secs(3600));
+        opts.active_window_trigger_file_num = 4;
+        opts.inactive_window_trigger_file_num = 4;
+        region.current_version.ssts.levels()[1]
+            .files()
+            .next()
+            .unwrap()
+            .set_compacting(busy);
+        let request = compact_request::Options::Regular(Default::default());
+        let picker = new_picker(&request, &region.region_options, limit, None);
+
+        let picked = picker.pick(&region).await.unwrap().unwrap();
+        assert_eq!(expected_windows.len(), picked.outputs.len());
+        assert!(picked.expired_ssts.is_empty());
+        // The execution pops outputs from the end, not the front.
+        for (output, window_indices) in picked.outputs.iter().rev().zip(expected_windows) {
+            let mut expected: HashSet<_> = window_indices
+                .iter()
+                .flat_map(|&i| windows[i].iter().map(FileMeta::file_id))
+                .collect();
+            if window_indices.contains(&2) {
+                expected.insert(dependency_id);
+            }
+            assert_eq!(expected, file_ids(&output.inputs));
+        }
+
+        // The LastRow picker must retain its original seed cap and priority.
+        region.region_options.merge_mode = Some(MergeMode::LastRow);
+        let picker = new_picker(&request, &region.region_options, limit, None);
+        let picked = picker.pick(&region).await.unwrap().unwrap();
+        assert_eq!(limit.unwrap_or(3).min(3), picked.outputs.len());
+        for (output, window) in picked.outputs.iter().rev().zip(windows.iter().rev()) {
+            let expected: HashSet<_> = window.iter().map(FileMeta::file_id).collect();
+            assert_eq!(expected, file_ids(&output.inputs));
+        }
     }
 
     // Cover absent/unknown boundaries and strict inequality without arithmetic
