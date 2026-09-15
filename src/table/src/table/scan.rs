@@ -447,30 +447,32 @@ impl ExecutionPlan for RegionScanExec {
     }
 
     fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Statistics> {
-        if partition.is_some() {
+        if partition.is_some() || !self.append_mode {
             return Ok(Statistics::new_unknown(self.schema().as_ref()));
         }
 
-        let statistics =
-            if self.append_mode && !self.scanner.lock().unwrap().has_predicate_without_region() {
-                let column_statistics = self
-                    .arrow_schema
-                    .fields
-                    .iter()
-                    .map(|_| ColumnStatistics {
-                        distinct_count: Precision::Exact(self.total_rows),
-                        null_count: Precision::Exact(0), // all null rows are counted for append-only table
-                        ..Default::default()
-                    })
-                    .collect();
-                Statistics {
-                    num_rows: Precision::Exact(self.total_rows),
-                    total_byte_size: Default::default(),
-                    column_statistics,
-                }
-            } else {
-                Statistics::new_unknown(&self.arrow_schema)
-            };
+        let scanner = self.scanner.lock().unwrap();
+        let statistics = if scanner.properties().total_rows_is_exact()
+            && !scanner.has_predicate_without_region()
+        {
+            let column_statistics = self
+                .arrow_schema
+                .fields
+                .iter()
+                .map(|_| ColumnStatistics {
+                    distinct_count: Precision::Exact(self.total_rows),
+                    null_count: Precision::Exact(0), // all null rows are counted for append-only table
+                    ..Default::default()
+                })
+                .collect();
+            Statistics {
+                num_rows: Precision::Exact(self.total_rows),
+                total_byte_size: Default::default(),
+                column_statistics,
+            }
+        } else {
+            Statistics::new_unknown(&self.arrow_schema)
+        };
         Ok(statistics)
     }
 
@@ -577,10 +579,144 @@ mod test {
     use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
     use futures::TryStreamExt;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::region_engine::SinglePartitionScanner;
+    use store_api::region_engine::{RegionScanner, ScannerProperties, SinglePartitionScanner};
     use store_api::storage::RegionId;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct RepeatableScanner {
+        batches: RecordBatches,
+        properties: ScannerProperties,
+        metadata: store_api::metadata::RegionMetadataRef,
+    }
+
+    impl DisplayAs for RepeatableScanner {
+        fn fmt_as(
+            &self,
+            _t: DisplayFormatType,
+            f: &mut std::fmt::Formatter<'_>,
+        ) -> std::fmt::Result {
+            write!(f, "RepeatableScanner")
+        }
+    }
+
+    impl RegionScanner for RepeatableScanner {
+        fn name(&self) -> &str {
+            "RepeatableScanner"
+        }
+
+        fn properties(&self) -> &ScannerProperties {
+            &self.properties
+        }
+
+        fn schema(&self) -> SchemaRef {
+            self.batches.schema()
+        }
+
+        fn metadata(&self) -> store_api::metadata::RegionMetadataRef {
+            self.metadata.clone()
+        }
+
+        fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+            self.properties.prepare(request);
+            Ok(())
+        }
+
+        fn scan_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics_set: &ExecutionPlanMetricsSet,
+            _partition: usize,
+        ) -> Result<SendableRecordBatchStream, BoxedError> {
+            Ok(self.batches.as_stream())
+        }
+
+        fn has_predicate_without_region(&self) -> bool {
+            false
+        }
+
+        fn add_dyn_filter_to_predicate(
+            &mut self,
+            filters: Vec<Arc<dyn PhysicalExpr>>,
+        ) -> Vec<bool> {
+            vec![false; filters.len()]
+        }
+
+        fn set_logical_region(&mut self, logical_region: bool) {
+            self.properties.set_logical_region(logical_region);
+        }
+
+        fn set_query_load_region_id(&mut self, region_id: RegionId) {
+            self.properties.set_query_load_region_id(region_id);
+        }
+    }
+
+    fn count_statistics_test_data() -> (
+        SchemaRef,
+        RecordBatch,
+        store_api::metadata::RegionMetadataRef,
+    ) {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Vector::from_slice([1, 2, 3, 4])) as _,
+                Arc::new(TimestampMillisecondVector::from_slice([1, 2, 3, 4])) as _,
+            ],
+        )
+        .unwrap();
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5685));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![]);
+        (schema, batch, Arc::new(builder.build().unwrap()))
+    }
+
+    #[test]
+    fn test_count_statistics_require_exact_source_rows() {
+        for (append_mode, exact, expected) in [
+            (true, false, Precision::Absent),
+            (true, true, Precision::Exact(4)),
+            (false, true, Precision::Absent),
+        ] {
+            let (schema, batch, metadata) = count_statistics_test_data();
+            let scanner = Box::new(RepeatableScanner {
+                batches: RecordBatches::try_new(schema, vec![batch]).unwrap(),
+                properties: ScannerProperties::default()
+                    .with_append_mode(append_mode)
+                    .with_total_rows(4)
+                    .with_total_rows_is_exact(exact),
+                metadata,
+            });
+            let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
+            assert_eq!(plan.partition_statistics(None).unwrap().num_rows, expected);
+            assert_eq!(
+                plan.partition_statistics(Some(0)).unwrap().num_rows,
+                Precision::Absent,
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_simple_table_scan() {
