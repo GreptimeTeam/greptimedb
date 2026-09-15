@@ -93,7 +93,7 @@ use sql::statements::create::{
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
-use store_api::mito_engine_options::APPEND_MODE_KEY;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
@@ -447,6 +447,14 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
+            if create_table.table_options.contains_key(TTL_KEY) {
+                return CreateLogicalTablesSnafu {
+                    reason: format!(
+                        "TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
+                    ),
+                }
+                .fail();
+            }
             if let Some(partitions) = partitions.as_ref()
                 && !partitions.exprs.is_empty()
             {
@@ -1959,6 +1967,24 @@ impl StatementExecutor {
         } else {
             // This is logical table. Annotation alters only rewrite its own
             // metadata; `AlterLogicalTablesProcedure` only handles column adds.
+            let alters_ttl = expr.kind.as_ref().is_some_and(|kind| match kind {
+                Kind::SetTableOptions(options) => options
+                    .table_options
+                    .iter()
+                    .any(|option| option.key == TTL_KEY),
+                Kind::UnsetTableOptions(options) => {
+                    options.keys.iter().any(|key| key == TTL_KEY)
+                }
+                _ => false,
+            });
+            if alters_ttl {
+                return CreateLogicalTablesSnafu {
+                    reason: format!(
+                        "TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
+                    ),
+                }
+                .fail();
+            }
             let annotation_alter = match expr.kind.as_ref() {
                 Some(kind) => common_grpc_expr::annotation_alter_family(kind)
                     .context(AlterExprToRequestSnafu)?
