@@ -147,7 +147,8 @@ impl SeriesScan {
         };
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
-            .with_total_rows(input.total_rows());
+            .with_total_rows(input.total_rows())
+            .with_total_rows_is_exact(input.append_mode && input.total_rows_is_exact());
         if let Some(counters) = input.query_stat_counters.clone() {
             properties.set_query_stat_counters(counters);
         }
