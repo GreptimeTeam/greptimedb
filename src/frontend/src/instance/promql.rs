@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -22,18 +23,26 @@ use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_catalog::format_full_table_name;
 use common_recordbatch::util;
 use common_telemetry::tracing;
+use datafusion::common::DFSchemaRef;
 use datafusion_expr::LogicalPlan;
+use datatypes::arrow::array::{Array, UInt32Array};
+use futures::StreamExt;
 use promql_parser::label::{Matcher, Matchers};
 use query::promql;
 use query::promql::planner::PromPlanner;
 use servers::prometheus;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, is_metric_engine_internal_column,
+};
+use store_api::storage::TableId;
+use table::TableRef;
 
 use crate::error::{
     CatalogSnafu, CollectRecordbatchSnafu, ExecLogicalPlanSnafu,
     PrometheusLabelValuesQueryPlanSnafu, PrometheusMetricNamesQueryPlanSnafu, ReadTableSnafu,
-    Result, TableNotFoundSnafu, TableSnafu,
+    Result, TableNotFoundSnafu, TableSnafu, UnexpectedColumnTypeSnafu,
 };
 use crate::instance::Instance;
 
@@ -50,6 +59,32 @@ pub(super) fn remove_output_sort(plan: LogicalPlan) -> LogicalPlan {
         }
         plan => plan,
     }
+}
+
+/// Narrows `matchers` to the ones a physical table can evaluate, or `None` when
+/// one of them rules the table out entirely.
+///
+/// A label the table has no column for reads as an empty string on all of its
+/// series, so such a matcher holds for every one of them or for none. Dropping
+/// it in the first case also keeps `matchers_to_expr` from planning an aliased
+/// literal, which a filter cannot execute. Column lookup mirrors that function,
+/// down to treating the metric engine's own columns as absent.
+fn applicable_matchers(schema: &DFSchemaRef, matchers: &[Matcher]) -> Option<Vec<Matcher>> {
+    let mut applicable = Vec::with_capacity(matchers.len());
+    for matcher in matchers {
+        let has_column = !is_metric_engine_internal_column(&matcher.name)
+            && schema
+                .fields()
+                .iter()
+                .any(|field| field.name() == &matcher.name);
+        if has_column {
+            applicable.push(matcher.clone());
+        } else if !matcher.is_match("") {
+            return None;
+        }
+    }
+
+    Some(applicable)
 }
 
 impl Instance {
@@ -115,6 +150,143 @@ impl Instance {
         }
 
         Ok(results)
+    }
+
+    /// Handles a metric names query constrained by matchers on ordinary labels.
+    ///
+    /// [`Instance::handle_query_metric_names`] answers from table metadata, which
+    /// cannot resolve a label matcher: whether a metric carries `pod="abc"` is a
+    /// property of its data. The metric engine multiplexes the logical tables of
+    /// one physical table into a region holding the union of their label columns
+    /// alongside `__table_id`, so a single distinct scan per physical table
+    /// resolves the matchers for all of its logical tables at once.
+    ///
+    /// Only metric engine tables are covered. Tables on other engines share no
+    /// column space to scan, and a scan per table does not scale to the table
+    /// counts this API is expected to answer over.
+    #[tracing::instrument(skip_all)]
+    pub(crate) async fn handle_query_metric_names_by_labels(
+        &self,
+        matchers: Vec<Matcher>,
+        schema: &str,
+        start: SystemTime,
+        end: SystemTime,
+        ctx: &QueryContextRef,
+    ) -> Result<Vec<String>> {
+        let _timer = crate::metrics::PROMQL_QUERY_METRICS_ELAPSED
+            .with_label_values(&[ctx.get_db_string().as_str()])
+            .start_timer();
+
+        let catalog = ctx.current_catalog();
+        let mut table_ids = HashSet::new();
+        for physical in self.physical_metric_tables(catalog, schema, ctx).await? {
+            table_ids.extend(
+                self.scan_matching_table_ids(physical, &matchers, start, end, ctx)
+                    .await?,
+            );
+        }
+
+        // Batch-resolve only the ids the scan produced. An id dropped between the
+        // scan and here simply has no entry.
+        let table_ids = table_ids.into_iter().collect::<Vec<_>>();
+        let mut names = self
+            .catalog_manager
+            .tables_by_ids(catalog, schema, &table_ids)
+            .await
+            .context(CatalogSnafu)?
+            .into_iter()
+            .map(|table| table.table_info().name.clone())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        Ok(names)
+    }
+
+    /// Returns the metric engine physical tables of a schema.
+    ///
+    /// Their data regions carry the union of their logical tables' label columns,
+    /// so scanning these covers every metric of the schema.
+    async fn physical_metric_tables(
+        &self,
+        catalog: &str,
+        schema: &str,
+        ctx: &QueryContextRef,
+    ) -> Result<Vec<TableRef>> {
+        let mut tables = self.catalog_manager.tables(catalog, schema, Some(ctx));
+        let mut physical_tables = Vec::new();
+
+        while let Some(table) = tables.next().await {
+            let table = table.context(CatalogSnafu)?;
+            if table.table_info().is_physical_table() {
+                physical_tables.push(table);
+            }
+        }
+
+        Ok(physical_tables)
+    }
+
+    /// Returns the `__table_id`s of `physical` carrying a row that matches every
+    /// matcher within the time range.
+    async fn scan_matching_table_ids(
+        &self,
+        physical: TableRef,
+        matchers: &[Matcher],
+        start: SystemTime,
+        end: SystemTime,
+        ctx: &QueryContextRef,
+    ) -> Result<Vec<TableId>> {
+        let table_name = physical.table_info().full_table_name();
+        let dataframe = self
+            .query_engine
+            .read_table(physical.clone())
+            .with_context(|_| ReadTableSnafu {
+                table_name: table_name.clone(),
+            })?;
+        let scan_plan = dataframe.into_unoptimized_plan();
+        let Some(matchers) = applicable_matchers(scan_plan.schema(), matchers) else {
+            return Ok(Vec::new());
+        };
+
+        let conditions = PromPlanner::matchers_to_expr(Matchers::new(matchers), scan_plan.schema())
+            .context(PrometheusLabelValuesQueryPlanSnafu)?;
+        let logical_plan = promql::label_values::rewrite_label_values_query(
+            physical,
+            scan_plan,
+            conditions,
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            start,
+            end,
+        )
+        .context(PrometheusLabelValuesQueryPlanSnafu)?;
+
+        let results = self
+            .query_engine
+            .execute(logical_plan, ctx.clone())
+            .await
+            .context(ExecLogicalPlanSnafu)?;
+        let batches = match results.data {
+            OutputData::Stream(stream) => util::collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?,
+            OutputData::RecordBatches(rbs) => rbs.take(),
+            _ => unreachable!("should not happen"),
+        };
+
+        let mut table_ids = Vec::new();
+        for batch in batches {
+            // Only one column in results, ensured by `rewrite_label_values_query`.
+            let column = batch.column(0);
+            let ids = column
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .with_context(|| UnexpectedColumnTypeSnafu {
+                    table_name: table_name.clone(),
+                    column: DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    data_type: column.data_type().to_string(),
+                })?;
+            table_ids.extend(ids.iter().flatten());
+        }
+
+        Ok(table_ids)
     }
 
     /// Handles label values query request, returns the values.
@@ -200,11 +372,74 @@ impl Instance {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc as StdArc;
+
     use datafusion::arrow::array::Int64Array;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    use datafusion::common::DFSchema;
     use datafusion::prelude::{SessionConfig, SessionContext};
     use datafusion_expr::{LogicalPlanBuilder, Sort, col, lit};
 
     use super::*;
+
+    fn schema_with(columns: &[&str]) -> DFSchemaRef {
+        let fields = columns
+            .iter()
+            .map(|name| Field::new(*name, DataType::Utf8, true))
+            .collect::<Vec<_>>();
+        StdArc::new(DFSchema::try_from(ArrowSchema::new(fields)).unwrap())
+    }
+
+    fn matchers_of(selector: &str) -> Vec<Matcher> {
+        let promql_parser::parser::Expr::VectorSelector(selector) =
+            promql_parser::parser::parse(selector).unwrap()
+        else {
+            panic!("expected a vector selector")
+        };
+        selector.matchers.matchers
+    }
+
+    #[test]
+    fn a_missing_column_drops_a_matcher_that_accepts_the_empty_string() {
+        // Prometheus reads a label a series does not carry as an empty string, so
+        // these hold for every series of the table and must not remove it.
+        let schema = schema_with(&["host"]);
+        for selector in [
+            r#"{host="host1", pod!="abc"}"#,
+            r#"{host="host1", pod=~".*"}"#,
+            r#"{host="host1", pod=""}"#,
+        ] {
+            let applicable = applicable_matchers(&schema, &matchers_of(selector)).unwrap();
+            assert_eq!(
+                vec!["host".to_string()],
+                applicable
+                    .iter()
+                    .map(|matcher| matcher.name.clone())
+                    .collect::<Vec<_>>(),
+                "{selector}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_column_rules_the_table_out_when_the_matcher_needs_a_value() {
+        let schema = schema_with(&["host"]);
+        for selector in [r#"{pod="abc"}"#, r#"{pod=~"a.+"}"#] {
+            assert!(
+                applicable_matchers(&schema, &matchers_of(selector)).is_none(),
+                "{selector}"
+            );
+        }
+    }
+
+    #[test]
+    fn metric_engine_internal_columns_are_not_matchable_labels() {
+        // `__table_id` is a real column of the physical table, but the planner
+        // treats it as absent, so a matcher on it must not become a predicate.
+        let schema = schema_with(&[DATA_SCHEMA_TABLE_ID_COLUMN_NAME]);
+        let matchers = matchers_of(&format!(r#"{{{DATA_SCHEMA_TABLE_ID_COLUMN_NAME}="1024"}}"#));
+        assert!(applicable_matchers(&schema, &matchers).is_none());
+    }
 
     #[tokio::test]
     async fn remove_output_sort_keeps_schema_and_row_selection() {

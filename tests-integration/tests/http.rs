@@ -1516,6 +1516,66 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .unwrap()
     );
 
+    // query `__name__` by a matcher on an ordinary label: the metric engine
+    // physical tables are scanned, so only metrics carrying the label value are
+    // returned. `demo_metrics` shares `phy` with `demo` but has no `host` value.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host1\"}&start=0&end=600")
+        .send()
+        .await;
+    let status = res.status();
+    let text = res.text().await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let prom_resp = serde_json::from_str::<PrometheusJsonResponse>(&text).unwrap();
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+
+    // `__name__` matchers narrow the names the data resolved: `multi_labels`
+    // also carries `idc="idc1"` but its name does not match.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\"demo.*\", idc=\"idc1\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+        ]))
+        .unwrap()
+    );
+
+    // The time range selects the series: `demo` carries `host="host2"` only at
+    // t=600, so narrowing the range drops it while `multi_labels` at t=0 stays.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host2\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host2\"}&start=0&end=300")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["multi_labels"])).unwrap()
+    );
+
     // buildinfo
     let res = client
         .get("/v1/prometheus/api/v1/status/buildinfo")

@@ -1509,6 +1509,20 @@ impl PrometheusHandler for Instance {
             .context(ExecuteQuerySnafu)
     }
 
+    async fn query_metric_names_by_labels(
+        &self,
+        matchers: Vec<Matcher>,
+        schema: &str,
+        start: SystemTime,
+        end: SystemTime,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_metric_names_by_labels(matchers, schema, start, end, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     async fn query_label_values(
         &self,
         metric: String,
