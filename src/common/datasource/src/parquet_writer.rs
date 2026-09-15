@@ -35,7 +35,7 @@ pub struct ParquetWriterLimits {
     /// Maximum rows in a row group.
     pub row_group_rows: usize,
     /// Flush when encoder memory or encoded size reaches this threshold.
-    pub writer_bytes: usize,
+    pub flush_threshold_bytes: usize,
     /// Maximum row groups retained in the file footer.
     pub max_row_groups: usize,
 }
@@ -67,7 +67,9 @@ impl ParquetFileWriter {
             .set_column_index_truncate_length(None);
         if let Some(limits) = limits {
             ensure!(
-                limits.row_group_rows > 0 && limits.writer_bytes > 0 && limits.max_row_groups > 0,
+                limits.row_group_rows > 0
+                    && limits.flush_threshold_bytes > 0
+                    && limits.max_row_groups > 0,
                 error::InvalidParquetWriterLimitsSnafu
             );
             props = props
@@ -131,8 +133,8 @@ impl ParquetFileWriter {
                     .write(&slice)
                     .context(error::WriteParquetSnafu { path: &path })?;
                 if limits.is_some_and(|limits| {
-                    encoder.memory_size() >= limits.writer_bytes
-                        || encoder.in_progress_size() >= limits.writer_bytes
+                    encoder.memory_size() >= limits.flush_threshold_bytes
+                        || encoder.in_progress_size() >= limits.flush_threshold_bytes
                 }) {
                     encoder
                         .flush()
@@ -296,7 +298,7 @@ mod tests {
             1,
             Some(ParquetWriterLimits {
                 row_group_rows: 2,
-                writer_bytes: usize::MAX,
+                flush_threshold_bytes: usize::MAX,
                 max_row_groups: 2,
             }),
         )
@@ -351,7 +353,7 @@ mod tests {
             1,
             Some(ParquetWriterLimits {
                 row_group_rows: 2,
-                writer_bytes: usize::MAX,
+                flush_threshold_bytes: usize::MAX,
                 max_row_groups: 1,
             }),
         )
@@ -375,7 +377,7 @@ mod tests {
             1,
             Some(ParquetWriterLimits {
                 row_group_rows: 100,
-                writer_bytes: 1,
+                flush_threshold_bytes: 1,
                 max_row_groups: 2,
             }),
         )

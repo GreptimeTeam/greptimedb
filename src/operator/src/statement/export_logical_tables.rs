@@ -38,7 +38,7 @@ use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col};
 use futures::StreamExt;
 use object_store::ObjectStore;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID, DATA_SCHEMA_TSID_COLUMN_NAME as TSID,
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
@@ -71,7 +71,7 @@ impl Default for LogicalTableExportLimits {
             conversion_bytes: 1024 * 1024,
             writer: ParquetWriterLimits {
                 row_group_rows: 8192,
-                writer_bytes: 8 * 1024 * 1024,
+                flush_threshold_bytes: 8 * 1024 * 1024,
                 max_row_groups: 4096,
             },
         }
@@ -95,7 +95,7 @@ impl LogicalTableExportLimits {
 /// references supplies no snapshot isolation or locking guarantee.
 pub struct LogicalTableExport {
     physical_table: TableRef,
-    projection: Vec<usize>,
+    scan_projection: Vec<usize>,
     logical_tables: BTreeMap<TableId, LogicalTableProjection>,
 }
 
@@ -127,8 +127,8 @@ impl LogicalTableExport {
                 reason: "physical schema has no __table_id",
             },
         )?;
-        let mut projection = BTreeSet::from([id_index]);
-        let mut logical = BTreeMap::new();
+        let mut scan_projection = BTreeSet::from([id_index]);
+        let mut logical_tables = BTreeMap::new();
         for table in tables {
             let info = table.table_info();
             let name = &info.name;
@@ -178,9 +178,9 @@ impl LogicalTableExport {
                     Ok(index)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            projection.extend(indices.iter().copied());
+            scan_projection.extend(indices.iter().copied());
             ensure!(
-                logical
+                logical_tables
                     .insert(
                         info.table_id(),
                         LogicalTableProjection {
@@ -195,10 +195,10 @@ impl LogicalTableExport {
                 }
             );
         }
-        let projection = projection.into_iter().collect::<Vec<_>>();
-        for file in logical.values_mut() {
+        let scan_projection = scan_projection.into_iter().collect::<Vec<_>>();
+        for file in logical_tables.values_mut() {
             for index in &mut file.projection {
-                *index = projection.binary_search(index).map_err(|_| {
+                *index = scan_projection.binary_search(index).map_err(|_| {
                     error::UnexpectedSnafu {
                         violated: "logical column missing from physical projection",
                     }
@@ -208,12 +208,12 @@ impl LogicalTableExport {
         }
         Ok(Self {
             physical_table: physical,
-            projection,
-            logical_tables: logical,
+            scan_projection,
+            logical_tables,
         })
     }
 
-    fn plan(&self, time_range: Option<&TimestampRange>) -> Result<LogicalPlan> {
+    fn build_plan(&self, time_range: Option<&TimestampRange>) -> Result<LogicalPlan> {
         let info = self.physical_table.table_info();
         let filters = self
             .physical_table
@@ -234,7 +234,7 @@ impl LogicalTableExport {
                 info.name.clone(),
             ),
             source,
-            Some(self.projection.clone()),
+            Some(self.scan_projection.clone()),
             filters.clone(),
         )
         .context(error::BuildDfLogicalPlanSnafu)?;
@@ -283,7 +283,7 @@ impl StatementExecutor {
             result = async {
                 let store = build_backend_for_write(&format!("{}/", directory.trim_end_matches('/')), connection, &self.local_file_access)
                     .await.context(error::BuildBackendSnafu)?;
-                let output = self.query_engine.execute(unit.plan(time_range)?, query_ctx)
+                let output = self.query_engine.execute(unit.build_plan(time_range)?, query_ctx)
                     .await.context(error::ExecLogicalPlanSnafu)?;
                 let stream = match output.data {
                     OutputData::Stream(stream) => stream,
@@ -293,11 +293,11 @@ impl StatementExecutor {
                 Ok((store, stream))
             } => result?,
         };
-        export_cancellable_stream(unit, stream, &store, limits, cancellation).await
+        export_stream(unit, stream, &store, limits, cancellation).await
     }
 }
 
-async fn export_cancellable_stream(
+async fn export_stream(
     unit: &LogicalTableExport,
     stream: SendableRecordBatchStream,
     store: &ObjectStore,
@@ -305,10 +305,14 @@ async fn export_cancellable_stream(
     cancellation: &CancellationToken,
 ) -> Result<LogicalTableExportSummary> {
     let mut active = None;
-    let result = export_stream(unit, stream, store, limits, cancellation, &mut active).await;
+    let result = write_tables(unit, stream, store, limits, cancellation, &mut active).await;
     if result.is_err()
         && let Some(writer) = active
-        && let Err(cleanup_error) = abort_active(writer).await
+        && let Err(cleanup_error) = writer
+            .writer
+            .abort()
+            .await
+            .map_err(|error| map_writer_error(error, &writer.path))
     {
         common_telemetry::warn!(cleanup_error; "Failed to clean up incomplete Metric export file");
     }
@@ -323,17 +327,13 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
     Ok(())
 }
 
-async fn abort_active(writer: LogicalTableWriter) -> Result<()> {
-    writer_result(writer.writer.abort().await, &writer.path)
-}
-
-async fn export_stream(
+async fn write_tables(
     unit: &LogicalTableExport,
     mut stream: SendableRecordBatchStream,
     store: &ObjectStore,
     limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
-    active: &mut Option<LogicalTableWriter>,
+    active: &mut Option<ActiveWriter>,
 ) -> Result<LogicalTableExportSummary> {
     let id_index =
         stream
@@ -397,7 +397,7 @@ async fn export_stream(
             check_cancelled(cancellation)?;
             if let Some(file) = unit.logical_tables.get(&id) {
                 if active.is_none() {
-                    *active = Some(LogicalTableWriter::open(id, file, store, limits).await?);
+                    *active = Some(ActiveWriter::open(id, file, store, limits).await?);
                     written.insert(id);
                     summary.files += 1;
                 }
@@ -409,7 +409,7 @@ async fn export_stream(
                 })?;
                 let mut offset = start;
                 while offset < end {
-                    let (expanded, consumed) = convert_slice(
+                    let (expanded, consumed) = expand_bounded_slice(
                         projected.clone(),
                         file.schema.clone(),
                         offset,
@@ -419,10 +419,11 @@ async fn export_stream(
                     .await?;
                     check_cancelled(cancellation)?;
                     // Do not drop an in-flight file operation before cleanup.
-                    writer_result(
-                        writer.writer.write(expanded, Some(cancellation)).await,
-                        &writer.path,
-                    )?;
+                    writer
+                        .writer
+                        .write(expanded, Some(cancellation))
+                        .await
+                        .map_err(|error| map_writer_error(error, &writer.path))?;
                     check_cancelled(cancellation)?;
                     offset += consumed;
                     summary.rows += consumed;
@@ -437,7 +438,7 @@ async fn export_stream(
     for (&id, file) in &unit.logical_tables {
         if !written.contains(&id) {
             check_cancelled(cancellation)?;
-            *active = Some(LogicalTableWriter::open(id, file, store, limits).await?);
+            *active = Some(ActiveWriter::open(id, file, store, limits).await?);
             finish_active(active, cancellation).await?;
             summary.files += 1;
         }
@@ -446,13 +447,13 @@ async fn export_stream(
     Ok(summary)
 }
 
-struct LogicalTableWriter {
+struct ActiveWriter {
     table_id: u32,
     path: String,
     writer: ParquetFileWriter,
 }
 
-impl LogicalTableWriter {
+impl ActiveWriter {
     async fn open(
         id: u32,
         table: &LogicalTableProjection,
@@ -469,17 +470,15 @@ impl LogicalTableWriter {
                 reason: format!("output already exists: {path}")
             }
         );
-        let writer = writer_result(
-            ParquetFileWriter::open(
-                table.schema.clone(),
-                store.clone(),
-                &path,
-                1,
-                Some(limits.writer),
-            )
-            .await,
+        let writer = ParquetFileWriter::open(
+            table.schema.clone(),
+            store.clone(),
             &path,
-        )?;
+            1,
+            Some(limits.writer),
+        )
+        .await
+        .map_err(|error| map_writer_error(error, &path))?;
         Ok(Self {
             table_id: id,
             path,
@@ -489,18 +488,22 @@ impl LogicalTableWriter {
 }
 
 async fn finish_active(
-    active: &mut Option<LogicalTableWriter>,
+    active: &mut Option<ActiveWriter>,
     cancellation: &CancellationToken,
 ) -> Result<()> {
     if let Some(writer) = active.as_mut() {
-        writer_result(writer.writer.finish(Some(cancellation)).await, &writer.path)?;
+        writer
+            .writer
+            .finish(Some(cancellation))
+            .await
+            .map_err(|error| map_writer_error(error, &writer.path))?;
         check_cancelled(cancellation)?;
         *active = None;
     }
     Ok(())
 }
 
-async fn convert_slice(
+async fn expand_bounded_slice(
     batch: RecordBatch,
     schema: SchemaRef,
     start: usize,
@@ -508,7 +511,7 @@ async fn convert_slice(
     budget: usize,
 ) -> Result<(RecordBatch, usize)> {
     common_runtime::spawn_blocking_global(move || {
-        let len = bounded_slice_len(&batch, start, end, budget)?;
+        let len = rows_within_budget(&batch, start, end, budget)?;
         let slice = batch.slice(start, len);
         let arrays = slice
             .columns()
@@ -523,27 +526,27 @@ async fn convert_slice(
     .context(error::JoinTaskSnafu)?
 }
 
-fn writer_result<T>(result: common_datasource::error::Result<T>, path: &str) -> Result<T> {
-    match result {
-        Err(common_datasource::error::Error::ParquetWriteCancelled {}) => {
-            error::LogicalTableExportCancelledSnafu.fail()
+fn map_writer_error(source: common_datasource::error::Error, path: &str) -> error::Error {
+    match source {
+        common_datasource::error::Error::ParquetWriteCancelled {} => {
+            error::LogicalTableExportCancelledSnafu.build()
         }
-        Err(common_datasource::error::Error::InvalidParquetWriterLimits {}) => {
+        common_datasource::error::Error::InvalidParquetWriterLimits {} => {
             InvalidLogicalTableExportSnafu {
                 reason: "Parquet writer limits must be positive",
             }
-            .fail()
+            .build()
         }
-        Err(common_datasource::error::Error::ParquetWriterResource { reason }) => {
-            LogicalTableExportResourceSnafu { reason }.fail()
+        common_datasource::error::Error::ParquetWriterResource { reason } => {
+            LogicalTableExportResourceSnafu { reason }.build()
         }
-        result => result.context(error::WriteStreamToFileSnafu { path }),
+        source => error::WriteStreamToFileSnafu { path }.into_error(source),
     }
 }
 
 // Count only selected logical values before dictionary expansion, including nested
 // histogram lists/structs. Offset and validity overhead is charged per value.
-fn value_bytes(array: &dyn Array, row: usize) -> Result<usize> {
+fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
     if array.is_null(row) {
         return Ok(32);
     }
@@ -560,7 +563,9 @@ fn value_bytes(array: &dyn Array, row: usize) -> Result<usize> {
                 .columns()
                 .iter()
                 .try_fold(0usize, |sum, child| {
-                    Ok::<_, error::Error>(sum.saturating_add(value_bytes(child.as_ref(), row)?))
+                    Ok::<_, error::Error>(
+                        sum.saturating_add(estimate_value_size(child.as_ref(), row)?),
+                    )
                 })?
         }
         DataType::List(_) => {
@@ -568,7 +573,7 @@ fn value_bytes(array: &dyn Array, row: usize) -> Result<usize> {
             let offsets = list.value_offsets();
             (offsets[row] as usize..offsets[row + 1] as usize).try_fold(0usize, |sum, index| {
                 Ok::<_, error::Error>(
-                    sum.saturating_add(value_bytes(list.values().as_ref(), index)?),
+                    sum.saturating_add(estimate_value_size(list.values().as_ref(), index)?),
                 )
             })?
         }
@@ -576,7 +581,7 @@ fn value_bytes(array: &dyn Array, row: usize) -> Result<usize> {
             downcast_dictionary_array! {
                 array => {
                     match array.key(row) {
-                        Some(index) => value_bytes(array.values().as_ref(), index)?,
+                        Some(index) => estimate_value_size(array.values().as_ref(), index)?,
                         None => 0,
                     }
                 },
@@ -592,7 +597,7 @@ fn value_bytes(array: &dyn Array, row: usize) -> Result<usize> {
     Ok(bytes.saturating_add(16))
 }
 
-fn bounded_slice_len(
+fn rows_within_budget(
     batch: &RecordBatch,
     start: usize,
     end: usize,
@@ -602,7 +607,7 @@ fn bounded_slice_len(
     let mut row = start;
     while row < end {
         let row_bytes = batch.columns().iter().try_fold(0usize, |sum, array| {
-            Ok::<_, error::Error>(sum.saturating_add(value_bytes(array.as_ref(), row)?))
+            Ok::<_, error::Error>(sum.saturating_add(estimate_value_size(array.as_ref(), row)?))
         })?;
         if row_bytes > budget.saturating_sub(bytes) {
             break;

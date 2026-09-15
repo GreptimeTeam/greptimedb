@@ -137,7 +137,7 @@ async fn routes_across_batches_and_writes_empty_files() {
             vec![Some("a"), Some("b"), Some("unselected")],
         ),
     ];
-    let result = export_stream(
+    let result = write_tables(
         &unit,
         stream(batches),
         &store,
@@ -230,7 +230,7 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
     ] {
         let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
         let mut active = None;
-        let err = export_stream(
+        let err = write_tables(
             &unit,
             stream(batches),
             &store,
@@ -251,7 +251,7 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
 async fn existing_outputs_are_not_overwritten() {
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
     store.write("cpu.v1.parquet", "keep").await.unwrap();
-    let err = export_stream(
+    let err = write_tables(
         &unit(),
         stream(vec![batch(vec![Some(1025)], vec![None])]),
         &store,
@@ -296,9 +296,9 @@ fn dictionary_and_nested_histogram_values_are_bounded_before_expansion() {
             .collect::<Vec<_>>(),
     ));
     let batch = RecordBatch::try_new(schema, arrays).unwrap();
-    assert_eq!(bounded_slice_len(&batch, 0, 3, 4300).unwrap(), 1);
-    assert!(bounded_slice_len(&batch, 0, 3, 4096).is_err());
-    assert_eq!(bounded_slice_len(&batch, 0, 3, 15000).unwrap(), 3);
+    assert_eq!(rows_within_budget(&batch, 0, 3, 4300).unwrap(), 1);
+    assert!(rows_within_budget(&batch, 0, 3, 4096).is_err());
+    assert_eq!(rows_within_budget(&batch, 0, 3, 15000).unwrap(), 3);
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn validates_membership_and_projects_only_selected_columns() {
     let one =
         LogicalTableExport::try_new(unit.physical_table.clone(), std::slice::from_ref(&selected))
             .unwrap();
-    assert_eq!(one.projection, vec![0, 3]);
+    assert_eq!(one.scan_projection, vec![0, 3]);
     assert_eq!(one.logical_tables[&1025].projection, vec![1]);
     assert!(
         LogicalTableExport::try_new(unit.physical_table.clone(), &[selected.clone(), selected])
@@ -360,7 +360,7 @@ async fn cancellation_drops_input_and_aborts_active_upload() {
         let stream =
             common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(Box::pin(df_stream))
                 .unwrap();
-        let result = export_cancellable_stream(
+        let result = export_stream(
             &unit,
             Box::pin(stream),
             &store,
@@ -428,13 +428,9 @@ async fn native_histogram_parquet_roundtrip() {
         },
         ..Default::default()
     };
-    let mut active = Some(
-        LogicalTableWriter::open(1, &file, &store, limits)
-            .await
-            .unwrap(),
-    );
+    let mut active = Some(ActiveWriter::open(1, &file, &store, limits).await.unwrap());
     let (expanded, rows) =
-        convert_slice(batch.clone(), schema.clone(), 0, 2, limits.conversion_bytes)
+        expand_bounded_slice(batch.clone(), schema.clone(), 0, 2, limits.conversion_bytes)
             .await
             .unwrap();
     assert_eq!(rows, 2);
@@ -527,7 +523,7 @@ async fn cancellation_waits_for_file_creation_before_cleanup() {
     );
     let cancellation = CancellationToken::new();
     let unit = unit();
-    let export = export_cancellable_stream(
+    let export = export_stream(
         &unit,
         stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
         &store,
@@ -579,7 +575,7 @@ async fn cleanup_failure_preserves_resource_error() {
                 .build()
                 .unwrap(),
         );
-    let result = export_cancellable_stream(
+    let result = export_stream(
         &unit(),
         stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
         &store,
