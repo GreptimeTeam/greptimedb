@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{fs, io};
 
@@ -49,14 +51,25 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     let client = Client::builder()
         .timeout(Duration::from_secs_f64(args.http_timeout))
         .build()?;
-    let base = run_target(args.base_http_port, &tables, &configured_queries, &client).await;
+    let response_artifacts = args.output.as_deref().map(ResponseArtifacts::new);
+    let base = run_target(
+        args.base_http_port,
+        &tables,
+        &configured_queries,
+        &client,
+        0,
+        response_artifacts.as_ref(),
+    )
+    .await?;
     let candidate = run_target(
         args.candidate_http_port,
         &tables,
         &configured_queries,
         &client,
+        1,
+        response_artifacts.as_ref(),
     )
-    .await;
+    .await?;
     let thresholds = enforce_thresholds(&configured_queries, &base, &candidate)?;
     let status = if base.status == "failed"
         || candidate.status == "failed"
@@ -68,7 +81,7 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     } else {
         "ok"
     };
-    let report = json!({
+    let mut report = json!({
         "case_path": case_path,
         "case": case_metadata,
         "scenario": scenario_value,
@@ -79,11 +92,11 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
         "thresholds": thresholds,
         "status": status,
     });
-    let text = format!("{}\n", serde_json::to_string_pretty(&report)?);
     if let Some(path) = args.output {
-        fs::write(path, &text)?;
+        report["report_format_version"] = Value::from(2);
+        write_report(&path, &report)?;
     }
-    print!("{text}");
+    write_stdout_report(&report)?;
     if status == "failed" {
         std::process::exit(1);
     }
@@ -131,7 +144,9 @@ async fn run_target(
     tables: &[Table],
     configured_queries: &[Query],
     client: &Client,
-) -> QueryResult {
+    target_index: usize,
+    response_artifacts: Option<&ResponseArtifacts>,
+) -> Result<QueryResult> {
     let mut queries = configured_queries.to_vec();
     if queries.is_empty() {
         queries.push(Query {
@@ -150,52 +165,79 @@ async fn run_target(
     let db = &tables[0].database;
     let mut validation = Vec::new();
     let mut validation_errors = Vec::new();
-    for table in tables {
+    for (table_index, table) in tables.iter().enumerate() {
         let sql = format!("SHOW CREATE TABLE {}", sql_ident(&table.name));
-        let sample = http_post_sql(client, port, &sql, &table.database).await;
+        let mut sample = http_post_sql(client, port, &sql, &table.database).await;
+        let validation_index = validation.len();
+        let validation_error_start = validation_errors.len();
         if !sample["ok"].as_bool().unwrap_or(false) {
-            validation_errors.push(json!({
-                "sql": sql,
-                "error": sample.get("error"),
-                "response": sample.get("response"),
-            }));
+            validation_errors.push(validation_error(
+                &sql,
+                None,
+                sample.get("error").cloned().unwrap_or(Value::Null),
+                validation_index,
+            ));
         } else {
             for error in validate_show_create(&sample, table) {
-                validation_errors.push(json!({
-                    "sql": sql,
-                    "error": error,
-                    "response": sample.get("response"),
-                }));
+                validation_errors.push(validation_error(
+                    &sql,
+                    None,
+                    Value::String(error.to_string()),
+                    validation_index,
+                ));
             }
         }
+        persist_response(
+            response_artifacts,
+            &mut sample,
+            target_index,
+            table_index,
+            0,
+            0,
+        )?;
+        attach_response(&sample, &mut validation_errors[validation_error_start..]);
         validation.push(sample);
     }
-    let first = post_query(client, port, &queries[0], db).await;
+    let mut first = post_query(client, port, &queries[0], db).await;
+    let validation_index = validation.len();
+    let validation_error_start = validation_errors.len();
     if !first["ok"].as_bool().unwrap_or(false) {
-        validation_errors.push(json!({
-            "sql": queries[0].query,
-            "error": first.get("error"),
-            "response": first.get("response"),
-        }));
+        validation_errors.push(validation_error(
+            &queries[0].query,
+            None,
+            first.get("error").cloned().unwrap_or(Value::Null),
+            validation_index,
+        ));
     }
+    persist_response(response_artifacts, &mut first, target_index, 0, 1, 0)?;
+    attach_response(&first, &mut validation_errors[validation_error_start..]);
     validation.push(first);
 
     let mut measurements = Vec::with_capacity(queries.len());
-    for query in &queries {
-        for _ in 0..query.warmup {
-            let warmup = post_query(client, port, query, db).await;
+    for (query_index, query) in queries.iter().enumerate() {
+        for warmup_index in 0..query.warmup {
+            let mut warmup = post_query(client, port, query, db).await;
             if !warmup["ok"].as_bool().unwrap_or(false) {
-                validation_errors.push(json!({
+                let mut failure = json!({
                     "sql": query.query,
                     "phase": "warmup",
-                    "error": warmup.get("error"),
-                    "response": warmup.get("response"),
-                }));
+                    "error": warmup.get("error").cloned(),
+                });
+                move_response(&mut warmup, &mut failure);
+                persist_response(
+                    response_artifacts,
+                    &mut failure,
+                    target_index,
+                    query_index,
+                    2,
+                    warmup_index,
+                )?;
+                validation_errors.push(failure);
             }
         }
         let mut samples = Vec::with_capacity(query.iterations);
         let mut good_latencies = Vec::with_capacity(query.iterations);
-        for _ in 0..query.iterations {
+        for sample_index in 0..query.iterations {
             let mut sample = post_query(client, port, query, db).await;
             let execution_time = sample
                 .get("response")
@@ -211,6 +253,14 @@ async fn run_target(
             if sample["ok"].as_bool().unwrap_or(false) {
                 good_latencies.push(sample["latency_ms"].as_f64().unwrap_or_default());
             }
+            persist_response(
+                response_artifacts,
+                &mut sample,
+                target_index,
+                query_index,
+                3,
+                sample_index,
+            )?;
             samples.push(sample);
         }
         let median = (!good_latencies.is_empty()).then(|| median(&good_latencies));
@@ -231,11 +281,144 @@ async fn run_target(
         });
     }
     let failed = !validation_errors.is_empty() || measurements.iter().any(|m| m.status == "failed");
-    QueryResult {
+    Ok(QueryResult {
         validation,
         validation_errors,
         measurements,
         status: if failed { "failed" } else { "ok" }.to_string(),
+    })
+}
+
+fn write_report(path: &Path, report: &Value) -> Result<()> {
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, report)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_stdout_report(report: &Value) -> Result<()> {
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    serde_json::to_writer_pretty(&mut writer, report)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+struct ResponseArtifacts {
+    report_dir: PathBuf,
+}
+
+impl ResponseArtifacts {
+    fn new(report_path: &Path) -> Self {
+        Self {
+            report_dir: report_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+        }
+    }
+
+    fn persist(
+        &self,
+        sample: &mut Value,
+        target: usize,
+        query: usize,
+        phase: usize,
+        sample_index: usize,
+    ) -> Result<()> {
+        let Some(response) = sample.get("response") else {
+            return Ok(());
+        };
+        let relative_path = PathBuf::from("logs")
+            .join("responses")
+            .join(target.to_string())
+            .join(query.to_string())
+            .join(phase.to_string())
+            .join(format!("{sample_index}.json"));
+        let path = self.report_dir.join(&relative_path);
+        let parent = path
+            .parent()
+            .ok_or("response artifact path has no parent")?;
+        fs::create_dir_all(parent)?;
+        let file = fs::File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, response)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+
+        let sample = sample
+            .as_object_mut()
+            .ok_or("HTTP sample is not an object")?;
+        sample.remove("response");
+        sample.insert(
+            "response_ref".to_string(),
+            json!({"path": relative_path, "format": "json"}),
+        );
+        Ok(())
+    }
+}
+
+fn persist_response(
+    response_artifacts: Option<&ResponseArtifacts>,
+    sample: &mut Value,
+    target: usize,
+    query: usize,
+    phase: usize,
+    sample_index: usize,
+) -> Result<()> {
+    if let Some(response_artifacts) = response_artifacts {
+        response_artifacts.persist(sample, target, query, phase, sample_index)?;
+    }
+    Ok(())
+}
+
+fn attach_response(sample: &Value, errors: &mut [Value]) {
+    let (field, response) = if let Some(response_ref) = sample.get("response_ref") {
+        ("response_ref", response_ref)
+    } else if let Some(response) = sample.get("response") {
+        ("response", response)
+    } else {
+        return;
+    };
+    for error in errors {
+        error
+            .as_object_mut()
+            .expect("validation errors are objects")
+            .insert(field.to_string(), response.clone());
+    }
+}
+
+fn validation_error(
+    sql: &str,
+    phase: Option<&str>,
+    error: Value,
+    validation_sample: usize,
+) -> Value {
+    let mut error_record = json!({
+        "sql": sql,
+        "error": error,
+        "validation_sample": validation_sample,
+    });
+    if let Some(phase) = phase {
+        error_record
+            .as_object_mut()
+            .expect("validation errors are objects")
+            .insert("phase".to_string(), Value::String(phase.to_string()));
+    }
+    error_record
+}
+
+fn move_response(from: &mut Value, to: &mut Value) {
+    if let Some(response) = from
+        .as_object_mut()
+        .and_then(|sample| sample.remove("response"))
+    {
+        to.as_object_mut()
+            .expect("validation errors are objects")
+            .insert("response".to_string(), response);
     }
 }
 
@@ -388,6 +571,51 @@ fn value_as_f64(value: &Value) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persists_response_as_report_relative_reference() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let report = tempdir.path().join("query-regression-report.json");
+        let artifacts = ResponseArtifacts::new(&report);
+        let mut sample = json!({"ok": true, "response": {"data": ["full response"]}});
+
+        artifacts.persist(&mut sample, 1, 2, 3, 4).unwrap();
+
+        assert!(sample.get("response").is_none());
+        assert_eq!(
+            sample["response_ref"],
+            json!({"path": "logs/responses/1/2/3/4.json", "format": "json"})
+        );
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join("logs/responses/1/2/3/4.json")).unwrap(),
+            "{\"data\":[\"full response\"]}\n"
+        );
+    }
+
+    #[test]
+    fn failed_response_persistence_keeps_body_without_reference() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let report_parent = tempdir.path().join("not-a-directory");
+        fs::write(&report_parent, "not a directory").unwrap();
+        let artifacts = ResponseArtifacts::new(&report_parent.join("report.json"));
+        let mut sample = json!({"ok": true, "response": {"data": ["full response"]}});
+
+        assert!(artifacts.persist(&mut sample, 0, 0, 0, 0).is_err());
+        assert_eq!(sample["response"], json!({"data": ["full response"]}));
+        assert!(sample.get("response_ref").is_none());
+    }
+
+    #[test]
+    fn bodyless_sample_has_no_response_reference() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let artifacts =
+            ResponseArtifacts::new(&tempdir.path().join("query-regression-report.json"));
+        let mut sample = json!({"ok": false, "error": "connection refused"});
+
+        artifacts.persist(&mut sample, 0, 0, 0, 0).unwrap();
+
+        assert!(sample.get("response_ref").is_none());
+    }
 
     #[test]
     fn median_and_p95_match_python() {

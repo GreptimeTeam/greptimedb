@@ -351,7 +351,11 @@ with `render-remote-config`, starts both clusters, runs `prepare-remote` and
 `measure`, stops both datanodes, then runs `finalize-remote`. Finalization owns
 storage inspection and read-bench against the quiescent data homes. Both paths
 write `query-regression-report.json` in the case work directory and always clean
-up the remaining components.
+up the remaining components. When `query_regression_runner measure` receives `--output`, its
+report has `report_format_version: 2`; every response body otherwise exposed by the
+report is written as JSON below report-relative `logs/responses/<target>/<query>/<phase>/<sample>.json`
+and replaced with `response_ref` metadata (`path` and `format`). The workflow already uploads
+that `logs/**` tree. Without `--output`, stdout preserves the legacy inline response bodies.
 
 For local orchestration after building the three binaries, invoke the outer
 driver directly:

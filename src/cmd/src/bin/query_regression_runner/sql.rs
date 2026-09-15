@@ -15,7 +15,7 @@
 use std::time::Instant;
 
 use reqwest::Client;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::query_regression_runner::Result;
 
@@ -180,19 +180,20 @@ async fn post_form(client: &Client, url: String, form: &[(&str, &str)]) -> Value
                 Ok(raw) => {
                     let body = serde_json::from_str(&raw).unwrap_or_else(|_| json!({"raw": raw}));
                     let ok = status < 400 && !response_has_error(&body);
-                    let mut sample = json!({
-                        "ok": ok,
-                        "status": status,
-                        "latency_ms": started.elapsed().as_secs_f64() * 1000.0,
-                        "response": body,
-                    });
+                    let mut sample = Map::new();
+                    sample.insert("ok".to_string(), Value::Bool(ok));
+                    sample.insert("status".to_string(), Value::from(status));
+                    // Capture latency only after the entire body has been read,
+                    // parsed, and classified, before any report persistence.
+                    sample.insert(
+                        "latency_ms".to_string(),
+                        Value::from(started.elapsed().as_secs_f64() * 1000.0),
+                    );
+                    sample.insert("response".to_string(), body);
                     if status >= 400 {
-                        sample
-                            .as_object_mut()
-                            .expect("HTTP samples are objects")
-                            .insert("error".to_string(), Value::String(format!("HTTP {status}")));
+                        sample.insert("error".to_string(), Value::String(format!("HTTP {status}")));
                     }
-                    sample
+                    Value::Object(sample)
                 }
                 Err(error) => json!({
                     "ok": false,
