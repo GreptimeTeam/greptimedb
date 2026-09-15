@@ -24,6 +24,7 @@ use deadpool_postgres::{Config, Runtime};
 use servers::tls::TlsOption;
 use snafu::{OptionExt, ResultExt};
 use tokio_postgres::NoTls;
+use url::Url;
 
 use crate::error::{self, Result};
 
@@ -60,7 +61,14 @@ pub async fn create_postgres_pool(
     })?;
     cfg.url = Some(postgres_url.clone());
 
-    let pool = if let Some(tls_config) = tls_config {
+    let use_no_tls = tls_config
+        .as_ref()
+        .is_none_or(|tls_config| tls_config.mode == servers::tls::TlsMode::Disable)
+        || is_unix_socket_url(postgres_url);
+    let pool = if use_no_tls {
+        cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(error::CreatePostgresPoolSnafu)?
+    } else if let Some(tls_config) = tls_config {
         let pg_tls_config = convert_tls_option(&tls_config);
         let tls_connector =
             create_postgres_tls_connector(&pg_tls_config).map_err(|e| error::Error::Other {
@@ -75,6 +83,17 @@ pub async fn create_postgres_pool(
     };
 
     Ok(pool)
+}
+
+fn is_unix_socket_url(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "host")
+                .map(|(_, host)| host.starts_with('/'))
+        })
+        .unwrap_or(false)
 }
 
 /// Builds a Postgres-backed metadata [`KvBackendRef`].
@@ -149,4 +168,17 @@ pub async fn build_postgres_election(
     )
     .await
     .context(error::KvBackendSnafu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_unix_socket_url;
+
+    #[test]
+    fn detects_postgres_unix_socket_url() {
+        assert!(is_unix_socket_url(
+            "postgresql://user@/db?host=%2Fvar%2Frun%2Fpostgresql"
+        ));
+        assert!(!is_unix_socket_url("postgresql://user@localhost/db"));
+    }
 }
