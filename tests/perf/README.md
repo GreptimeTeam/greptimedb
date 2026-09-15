@@ -353,9 +353,11 @@ storage inspection and read-bench against the quiescent data homes. Both paths
 write `query-regression-report.json` in the case work directory and always clean
 up the remaining components. When `query_regression_runner measure` receives `--output`, its
 report has `report_format_version: 2`; every response body otherwise exposed by the
-report is written as JSON below report-relative `logs/responses/<target>/<query>/<phase>/<sample>.json`
-and replaced with `response_ref` metadata (`path` and `format`). The workflow already uploads
-that `logs/**` tree. Without `--output`, stdout preserves the legacy inline response bodies.
+report, including successful and failed warmups, is written as JSON below report-relative
+`logs/responses/<namespace>/<target>/<query>/<phase>/<sample>.json` and replaced with
+`response_ref` metadata (`path` and `format`). Each invocation allocates a new namespace, so a
+frontend-restart retry retains previous bodies. The workflow already uploads that `logs/**` tree.
+Without `--output`, stdout preserves the legacy inline response bodies and omits warmup metadata.
 
 For local orchestration after building the three binaries, invoke the outer
 driver directly:

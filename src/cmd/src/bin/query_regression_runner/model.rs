@@ -241,6 +241,8 @@ pub(super) struct Measurement {
     pub(super) name: Option<String>,
     pub(super) kind: Option<String>,
     pub(super) iterations: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) warmups: Option<Vec<Value>>,
     pub(super) samples: Vec<Value>,
     pub(super) latency_ms_median: Option<f64>,
     pub(super) latency_ms_p95: Option<f64>,

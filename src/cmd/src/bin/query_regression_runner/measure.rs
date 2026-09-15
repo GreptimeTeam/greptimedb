@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
 use reqwest::Client;
@@ -51,7 +51,11 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     let client = Client::builder()
         .timeout(Duration::from_secs_f64(args.http_timeout))
         .build()?;
-    let response_artifacts = args.output.as_deref().map(ResponseArtifacts::new);
+    let response_artifacts = args
+        .output
+        .as_deref()
+        .map(ResponseArtifacts::new)
+        .transpose()?;
     let base = run_target(
         args.base_http_port,
         &tables,
@@ -173,7 +177,6 @@ async fn run_target(
         if !sample["ok"].as_bool().unwrap_or(false) {
             validation_errors.push(validation_error(
                 &sql,
-                None,
                 sample.get("error").cloned().unwrap_or(Value::Null),
                 validation_index,
             ));
@@ -181,7 +184,6 @@ async fn run_target(
             for error in validate_show_create(&sample, table) {
                 validation_errors.push(validation_error(
                     &sql,
-                    None,
                     Value::String(error.to_string()),
                     validation_index,
                 ));
@@ -204,7 +206,6 @@ async fn run_target(
     if !first["ok"].as_bool().unwrap_or(false) {
         validation_errors.push(validation_error(
             &queries[0].query,
-            None,
             first.get("error").cloned().unwrap_or(Value::Null),
             validation_index,
         ));
@@ -215,24 +216,31 @@ async fn run_target(
 
     let mut measurements = Vec::with_capacity(queries.len());
     for (query_index, query) in queries.iter().enumerate() {
+        // Warmups are retained only in artifact-mode reports; stdout keeps the
+        // legacy shape even though their bodies are still persisted when requested.
+        let mut warmups = response_artifacts.map(|_| Vec::with_capacity(query.warmup));
         for warmup_index in 0..query.warmup {
             let mut warmup = post_query(client, port, query, db).await;
-            if !warmup["ok"].as_bool().unwrap_or(false) {
+            let failed = !warmup["ok"].as_bool().unwrap_or(false);
+            persist_response(
+                response_artifacts,
+                &mut warmup,
+                target_index,
+                query_index,
+                2,
+                warmup_index,
+            )?;
+            if failed {
                 let mut failure = json!({
                     "sql": query.query,
                     "phase": "warmup",
                     "error": warmup.get("error").cloned(),
                 });
-                move_response(&mut warmup, &mut failure);
-                persist_response(
-                    response_artifacts,
-                    &mut failure,
-                    target_index,
-                    query_index,
-                    2,
-                    warmup_index,
-                )?;
+                attach_response(&warmup, std::slice::from_mut(&mut failure));
                 validation_errors.push(failure);
+            }
+            if let Some(warmups) = &mut warmups {
+                warmups.push(warmup_metadata(&warmup));
             }
         }
         let mut samples = Vec::with_capacity(query.iterations);
@@ -274,6 +282,7 @@ async fn run_target(
             name: query.name.clone(),
             kind: query.kind.clone(),
             iterations: samples.len(),
+            warmups,
             samples,
             latency_ms_median: median,
             latency_ms_p95: p95,
@@ -309,16 +318,33 @@ fn write_stdout_report(report: &Value) -> Result<()> {
 
 struct ResponseArtifacts {
     report_dir: PathBuf,
+    namespace: PathBuf,
 }
 
 impl ResponseArtifacts {
-    fn new(report_path: &Path) -> Self {
-        Self {
-            report_dir: report_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
+    fn new(report_path: &Path) -> Result<Self> {
+        let report_dir = report_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let responses_dir = report_dir.join("logs").join("responses");
+        fs::create_dir_all(&responses_dir)?;
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let pid = std::process::id();
+        for counter in 0..u32::MAX {
+            let namespace = PathBuf::from(format!("{pid}-{timestamp}-{counter}"));
+            match fs::create_dir(responses_dir.join(&namespace)) {
+                Ok(()) => {
+                    return Ok(Self {
+                        report_dir,
+                        namespace,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
+        Err("unable to allocate a unique response artifact namespace".into())
     }
 
     fn persist(
@@ -334,6 +360,7 @@ impl ResponseArtifacts {
         };
         let relative_path = PathBuf::from("logs")
             .join("responses")
+            .join(&self.namespace)
             .join(target.to_string())
             .join(query.to_string())
             .join(phase.to_string())
@@ -391,35 +418,22 @@ fn attach_response(sample: &Value, errors: &mut [Value]) {
     }
 }
 
-fn validation_error(
-    sql: &str,
-    phase: Option<&str>,
-    error: Value,
-    validation_sample: usize,
-) -> Value {
-    let mut error_record = json!({
+fn warmup_metadata(sample: &Value) -> Value {
+    let mut metadata = Map::new();
+    for field in ["ok", "status", "latency_ms", "error", "response_ref"] {
+        if let Some(value) = sample.get(field) {
+            metadata.insert(field.to_string(), value.clone());
+        }
+    }
+    Value::Object(metadata)
+}
+
+fn validation_error(sql: &str, error: Value, validation_sample: usize) -> Value {
+    json!({
         "sql": sql,
         "error": error,
         "validation_sample": validation_sample,
-    });
-    if let Some(phase) = phase {
-        error_record
-            .as_object_mut()
-            .expect("validation errors are objects")
-            .insert("phase".to_string(), Value::String(phase.to_string()));
-    }
-    error_record
-}
-
-fn move_response(from: &mut Value, to: &mut Value) {
-    if let Some(response) = from
-        .as_object_mut()
-        .and_then(|sample| sample.remove("response"))
-    {
-        to.as_object_mut()
-            .expect("validation errors are objects")
-            .insert("response".to_string(), response);
-    }
+    })
 }
 
 fn validate_show_create(result: &Value, table: &Table) -> Vec<&'static str> {
@@ -576,28 +590,107 @@ mod tests {
     fn persists_response_as_report_relative_reference() {
         let tempdir = tempfile::tempdir().unwrap();
         let report = tempdir.path().join("query-regression-report.json");
-        let artifacts = ResponseArtifacts::new(&report);
+        let artifacts = ResponseArtifacts::new(&report).unwrap();
         let mut sample = json!({"ok": true, "response": {"data": ["full response"]}});
 
         artifacts.persist(&mut sample, 1, 2, 3, 4).unwrap();
 
         assert!(sample.get("response").is_none());
+        let path = sample["response_ref"]["path"].as_str().unwrap();
+        assert!(path.starts_with("logs/responses/"));
+        assert!(path.ends_with("/1/2/3/4.json"));
+        assert_eq!(sample["response_ref"]["format"], "json");
         assert_eq!(
-            sample["response_ref"],
-            json!({"path": "logs/responses/1/2/3/4.json", "format": "json"})
-        );
-        assert_eq!(
-            fs::read_to_string(tempdir.path().join("logs/responses/1/2/3/4.json")).unwrap(),
+            fs::read_to_string(tempdir.path().join(path)).unwrap(),
             "{\"data\":[\"full response\"]}\n"
         );
     }
 
     #[test]
-    fn failed_response_persistence_keeps_body_without_reference() {
+    fn response_artifact_namespaces_preserve_prior_invocations() {
         let tempdir = tempfile::tempdir().unwrap();
-        let report_parent = tempdir.path().join("not-a-directory");
-        fs::write(&report_parent, "not a directory").unwrap();
-        let artifacts = ResponseArtifacts::new(&report_parent.join("report.json"));
+        let report = tempdir.path().join("query-regression-report.json");
+        let first = ResponseArtifacts::new(&report).unwrap();
+        let second = ResponseArtifacts::new(&report).unwrap();
+        assert_ne!(first.namespace, second.namespace);
+
+        let mut first_sample = json!({"response": {"body": "first"}});
+        let mut second_sample = json!({"response": {"body": "second"}});
+        first.persist(&mut first_sample, 0, 0, 0, 0).unwrap();
+        second.persist(&mut second_sample, 0, 0, 0, 0).unwrap();
+
+        let first_path = first_sample["response_ref"]["path"].as_str().unwrap();
+        let second_path = second_sample["response_ref"]["path"].as_str().unwrap();
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(first_path)).unwrap(),
+            "{\"body\":\"first\"}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(second_path)).unwrap(),
+            "{\"body\":\"second\"}\n"
+        );
+    }
+
+    #[test]
+    fn different_report_names_use_distinct_response_namespaces() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let first = ResponseArtifacts::new(&tempdir.path().join("first-report.json")).unwrap();
+        let second = ResponseArtifacts::new(&tempdir.path().join("second-report.json")).unwrap();
+        let mut first_sample = json!({"response": {"body": "first"}});
+        let mut second_sample = json!({"response": {"body": "second"}});
+
+        first.persist(&mut first_sample, 0, 0, 0, 0).unwrap();
+        second.persist(&mut second_sample, 0, 0, 0, 0).unwrap();
+
+        let first_path = first_sample["response_ref"]["path"].as_str().unwrap();
+        let second_path = second_sample["response_ref"]["path"].as_str().unwrap();
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(first_path)).unwrap(),
+            "{\"body\":\"first\"}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(second_path)).unwrap(),
+            "{\"body\":\"second\"}\n"
+        );
+    }
+
+    #[test]
+    fn warmup_metadata_retains_success_and_failure_references() {
+        let success = json!({
+            "ok": true,
+            "status": 200,
+            "latency_ms": 1.0,
+            "response_ref": {"path": "logs/responses/ns/0/0/2/0.json", "format": "json"}
+        });
+        let failure = json!({
+            "ok": false,
+            "status": 500,
+            "error": "HTTP 500",
+            "response_ref": {"path": "logs/responses/ns/0/0/2/1.json", "format": "json"}
+        });
+
+        assert_eq!(
+            warmup_metadata(&success)["response_ref"],
+            success["response_ref"]
+        );
+        assert_eq!(
+            warmup_metadata(&failure)["response_ref"],
+            failure["response_ref"]
+        );
+        let mut failure_record = json!({"phase": "warmup"});
+        attach_response(&failure, std::slice::from_mut(&mut failure_record));
+        assert_eq!(failure_record["response_ref"], failure["response_ref"]);
+    }
+
+    #[test]
+    fn post_creation_write_failure_keeps_body_without_reference() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let report = tempdir.path().join("query-regression-report.json");
+        let artifacts = ResponseArtifacts::new(&report).unwrap();
+        fs::remove_dir_all(tempdir.path().join("logs")).unwrap();
+        fs::write(tempdir.path().join("logs"), "not a directory").unwrap();
         let mut sample = json!({"ok": true, "response": {"data": ["full response"]}});
 
         assert!(artifacts.persist(&mut sample, 0, 0, 0, 0).is_err());
@@ -609,7 +702,7 @@ mod tests {
     fn bodyless_sample_has_no_response_reference() {
         let tempdir = tempfile::tempdir().unwrap();
         let artifacts =
-            ResponseArtifacts::new(&tempdir.path().join("query-regression-report.json"));
+            ResponseArtifacts::new(&tempdir.path().join("query-regression-report.json")).unwrap();
         let mut sample = json!({"ok": false, "error": "connection refused"});
 
         artifacts.persist(&mut sample, 0, 0, 0, 0).unwrap();
@@ -678,6 +771,7 @@ mod tests {
             name: Some("q".to_string()),
             kind: None,
             iterations: 1,
+            warmups: None,
             samples: vec![],
             latency_ms_median: median,
             latency_ms_p95: median,
