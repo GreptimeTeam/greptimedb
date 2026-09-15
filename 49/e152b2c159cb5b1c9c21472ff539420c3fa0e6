@@ -1,0 +1,31 @@
+src/mito2/src/read/scan_region.rs
+  s_917668e5144aba::t_1fff1d106e8ee5 1691-1711,2348-2384
+src/mito2/src/read/seq_scan.rs
+  s_917668e5144aba::t_312d61f809cacf 79-80
+src/mito2/src/read/series_scan.rs
+  s_917668e5144aba::t_e3ca07ca0af432 150-151
+src/mito2/src/read/unordered_scan.rs
+  s_917668e5144aba::t_b66bddfa65c7e7 64-65
+src/store-api/src/region_engine.rs
+  s_917668e5144aba::t_11176ea8264f88 309-311,340-345,352,387-391
+src/table/src/table/scan.rs
+  s_917668e5144aba::t_25d876a6d6bc6e 485,489-510,850-875
+tests-integration/tests/repartition.rs
+  s_917668e5144aba::t_38c3e228a66b38 120-259
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "49e152b2c159cb5b1c9c21472ff539420c3fa0e6",
+  "prompts": {},
+  "sessions": {
+    "s_917668e5144aba": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a314-ffdd-78a2-bd53-2b272122e83a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
