@@ -162,7 +162,7 @@ async fn routes_across_batches_and_writes_empty_files() {
         }
     );
     let (schema, cpu) = read(&store, "cpu.v1.parquet").await;
-    assert_eq!(schema.fields(), unit.logical[&1025].schema.fields());
+    assert_eq!(schema.fields(), unit.logical_tables[&1025].schema.fields());
     let values: Vec<_> = cpu
         .iter()
         .flat_map(|batch| {
@@ -175,10 +175,10 @@ async fn routes_across_batches_and_writes_empty_files() {
         .collect();
     assert_eq!(values, vec![Some("".into()), None, Some("a".into())]);
     let (schema, empty) = read(&store, "empty.parquet").await;
-    assert_eq!(schema.fields(), unit.logical[&1026].schema.fields());
+    assert_eq!(schema.fields(), unit.logical_tables[&1026].schema.fields());
     assert!(empty.is_empty());
     let (schema, requests) = read(&store, "requests.parquet").await;
-    assert_eq!(schema.fields(), unit.logical[&1027].schema.fields());
+    assert_eq!(schema.fields(), unit.logical_tables[&1027].schema.fields());
     assert_eq!(requests[0].column(1).null_count(), 1);
 }
 
@@ -310,22 +310,24 @@ fn validates_membership_and_projects_only_selected_columns() {
         vec![Field::new("a", DataType::Float64, true)],
         false,
     );
-    let one = LogicalTableExport::try_new(unit.physical.clone(), std::slice::from_ref(&selected))
-        .unwrap();
+    let one =
+        LogicalTableExport::try_new(unit.physical_table.clone(), std::slice::from_ref(&selected))
+            .unwrap();
     assert_eq!(one.projection, vec![0, 3]);
-    assert_eq!(one.logical[&1025].projection, vec![1]);
+    assert_eq!(one.logical_tables[&1025].projection, vec![1]);
     assert!(
-        LogicalTableExport::try_new(unit.physical.clone(), &[selected.clone(), selected]).is_err()
+        LogicalTableExport::try_new(unit.physical_table.clone(), &[selected.clone(), selected])
+            .is_err()
     );
     let unsafe_name = table(1030, "a/b", vec![], false);
-    assert!(LogicalTableExport::try_new(unit.physical.clone(), &[unsafe_name]).is_err());
+    assert!(LogicalTableExport::try_new(unit.physical_table.clone(), &[unsafe_name]).is_err());
     let wrong_type = table(
         1030,
         "wrong",
         vec![Field::new("a", DataType::Int32, true)],
         false,
     );
-    assert!(LogicalTableExport::try_new(unit.physical, &[wrong_type]).is_err());
+    assert!(LogicalTableExport::try_new(unit.physical_table, &[wrong_type]).is_err());
 }
 
 #[tokio::test]

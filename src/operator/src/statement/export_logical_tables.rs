@@ -44,6 +44,7 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use table::TableRef;
+use table::metadata::TableId;
 use table::table::adapter::DfTableProviderAdapter;
 use tokio_util::sync::CancellationToken;
 
@@ -93,9 +94,9 @@ impl LogicalTableExportLimits {
 /// Construct one unit per physical table, schema and time chunk. Capturing these
 /// references supplies no snapshot isolation or locking guarantee.
 pub struct LogicalTableExport {
-    physical: TableRef,
+    physical_table: TableRef,
     projection: Vec<usize>,
-    logical: BTreeMap<u32, LogicalTableProjection>,
+    logical_tables: BTreeMap<TableId, LogicalTableProjection>,
 }
 
 struct LogicalTableProjection {
@@ -206,16 +207,16 @@ impl LogicalTableExport {
             }
         }
         Ok(Self {
-            physical,
+            physical_table: physical,
             projection,
-            logical,
+            logical_tables: logical,
         })
     }
 
     fn plan(&self, time_range: Option<&TimestampRange>) -> Result<LogicalPlan> {
-        let info = self.physical.table_info();
+        let info = self.physical_table.table_info();
         let filters = self
-            .physical
+            .physical_table
             .schema()
             .timestamp_column()
             .and_then(|column| {
@@ -224,7 +225,7 @@ impl LogicalTableExport {
             .into_iter()
             .collect::<Vec<_>>();
         let source = Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(self.physical.clone()),
+            DfTableProviderAdapter::new(self.physical_table.clone()),
         )));
         let mut builder = LogicalPlanBuilder::scan_with_filters(
             DfTableReference::full(
@@ -390,11 +391,11 @@ async fn export_stream(
             while end < batch.num_rows() && ids.value(end) == id {
                 end += 1;
             }
-            if active.as_ref().is_some_and(|writer| writer.id != id) {
+            if active.as_ref().is_some_and(|writer| writer.table_id != id) {
                 finish_active(active, cancellation).await?;
             }
             check_cancelled(cancellation)?;
-            if let Some(file) = unit.logical.get(&id) {
+            if let Some(file) = unit.logical_tables.get(&id) {
                 if active.is_none() {
                     *active = Some(LogicalTableWriter::open(id, file, store, limits).await?);
                     written.insert(id);
@@ -433,7 +434,7 @@ async fn export_stream(
         }
     }
     finish_active(active, cancellation).await?;
-    for (&id, file) in &unit.logical {
+    for (&id, file) in &unit.logical_tables {
         if !written.contains(&id) {
             check_cancelled(cancellation)?;
             *active = Some(LogicalTableWriter::open(id, file, store, limits).await?);
@@ -446,7 +447,7 @@ async fn export_stream(
 }
 
 struct LogicalTableWriter {
-    id: u32,
+    table_id: u32,
     path: String,
     writer: ParquetFileWriter,
 }
@@ -479,7 +480,11 @@ impl LogicalTableWriter {
             .await,
             &path,
         )?;
-        Ok(Self { id, path, writer })
+        Ok(Self {
+            table_id: id,
+            path,
+            writer,
+        })
     }
 }
 
