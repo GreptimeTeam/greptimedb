@@ -333,6 +333,13 @@ pub struct SeriesDivideExec {
     metric: ExecutionPlanMetricsSet,
 }
 
+impl SeriesDivideExec {
+    /// The tag columns whose values are constant within each emitted series.
+    pub(super) fn tag_columns(&self) -> &[String] {
+        &self.tag_columns
+    }
+}
+
 impl ExecutionPlan for SeriesDivideExec {
     fn as_any(&self) -> &dyn Any {
         self

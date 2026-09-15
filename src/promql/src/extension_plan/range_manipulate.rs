@@ -451,6 +451,79 @@ pub struct RangeManipulateExec {
     properties: Arc<PlanProperties>,
 }
 
+/// The range-fold parameters and the pre-fold input a fused consumer needs to recompute a
+/// range function directly from the raw samples.
+pub(super) struct FusedRateSource {
+    pub input: Arc<dyn ExecutionPlan>,
+    pub range: Millisecond,
+    pub time_index: usize,
+    pub value_index: usize,
+}
+
+impl RangeManipulateExec {
+    /// Returns the evaluation grid when every requested column is a series label carried
+    /// through unchanged, or the evaluation time index itself.
+    pub fn series_group_grid(
+        &self,
+        columns: &[usize],
+    ) -> Option<(Millisecond, Millisecond, Millisecond)> {
+        for index in columns {
+            let field = self.output_schema.fields().get(*index)?;
+            // Field and range columns vary within a series, and another timestamp column is
+            // not proven to sit on this grid.
+            if self.field_columns.contains(field.name()) || field.name() == &self.time_range_column
+            {
+                return None;
+            }
+            if matches!(field.data_type(), DataType::Timestamp(_, _))
+                && field.name() != &self.time_index_column
+            {
+                return None;
+            }
+        }
+        Some((self.start, self.end, self.interval))
+    }
+
+    /// Accepts a `prom_rate`-shaped argument list when it reads exactly the columns this node
+    /// folds, over the same window and grid, so the fold can be skipped entirely.
+    ///
+    /// Restricted to millisecond samples with no selector offset: a fused consumer reads the
+    /// input timestamps directly, and only then are they already the millisecond values this
+    /// node would have produced.
+    pub(super) fn fused_rate_source(
+        &self,
+        timestamp_range: usize,
+        value: usize,
+        evaluation_time: usize,
+        range_length: i64,
+        grid: (i64, i64, i64),
+    ) -> Option<FusedRateSource> {
+        let input_schema = self.input.schema();
+        let time_index = input_schema.column_with_name(&self.time_index_column)?.0;
+        let value_field = self.output_schema.fields().get(value)?;
+        if self.offset != 0
+            || !matches!(
+                input_schema.field(time_index).data_type(),
+                DataType::Timestamp(TimeUnit::Millisecond, _)
+            )
+            || timestamp_range + 1 != self.output_schema.fields().len()
+            || self.output_schema.field(timestamp_range).name() != &self.time_range_column
+            || evaluation_time != time_index
+            || !self.field_columns.contains(value_field.name())
+            || range_length != self.range
+            || grid != (self.start, self.end, self.interval)
+        {
+            return None;
+        }
+        Some(FusedRateSource {
+            input: self.input.clone(),
+            range: self.range,
+            time_index,
+            value_index: value,
+        })
+    }
+}
+
 impl ExecutionPlan for RangeManipulateExec {
     fn as_any(&self) -> &dyn Any {
         self
@@ -752,69 +825,94 @@ impl RangeManipulateStream {
         input: &RecordBatch,
     ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
         let ts_column = input.column(self.time_index);
-        let scale = nanoseconds_per_native_tick(self.time_unit);
         let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
             DataFusionError::Execution("Time index column is not a timestamp".into())
         })?;
-        let timestamps = timestamps.values();
-        let timestamp =
-            |index| (timestamps[index] as i128) * scale + (self.offset as i128) * 1_000_000;
-        let len = timestamps.len();
-        if len == 0 {
-            return Ok((vec![], (self.start, self.end)));
-        }
-
-        // Shorten the range using wide arithmetic so timestamps near the native
-        // type limits retain every query-aligned evaluation point.
-        let query_start = self.start as i128;
-        let query_end = self.end as i128;
-        let interval = self.interval as i128;
-        let first_ts = timestamp(0).div_euclid(1_000_000);
-        // Preserve the query's alignment pattern when optimizing start time.
-        let remainder = (first_ts - query_start).rem_euclid(interval);
-        let first_ts_aligned = first_ts + (interval - remainder).rem_euclid(interval);
-        let last_ts_with_range =
-            (timestamp(len - 1) + (self.range as i128) * 1_000_000).div_euclid(1_000_000);
-        let remainder = (last_ts_with_range - query_start).rem_euclid(interval);
-        let last_ts_aligned = last_ts_with_range - remainder;
-        let start = query_start.max(first_ts_aligned);
-        let end = query_end.min(last_ts_aligned);
-        if start > end {
-            return Ok((vec![], (self.start, self.end)));
-        }
-        // The intersection is within the declared i64 query bounds.
-        let start = start as i64;
-        let end = end as i64;
-        let mut ranges = Vec::new();
-
-        // Range membership is decided on shifted native ticks, before the
-        // timestamp-range payload is converted to its millisecond ABI. This
-        // keeps sub-millisecond samples distinct in a range; equal millisecond
-        // payload values are not a reason to deduplicate input samples.
-        //
-        // Calculate for every aligned timestamp (`curr_ts`), assuming ordered timestamps.
-        let mut left = 0usize;
-        let mut right = 0usize;
-        for curr_ts in (start..=end).step_by(self.interval as _) {
-            let start_ts = (curr_ts as i128) * 1_000_000 - (self.range as i128) * 1_000_000;
-
-            while left < len && timestamp(left) <= start_ts {
-                left += 1;
-            }
-            right = right.max(left);
-            while right < len && timestamp(right) <= (curr_ts as i128) * 1_000_000 {
-                right += 1;
-            }
-
-            if left == right {
-                ranges.push((0, 0));
-            } else {
-                ranges.push((left as _, (right - left) as _));
-            }
-        }
-
-        Ok((ranges, (start, end)))
+        Ok(calculate_ranges(
+            timestamps.values(),
+            nanoseconds_per_native_tick(self.time_unit),
+            self.offset,
+            self.start,
+            self.end,
+            self.interval,
+            self.range,
+        ))
     }
+}
+
+/// Folds an ordered timestamp column into one `(offset, length)` window per aligned
+/// evaluation timestamp, together with the bounds those windows actually cover.
+///
+/// `scale` is nanoseconds per native tick and `offset_ms` is the selector offset. Range
+/// membership is decided on shifted native ticks so sub-millisecond samples stay distinct,
+/// while the returned bounds are on the millisecond evaluation grid.
+#[allow(clippy::type_complexity)]
+pub(super) fn calculate_ranges(
+    timestamps: &[i64],
+    scale: i128,
+    offset_ms: Millisecond,
+    req_start: Millisecond,
+    req_end: Millisecond,
+    interval_ms: Millisecond,
+    range_ms: Millisecond,
+) -> (Vec<(u32, u32)>, (i64, i64)) {
+    let timestamp =
+        |index: usize| (timestamps[index] as i128) * scale + (offset_ms as i128) * 1_000_000;
+    let len = timestamps.len();
+    if len == 0 {
+        return (vec![], (req_start, req_end));
+    }
+
+    // Shorten the range using wide arithmetic so timestamps near the native
+    // type limits retain every query-aligned evaluation point.
+    let query_start = req_start as i128;
+    let query_end = req_end as i128;
+    let interval = interval_ms as i128;
+    let first_ts = timestamp(0).div_euclid(1_000_000);
+    // Preserve the query's alignment pattern when optimizing start time.
+    let remainder = (first_ts - query_start).rem_euclid(interval);
+    let first_ts_aligned = first_ts + (interval - remainder).rem_euclid(interval);
+    let last_ts_with_range =
+        (timestamp(len - 1) + (range_ms as i128) * 1_000_000).div_euclid(1_000_000);
+    let remainder = (last_ts_with_range - query_start).rem_euclid(interval);
+    let last_ts_aligned = last_ts_with_range - remainder;
+    let start = query_start.max(first_ts_aligned);
+    let end = query_end.min(last_ts_aligned);
+    if start > end {
+        return (vec![], (req_start, req_end));
+    }
+    // The intersection is within the declared i64 query bounds.
+    let start = start as i64;
+    let end = end as i64;
+    let mut ranges = Vec::new();
+
+    // Range membership is decided on shifted native ticks, before the
+    // timestamp-range payload is converted to its millisecond ABI. This
+    // keeps sub-millisecond samples distinct in a range; equal millisecond
+    // payload values are not a reason to deduplicate input samples.
+    //
+    // Calculate for every aligned timestamp (`curr_ts`), assuming ordered timestamps.
+    let mut left = 0usize;
+    let mut right = 0usize;
+    for curr_ts in (start..=end).step_by(interval_ms as _) {
+        let start_ts = (curr_ts as i128) * 1_000_000 - (range_ms as i128) * 1_000_000;
+
+        while left < len && timestamp(left) <= start_ts {
+            left += 1;
+        }
+        right = right.max(left);
+        while right < len && timestamp(right) <= (curr_ts as i128) * 1_000_000 {
+            right += 1;
+        }
+
+        if left == right {
+            ranges.push((0, 0));
+        } else {
+            ranges.push((left as _, (right - left) as _));
+        }
+    }
+
+    (ranges, (start, end))
 }
 
 #[cfg(test)]

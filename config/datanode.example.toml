@@ -283,6 +283,10 @@ overwrite_entry_start_id = false
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
 
+## Whether PromQL range queries of the form `aggr(range_fn(...))` use the series-aware
+## aggregate operators. When false, these queries use the generic hash aggregate plan.
+#+ enable_promql_series_aggregate = true
+
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
 ## Setting it to 0 disables the limit (unbounded, default behavior).
