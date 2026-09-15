@@ -31,23 +31,37 @@ use regex::bytes::RegexSet;
 use session::SessionRef;
 use session::context::QueryContextRef;
 
-static SELECT_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^(SELECT @@(.*))").unwrap());
-static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(/\\* mysql-connector-j(.*))").unwrap());
-static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
-static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
+/// Matches the optional `GLOBAL`/`SESSION`/`LOCAL` scope MySQL accepts before `VARIABLES`.
+const VARIABLES_SCOPE: &str = "(GLOBAL |SESSION |LOCAL )?";
+
+static SELECT_VAR_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(SELECT\\s+@@(.*))").unwrap());
+static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        "(?i)^(SHOW {VARIABLES_SCOPE}VARIABLES LIKE 'lower_case_table_names'(.*))"
+    ))
+    .unwrap()
+});
+static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        "(?i)^(SHOW {VARIABLES_SCOPE}VARIABLES( LIKE (.*))?)"
+    ))
+    .unwrap()
+});
 static SHOW_WARNINGS_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(/\\* ApplicationName=.*)?SHOW WARNINGS").unwrap());
+    Lazy::new(|| Regex::new("(?i)^(SHOW WARNINGS)").unwrap());
 
 // SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP());
 static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SELECT TIMEDIFF\\(NOW\\(\\), UTC_TIMESTAMP\\(\\)\\))").unwrap());
 
 // sqlalchemy < 1.4.30
-static SHOW_SQL_MODE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'sql_mode'(.*))").unwrap());
+static SHOW_SQL_MODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        "(?i)^(SHOW {VARIABLES_SCOPE}VARIABLES LIKE 'sql_mode'(.*))"
+    ))
+    .unwrap()
+});
 
 static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
     RegexSet::new([
@@ -55,6 +69,7 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(ROLLBACK(.*))",
         "(?i)^(COMMIT(.*))",
         "(?i)^(START(.*))",
+        "(?i)^(BEGIN(.*))",
 
         // Set.
         "(?i)^(SET NAMES(.*))",
@@ -88,13 +103,9 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(/\\*!40101 SET(.*) \\*/)$",
 
         // DBeaver.
-        "(?i)^(/\\* ApplicationName=(.*)SHOW PLUGINS)",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW ENGINES)",
-        "(?i)^(/\\* ApplicationName=(.*)SELECT @@(.*))",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW @@(.*))",
-        "(?i)^(/\\* ApplicationName=(.*)SET net_write_timeout(.*))",
-        "(?i)^(/\\* ApplicationName=(.*)SET SQL_SELECT_LIMIT(.*))",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW VARIABLES(.*))",
+        "(?i)^(SHOW PLUGINS)",
+        "(?i)^(SHOW ENGINES)",
+        "(?i)^(SHOW @@(.*))",
 
         // pt-toolkit
         "(?i)^(/\\*!40101 SET(.*) \\*/)$",
@@ -227,10 +238,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
 }
 
 fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
-    if [&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
-        .iter()
-        .any(|r| r.is_match(query))
-    {
+    if SELECT_VAR_PATTERN.is_match(query) {
         select_variable(query, query_context)
     } else {
         None
@@ -311,6 +319,36 @@ fn check_others(query: &str, _query_ctx: QueryContextRef) -> Option<Output> {
     recordbatches.map(Output::new_with_record_batches)
 }
 
+/// Strips leading whitespace and SQL comments.
+///
+/// All patterns above are anchored at the start of the statement, but JDBC clients such as
+/// DataGrip and DBeaver prefix every statement they send with a `/* ApplicationName=... */`
+/// comment. Without stripping it first, those statements miss every pattern and reach the
+/// query engine, which rejects the ones this module exists to absorb.
+fn strip_leading_comments(query: &str) -> &str {
+    let mut rest = query.trim_start();
+    loop {
+        if let Some(tail) = rest.strip_prefix("/*") {
+            // An unterminated block comment leaves no statement to match against.
+            let Some(end) = tail.find("*/") else {
+                return "";
+            };
+            rest = tail[end + 2..].trim_start();
+        } else if rest.starts_with('#')
+            // MySQL only treats `--` as a comment when followed by whitespace.
+            || (rest.starts_with("--")
+                && rest[2..].chars().next().is_none_or(|c| c.is_whitespace()))
+        {
+            let Some(end) = rest.find('\n') else {
+                return "";
+            };
+            rest = rest[end + 1..].trim_start();
+        } else {
+            return rest;
+        }
+    }
+}
+
 // Check whether the query is a federated or driver setup command,
 // and return some faked results if there are any.
 pub(crate) fn check(
@@ -318,6 +356,8 @@ pub(crate) fn check(
     query_ctx: QueryContextRef,
     session: SessionRef,
 ) -> Option<Output> {
+    let query = strip_leading_comments(query);
+
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
     let the_6th_index = query.char_indices().nth(6).map(|(i, _)| i);
@@ -493,5 +533,79 @@ mod test {
             session.clone(),
         );
         assert!(output.is_some());
+    }
+
+    #[test]
+    fn test_strip_leading_comments() {
+        assert_eq!(strip_leading_comments("SELECT 1"), "SELECT 1");
+        assert_eq!(strip_leading_comments("  \n\tSELECT 1"), "SELECT 1");
+        assert_eq!(
+            strip_leading_comments("/* ApplicationName=DataGrip 2026.2.5 */ COMMIT"),
+            "COMMIT"
+        );
+        assert_eq!(strip_leading_comments("/* a */ /* b */COMMIT"), "COMMIT");
+        assert_eq!(strip_leading_comments("-- a comment\nCOMMIT"), "COMMIT");
+        assert_eq!(strip_leading_comments("# a comment\nCOMMIT"), "COMMIT");
+        // `--` without trailing whitespace is not a comment.
+        assert_eq!(strip_leading_comments("--x\nCOMMIT"), "--x\nCOMMIT");
+        // Nothing left to match against.
+        assert_eq!(strip_leading_comments("/* unterminated"), "");
+        assert_eq!(strip_leading_comments("-- trailing"), "");
+        // Comments inside the statement are left alone; only the prefix is stripped.
+        assert_eq!(
+            strip_leading_comments("/* a */SELECT /* b */ 1"),
+            "SELECT /* b */ 1"
+        );
+    }
+
+    /// JDBC clients prefix every statement with a comment. Those statements must still reach
+    /// the federated handling, and the ones MySQL answers with a result set must keep doing so.
+    #[test]
+    fn test_check_comment_prefixed() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        let prefix = "/* ApplicationName=DataGrip 2026.2.5 */ ";
+
+        for query in [
+            "SET TRANSACTION READ WRITE",
+            "SET SESSION TRANSACTION READ ONLY",
+            "SET NAMES utf8mb4",
+            "BEGIN",
+            "START TRANSACTION",
+            "COMMIT",
+            "ROLLBACK",
+        ] {
+            let output = check(
+                &format!("{prefix}{query}"),
+                QueryContext::arc(),
+                session.clone(),
+            );
+            let OutputData::RecordBatches(batches) = output
+                .unwrap_or_else(|| panic!("{query} was not absorbed"))
+                .data
+            else {
+                unreachable!()
+            };
+            assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+        }
+
+        // DataGrip reads the scheduler status through these two. A column-less output is written
+        // as an OK packet, which the JDBC driver reports as "statement has not returned cursor".
+        for query in [
+            "SELECT @@GLOBAL.event_scheduler",
+            "SHOW GLOBAL VARIABLES LIKE 'event_scheduler'",
+        ] {
+            let output = check(
+                &format!("{prefix}{query}"),
+                QueryContext::arc(),
+                session.clone(),
+            );
+            let OutputData::RecordBatches(batches) = output
+                .unwrap_or_else(|| panic!("{query} was not absorbed"))
+                .data
+            else {
+                unreachable!()
+            };
+            assert!(!batches.schema().column_schemas().is_empty(), "{query}");
+        }
     }
 }
