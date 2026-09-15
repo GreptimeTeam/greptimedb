@@ -107,7 +107,7 @@ async fn roundtrip(instance: &Instance) {
             );
             let summary = instance
                 .statement_executor()
-                .export_metric_unit(
+                .export_logical_tables(
                     &unit,
                     directory.to_str().unwrap(),
                     &Default::default(),
@@ -164,7 +164,7 @@ async fn roundtrip(instance: &Instance) {
         let directory = destination.path().join(format!("cancel_{physical}"));
         let result = instance
             .statement_executor()
-            .export_metric_unit(
+            .export_logical_tables(
                 &unit,
                 directory.to_str().unwrap(),
                 &Default::default(),

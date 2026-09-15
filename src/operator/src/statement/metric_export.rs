@@ -268,13 +268,13 @@ pub struct MetricExportSummary {
 }
 
 impl StatementExecutor {
-    /// Export an authorized unit to a fresh directory using one physical query.
+    /// Export selected logical tables to a fresh directory using one physical query.
     /// The caller bounds concurrent units and owns retry/cleanup of this directory.
     /// Cancellation waits for in-flight I/O before aborting the active upload.
     /// Closed files remain an incomplete chunk until the caller publishes its
     /// completion state.
     #[allow(clippy::too_many_arguments)]
-    pub async fn export_metric_unit(
+    pub async fn export_logical_tables(
         &self,
         unit: &MetricExportUnit,
         directory: &str,
