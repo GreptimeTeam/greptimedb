@@ -46,8 +46,10 @@ SHOW TABLES;
 | optimizer_trace                       |
 | parameters                            |
 | partitions                            |
+| plugins                               |
 | procedure_info                        |
 | process_list                          |
+| processlist                           |
 | profiling                             |
 | referential_constraints               |
 | region_info                           |
@@ -65,6 +67,7 @@ SHOW TABLES;
 | table_privileges                      |
 | table_semantics                       |
 | tables                                |
+| user_privileges                       |
 | views                                 |
 +---------------------------------------+
 
@@ -100,8 +103,10 @@ SHOW FULL TABLES;
 | optimizer_trace                       | LOCAL TEMPORARY |
 | parameters                            | LOCAL TEMPORARY |
 | partitions                            | LOCAL TEMPORARY |
+| plugins                               | LOCAL TEMPORARY |
 | procedure_info                        | LOCAL TEMPORARY |
 | process_list                          | LOCAL TEMPORARY |
+| processlist                           | LOCAL TEMPORARY |
 | profiling                             | LOCAL TEMPORARY |
 | referential_constraints               | LOCAL TEMPORARY |
 | region_info                           | LOCAL TEMPORARY |
@@ -119,6 +124,7 @@ SHOW FULL TABLES;
 | table_privileges                      | LOCAL TEMPORARY |
 | table_semantics                       | LOCAL TEMPORARY |
 | tables                                | LOCAL TEMPORARY |
+| user_privileges                       | LOCAL TEMPORARY |
 | views                                 | LOCAL TEMPORARY |
 +---------------------------------------+-----------------+
 
@@ -148,8 +154,10 @@ SHOW TABLE STATUS;
 |optimizer_trace||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |parameters||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |partitions||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|plugins||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |procedure_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |process_list||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|processlist||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |region_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
@@ -167,6 +175,7 @@ SHOW TABLE STATUS;
 |table_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |table_semantics||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |tables||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|user_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |views||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 +++++++++++++++++++
 
