@@ -36,10 +36,10 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY, is_metric_engine_option_key,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD,
-    MEMTABLE_BULK_ENCODE_ROW_THRESHOLD, MEMTABLE_BULK_MAX_MERGE_GROUPS,
-    MEMTABLE_BULK_MERGE_THRESHOLD, MEMTABLE_TYPE, MERGE_MODE_KEY, SST_FORMAT_KEY,
-    TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, COMPACTION_TYPE, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, FloatFieldEncoding,
+    MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD, MEMTABLE_BULK_ENCODE_ROW_THRESHOLD,
+    MEMTABLE_BULK_MAX_MERGE_GROUPS, MEMTABLE_BULK_MERGE_THRESHOLD, MEMTABLE_TYPE, MERGE_MODE_KEY,
+    SST_FORMAT_KEY, TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
     TWCS_FALLBACK_TO_LOCAL, TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
     TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
     TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key, normalize_twcs_trigger_options,
@@ -254,6 +254,16 @@ impl TableOptions {
                 .build()
             })?;
             options.ttl = Some(ttl_value);
+        }
+
+        if let Some(encoding) = kvs.get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING) {
+            encoding.parse::<FloatFieldEncoding>().map_err(|_| {
+                ParseTableOptionSnafu {
+                    key: EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
+                    value: encoding,
+                }
+                .build()
+            })?;
         }
 
         if let Some(skip_wal) = kvs.get(SKIP_WAL_KEY) {
@@ -885,6 +895,7 @@ mod tests {
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));
         assert!(validate_table_option(MEMTABLE_BULK_MERGE_THRESHOLD));
+        assert!(validate_table_option(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING));
         assert!(validate_table_option(REPARTITION_COLUMN_HINT_KEY));
         assert!(validate_table_option(REPARTITION_PARTITION_NUM_HINT_KEY));
         assert_eq!(AnnotationFamily::of_key("repartition.unknown.hint"), None);
@@ -921,6 +932,25 @@ mod tests {
             "compaction.twcs.inactive_window.l1_merge_trigger"
         ));
         assert!(!validate_database_option("foo"));
+    }
+
+    #[test]
+    fn test_parse_float_field_encoding_option() {
+        let options = TableOptions::try_from_iter([(
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
+            "byte_stream_split",
+        )])
+        .unwrap();
+        assert_eq!(
+            options
+                .extra_options
+                .get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING),
+            Some(&"byte_stream_split".to_string())
+        );
+        assert!(
+            TableOptions::try_from_iter([(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "invalid",)])
+                .is_err()
+        );
     }
 
     #[test]

@@ -850,6 +850,32 @@ mod test {
         )
     }
 
+    #[test]
+    fn test_count_statistics_require_exact_source_rows() {
+        for (append_mode, exact, expected) in [
+            (true, false, Precision::Absent),
+            (true, true, Precision::Exact(3)),
+            (false, true, Precision::Absent),
+        ] {
+            let (schema, batch, metadata) = dynamic_filter_test_data(5685, false);
+            let scanner = Box::new(RepeatableScanner {
+                batches: RecordBatches::try_new(schema, vec![batch]).unwrap(),
+                properties: ScannerProperties::default()
+                    .with_append_mode(append_mode)
+                    .with_total_rows(3)
+                    .with_total_rows_is_exact(exact),
+                metadata,
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
+            assert_eq!(plan.partition_statistics(None).unwrap().num_rows, expected);
+            assert_eq!(
+                plan.partition_statistics(Some(0)).unwrap().num_rows,
+                Precision::Absent,
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_reset_state_clears_dynamic_filters_for_repeatable_scanner() {
         let ctx = SessionContext::new();

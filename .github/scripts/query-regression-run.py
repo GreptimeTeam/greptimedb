@@ -33,6 +33,7 @@ from typing import Any
 
 DEFAULT_CASES = [
     "tests/perf/query_cases/smoke_direct_sst/case.toml",
+    "tests/perf/query_cases/sst_float_bss/case.toml",
     "tests/perf/query_cases/prom_remote_write_seeded_random/case.toml",
     "tests/perf/query_cases/prom_remote_write_run_heavy/case.toml",
     "tests/perf/query_cases/prom_remote_write_mixed_every/case.toml",

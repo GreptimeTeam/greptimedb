@@ -116,6 +116,10 @@ pub(super) struct RemoteWrite {
     pub(super) sample_chunk_size: Option<u64>,
     pub(super) flush_every_sample_chunks: u64,
     pub(super) visibility_timeout_seconds: u64,
+    #[serde(default)]
+    pub(super) base_setup_sql: Vec<String>,
+    #[serde(default)]
+    pub(super) candidate_setup_sql: Vec<String>,
     pub(super) prom_store: PromStore,
     pub(super) value: RemoteValue,
     pub(super) storage: Option<StorageConfig>,
