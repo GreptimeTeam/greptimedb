@@ -27,7 +27,7 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
@@ -51,6 +51,7 @@ pub struct SimpleBulkMemtable {
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
+    min_sequence: AtomicU64,
     dedup: bool,
     merge_mode: MergeMode,
     num_rows: AtomicUsize,
@@ -80,6 +81,7 @@ impl SimpleBulkMemtable {
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
+            min_sequence: AtomicU64::new(u64::MAX),
             dedup,
             merge_mode,
             num_rows: AtomicUsize::new(0),
@@ -114,6 +116,7 @@ impl SimpleBulkMemtable {
             .value();
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
+        stats.min_sequence = stats.min_sequence.min(sequence);
     }
 
     /// Updates memtable stats.
@@ -125,6 +128,8 @@ impl SimpleBulkMemtable {
         self.min_timestamp.fetch_min(stats.min_ts, Ordering::SeqCst);
         self.max_sequence
             .fetch_max(stats.max_sequence, Ordering::SeqCst);
+        self.min_sequence
+            .fetch_min(stats.min_sequence, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -209,6 +214,7 @@ impl Memtable for SimpleBulkMemtable {
             max_ts: part.max_timestamp,
             num_rows: part.num_rows(),
             max_sequence: sequence,
+            min_sequence: sequence,
         });
         Ok(())
     }
@@ -226,6 +232,7 @@ impl Memtable for SimpleBulkMemtable {
 
         // Use the memtable's overall time range and max sequence for all ranges
         let max_sequence = self.max_sequence.load(Ordering::Relaxed);
+        let min_sequence = self.min_sequence.load(Ordering::Relaxed);
         let time_range = {
             let num_rows = self.num_rows.load(Ordering::Relaxed);
             if num_rows > 0 {
@@ -279,6 +286,7 @@ impl Memtable for SimpleBulkMemtable {
                         num_rows,
                         num_ranges: 1,
                         max_sequence,
+                        min_sequence,
                         series_count: 1,
                     };
 
@@ -329,6 +337,7 @@ impl Memtable for SimpleBulkMemtable {
                 num_rows: 0,
                 num_ranges: 0,
                 max_sequence: 0,
+                min_sequence: 0,
                 series_count: 0,
             };
         }
@@ -341,8 +350,16 @@ impl Memtable for SimpleBulkMemtable {
             num_rows,
             num_ranges: 1,
             max_sequence: self.max_sequence.load(Ordering::Relaxed),
+            min_sequence: self.min_sequence.load(Ordering::Relaxed),
             series_count: 1,
         }
+    }
+
+    fn min_sequence(&self) -> SequenceNumber {
+        if self.num_rows.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
+        self.min_sequence.load(Ordering::Relaxed)
     }
 
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
@@ -485,6 +502,29 @@ mod tests {
             write_hint: None,
         };
         KeyValues::new(metadata, mutation).unwrap()
+    }
+
+    #[test]
+    fn test_min_sequence_covers_single_and_batch_writes_and_fork() {
+        let memtable = new_test_memtable(true, MergeMode::LastNonNull);
+        let schema = memtable.schema();
+        let rows = [(1, 1.0, "a".to_string()), (2, 2.0, "b".to_string())];
+        let newer = build_key_values(schema, 100, &rows, OpType::Put);
+        assert_eq!(0, memtable.min_sequence());
+        memtable.write(&newer).unwrap();
+        assert_eq!(100, memtable.stats().min_sequence);
+        assert_eq!(100, memtable.min_sequence());
+        let older = build_key_values(schema, 10, &rows, OpType::Put);
+        memtable.write_one(older.iter().next().unwrap()).unwrap();
+        assert_eq!(10, memtable.stats().min_sequence);
+        assert_eq!(10, memtable.min_sequence());
+        assert_eq!(101, memtable.stats().max_sequence);
+        let fork = memtable.fork(2, schema);
+        assert!(fork.is_empty());
+        assert_eq!(0, fork.min_sequence());
+        fork.write(&newer).unwrap();
+        assert_eq!(100, fork.stats().min_sequence);
+        assert_eq!(100, fork.min_sequence());
     }
 
     #[test]
@@ -664,6 +704,7 @@ mod tests {
         let part = BulkPart {
             batch: rb,
             sequence: 1,
+            min_sequence: 1,
             min_timestamp: 1,
             max_timestamp: 2,
             timestamp_index: 0,
@@ -851,6 +892,7 @@ mod tests {
                 max_timestamp: 0,
                 min_timestamp: 0,
                 sequence: 0,
+                min_sequence: 0,
                 timestamp_index: 1,
                 raw_data: None,
             })
@@ -863,6 +905,7 @@ mod tests {
                 max_timestamp: 1,
                 min_timestamp: 1,
                 sequence: 1,
+                min_sequence: 1,
                 timestamp_index: 1,
                 raw_data: None,
             })

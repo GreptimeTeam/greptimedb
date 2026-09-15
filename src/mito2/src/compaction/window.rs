@@ -26,8 +26,10 @@ use store_api::storage::RegionId;
 use crate::compaction::CompactionOutput;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
+use crate::compaction::last_non_null::inputs_precede_memtables;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::error::{JoinSnafu, Result};
+use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
 
 /// Compaction picker that splits the time range of all involved files to windows, and merges
@@ -112,6 +114,16 @@ impl WindowedCompactionPicker {
                 .filter(|file| !expired_file_ids.contains(&file.file_id())),
         );
         let windows = filter_time_windows(windows, self.time_range);
+
+        // One SST can span several outputs. Deferring only an unsafe window
+        // would remove that SST without rewriting all its remaining segments.
+        if current_version.options.merge_mode() == MergeMode::LastNonNull
+            && windows.values().any(|(_, inputs)| {
+                !inputs_precede_memtables(inputs, current_version.memtable_min_sequence)
+            })
+        {
+            return (vec![], expired_ssts, time_window);
+        }
 
         (build_output(windows), expired_ssts, time_window)
     }
@@ -320,6 +332,7 @@ mod tests {
         CompactionVersion {
             metadata,
             ssts: Arc::new(ssts),
+            memtable_min_sequence: None,
             options: RegionOptions {
                 ttl: ttl.map(|t| t.into()),
                 auto_flush_interval: None,
