@@ -440,6 +440,7 @@ impl RegionOpener {
             region_id,
             version_control,
             series_index_version_control: Default::default(),
+            series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
@@ -686,6 +687,7 @@ impl RegionOpener {
             region_id: self.region_id,
             version_control: version_control.clone(),
             series_index_version_control,
+            series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
