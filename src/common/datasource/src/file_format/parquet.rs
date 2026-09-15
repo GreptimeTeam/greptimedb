@@ -213,24 +213,15 @@ pub async fn stream_to_parquet(
 ) -> Result<usize> {
     let mut writer =
         ParquetFileWriter::open(stream.schema(), store, path, concurrency, None).await?;
-    let result = async {
-        let mut rows_written = 0;
-        while let Some(batch) = stream.next().await {
-            let batch = batch.context(error::ReadRecordBatchSnafu)?;
-            let rows = batch.num_rows();
-            writer.write(batch).await?;
-            rows_written += rows;
-        }
-        writer.finish().await?;
-        Ok(rows_written)
+    let mut rows_written = 0;
+    while let Some(batch) = stream.next().await {
+        let batch = batch.context(error::ReadRecordBatchSnafu)?;
+        let rows = batch.num_rows();
+        writer.write(batch, None).await?;
+        rows_written += rows;
     }
-    .await;
-    if result.is_err()
-        && let Err(cleanup_error) = writer.abort().await
-    {
-        common_telemetry::warn!(cleanup_error; "Failed to clean up incomplete Parquet file");
-    }
-    result
+    writer.finish(None).await?;
+    Ok(rows_written)
 }
 
 #[cfg(test)]

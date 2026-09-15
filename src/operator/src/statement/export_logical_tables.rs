@@ -418,7 +418,10 @@ async fn export_stream(
                     .await?;
                     check_cancelled(cancellation)?;
                     // Do not drop an in-flight file operation before cleanup.
-                    writer_result(writer.writer.write(expanded).await, &writer.path)?;
+                    writer_result(
+                        writer.writer.write(expanded, Some(cancellation)).await,
+                        &writer.path,
+                    )?;
                     check_cancelled(cancellation)?;
                     offset += consumed;
                     summary.rows += consumed;
@@ -485,7 +488,7 @@ async fn finish_active(
     cancellation: &CancellationToken,
 ) -> Result<()> {
     if let Some(writer) = active.as_mut() {
-        writer_result(writer.writer.finish().await, &writer.path)?;
+        writer_result(writer.writer.finish(Some(cancellation)).await, &writer.path)?;
         check_cancelled(cancellation)?;
         *active = None;
     }
@@ -517,6 +520,9 @@ async fn convert_slice(
 
 fn writer_result<T>(result: common_datasource::error::Result<T>, path: &str) -> Result<T> {
     match result {
+        Err(common_datasource::error::Error::ParquetWriteCancelled {}) => {
+            error::LogicalTableExportCancelledSnafu.fail()
+        }
         Err(common_datasource::error::Error::InvalidParquetWriterLimits {}) => {
             InvalidLogicalTableExportSnafu {
                 reason: "Parquet writer limits must be positive",

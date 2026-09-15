@@ -24,6 +24,7 @@ use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
 use snafu::{IntoError, ResultExt, ensure};
+use tokio_util::sync::CancellationToken;
 
 use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{self, Result};
@@ -99,9 +100,14 @@ impl ParquetFileWriter {
     }
 
     /// Write a batch, enforcing file limits across batch and row-group boundaries.
-    pub async fn write(&mut self, batch: RecordBatch) -> Result<()> {
+    pub async fn write(
+        &mut self,
+        batch: RecordBatch,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<()> {
         let mut offset = 0;
         while offset < batch.num_rows() {
+            check_cancelled(cancellation)?;
             let mut encoder = self.encoder.take().ok_or_else(|| {
                 error::WriteParquetSnafu { path: &self.path }
                     .into_error(ParquetError::General("Parquet writer is closed".into()))
@@ -139,7 +145,9 @@ impl ParquetFileWriter {
             .await
             .context(error::JoinHandleSnafu)??;
             self.encoder = Some(encoder);
+            check_cancelled(cancellation)?;
             self.write_bytes(bytes).await?;
+            check_cancelled(cancellation)?;
             offset += len;
         }
         Ok(())
@@ -156,7 +164,8 @@ impl ParquetFileWriter {
     }
 
     /// Write the footer and close the file. Retains the handle for cleanup on error.
-    pub async fn finish(&mut self) -> Result<()> {
+    pub async fn finish(&mut self, cancellation: Option<&CancellationToken>) -> Result<()> {
+        check_cancelled(cancellation)?;
         let mut encoder = self.encoder.take().ok_or_else(|| {
             error::WriteParquetSnafu { path: &self.path }
                 .into_error(ParquetError::General("Parquet writer is closed".into()))
@@ -171,14 +180,17 @@ impl ParquetFileWriter {
         .await
         .context(error::JoinHandleSnafu)??;
         self.write_bytes(bytes).await?;
+        check_cancelled(cancellation)?;
         self.sink
             .close()
             .await
             .context(error::WriteObjectSnafu { path: &self.path })?;
+        check_cancelled(cancellation)?;
         Ok(())
     }
 
-    /// Abort an incomplete file after all in-flight operations have completed.
+    /// Abort an exclusively owned file after all in-flight operations have completed.
+    /// If the backend cannot abort, deletion assumes this attempt owns the path.
     pub async fn abort(mut self) -> Result<()> {
         let result = self.sink.abort().await;
         if result
@@ -198,6 +210,14 @@ impl ParquetFileWriter {
         }
         Ok(())
     }
+}
+
+fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<()> {
+    ensure!(
+        cancellation.is_none_or(|token| !token.is_cancelled()),
+        error::ParquetWriteCancelledSnafu
+    );
+    Ok(())
 }
 
 /// Bridges opendal [Writer] with parquet [AsyncFileWriter].
@@ -282,9 +302,9 @@ mod tests {
         )
         .await
         .unwrap();
-        writer.write(batch.slice(0, 3)).await.unwrap();
-        writer.write(batch.slice(3, 1)).await.unwrap();
-        writer.finish().await.unwrap();
+        writer.write(batch.slice(0, 3), None).await.unwrap();
+        writer.write(batch.slice(3, 1), None).await.unwrap();
+        writer.finish(None).await.unwrap();
         let reader = ParquetRecordBatchReaderBuilder::try_new(
             store.read("groups.parquet").await.unwrap().to_bytes(),
         )
@@ -337,7 +357,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = writer.write(batch).await.unwrap_err();
+        let err = writer.write(batch, None).await.unwrap_err();
         assert!(matches!(err, error::Error::ParquetWriterResource { .. }));
         assert_eq!(err.status_code(), StatusCode::Suspended);
         writer.abort().await.unwrap();
@@ -361,9 +381,9 @@ mod tests {
         )
         .await
         .unwrap();
-        writer.write(batch.slice(0, 2)).await.unwrap();
-        writer.write(batch.slice(2, 2)).await.unwrap();
-        writer.finish().await.unwrap();
+        writer.write(batch.slice(0, 2), None).await.unwrap();
+        writer.write(batch.slice(2, 2), None).await.unwrap();
+        writer.finish(None).await.unwrap();
         let reader = ParquetRecordBatchReaderBuilder::try_new(
             store.read("flush.parquet").await.unwrap().to_bytes(),
         )
@@ -417,5 +437,111 @@ mod tests {
                 assert_eq!(actual, vec![batch.clone()]);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn failed_copy_preserves_untouched_securefs_destination() {
+        let directory = common_test_util::temp_dir::create_temp_dir("copy_existing");
+        let path = directory.path().join("existing.parquet");
+        std::fs::write(&path, b"original bytes").unwrap();
+        let access = crate::object_store::LocalFileAccess::sandboxed(directory.path()).unwrap();
+        let store = crate::object_store::build_backend_for_write(
+            &format!("{}/", directory.path().display()),
+            &Default::default(),
+            &access,
+        )
+        .await
+        .unwrap();
+        let stream = RecordBatchStreamAdapter::new(
+            batch().schema(),
+            futures::stream::iter(vec![Err(datafusion::error::DataFusionError::Execution(
+                "injected input failure".into(),
+            ))]),
+        );
+        let err = stream_to_parquet(Box::pin(stream), store, "existing.parquet", 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, error::Error::ReadRecordBatch { .. }));
+        assert_eq!(std::fs::read(path).unwrap(), b"original bytes");
+    }
+
+    struct PausedFooterWriter {
+        inner: object_store::layers::mock::oio::Writer,
+        paused: bool,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        closed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl object_store::layers::mock::oio::Write for PausedFooterWriter {
+        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+            if !self.paused {
+                self.paused = true;
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.write(bytes).await
+        }
+        async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+            self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.inner.close().await
+        }
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_footer_write_waits_then_aborts_before_close() {
+        use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory};
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let factory: MockWriterFactory = Arc::new({
+            let (started, release, closed) = (started.clone(), release.clone(), closed.clone());
+            move |_, _, inner| {
+                Box::new(PausedFooterWriter {
+                    inner,
+                    paused: false,
+                    started: started.clone(),
+                    release: release.clone(),
+                    closed: closed.clone(),
+                })
+            }
+        });
+        let store = ObjectStore::new(object_store::services::Memory::default())
+            .unwrap()
+            .layer(
+                MockLayerBuilder::default()
+                    .writer_factory(factory)
+                    .build()
+                    .unwrap(),
+            );
+        let mut writer =
+            ParquetFileWriter::open(batch().schema(), store.clone(), "cancel.parquet", 1, None)
+                .await
+                .unwrap();
+        // Force footer bytes through the sink before its close operation.
+        writer.sink = store.writer_with("cancel.parquet").chunk(1).await.unwrap();
+        let cancellation = CancellationToken::new();
+        let result = {
+            let finish = writer.finish(Some(&cancellation));
+            tokio::pin!(finish);
+            tokio::select! {
+                result = &mut finish => panic!("finished before footer write: {result:?}"),
+                _ = started.notified() => {},
+            }
+            cancellation.cancel();
+            assert!(futures::poll!(&mut finish).is_pending());
+            release.notify_one();
+            finish.await
+        };
+        assert!(matches!(
+            result,
+            Err(error::Error::ParquetWriteCancelled {})
+        ));
+        assert!(!closed.load(std::sync::atomic::Ordering::SeqCst));
+        writer.abort().await.unwrap();
+        assert!(!store.exists("cancel.parquet").await.unwrap());
     }
 }

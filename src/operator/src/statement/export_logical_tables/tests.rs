@@ -440,7 +440,7 @@ async fn native_histogram_parquet_roundtrip() {
         .as_mut()
         .unwrap()
         .writer
-        .write(expanded)
+        .write(expanded, None)
         .await
         .unwrap();
     finish_active(&mut active, &CancellationToken::new())

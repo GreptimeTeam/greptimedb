@@ -27,6 +27,9 @@ use url::ParseError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Parquet write cancelled"))]
+    ParquetWriteCancelled {},
+
     #[snafu(display("Parquet writer limits must be positive"))]
     InvalidParquetWriterLimits {},
 
@@ -281,6 +284,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            ParquetWriteCancelled {} => StatusCode::Cancelled,
             InvalidParquetWriterLimits {} => StatusCode::InvalidArguments,
             ParquetWriterResource { .. } => StatusCode::Suspended,
             BuildBackend { .. }

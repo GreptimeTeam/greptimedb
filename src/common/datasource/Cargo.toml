@@ -47,3 +47,4 @@ url.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
+object-store = { workspace = true, features = ["testing"] }

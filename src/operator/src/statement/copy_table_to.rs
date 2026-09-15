@@ -25,8 +25,8 @@ use common_datasource::object_store::build_backend_for_write_with_path;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::{
-    RecordBatchStream, SendableRecordBatchMapper, SendableRecordBatchStream,
-    map_json_type_to_string, map_json_type_to_string_schema,
+    SendableRecordBatchMapper, SendableRecordBatchStream, map_json_type_to_string,
+    map_json_type_to_string_schema,
 };
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::DefaultTableSource;
