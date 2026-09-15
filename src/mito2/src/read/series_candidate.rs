@@ -54,7 +54,7 @@ use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
 use crate::series_index::{
     METRIC_SERIES_ID_BATCH_SIZE, MetricSeriesId, MetricSeriesIdStream, SeriesIndexFileHandle,
-    SeriesIndexReadContext, SeriesIndexSearcher, series_index_path,
+    SeriesIndexReadContext, SeriesIndexSearcher,
 };
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::PrimaryKeyArray;
@@ -308,7 +308,6 @@ fn index_primary_key_stream(
     Box::pin(try_stream! {
         let metadata = stream_ctx.input.region_metadata();
         let codec = SparsePrimaryKeyCodec::new(metadata);
-        let path = series_index_path(metadata.region_id, index.entry().index_uuid);
         let mut series = {
             let _permit = semaphore.acquire().await.map_err(|error| UnexpectedSnafu {
                 reason: format!("failed to acquire candidate index permit: {error}"),
@@ -316,7 +315,7 @@ fn index_primary_key_stream(
             SeriesIndexSearcher::try_new(
                 metadata.clone(),
                 context.store.clone(),
-                &path,
+                index,
                 stream_ctx.input.predicate_group().predicate(),
                 stream_ctx.input.time_range,
             ).await?.search()?
@@ -340,9 +339,6 @@ fn index_primary_key_stream(
             yield RecordBatch::try_new(primary_key_schema(), vec![Arc::new(builder.finish())])
                 .context(NewRecordBatchSnafu)?;
         }
-        // Pin the snapshot and handle until all index reads have completed.
-        drop(index);
-        drop(context);
     })
 }
 
@@ -767,7 +763,7 @@ mod tests {
     use crate::read::scan_util::PartitionMetrics;
     use crate::series_index::{
         SeriesIndexEntry, SeriesIndexVersion, SeriesIndexWriter, SeriesIndexWriterOptions,
-        series_index_channel,
+        series_index_channel, series_index_path,
     };
     use crate::sst::file::{FileHandle, FileMeta};
     use crate::test_util::new_noop_file_purger;
