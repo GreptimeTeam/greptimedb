@@ -133,7 +133,7 @@ async fn test_repartition_append_count_file() {
     run_sql(instance, sql, QueryContext::arc()).await.unwrap();
     wait_for_append_count_regions(instance, table, 2).await;
     assert_append_count(instance, table, 100, 0).await;
-    check_append_count_after_write(instance, table).await;
+    check_append_count_after_write(instance, table, 0).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -147,16 +147,16 @@ async fn test_split_append_count_file() {
         "PARTITION ON COLUMNS (device_id) (device_id < 50, device_id >= 50)",
     )
     .await;
-    assert_append_count(instance, table, 100, 0).await;
+    assert_append_count(instance, table, 100, 2).await;
     flush_append_count_table(instance, table).await;
-    assert_append_count(instance, table, 100, 0).await;
+    assert_append_count(instance, table, 100, 2).await;
 
     let sql = "ALTER TABLE count_split SPLIT PARTITION (device_id < 50) INTO \
                (device_id < 25, device_id >= 25 AND device_id < 50)";
     run_sql(instance, sql, QueryContext::arc()).await.unwrap();
     wait_for_append_count_regions(instance, table, 3).await;
-    assert_append_count(instance, table, 100, 0).await;
-    check_append_count_after_write(instance, table).await;
+    assert_append_count(instance, table, 100, 1).await;
+    check_append_count_after_write(instance, table, 1).await;
 }
 
 async fn append_count_cluster(name: &str) -> GreptimeDbCluster {
@@ -204,7 +204,11 @@ async fn flush_append_count_table(instance: &Arc<Instance>, table: &str) {
     .unwrap();
 }
 
-async fn check_append_count_after_write(instance: &Arc<Instance>, table: &str) {
+async fn check_append_count_after_write(
+    instance: &Arc<Instance>,
+    table: &str,
+    statistics_regions: usize,
+) {
     run_sql(
         instance,
         &format!("INSERT INTO {table} VALUES (to_timestamp_millis(100), 100)"),
@@ -212,9 +216,9 @@ async fn check_append_count_after_write(instance: &Arc<Instance>, table: &str) {
     )
     .await
     .unwrap();
-    assert_append_count(instance, table, 101, 0).await;
+    assert_append_count(instance, table, 101, statistics_regions).await;
     flush_append_count_table(instance, table).await;
-    assert_append_count(instance, table, 101, 0).await;
+    assert_append_count(instance, table, 101, statistics_regions).await;
 }
 
 async fn wait_for_append_count_regions(instance: &Arc<Instance>, table: &str, expected: usize) {
@@ -263,7 +267,7 @@ async fn assert_append_count(
     )
     .await;
     assert_eq!(scanned_count, expected, "scanned COUNT for {table}");
-    // Only scans without predicates, including region predicates, may use statistics.
+    // Only regions whose source row counts are exact may use statistics.
     let plan = append_count_query(
         instance,
         &format!("EXPLAIN ANALYZE SELECT count(*) FROM {table}"),

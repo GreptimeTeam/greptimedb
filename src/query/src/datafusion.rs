@@ -901,7 +901,7 @@ mod tests {
             Ok(Box::pin(EmptyRecordBatchStream::new(self.schema.clone())))
         }
 
-        fn has_predicate(&self) -> bool {
+        fn has_predicate_without_region(&self) -> bool {
             true
         }
 

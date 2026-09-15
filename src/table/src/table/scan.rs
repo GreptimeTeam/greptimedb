@@ -482,11 +482,14 @@ impl ExecutionPlan for RegionScanExec {
     }
 
     fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Statistics> {
-        if partition.is_some() {
+        if partition.is_some() || !self.append_mode {
             return Ok(Statistics::new_unknown(self.schema().as_ref()));
         }
 
-        let statistics = if self.append_mode && !self.scanner.lock().unwrap().has_predicate() {
+        let scanner = self.scanner.lock().unwrap();
+        let statistics = if scanner.properties().total_rows_is_exact()
+            && !scanner.has_predicate_without_region()
+        {
             let column_statistics = self
                 .arrow_schema
                 .fields
@@ -740,7 +743,7 @@ mod test {
             self.dynamic_filters.lock().unwrap().clear();
         }
 
-        fn has_predicate(&self) -> bool {
+        fn has_predicate_without_region(&self) -> bool {
             false
         }
 
@@ -842,6 +845,32 @@ mod test {
             schema,
             RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap(),
         )
+    }
+
+    #[test]
+    fn test_count_statistics_require_exact_source_rows() {
+        for (append_mode, exact, expected) in [
+            (true, false, Precision::Absent),
+            (true, true, Precision::Exact(3)),
+            (false, true, Precision::Absent),
+        ] {
+            let (schema, batch, metadata) = dynamic_filter_test_data(5685, false);
+            let scanner = Box::new(RepeatableScanner {
+                batches: RecordBatches::try_new(schema, vec![batch]).unwrap(),
+                properties: ScannerProperties::default()
+                    .with_append_mode(append_mode)
+                    .with_total_rows(3)
+                    .with_total_rows_is_exact(exact),
+                metadata,
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
+            assert_eq!(plan.partition_statistics(None).unwrap().num_rows, expected);
+            assert_eq!(
+                plan.partition_statistics(Some(0)).unwrap().num_rows,
+                Precision::Absent,
+            );
+        }
     }
 
     #[tokio::test]

@@ -61,7 +61,8 @@ impl UnorderedScan {
     pub(crate) fn new(input: ScanInput) -> Self {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
-            .with_total_rows(input.total_rows());
+            .with_total_rows(input.total_rows())
+            .with_total_rows_is_exact(input.append_mode && input.total_rows_is_exact());
         if let Some(counters) = input.query_stat_counters.clone() {
             properties.set_query_stat_counters(counters);
         }
@@ -343,9 +344,13 @@ impl RegionScanner for UnorderedScan {
             .map_err(BoxedError::new)
     }
 
-    /// Returns whether the scanner has any predicate, including region partition expressions.
-    fn has_predicate(&self) -> bool {
-        let predicate = self.stream_ctx.input.predicate_group().predicate();
+    /// If this scanner have predicate other than region partition exprs
+    fn has_predicate_without_region(&self) -> bool {
+        let predicate = self
+            .stream_ctx
+            .input
+            .predicate_group()
+            .predicate_without_region();
         predicate.is_some()
     }
 
