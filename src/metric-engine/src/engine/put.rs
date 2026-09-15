@@ -554,7 +554,7 @@ impl MetricEngineInner {
                     region_id: data_region_id,
                 })?;
             (
-                physical_state.physical_columns().clone(),
+                physical_state.physical_columns_snapshot(),
                 physical_state.time_index_column_name().to_string(),
             )
         };
