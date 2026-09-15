@@ -2168,7 +2168,10 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(plan_info.coverage, QueryCoverage::IncrementalDelta));
+    assert!(matches!(
+        plan_info.coverage,
+        QueryCoverage::IncrementalDelta
+    ));
 
     let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
         Arc::new(ExactDeltaFailureHandler);
@@ -2389,9 +2392,9 @@ async fn test_exact_required_unsupported_plan_keeps_exact_retry_state() {
     .unwrap();
     let dml_plan = LogicalPlan::Dml(DmlStatement::new(
         datafusion_common::TableReference::bare("test"),
-        Arc::new(DefaultTableSource::new(Arc::new(DfTableProviderAdapter::new(
-            sink_table,
-        )))),
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(sink_table),
+        ))),
         WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
         Arc::new(plan),
     ));
