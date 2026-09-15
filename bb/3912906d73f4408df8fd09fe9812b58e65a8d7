@@ -1,0 +1,37 @@
+src/common/batcher/src/flush_policy/timing.rs
+  s_d1140b6a37d6d5::t_0d4717694cf152 29,33-35,51,89,96,136,152-153
+src/common/batcher/src/pending_worker.rs
+  s_d1140b6a37d6d5::t_c83f1fc9999aef 127
+src/common/batcher/src/flush_limiter.rs
+  s_d1140b6a37d6d5::t_3f264769d0df3d 26-29,48-53,58
+src/common/batcher/src/request_limiter.rs
+  s_d1140b6a37d6d5::t_7e47cda6b27149 29-32,64,66-67,73,91,106
+src/common/batcher/src/notifier.rs
+  s_d1140b6a37d6d5::t_ad91f070097f4e 39-41,44,95-97,111
+src/servers/src/pending_rows_batcher.rs
+  s_c8f343c7af25c4::t_8ee806119d625e 386-387,389,391,1510,1897-1899,2129,2350-2351,2393-2394,2605,2964,3119,3122,3134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "bb3912906d73f4408df8fd09fe9812b58e65a8d7",
+  "prompts": {},
+  "sessions": {
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_d1140b6a37d6d5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a085df-416d-7100-9b16-05c8a5e7279d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
