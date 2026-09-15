@@ -19,13 +19,13 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::array::{
     Array, ArrayRef, DictionaryArray, LargeStringArray, PrimitiveArray, StringArray,
-    StringViewArray, UInt32Array, UInt64Array,
+    StringViewArray, UInt64Array,
 };
 use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::{ArrowDictionaryKeyType, DataType, SchemaRef};
 use datafusion::arrow::downcast_dictionary_array;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -548,29 +548,18 @@ fn concat_series_batches(
     }
 
     let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
-    let mut take_indices = None;
     let columns = schema
         .fields()
         .iter()
         .enumerate()
         .map(|(index, field)| -> DataFusionResult<ArrayRef> {
-            if tag_indices.contains(&index) {
+            if tag_indices.contains(&index)
+                && matches!(field.data_type(), DataType::Dictionary(_, value_type) if value_type.is_string())
+            {
                 let array = first_batch.column(index);
-                match field.data_type() {
-                    DataType::Dictionary(_, value_type) if value_type.is_string() => {
-                        downcast_dictionary_array! {
-                            array => constant_string_dictionary(array, total_rows),
-                            _ => unreachable!("dictionary keys must be integers"),
-                        }
-                    }
-                    DataType::Dictionary(_, _) => {
-                        ScalarValue::try_from_array(array, 0)?.to_array_of_size(total_rows)
-                    }
-                    _ => {
-                        let take_indices = take_indices
-                            .get_or_insert_with(|| UInt32Array::from(vec![0; total_rows]));
-                        compute::take(array, take_indices, None).map_err(Into::into)
-                    }
+                downcast_dictionary_array! {
+                    array => constant_string_dictionary(array, total_rows),
+                    _ => unreachable!("dictionary keys must be integers"),
                 }
             } else {
                 compute::concat(
@@ -992,12 +981,6 @@ mod test {
             Arc::new(StringArray::from(vec!["unused"])),
             vec![Some(0)],
             Arc::new(StringArray::from(vec![None::<&str>])),
-        );
-        assert_dictionary_concat::<UInt32Type>(
-            vec![Some(1), Some(1)],
-            Arc::new(Int32Array::from(vec![1, 2])),
-            vec![Some(0)],
-            Arc::new(Int32Array::from(vec![2, 1])),
         );
     }
 
@@ -1657,6 +1640,99 @@ mod test {
 
         // No more batches should be produced
         assert!(divide_stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dictionary_tags_across_batches_and_eof() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "tag",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+                false,
+            ),
+            Field::new("value", DataType::Int64, false),
+            Field::new(
+                "time_index",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let make_batch = |values: Vec<&str>, keys: Vec<u32>, payload: Vec<i64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(DictionaryArray::<UInt32Type>::new(
+                        UInt32Array::from(keys),
+                        Arc::new(StringArray::from(values)),
+                    )),
+                    Arc::new(Int64Array::from(payload.clone())),
+                    Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                        payload,
+                    )),
+                ],
+            )
+            .unwrap()
+        };
+        let memory_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[vec![
+                    make_batch(vec!["b", "a", "unused-a"], vec![1, 1, 0], vec![1, 2, 3]),
+                    make_batch(vec!["c", "b", "unused-b"], vec![1, 1, 0], vec![4, 5, 6]),
+                    make_batch(vec!["unused-c", "c"], vec![1, 1], vec![7, 8]),
+                ]],
+                schema,
+                None,
+            )
+            .unwrap(),
+        )));
+        let divide_exec = Arc::new(SeriesDivideExec {
+            tag_columns: vec!["tag".to_string()],
+            time_index_column: "time_index".to_string(),
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let mut stream = divide_exec
+            .execute(0, SessionContext::default().task_ctx())
+            .unwrap();
+
+        for (expected_tag, expected_payload, concatenated) in [
+            ("a", vec![1, 2], false),
+            ("b", vec![3, 4, 5], true),
+            ("c", vec![6, 7, 8], true),
+        ] {
+            let batch = stream.next().await.unwrap().unwrap();
+            assert_eq!(batch.num_rows(), expected_payload.len());
+            assert_eq!(
+                (0..batch.num_rows())
+                    .map(|row| string_array_value_at_index(batch.column(0), row).unwrap())
+                    .collect::<Vec<_>>(),
+                vec![expected_tag; expected_payload.len()]
+            );
+            assert_eq!(
+                batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<_>>(),
+                expected_payload
+            );
+
+            if concatenated {
+                let tag = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<UInt32Type>>()
+                    .unwrap();
+                let values = tag.values().as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(values.len(), 1, "tag {expected_tag}");
+                assert_eq!(values.value(0), expected_tag);
+                assert!(tag.keys().iter().all(|key| key == Some(0)));
+            }
+        }
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]
