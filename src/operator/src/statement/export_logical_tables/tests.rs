@@ -41,7 +41,7 @@ fn table(id: u32, name: &str, fields: Vec<Field>, physical: bool) -> TableRef {
     EmptyTable::from_table_info(&info)
 }
 
-fn unit() -> MetricExportUnit {
+fn unit() -> LogicalTableExport {
     let ts = Field::new(
         "ts",
         DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
@@ -72,7 +72,7 @@ fn unit() -> MetricExportUnit {
         table(1026, "empty", vec![ts.clone(), a], false),
         table(1027, "requests", vec![ts, b, host], false),
     ];
-    MetricExportUnit::try_new(physical, &tables).unwrap()
+    LogicalTableExport::try_new(physical, &tables).unwrap()
 }
 
 fn batch(ids: Vec<Option<u32>>, hosts: Vec<Option<&str>>) -> RecordBatch {
@@ -141,8 +141,11 @@ async fn routes_across_batches_and_writes_empty_files() {
         &unit,
         stream(batches),
         &store,
-        MetricExportLimits {
-            row_group_rows: 1,
+        LogicalTableExportLimits {
+            writer: ParquetWriterLimits {
+                row_group_rows: 1,
+                ..LogicalTableExportLimits::default().writer
+            },
             ..Default::default()
         },
         &CancellationToken::new(),
@@ -152,7 +155,7 @@ async fn routes_across_batches_and_writes_empty_files() {
     .unwrap();
     assert_eq!(
         result,
-        MetricExportSummary {
+        LogicalTableExportSummary {
             rows: 4,
             skipped_rows: 1,
             files: 3
@@ -188,17 +191,17 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
                 batch(vec![Some(1027)], vec![Some("a")]),
                 batch(vec![Some(1025)], vec![Some("b")]),
             ],
-            MetricExportLimits::default(),
+            LogicalTableExportLimits::default(),
             "not ordered",
         ),
         (
             vec![batch(vec![None], vec![None])],
-            MetricExportLimits::default(),
+            LogicalTableExportLimits::default(),
             "null __table_id",
         ),
         (
             vec![batch(vec![Some(1025)], vec![Some("a")])],
-            MetricExportLimits {
+            LogicalTableExportLimits {
                 input_batch_bytes: 1,
                 ..Default::default()
             },
@@ -206,7 +209,7 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
         ),
         (
             vec![batch(vec![Some(1025)], vec![Some("too big")])],
-            MetricExportLimits {
+            LogicalTableExportLimits {
                 conversion_bytes: 1,
                 ..Default::default()
             },
@@ -214,9 +217,12 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
         ),
         (
             vec![batch(vec![Some(1025); 2], vec![Some("a"); 2])],
-            MetricExportLimits {
-                row_group_rows: 1,
-                max_row_groups: 1,
+            LogicalTableExportLimits {
+                writer: ParquetWriterLimits {
+                    row_group_rows: 1,
+                    max_row_groups: 1,
+                    ..LogicalTableExportLimits::default().writer
+                },
                 ..Default::default()
             },
             "metadata budget",
@@ -235,8 +241,8 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
         .await
         .unwrap_err();
         assert!(err.to_string().contains(message), "{err}");
-        if let Some(mut writer) = active {
-            writer.sink.abort().await.unwrap();
+        if let Some(writer) = active {
+            writer.writer.abort().await.unwrap();
         }
     }
 }
@@ -249,7 +255,7 @@ async fn existing_outputs_are_not_overwritten() {
         &unit(),
         stream(vec![batch(vec![Some(1025)], vec![None])]),
         &store,
-        MetricExportLimits::default(),
+        LogicalTableExportLimits::default(),
         &CancellationToken::new(),
         &mut None,
     )
@@ -304,22 +310,22 @@ fn validates_membership_and_projects_only_selected_columns() {
         vec![Field::new("a", DataType::Float64, true)],
         false,
     );
-    let one =
-        MetricExportUnit::try_new(unit.physical.clone(), std::slice::from_ref(&selected)).unwrap();
+    let one = LogicalTableExport::try_new(unit.physical.clone(), std::slice::from_ref(&selected))
+        .unwrap();
     assert_eq!(one.projection, vec![0, 3]);
     assert_eq!(one.logical[&1025].projection, vec![1]);
     assert!(
-        MetricExportUnit::try_new(unit.physical.clone(), &[selected.clone(), selected]).is_err()
+        LogicalTableExport::try_new(unit.physical.clone(), &[selected.clone(), selected]).is_err()
     );
     let unsafe_name = table(1030, "a/b", vec![], false);
-    assert!(MetricExportUnit::try_new(unit.physical.clone(), &[unsafe_name]).is_err());
+    assert!(LogicalTableExport::try_new(unit.physical.clone(), &[unsafe_name]).is_err());
     let wrong_type = table(
         1030,
         "wrong",
         vec![Field::new("a", DataType::Int32, true)],
         false,
     );
-    assert!(MetricExportUnit::try_new(unit.physical, &[wrong_type]).is_err());
+    assert!(LogicalTableExport::try_new(unit.physical, &[wrong_type]).is_err());
 }
 
 #[tokio::test]
@@ -356,8 +362,11 @@ async fn cancellation_drops_input_and_aborts_active_upload() {
             &unit,
             Box::pin(stream),
             &store,
-            MetricExportLimits {
-                row_group_rows: 1,
+            LogicalTableExportLimits {
+                writer: ParquetWriterLimits {
+                    row_group_rows: 1,
+                    ..LogicalTableExportLimits::default().writer
+                },
                 ..Default::default()
             },
             &token,
@@ -365,7 +374,7 @@ async fn cancellation_drops_input_and_aborts_active_upload() {
         .await;
         assert!(matches!(
             result,
-            Err(error::Error::MetricExportCancelled { .. })
+            Err(error::Error::LogicalTableExportCancelled { .. })
         ));
         assert!(!store.exists("cpu.v1.parquet").await.unwrap());
         assert!(!store.exists("empty.parquet").await.unwrap());
@@ -405,32 +414,35 @@ async fn native_histogram_parquet_roundtrip() {
     let schema = Arc::new(Schema::new(vec![Field::new("histogram", data_type, true)]));
     let batch = RecordBatch::try_new(schema.clone(), vec![histogram]).unwrap();
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-    let file = LogicalFile {
+    let file = LogicalTableProjection {
         name: "histogram".into(),
         schema: schema.clone(),
         projection: vec![0],
     };
-    let limits = MetricExportLimits {
-        row_group_rows: 1,
+    let limits = LogicalTableExportLimits {
+        writer: ParquetWriterLimits {
+            row_group_rows: 1,
+            ..LogicalTableExportLimits::default().writer
+        },
         ..Default::default()
     };
-    let mut active = Some(LogicalWriter::open(1, &file, &store, limits).await.unwrap());
-    for start in 0..2 {
-        let writer = active.as_mut().unwrap();
-        let (encoder, rows, bytes) = encode_slice(
-            writer.encoder.take().unwrap(),
-            batch.clone(),
-            schema.clone(),
-            start,
-            2,
-            limits,
-        )
+    let mut active = Some(
+        LogicalTableWriter::open(1, &file, &store, limits)
+            .await
+            .unwrap(),
+    );
+    let (expanded, rows) =
+        convert_slice(batch.clone(), schema.clone(), 0, 2, limits.conversion_bytes)
+            .await
+            .unwrap();
+    assert_eq!(rows, 2);
+    active
+        .as_mut()
+        .unwrap()
+        .writer
+        .write(expanded)
         .await
         .unwrap();
-        assert_eq!(rows, 1);
-        writer.encoder = Some(encoder);
-        writer.write(bytes).await.unwrap();
-    }
     finish_active(&mut active, &CancellationToken::new())
         .await
         .unwrap();
@@ -517,7 +529,7 @@ async fn cancellation_waits_for_file_creation_before_cleanup() {
         &unit,
         stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
         &store,
-        MetricExportLimits::default(),
+        LogicalTableExportLimits::default(),
         &cancellation,
     );
     tokio::pin!(export);
@@ -531,7 +543,7 @@ async fn cancellation_waits_for_file_creation_before_cleanup() {
     let result = export.await;
     assert!(matches!(
         result,
-        Err(error::Error::MetricExportCancelled { .. })
+        Err(error::Error::LogicalTableExportCancelled { .. })
     ));
     assert!(!store.exists("cpu.v1.parquet").await.unwrap());
 }
@@ -569,7 +581,7 @@ async fn cleanup_failure_preserves_resource_error() {
         &unit(),
         stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
         &store,
-        MetricExportLimits {
+        LogicalTableExportLimits {
             conversion_bytes: 1,
             ..Default::default()
         },
@@ -578,6 +590,6 @@ async fn cleanup_failure_preserves_resource_error() {
     .await;
     assert!(matches!(
         result,
-        Err(error::Error::MetricExportResource { .. })
+        Err(error::Error::LogicalTableExportResource { .. })
     ));
 }

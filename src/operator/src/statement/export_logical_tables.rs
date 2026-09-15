@@ -28,14 +28,11 @@ use arrow::datatypes::{DataType, SchemaRef};
 use arrow::downcast_dictionary_array;
 use arrow::record_batch::RecordBatch;
 use common_datasource::object_store::build_backend_for_write;
+use common_datasource::parquet_writer::{ParquetFileWriter, ParquetWriterLimits};
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
 use common_time::range::TimestampRange;
 use datafusion::datasource::DefaultTableSource;
-use datafusion::parquet::arrow::ArrowWriter;
-use datafusion::parquet::basic::{Compression, Encoding, ZstdLevel};
-use datafusion::parquet::file::properties::WriterProperties;
-use datafusion::parquet::schema::types::ColumnPath;
 use datafusion_common::TableReference as DfTableReference;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col};
 use futures::StreamExt;
@@ -50,46 +47,41 @@ use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{self, InvalidMetricExportSnafu, MetricExportResourceSnafu, Result};
+use crate::error::{self, InvalidLogicalTableExportSnafu, LogicalTableExportResourceSnafu, Result};
 use crate::statement::StatementExecutor;
 
-/// Writer-side limits. Query memory and spill remain governed by the query engine.
+/// Export preprocessing and per-file limits. Query memory and spill remain
+/// governed by the query engine.
 /// Batch checks happen after allocation; flush thresholds are not hard RSS caps.
 #[derive(Clone, Copy, Debug)]
-pub struct MetricExportLimits {
+pub struct LogicalTableExportLimits {
     /// Maximum retained scan batch before routing.
     pub input_batch_bytes: usize,
     /// Maximum estimated expanded logical values in one conversion slice.
     pub conversion_bytes: usize,
-    /// Maximum rows per conversion slice and Parquet row group.
-    pub row_group_rows: usize,
-    /// Flush when buffered encoder memory or encoded size reaches this threshold.
-    pub writer_bytes: usize,
-    /// Maximum row groups retained in one file's footer metadata.
-    pub max_row_groups: usize,
+    /// Limits owned by the single-file Parquet writer.
+    pub writer: ParquetWriterLimits,
 }
 
-impl Default for MetricExportLimits {
+impl Default for LogicalTableExportLimits {
     fn default() -> Self {
         Self {
             input_batch_bytes: 64 * 1024 * 1024,
             conversion_bytes: 1024 * 1024,
-            row_group_rows: 8192,
-            writer_bytes: 8 * 1024 * 1024,
-            max_row_groups: 4096,
+            writer: ParquetWriterLimits {
+                row_group_rows: 8192,
+                writer_bytes: 8 * 1024 * 1024,
+                max_row_groups: 4096,
+            },
         }
     }
 }
 
-impl MetricExportLimits {
+impl LogicalTableExportLimits {
     fn validate(self) -> Result<()> {
         ensure!(
-            self.input_batch_bytes > 0
-                && self.conversion_bytes > 0
-                && self.row_group_rows > 0
-                && self.writer_bytes > 0
-                && self.max_row_groups > 0,
-            InvalidMetricExportSnafu {
+            self.input_batch_bytes > 0 && self.conversion_bytes > 0,
+            InvalidLogicalTableExportSnafu {
                 reason: "export limits must be positive"
             }
         );
@@ -100,19 +92,19 @@ impl MetricExportLimits {
 /// Metadata captured for one physical table and its selected logical tables.
 /// Construct one unit per physical table, schema and time chunk. Capturing these
 /// references supplies no snapshot isolation or locking guarantee.
-pub struct MetricExportUnit {
+pub struct LogicalTableExport {
     physical: TableRef,
     projection: Vec<usize>,
-    logical: BTreeMap<u32, LogicalFile>,
+    logical: BTreeMap<u32, LogicalTableProjection>,
 }
 
-struct LogicalFile {
+struct LogicalTableProjection {
     name: String,
     schema: SchemaRef,
     projection: Vec<usize>,
 }
 
-impl MetricExportUnit {
+impl LogicalTableExport {
     /// Validate associations and capture schemas from already selected table references.
     pub fn try_new(physical: TableRef, tables: &[TableRef]) -> Result<Self> {
         let physical_info = physical.table_info();
@@ -124,17 +116,16 @@ impl MetricExportUnit {
                     .extra_options
                     .contains_key(PHYSICAL_TABLE_METADATA_KEY)
                 && !tables.is_empty(),
-            InvalidMetricExportSnafu {
+            InvalidLogicalTableExportSnafu {
                 reason: "expected a Metric physical table and selected logical tables"
             }
         );
         let physical_schema = physical.schema();
-        let id_index =
-            physical_schema
-                .column_index_by_name(TABLE_ID)
-                .context(InvalidMetricExportSnafu {
-                    reason: "physical schema has no __table_id",
-                })?;
+        let id_index = physical_schema.column_index_by_name(TABLE_ID).context(
+            InvalidLogicalTableExportSnafu {
+                reason: "physical schema has no __table_id",
+            },
+        )?;
         let mut projection = BTreeSet::from([id_index]);
         let mut logical = BTreeMap::new();
         for table in tables {
@@ -142,7 +133,7 @@ impl MetricExportUnit {
             let name = &info.name;
             ensure!(
                 !name.contains('/') && !name.contains('\\'),
-                InvalidMetricExportSnafu {
+                InvalidLogicalTableExportSnafu {
                     reason: "logical table names must not contain path separators"
                 }
             );
@@ -156,7 +147,7 @@ impl MetricExportUnit {
                         .extra_options
                         .get(LOGICAL_TABLE_METADATA_KEY)
                         == Some(&physical_info.name),
-                InvalidMetricExportSnafu {
+                InvalidLogicalTableExportSnafu {
                     reason: format!("{name} does not belong to the physical table")
                 }
             );
@@ -167,19 +158,19 @@ impl MetricExportUnit {
                 .map(|field| {
                     ensure!(
                         field.name() != TABLE_ID && field.name() != TSID,
-                        InvalidMetricExportSnafu {
+                        InvalidLogicalTableExportSnafu {
                             reason: "logical schema contains internal Metric columns"
                         }
                     );
                     let index = physical_schema
                         .column_index_by_name(field.name())
-                        .with_context(|| InvalidMetricExportSnafu {
+                        .with_context(|| InvalidLogicalTableExportSnafu {
                             reason: format!("physical schema lacks {}", field.name()),
                         })?;
                     ensure!(
                         physical_schema.arrow_schema().field(index).data_type()
                             == field.data_type(),
-                        InvalidMetricExportSnafu {
+                        InvalidLogicalTableExportSnafu {
                             reason: format!("physical/logical type mismatch for {}", field.name())
                         }
                     );
@@ -191,14 +182,14 @@ impl MetricExportUnit {
                 logical
                     .insert(
                         info.table_id(),
-                        LogicalFile {
+                        LogicalTableProjection {
                             name: name.clone(),
                             schema,
                             projection: indices,
                         }
                     )
                     .is_none(),
-                InvalidMetricExportSnafu {
+                InvalidLogicalTableExportSnafu {
                     reason: "duplicate logical table"
                 }
             );
@@ -261,7 +252,7 @@ impl MetricExportUnit {
 
 /// Counts returned only after every selected logical file has been closed.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct MetricExportSummary {
+pub struct LogicalTableExportSummary {
     pub rows: usize,
     pub skipped_rows: usize,
     pub files: usize,
@@ -276,18 +267,18 @@ impl StatementExecutor {
     #[allow(clippy::too_many_arguments)]
     pub async fn export_logical_tables(
         &self,
-        unit: &MetricExportUnit,
+        unit: &LogicalTableExport,
         directory: &str,
         connection: &HashMap<String, String>,
         time_range: Option<&TimestampRange>,
-        limits: MetricExportLimits,
+        limits: LogicalTableExportLimits,
         cancellation: &CancellationToken,
         query_ctx: QueryContextRef,
-    ) -> Result<MetricExportSummary> {
+    ) -> Result<LogicalTableExportSummary> {
         limits.validate()?;
         let (store, stream) = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return error::MetricExportCancelledSnafu.fail(),
+            _ = cancellation.cancelled() => return error::LogicalTableExportCancelledSnafu.fail(),
             result = async {
                 let store = build_backend_for_write(&format!("{}/", directory.trim_end_matches('/')), connection, &self.local_file_access)
                     .await.context(error::BuildBackendSnafu)?;
@@ -306,17 +297,17 @@ impl StatementExecutor {
 }
 
 async fn export_cancellable_stream(
-    unit: &MetricExportUnit,
+    unit: &LogicalTableExport,
     stream: SendableRecordBatchStream,
     store: &ObjectStore,
-    limits: MetricExportLimits,
+    limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
-) -> Result<MetricExportSummary> {
+) -> Result<LogicalTableExportSummary> {
     let mut active = None;
     let result = export_stream(unit, stream, store, limits, cancellation, &mut active).await;
     if result.is_err()
         && let Some(writer) = active
-        && let Err(cleanup_error) = abort_active(writer, store).await
+        && let Err(cleanup_error) = abort_active(writer).await
     {
         common_telemetry::warn!(cleanup_error; "Failed to clean up incomplete Metric export file");
     }
@@ -326,42 +317,23 @@ async fn export_cancellable_stream(
 fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
     ensure!(
         !cancellation.is_cancelled(),
-        error::MetricExportCancelledSnafu
+        error::LogicalTableExportCancelledSnafu
     );
     Ok(())
 }
 
-async fn abort_active(mut writer: LogicalWriter, store: &ObjectStore) -> Result<()> {
-    let aborted = writer.sink.abort().await;
-    if aborted
-        .as_ref()
-        .is_err_and(|e| e.kind() == object_store::ErrorKind::Unsupported)
-    {
-        // Secure filesystem writes cannot abort. All writes have completed before
-        // this handle is dropped, so no detached creation can race with deletion.
-        let path = writer.path.clone();
-        drop(writer);
-        store
-            .delete(&path)
-            .await
-            .context(common_datasource::error::WriteObjectSnafu { path: &path })
-            .context(error::WriteStreamToFileSnafu { path: &path })?;
-    } else {
-        aborted
-            .context(common_datasource::error::WriteObjectSnafu { path: &writer.path })
-            .context(error::WriteStreamToFileSnafu { path: &writer.path })?;
-    }
-    Ok(())
+async fn abort_active(writer: LogicalTableWriter) -> Result<()> {
+    writer_result(writer.writer.abort().await, &writer.path)
 }
 
 async fn export_stream(
-    unit: &MetricExportUnit,
+    unit: &LogicalTableExport,
     mut stream: SendableRecordBatchStream,
     store: &ObjectStore,
-    limits: MetricExportLimits,
+    limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
-    active: &mut Option<LogicalWriter>,
-) -> Result<MetricExportSummary> {
+    active: &mut Option<LogicalTableWriter>,
+) -> Result<LogicalTableExportSummary> {
     let id_index =
         stream
             .schema()
@@ -369,13 +341,13 @@ async fn export_stream(
             .context(error::UnexpectedSnafu {
                 violated: "physical query omitted __table_id",
             })?;
-    let mut summary = MetricExportSummary::default();
+    let mut summary = LogicalTableExportSummary::default();
     let mut previous = None;
     let mut written = BTreeSet::new();
     loop {
         let batch = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return error::MetricExportCancelledSnafu.fail(),
+            _ = cancellation.cancelled() => return error::LogicalTableExportCancelledSnafu.fail(),
             batch = stream.next() => batch,
         };
         let Some(batch) = batch else {
@@ -386,7 +358,7 @@ async fn export_stream(
             .into_df_record_batch();
         ensure!(
             batch.get_array_memory_size() <= limits.input_batch_bytes,
-            MetricExportResourceSnafu {
+            LogicalTableExportResourceSnafu {
                 reason: "scan batch exceeds input byte budget"
             }
         );
@@ -424,7 +396,7 @@ async fn export_stream(
             check_cancelled(cancellation)?;
             if let Some(file) = unit.logical.get(&id) {
                 if active.is_none() {
-                    *active = Some(LogicalWriter::open(id, file, store, limits).await?);
+                    *active = Some(LogicalTableWriter::open(id, file, store, limits).await?);
                     written.insert(id);
                     summary.files += 1;
                 }
@@ -436,22 +408,17 @@ async fn export_stream(
                 })?;
                 let mut offset = start;
                 while offset < end {
-                    let (encoder, consumed, bytes) = encode_slice(
-                        writer.encoder.take().context(error::UnexpectedSnafu {
-                            violated: "missing Parquet encoder",
-                        })?,
+                    let (expanded, consumed) = convert_slice(
                         projected.clone(),
                         file.schema.clone(),
                         offset,
                         end,
-                        limits,
+                        limits.conversion_bytes,
                     )
                     .await?;
-                    writer.encoder = Some(encoder);
                     check_cancelled(cancellation)?;
-                    // Do not drop an in-flight sink operation: filesystem creation
-                    // and writes may run on a blocking worker after its future drops.
-                    writer.write(bytes).await?;
+                    // Do not drop an in-flight file operation before cleanup.
+                    writer_result(writer.writer.write(expanded).await, &writer.path)?;
                     check_cancelled(cancellation)?;
                     offset += consumed;
                     summary.rows += consumed;
@@ -466,7 +433,7 @@ async fn export_stream(
     for (&id, file) in &unit.logical {
         if !written.contains(&id) {
             check_cancelled(cancellation)?;
-            *active = Some(LogicalWriter::open(id, file, store, limits).await?);
+            *active = Some(LogicalTableWriter::open(id, file, store, limits).await?);
             finish_active(active, cancellation).await?;
             summary.files += 1;
         }
@@ -475,123 +442,65 @@ async fn export_stream(
     Ok(summary)
 }
 
-type Encoder = ArrowWriter<Vec<u8>>;
-
-struct LogicalWriter {
+struct LogicalTableWriter {
     id: u32,
     path: String,
-    encoder: Option<Encoder>,
-    sink: object_store::Writer,
+    writer: ParquetFileWriter,
 }
 
-impl LogicalWriter {
+impl LogicalTableWriter {
     async fn open(
         id: u32,
-        file: &LogicalFile,
+        table: &LogicalTableProjection,
         store: &ObjectStore,
-        limits: MetricExportLimits,
+        limits: LogicalTableExportLimits,
     ) -> Result<Self> {
-        let path = format!("{}.parquet", file.name);
+        let path = format!("{}.parquet", table.name);
         ensure!(
             !store
                 .exists(&path)
                 .await
                 .context(error::ReadObjectSnafu { path: &path })?,
-            InvalidMetricExportSnafu {
+            InvalidLogicalTableExportSnafu {
                 reason: format!("output already exists: {path}")
             }
         );
-        let mut properties = WriterProperties::builder()
-            .set_max_row_group_row_count(Some(limits.row_group_rows))
-            .set_max_row_group_bytes(None)
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_statistics_truncate_length(None)
-            .set_column_index_truncate_length(None);
-        for field in file.schema.fields() {
-            if matches!(field.data_type(), DataType::Timestamp(_, _)) {
-                let column = ColumnPath::new(vec![field.name().clone()]);
-                properties = properties
-                    .set_column_dictionary_enabled(column.clone(), false)
-                    .set_column_encoding(column, Encoding::DELTA_BINARY_PACKED);
-            }
-        }
-        let encoder = parquet_result(
-            ArrowWriter::try_new(Vec::new(), file.schema.clone(), Some(properties.build())),
+        let writer = writer_result(
+            ParquetFileWriter::open(
+                table.schema.clone(),
+                store.clone(),
+                &path,
+                1,
+                Some(limits.writer),
+            )
+            .await,
             &path,
         )?;
-        let sink = store
-            .writer_with(&path)
-            .concurrent(1)
-            .chunk(8 * 1024 * 1024)
-            .await
-            .context(common_datasource::error::WriteObjectSnafu { path: &path })
-            .context(error::WriteStreamToFileSnafu { path: &path })?;
-        Ok(Self {
-            id,
-            path,
-            encoder: Some(encoder),
-            sink,
-        })
-    }
-
-    async fn write(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if !bytes.is_empty() {
-            self.sink
-                .write(bytes)
-                .await
-                .context(common_datasource::error::WriteObjectSnafu { path: &self.path })
-                .context(error::WriteStreamToFileSnafu { path: &self.path })?;
-        }
-        Ok(())
+        Ok(Self { id, path, writer })
     }
 }
 
 async fn finish_active(
-    active: &mut Option<LogicalWriter>,
+    active: &mut Option<LogicalTableWriter>,
     cancellation: &CancellationToken,
 ) -> Result<()> {
     if let Some(writer) = active.as_mut() {
-        let mut encoder = writer.encoder.take().context(error::UnexpectedSnafu {
-            violated: "missing Parquet encoder",
-        })?;
-        let path = writer.path.clone();
-        let bytes = common_runtime::spawn_blocking_global(move || {
-            parquet_result(encoder.finish(), &path)?;
-            Ok::<_, error::Error>(std::mem::take(encoder.inner_mut()))
-        })
-        .await
-        .context(error::JoinTaskSnafu)??;
-        writer.write(bytes).await?;
-        check_cancelled(cancellation)?;
-        writer
-            .sink
-            .close()
-            .await
-            .context(common_datasource::error::WriteObjectSnafu { path: &writer.path })
-            .context(error::WriteStreamToFileSnafu { path: &writer.path })?;
+        writer_result(writer.writer.finish().await, &writer.path)?;
         check_cancelled(cancellation)?;
         *active = None;
     }
     Ok(())
 }
 
-async fn encode_slice(
-    mut encoder: Encoder,
+async fn convert_slice(
     batch: RecordBatch,
     schema: SchemaRef,
     start: usize,
     end: usize,
-    limits: MetricExportLimits,
-) -> Result<(Encoder, usize, Vec<u8>)> {
+    budget: usize,
+) -> Result<(RecordBatch, usize)> {
     common_runtime::spawn_blocking_global(move || {
-        ensure!(
-            encoder.flushed_row_groups().len() < limits.max_row_groups,
-            MetricExportResourceSnafu {
-                reason: "Parquet row-group metadata budget exceeded"
-            }
-        );
-        let end = end.min(start.saturating_add(limits.row_group_rows - encoder.in_progress_rows()));
-        let len = bounded_slice_len(&batch, start, end, limits.conversion_bytes)?;
+        let len = bounded_slice_len(&batch, start, end, budget)?;
         let slice = batch.slice(start, len);
         let arrays = slice
             .columns()
@@ -600,24 +509,25 @@ async fn encode_slice(
             .map(|(array, field)| cast(array, field.data_type()).context(error::ComputeArrowSnafu))
             .collect::<Result<Vec<_>>>()?;
         let expanded = RecordBatch::try_new(schema, arrays).context(error::ComputeArrowSnafu)?;
-        parquet_result(encoder.write(&expanded), "logical Parquet file")?;
-        if encoder.memory_size() >= limits.writer_bytes
-            || encoder.in_progress_size() >= limits.writer_bytes
-        {
-            parquet_result(encoder.flush(), "logical Parquet file")?;
-        }
-        // Draining the backing Vec preserves ArrowWriter's tracked byte offsets.
-        let bytes = std::mem::take(encoder.inner_mut());
-        Ok((encoder, len, bytes))
+        Ok((expanded, len))
     })
     .await
     .context(error::JoinTaskSnafu)?
 }
 
-fn parquet_result<T>(result: datafusion::parquet::errors::Result<T>, path: &str) -> Result<T> {
-    result
-        .context(common_datasource::error::WriteParquetSnafu { path })
-        .context(error::WriteStreamToFileSnafu { path })
+fn writer_result<T>(result: common_datasource::error::Result<T>, path: &str) -> Result<T> {
+    match result {
+        Err(common_datasource::error::Error::InvalidParquetWriterLimits {}) => {
+            InvalidLogicalTableExportSnafu {
+                reason: "Parquet writer limits must be positive",
+            }
+            .fail()
+        }
+        Err(common_datasource::error::Error::ParquetWriterResource { reason }) => {
+            LogicalTableExportResourceSnafu { reason }.fail()
+        }
+        result => result.context(error::WriteStreamToFileSnafu { path }),
+    }
 }
 
 // Count only selected logical values before dictionary expansion, including nested
@@ -664,7 +574,7 @@ fn value_bytes(array: &dyn Array, row: usize) -> Result<usize> {
         }
         other => other
             .primitive_width()
-            .with_context(|| InvalidMetricExportSnafu {
+            .with_context(|| InvalidLogicalTableExportSnafu {
                 reason: format!("unsupported Metric Parquet type: {other}"),
             })?,
     };
@@ -691,7 +601,7 @@ fn bounded_slice_len(
     }
     ensure!(
         row > start,
-        MetricExportResourceSnafu {
+        LogicalTableExportResourceSnafu {
             reason: "one expanded logical row exceeds conversion byte budget"
         }
     );

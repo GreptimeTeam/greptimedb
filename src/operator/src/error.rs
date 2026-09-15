@@ -85,14 +85,14 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Invalid Metric export: {reason}"))]
-    InvalidMetricExport { reason: String },
+    #[snafu(display("Invalid logical table export: {reason}"))]
+    InvalidLogicalTableExport { reason: String },
 
-    #[snafu(display("Metric export resource limit exceeded: {reason}"))]
-    MetricExportResource { reason: String },
+    #[snafu(display("Logical table export resource limit exceeded: {reason}"))]
+    LogicalTableExportResource { reason: String },
 
-    #[snafu(display("Metric export cancelled"))]
-    MetricExportCancelled {},
+    #[snafu(display("Logical table export cancelled"))]
+    LogicalTableExportCancelled {},
 
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
@@ -1080,9 +1080,9 @@ impl ErrorExt for Error {
             Error::InvalidTimeIndexType { .. } | Error::InvalidTimezone { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::InvalidMetricExport { .. } => StatusCode::InvalidArguments,
-            Error::MetricExportResource { .. } => StatusCode::Suspended,
-            Error::MetricExportCancelled { .. } => StatusCode::Cancelled,
+            Error::InvalidLogicalTableExport { .. } => StatusCode::InvalidArguments,
+            Error::LogicalTableExportResource { .. } => StatusCode::Suspended,
+            Error::LogicalTableExportCancelled { .. } => StatusCode::Cancelled,
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
             Error::TimestampFormatNotSupported { .. } => StatusCode::InvalidArguments,

@@ -14,11 +14,12 @@
 
 use std::sync::Arc;
 
+use common_datasource::parquet_writer::ParquetWriterLimits;
 use common_query::{Output, OutputData};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use frontend::instance::Instance;
-use operator::statement::metric_export::{MetricExportLimits, MetricExportUnit};
+use operator::statement::export_logical_tables::{LogicalTableExport, LogicalTableExportLimits};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
@@ -93,7 +94,7 @@ async fn roundtrip(instance: &Instance) {
             table(instance, &names[1]).await,
             table(instance, &names[2]).await,
         ];
-        let unit = MetricExportUnit::try_new(table(instance, physical).await, &tables).unwrap();
+        let unit = LogicalTableExport::try_new(table(instance, physical).await, &tables).unwrap();
         let range =
             TimestampRange::new(Timestamp::new_millisecond(2), Timestamp::new_millisecond(4))
                 .unwrap();
@@ -112,8 +113,11 @@ async fn roundtrip(instance: &Instance) {
                     directory.to_str().unwrap(),
                     &Default::default(),
                     Some(&range),
-                    MetricExportLimits {
-                        row_group_rows: 1,
+                    LogicalTableExportLimits {
+                        writer: ParquetWriterLimits {
+                            row_group_rows: 1,
+                            ..LogicalTableExportLimits::default().writer
+                        },
                         ..Default::default()
                     },
                     &CancellationToken::new(),
@@ -169,14 +173,14 @@ async fn roundtrip(instance: &Instance) {
                 directory.to_str().unwrap(),
                 &Default::default(),
                 None,
-                MetricExportLimits::default(),
+                LogicalTableExportLimits::default(),
                 &cancellation,
                 QueryContext::arc(),
             )
             .await;
         assert!(matches!(
             result,
-            Err(operator::error::Error::MetricExportCancelled { .. })
+            Err(operator::error::Error::LogicalTableExportCancelled { .. })
         ));
         assert!(!directory.exists());
     }

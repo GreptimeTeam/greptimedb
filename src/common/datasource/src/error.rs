@@ -27,6 +27,12 @@ use url::ParseError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Parquet writer limits must be positive"))]
+    InvalidParquetWriterLimits {},
+
+    #[snafu(display("Parquet writer resource limit exceeded: {reason}"))]
+    ParquetWriterResource { reason: String },
+
     #[snafu(display("Unsupported compression type: {}", compression_type))]
     UnsupportedCompressionType {
         compression_type: String,
@@ -275,6 +281,8 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            InvalidParquetWriterLimits {} => StatusCode::InvalidArguments,
+            ParquetWriterResource { .. } => StatusCode::Suspended,
             BuildBackend { .. }
             | ListObjects { .. }
             | ReadObject { .. }

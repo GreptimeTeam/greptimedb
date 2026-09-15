@@ -85,18 +85,14 @@ impl StatementExecutor {
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
-            Format::Parquet(_) => {
-                let schema = stream.schema();
-                stream_to_parquet(
-                    Box::pin(DfRecordBatchStreamAdapter::new(stream)),
-                    schema,
-                    object_store,
-                    path,
-                    WRITE_CONCURRENCY,
-                )
-                .await
-                .context(error::WriteStreamToFileSnafu { path })
-            }
+            Format::Parquet(_) => stream_to_parquet(
+                Box::pin(DfRecordBatchStreamAdapter::new(stream)),
+                object_store,
+                path,
+                WRITE_CONCURRENCY,
+            )
+            .await
+            .context(error::WriteStreamToFileSnafu { path }),
             _ => error::UnsupportedFormatSnafu {
                 format: format.clone(),
             }
