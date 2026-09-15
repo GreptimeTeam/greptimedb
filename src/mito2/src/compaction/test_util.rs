@@ -164,6 +164,7 @@ pub(crate) async fn compaction_region_with_ssts(
             metadata,
             options: RegionOptions::default(),
             ssts: Arc::new(ssts),
+            memtable_min_sequence: None,
             compaction_time_window: None,
         },
         file_purger: None,

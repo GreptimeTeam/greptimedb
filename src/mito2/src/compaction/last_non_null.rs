@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
+use store_api::storage::SequenceNumber;
 
 use crate::compaction::CompactionOutput;
 use crate::compaction::compactor::CompactionRegion;
@@ -63,11 +64,29 @@ impl Picker for LastNonNullPicker {
                 .cloned()
                 .collect();
             picked.outputs = close_outputs(picked.outputs, files, &version.metadata);
+            picked.outputs.retain(|output| {
+                inputs_precede_memtables(&output.inputs, version.memtable_min_sequence)
+            });
             (!picked.outputs.is_empty() || !picked.expired_ssts.is_empty()).then_some(picked)
         })
         .await
         .context(JoinSnafu)
     }
+}
+
+/// Imported SSTs can be newer than pending writes. A merge must not attach an
+/// old field to a sequence above an intermediate version left in a memtable.
+pub(super) fn inputs_precede_memtables(
+    inputs: &[FileHandle],
+    memtable_min_sequence: Option<SequenceNumber>,
+) -> bool {
+    memtable_min_sequence.is_none_or(|min_sequence| {
+        inputs.iter().all(|file| {
+            file.meta_ref()
+                .sequence
+                .is_some_and(|max_sequence| max_sequence.get() < min_sequence)
+        })
+    })
 }
 
 /// Each seed and snapshot file is consumed at most once. Absorbing a seed also
@@ -141,7 +160,9 @@ mod tests {
 
     use super::*;
     use crate::compaction::picker::new_picker;
-    use crate::compaction::test_util::{compaction_region_with_ssts, new_file_handle};
+    use crate::compaction::test_util::{
+        compaction_region_with_ssts, new_file_handle, new_file_handle_with_size_and_sequence,
+    };
     use crate::region::options::{CompactionOptions, MergeMode};
     use crate::sst::file::{FileMeta, RegionFileId};
     use crate::test_util::memtable_util::metadata_for_test;
@@ -157,6 +178,27 @@ mod tests {
 
     fn file_ids(files: &[FileHandle]) -> HashSet<RegionFileId> {
         files.iter().map(FileHandle::file_id).collect()
+    }
+
+    // Cover absent/unknown boundaries and strict inequality without arithmetic
+    // on sequence numbers, including the maximum representable sequence.
+    #[rstest::rstest]
+    #[case(0, None, true)]
+    #[case(0, Some(2), false)]
+    #[case(1, Some(0), false)]
+    #[case(1, Some(2), true)]
+    #[case(2, Some(2), false)]
+    #[case(3, Some(2), false)]
+    #[case(u64::MAX - 1, Some(u64::MAX), true)]
+    #[case(u64::MAX, Some(u64::MAX), false)]
+    fn test_inputs_must_precede_pending_memtables(
+        #[case] file_sequence: u64,
+        #[case] memtable_min: Option<u64>,
+        #[case] expected: bool,
+    ) {
+        let file =
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, file_sequence, 100);
+        assert_eq!(expected, inputs_precede_memtables(&[file], memtable_min));
     }
 
     #[test]
@@ -261,14 +303,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(MergeMode::LastRow, false, 4)]
-    #[case(MergeMode::LastRow, true, 4)]
-    #[case(MergeMode::LastNonNull, false, 5)]
-    #[case(MergeMode::LastNonNull, true, 0)]
+    #[case(MergeMode::LastRow, false, None, 4)]
+    #[case(MergeMode::LastRow, true, None, 4)]
+    #[case(MergeMode::LastNonNull, false, None, 5)]
+    #[case(MergeMode::LastNonNull, true, None, 0)]
+    #[case(MergeMode::LastRow, false, Some(5), 4)]
+    #[case(MergeMode::LastNonNull, false, Some(5), 0)]
+    #[case(MergeMode::LastNonNull, false, Some(6), 5)]
     #[tokio::test]
     async fn test_picker_dependencies_outside_request_window(
         #[case] merge_mode: MergeMode,
         #[case] busy: bool,
+        #[case] memtable_min: Option<u64>,
         #[case] expected_count: usize,
     ) {
         let files = (0..5).map(|i| FileMeta {
@@ -285,6 +331,7 @@ mod tests {
         let mut region = compaction_region_with_ssts(files, Duration::from_secs(60)).await;
         region.ttl = None;
         region.region_options.merge_mode = Some(merge_mode);
+        region.current_version.memtable_min_sequence = memtable_min;
         let CompactionOptions::Twcs(opts) = &mut region.region_options.compaction;
         opts.time_window = Some(Duration::from_secs(3600));
         let dependency = region.current_version.ssts.levels()[1]
@@ -316,18 +363,36 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[case(MergeMode::LastNonNull, None, 3)]
+    #[case(MergeMode::LastNonNull, Some(2), 0)]
+    #[case(MergeMode::LastRow, Some(2), 3)]
     #[tokio::test]
-    async fn test_strict_window_keeps_all_versions_in_disjoint_output_slices() {
+    async fn test_strict_window_keeps_all_versions_in_disjoint_output_slices(
+        #[case] merge_mode: MergeMode,
+        #[case] memtable_min: Option<u64>,
+        #[case] expected_outputs: usize,
+    ) {
         let files: Vec<_> = [(0, 10), (10, 10), (10, 20)]
             .into_iter()
-            .map(|(start, end)| {
-                new_file_handle(FileId::random(), start * 1000, end * 1000, 0)
-                    .meta_ref()
-                    .clone()
+            .enumerate()
+            .map(|(i, (start, end))| {
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    start * 1000,
+                    end * 1000,
+                    0,
+                    i as u64 + 1,
+                    100,
+                )
+                .meta_ref()
+                .clone()
             })
             .collect();
         let mut region = compaction_region_with_ssts(files, Duration::from_secs(60)).await;
-        region.region_options.merge_mode = Some(MergeMode::LastNonNull);
+        region.region_options.merge_mode = Some(merge_mode);
+        region.current_version.options.merge_mode = Some(merge_mode);
+        region.current_version.memtable_min_sequence = memtable_min;
         let picker = new_picker(
             &compact_request::Options::StrictWindow(api::v1::region::StrictWindow {
                 window_seconds: 10,
@@ -340,7 +405,9 @@ mod tests {
         let picked = picker.pick(&region).await.unwrap().unwrap();
         // Cross-window inputs also need their outer slices rewritten, despite
         // requesting only [10, 20). All three versions at t=10 share one stream.
-        assert_eq!(3, picked.outputs.len());
+        // With pending sequence 2, [0, 10) alone is safe, but must not be
+        // rewritten without the unsafe windows sharing its input SST.
+        assert_eq!(expected_outputs, picked.outputs.len());
         for (i, output) in picked.outputs.iter().enumerate() {
             assert_eq!(
                 TimestampRange::new(
