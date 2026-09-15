@@ -14,7 +14,7 @@
 
 //! some utils for helping with batching mode
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -1076,12 +1076,35 @@ pub(crate) async fn gen_plan_with_matching_schema(
     primary_key_indices: &[usize],
     allow_partial: bool,
 ) -> Result<LogicalPlan, Error> {
+    gen_plan_with_matching_schema_and_values(
+        sql,
+        query_ctx,
+        engine,
+        sink_table_schema,
+        primary_key_indices,
+        allow_partial,
+        &BTreeMap::new(),
+    )
+    .await
+}
+
+/// Generate a schema-matching plan with extension-owned typed sink values.
+pub(crate) async fn gen_plan_with_matching_schema_and_values(
+    sql: &str,
+    query_ctx: QueryContextRef,
+    engine: QueryEngineRef,
+    sink_table_schema: SchemaRef,
+    primary_key_indices: &[usize],
+    allow_partial: bool,
+    values: &BTreeMap<String, ScalarValue>,
+) -> Result<LogicalPlan, Error> {
     let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), sql, false).await?;
 
-    let mut add_auto_column = ColumnMatcherRewriter::new(
+    let mut add_auto_column = ColumnMatcherRewriter::new_with_values(
         sink_table_schema,
         primary_key_indices.to_vec(),
         allow_partial,
+        values.clone(),
     );
     let plan = plan
         .clone()
@@ -1217,7 +1240,10 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
 /// it also give existing columns alias to column in sink table if needed
 #[derive(Debug)]
 pub struct ColumnMatcherRewriter {
+    /// Schema used to match the ordinary flow output. It excludes injected values.
     pub schema: SchemaRef,
+    sink_schema: SchemaRef,
+    values: BTreeMap<String, ScalarValue>,
     pub is_rewritten: bool,
     pub primary_key_indices: Vec<usize>,
     pub allow_partial: bool,
@@ -1226,11 +1252,115 @@ pub struct ColumnMatcherRewriter {
 impl ColumnMatcherRewriter {
     pub fn new(schema: SchemaRef, primary_key_indices: Vec<usize>, allow_partial: bool) -> Self {
         Self {
-            schema,
+            schema: schema.clone(),
+            sink_schema: schema,
+            values: BTreeMap::new(),
             is_rewritten: false,
             primary_key_indices,
             allow_partial,
         }
+    }
+
+    /// Match ordinary output against the sink schema excluding typed values, then inject those
+    /// values in physical sink-column order.
+    pub fn new_with_values(
+        sink_schema: SchemaRef,
+        primary_key_indices: Vec<usize>,
+        allow_partial: bool,
+        values: BTreeMap<String, ScalarValue>,
+    ) -> Self {
+        let value_names = values.keys().collect::<BTreeSet<_>>();
+        let ordinary_columns = sink_schema
+            .column_schemas()
+            .iter()
+            .filter(|column| !value_names.contains(&column.name))
+            .cloned()
+            .collect();
+        let ordinary_schema = Arc::new(datatypes::schema::Schema::new(ordinary_columns));
+        let ordinary_primary_key_indices = primary_key_indices
+            .into_iter()
+            .filter_map(|index| {
+                let name = &sink_schema.column_schemas()[index].name;
+                ordinary_schema
+                    .column_schemas()
+                    .iter()
+                    .position(|column| column.name == *name)
+            })
+            .collect();
+        Self {
+            schema: ordinary_schema,
+            sink_schema,
+            values,
+            is_rewritten: false,
+            primary_key_indices: ordinary_primary_key_indices,
+            allow_partial,
+        }
+    }
+
+    fn validate_values(&self, output_exprs: &[Expr]) -> DfResult<()> {
+        let output_names = output_exprs
+            .iter()
+            .map(|expr| expr.qualified_name().1)
+            .collect::<Vec<_>>();
+        let duplicated = duplicate_names(&output_names);
+        if !duplicated.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "Flow output schema contains duplicate column(s) {:?}. {}",
+                duplicated,
+                format_flow_sink_schema_mismatch(output_exprs, self.sink_schema.as_ref())
+            )));
+        }
+        for (name, value) in &self.values {
+            let Some(column) = self
+                .sink_schema
+                .column_schemas()
+                .iter()
+                .find(|column| column.name == *name)
+            else {
+                return Err(DataFusionError::Plan(format!(
+                    "Injected flow value column '{name}' is not found in sink schema"
+                )));
+            };
+            if output_names.iter().any(|output| output == name) {
+                return Err(DataFusionError::Plan(format!(
+                    "Injected flow value column '{name}' collides with flow output"
+                )));
+            }
+            let value_type = ConcreteDataType::from_arrow_type(&value.data_type());
+            if value_type != column.data_type {
+                return Err(DataFusionError::Plan(format!(
+                    "Injected flow value column '{name}' has type {:?}, but sink column has type {:?}",
+                    value_type, column.data_type
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn inject_values_in_physical_order(&self, exprs: Vec<Expr>) -> DfResult<Vec<Expr>> {
+        if self.values.is_empty() {
+            return Ok(exprs);
+        }
+        let mut ordinary = exprs
+            .into_iter()
+            .map(|expr| (expr.qualified_name().1, expr))
+            .collect::<HashMap<_, _>>();
+        self.sink_schema
+            .column_schemas()
+            .iter()
+            .map(|column| {
+                if let Some(value) = self.values.get(&column.name) {
+                    Ok(Expr::Literal(value.clone(), None).alias(column.name.clone()))
+                } else {
+                    ordinary.remove(&column.name).ok_or_else(|| {
+                        DataFusionError::Plan(format!(
+                            "Flow output is missing sink column '{}' after schema matching",
+                            column.name
+                        ))
+                    })
+                }
+            })
+            .collect()
     }
 
     /// modify the exprs in place so that it matches the schema and some auto columns are added
@@ -1239,8 +1369,10 @@ impl ColumnMatcherRewriter {
         mut exprs: Vec<Expr>,
         input_schema: &DFSchema,
     ) -> DfResult<Vec<Expr>> {
+        self.validate_values(&exprs)?;
         if self.allow_partial {
-            return self.modify_project_exprs_with_partial(exprs);
+            let exprs = self.modify_project_exprs_with_partial(exprs)?;
+            return self.inject_values_in_physical_order(exprs);
         }
 
         let original_exprs = exprs.clone();
@@ -1309,7 +1441,12 @@ impl ColumnMatcherRewriter {
             )));
         }
 
-        self.match_extra_output_columns(exprs, input_schema, &original_exprs, &all_names)
+        self.inject_values_in_physical_order(self.match_extra_output_columns(
+            exprs,
+            input_schema,
+            &original_exprs,
+            &all_names,
+        )?)
     }
 
     /// Match flow output columns whose names are not in the sink schema by the same position only.

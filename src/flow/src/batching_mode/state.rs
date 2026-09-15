@@ -131,6 +131,11 @@ impl TaskState {
         &self.checkpoints
     }
 
+    /// Read the live dirty-window queue without exposing TaskState internals to execution owners.
+    pub fn dirty_time_windows(&self) -> &DirtyTimeWindows {
+        &self.dirty_time_windows
+    }
+
     /// Returns the in-progress fenced repair, if the task is repairing dirty
     /// windows under a frozen full-snapshot high watermark.
     pub fn pending_fenced_repair(&self) -> Option<&FencedRepair> {
@@ -543,6 +548,15 @@ impl DirtyTimeWindows {
             // never shrinks an already-known dirty range with the same start.
             (Some(end), None) | (None, Some(end)) => Some(end),
             (None, None) => None,
+        }
+    }
+
+    /// Detach all dirty windows while retaining this queue's configured limits.
+    pub(crate) fn detach(&mut self) -> Self {
+        Self {
+            windows: std::mem::take(&mut self.windows),
+            max_filter_num_per_query: self.max_filter_num_per_query,
+            time_window_merge_threshold: self.time_window_merge_threshold,
         }
     }
 
