@@ -52,7 +52,7 @@ pub enum FlightRecordBatchSource {
 }
 
 // Toggle only this constant for paired Flight coalescing diagnostics.
-const EXPERIMENTAL_FLIGHT_COALESCING_ENABLED: bool = false;
+const EXPERIMENTAL_FLIGHT_COALESCING_ENABLED: bool = true;
 
 /// Determines whether a Flight result is ready now or initialized asynchronously.
 pub enum FlightRecordBatchStreamInput<F = std::future::Ready<TonicResult<FlightRecordBatchSource>>>
