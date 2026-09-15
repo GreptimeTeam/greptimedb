@@ -2317,6 +2317,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-batcher"
+version = "1.3.0-alpha.1"
+dependencies = [
+ "dashmap",
+ "futures",
+ "tokio",
+]
+
+[[package]]
 name = "common-catalog"
 version = "1.3.0-alpha.1"
 dependencies = [
@@ -5637,6 +5646,7 @@ dependencies = [
  "catalog",
  "client",
  "common-base",
+ "common-batcher",
  "common-catalog",
  "common-config",
  "common-datasource",
@@ -13556,6 +13566,7 @@ dependencies = [
  "chrono",
  "client",
  "common-base",
+ "common-batcher",
  "common-catalog",
  "common-decimal",
  "common-error",
