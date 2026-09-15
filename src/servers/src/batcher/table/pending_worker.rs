@@ -42,6 +42,24 @@ pub(in crate::batcher::table) struct PendingWorker {
     pub tx: mpsc::Sender<WorkerCommand>,
 }
 
+/// Identifies submissions that can share a batch and overlapping writes.
+#[derive(PartialEq)]
+struct BatchIdentity {
+    table_id: u32,
+    table_version: u64,
+    schema: SchemaRef,
+}
+
+impl BatchIdentity {
+    fn new(batch: &PendingBatch) -> Self {
+        Self {
+            table_id: batch.table_info.table_id(),
+            table_version: batch.table_info.ident.version,
+            schema: batch.batch.schema(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::batcher::table) fn start_worker(
     key: BatchKey,
@@ -57,8 +75,8 @@ pub(in crate::batcher::table) fn start_worker(
 ) {
     spawn_global(async move {
         let mut pending = PendingCore::new(flush_policy);
-        let mut schema: Option<SchemaRef> = None;
-        // Handles are retained only for the schema transition barrier. Dropping
+        let mut identity: Option<BatchIdentity> = None;
+        // Handles are retained only for the table identity and schema transition barrier. Dropping
         // them on shutdown detaches writes, matching the Prom worker contract.
         let mut flushes: Vec<JoinHandle<()>> = Vec::new();
         let mut shutdown_rx = shutdown.subscribe();
@@ -71,17 +89,18 @@ pub(in crate::batcher::table) fn start_worker(
                     match command {
                         Some(WorkerCommand::Submit(batch)) => {
                             idle_timer.as_mut().reset(Instant::now() + idle_timeout);
-                            if schema.as_ref().is_some_and(|schema| *schema != batch.batch.schema()) {
+                            let next_identity = BatchIdentity::new(&batch);
+                            if identity.as_ref().is_some_and(|identity| *identity != next_identity) {
                                 if let Some(old) = drain_batch(&mut pending, None)
                                     && let Some(task) = spawn_flush(old, &flush_limiter, inserter.clone(), notifier.clone()).await {
                                     flushes.push(task);
                                 }
-                                // Never send a new schema ahead of an old-schema write.
+                                // Finish writes from the previous table definition before switching.
                                 for task in flushes.drain(..) {
                                     if let Err(error) = task.await { warn!(error; "Failed to join old-schema batch flush"); }
                                 }
                             }
-                            schema = Some(batch.batch.schema());
+                            identity = Some(next_identity);
                             let rows = batch.batch.num_rows();
                             if pending.is_empty() { PENDING_BATCHES.inc(); }
                             pending.submit(batch, rows);
@@ -99,7 +118,7 @@ pub(in crate::batcher::table) fn start_worker(
                 _ = pending.wait_flush() => drain_batch(&mut pending, Some(FlushTrigger::Deadline)),
                 _ = &mut idle_timer, if !closing => {
                     if pending.is_empty() && rx.is_empty() && flushes.iter().all(JoinHandle::is_finished) {
-                        // Keep schema history while writes are in flight. Closing
+                        // Keep table identity while writes are in flight. Closing
                         // still allows previously reserved sends to be received.
                         rx.close();
                         closing = true;

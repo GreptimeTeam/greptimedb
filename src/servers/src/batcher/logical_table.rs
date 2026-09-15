@@ -425,4 +425,32 @@ mod tests {
         .unwrap();
         RecordBatchWithTsIdx::try_new(batch, 0).unwrap()
     }
+    #[test]
+    fn test_batch_key_groups_by_skip_wal() {
+        use std::collections::HashMap;
+
+        use crate::batcher::logical_table::batch_key_from_ctx;
+
+        let wal_ctx = session::context::QueryContext::arc();
+        let skip_wal_ctx = session::context::QueryContext::arc();
+        skip_wal_ctx.set_skip_wal(true);
+        let another_skip_wal_ctx = session::context::QueryContext::arc();
+        another_skip_wal_ctx.set_skip_wal(true);
+
+        let mut batches = HashMap::new();
+        *batches.entry(batch_key_from_ctx(&wal_ctx)).or_insert(0) += 1;
+        *batches
+            .entry(batch_key_from_ctx(&skip_wal_ctx))
+            .or_insert(0) += 1;
+        *batches
+            .entry(batch_key_from_ctx(&another_skip_wal_ctx))
+            .or_insert(0) += 1;
+        *batches
+            .entry(batch_key_from_ctx(&session::context::QueryContext::arc()))
+            .or_insert(0) += 1;
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[&batch_key_from_ctx(&wal_ctx)], 2);
+        assert_eq!(batches[&batch_key_from_ctx(&skip_wal_ctx)], 2);
+    }
 }

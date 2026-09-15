@@ -154,6 +154,7 @@ auth = { workspace = true, features = ["testing"] }
 catalog = { workspace = true, features = ["testing"] }
 client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"

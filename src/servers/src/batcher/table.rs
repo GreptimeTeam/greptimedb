@@ -47,8 +47,18 @@ use crate::batcher::table::pending_worker::{PendingWorker, WorkerCommand, start_
 struct BatchKey {
     catalog: String,
     schema: String,
-    table_id: u32,
-    table_version: u64,
+    table_name: String,
+    skip_wal: bool,
+}
+
+// Match Prom batching: group by table name and keep WAL policies separate.
+fn batch_key_from_ctx(table_name: &str, ctx: &QueryContextRef) -> BatchKey {
+    BatchKey {
+        catalog: ctx.current_catalog().to_string(),
+        schema: ctx.current_schema().clone(),
+        table_name: table_name.to_string(),
+        skip_wal: ctx.skip_wal(),
+    }
 }
 
 type PendingWorkers = WorkerRegistry<BatchKey, WorkerCommand>;
@@ -171,13 +181,7 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
             }
             .fail();
         }
-        // TODO: Propagate skip_wal through the ordinary-table bulk path.
-        let key = BatchKey {
-            catalog: ctx.current_catalog().to_string(),
-            schema: ctx.current_schema().clone(),
-            table_id: table_info.table_id(),
-            table_version: table_info.ident.version,
-        };
+        let key = batch_key_from_ctx(&table_info.name, &ctx);
         let (response_tx, response_rx) = oneshot::channel();
         let pending = PendingBatch {
             table_info,
@@ -262,13 +266,14 @@ mod tests {
     use crate::batcher::table::flow_notifier::FlowNotifier;
     use crate::batcher::table::pending_batch::PendingBatch;
     use crate::batcher::table::pending_worker::{WorkerCommand, start_worker};
-    use crate::batcher::table::{BatchKey, PendingWorkers, TablePendingRowsBatcher};
+    use crate::batcher::table::{PendingWorkers, TablePendingRowsBatcher, batch_key_from_ctx};
     use crate::batcher::test_util::mock_table_flownode_cache;
 
     #[derive(Clone)]
     struct BulkHandler {
         requests: Arc<Mutex<Vec<RecordBatch>>>,
         report_missing_row: bool,
+        expected_skip_wal: bool,
     }
 
     #[async_trait::async_trait]
@@ -280,6 +285,7 @@ mod tests {
                 panic!("expected bulk insert")
             };
             assert_eq!(RegionId::new(1, 3).as_u64(), request.region_id);
+            assert_eq!(self.expected_skip_wal, request.skip_wal);
             assert!(request.partition_expr_version.is_some());
             let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
                 panic!("expected Arrow IPC")
@@ -330,12 +336,22 @@ mod tests {
         report_missing_row: bool,
         shared_request: bool,
     ) -> usize {
+        run_bulk_case_with_wal(max_batch_rows, report_missing_row, shared_request, false).await
+    }
+
+    async fn run_bulk_case_with_wal(
+        max_batch_rows: usize,
+        report_missing_row: bool,
+        shared_request: bool,
+        skip_wal: bool,
+    ) -> usize {
         let backend = prepare_mocked_backend().await;
         let partitions = create_partition_rule_manager(backend.clone()).await;
         let captured = Arc::new(Mutex::new(Vec::new()));
         let nodes = Arc::new(MockDatanodeManager::new(BulkHandler {
             requests: captured.clone(),
             report_missing_row,
+            expected_skip_wal: skip_wal,
         }));
         let inserter = Arc::new(Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
@@ -382,6 +398,8 @@ mod tests {
             "public",
             Channel::Opentsdb,
         ));
+        influx_ctx.set_skip_wal(skip_wal);
+        opentsdb_ctx.set_skip_wal(skip_wal);
         let first_permit = batcher.acquire().await.unwrap();
         let second_permit = if shared_request {
             first_permit.clone()
@@ -465,6 +483,31 @@ mod tests {
         assert_eq!(1, run_bulk_case(2, false, true).await);
     }
 
+    #[tokio::test]
+    async fn test_bulk_preserves_skip_wal() {
+        for skip_wal in [false, true] {
+            assert_eq!(1, run_bulk_case_with_wal(2, false, false, skip_wal).await);
+        }
+    }
+
+    #[test]
+    fn test_batch_key_uses_name_and_wal_policy() {
+        let ctx = QueryContext::arc();
+        let table = new_test_table_info(1, "table_1", [1, 2, 3].into_iter());
+        let mut replacement = table.clone();
+        replacement.ident.table_id = 2;
+        replacement.ident.version += 1;
+        let key = batch_key_from_ctx(&table.name, &ctx);
+        assert_eq!(key, batch_key_from_ctx(&replacement.name, &ctx));
+        assert_ne!(key, batch_key_from_ctx("table_2", &ctx));
+        for (catalog, schema) in [("other", "public"), ("greptime", "other")] {
+            let other = Arc::new(QueryContext::with_channel(catalog, schema, Channel::Influx));
+            assert_ne!(key, batch_key_from_ctx(&table.name, &other));
+        }
+        ctx.set_skip_wal(true);
+        assert_ne!(key, batch_key_from_ctx(&table.name, &ctx));
+    }
+
     const WORKER_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[derive(Clone)]
@@ -515,6 +558,7 @@ mod tests {
                 inner: BulkHandler {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     report_missing_row: false,
+                    expected_skip_wal: false,
                 },
                 entered: entered_tx,
             }));
@@ -530,12 +574,7 @@ mod tests {
                 true,
             ));
             let table = Arc::new(new_test_table_info(1, "table_1", [1, 2, 3].into_iter()));
-            let key = BatchKey {
-                catalog: table.catalog_name.clone(),
-                schema: table.schema_name.clone(),
-                table_id: 1,
-                table_version: table.ident.version,
-            };
+            let key = batch_key_from_ctx(&table.name, &QueryContext::arc());
             let workers = Arc::new(WorkerRegistry::new());
             let (tx, rx) = mpsc::channel(1);
             workers.get_or_insert_with(key.clone(), || tx.clone()).await;
@@ -566,6 +605,16 @@ mod tests {
             count: usize,
             changed_schema: bool,
         ) -> oneshot::Receiver<Result<(), Arc<Error>>> {
+            self.submit_with_table(count, changed_schema, self.table.clone())
+                .await
+        }
+
+        async fn submit_with_table(
+            &self,
+            count: usize,
+            changed_schema: bool,
+            table_info: TableInfoRef,
+        ) -> oneshot::Receiver<Result<(), Arc<Error>>> {
             let mut input = rows(1);
             input.rows = vec![input.rows[0].clone(); count];
             let mut batch = rows_to_record_batch(&input, &self.table).unwrap();
@@ -582,7 +631,7 @@ mod tests {
             let (response_tx, response_rx) = oneshot::channel();
             self.tx
                 .send(WorkerCommand::Submit(PendingBatch {
-                    table_info: self.table.clone(),
+                    table_info,
                     batch,
                     ctx: QueryContext::arc(),
                     response_tx,
@@ -669,6 +718,59 @@ mod tests {
             .unwrap();
         worker.shutdown.send(()).unwrap();
         worker.stopped().await;
+    }
+
+    #[tokio::test]
+    async fn test_table_identity_change_flushes_pending_rows_before_switching() {
+        for recreated in [false, true] {
+            let mut worker = WorkerTest::new(2, 2).await;
+            let first = worker.submit(1, false).await;
+            let mut changed = (*worker.table).clone();
+            if recreated {
+                changed.ident.table_id = 2;
+            } else {
+                changed.ident.version += 1;
+            }
+            let mut second = worker.submit_with_table(2, false, Arc::new(changed)).await;
+            // The first batch is below max_rows but must be flushed on identity change.
+            let first_release = worker.entered().await;
+            assert!(
+                timeout(Duration::from_millis(100), worker.entered.recv())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                timeout(Duration::from_millis(100), &mut second)
+                    .await
+                    .is_err()
+            );
+            first_release.send(()).unwrap();
+            timeout(WORKER_TIMEOUT, first)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if recreated {
+                // The recreated table has no route in this fixture; its error belongs only to it.
+                assert!(
+                    timeout(WORKER_TIMEOUT, second)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .is_err()
+                );
+            } else {
+                let second_release = worker.entered().await;
+                second_release.send(()).unwrap();
+                timeout(WORKER_TIMEOUT, second)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            }
+            worker.shutdown.send(()).unwrap();
+            worker.stopped().await;
+        }
     }
 
     #[tokio::test]
