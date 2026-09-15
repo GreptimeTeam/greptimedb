@@ -260,6 +260,13 @@ pub enum Error {
         error: parquet::errors::ParquetError,
     },
 
+    #[snafu(display("Invalid Parquet table name metadata: {}", reason))]
+    InvalidParquetTableNameMetadata {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(transparent)]
     DataFusion {
         #[snafu(implicit)]
@@ -298,7 +305,8 @@ impl ErrorExt for Error {
             | ReadParquetSnafu { .. }
             | ParquetToSchema { .. }
             | ParseFormat { .. }
-            | MergeSchema { .. } => StatusCode::InvalidArguments,
+            | MergeSchema { .. }
+            | InvalidParquetTableNameMetadata { .. } => StatusCode::InvalidArguments,
 
             JoinHandle { .. }
             | ReadRecordBatch { .. }
