@@ -74,6 +74,13 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
+| `experimental_pending_rows_batcher` | -- | -- | Shared experimental ordinary-table batching for opted-in ingestion protocols.<br/>Legacy Prometheus batching settings under prom_store remain supported.<br/>HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.<br/>Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.<br/>Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.<br/>Effective shared Prom settings take precedence; existing prom_store settings remain compatible. |
+| `experimental_pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
+| `experimental_pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
+| `experimental_pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
+| `experimental_pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `experimental_pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
+| `experimental_pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
@@ -325,6 +332,13 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
+| `experimental_pending_rows_batcher` | -- | -- | Shared experimental ordinary-table batching for opted-in ingestion protocols.<br/>Legacy Prometheus batching settings under prom_store remain supported.<br/>HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.<br/>Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.<br/>Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.<br/>Effective shared Prom settings take precedence; existing prom_store settings remain compatible. |
+| `experimental_pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
+| `experimental_pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
+| `experimental_pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
+| `experimental_pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `experimental_pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
+| `experimental_pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |

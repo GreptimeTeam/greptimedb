@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod kv_backend;
-mod partition_manager;
+//! Logical-table and ordinary-table batching implementations.
 
-pub(crate) use kv_backend::prepare_mocked_backend;
-pub(crate) use partition_manager::{create_partition_rule_manager, new_test_table_info};
+mod flow_notifier;
+mod flow_sender;
+pub mod logical_table;
+pub mod table;
+
+#[cfg(test)]
+mod test_util;
