@@ -90,6 +90,10 @@ pub struct QueryOptions {
     /// Whether to expose per-region query load metrics.
     #[serde(skip)]
     pub enable_per_region_metrics: bool,
+    /// Whether PromQL range queries of the form `aggr(range_fn(...))` use the
+    /// series-aware aggregate operators. When false, they use the generic hash
+    /// aggregate plan.
+    pub enable_promql_series_aggregate: bool,
     /// Experimental: spill-to-disk mode.
     /// - `default`: preserve DataFusion built-in OS temp directory behavior.
     /// - `custom`: explicitly configure spill path, max directory size, and compression.
@@ -119,6 +123,7 @@ impl Default for QueryOptions {
             allow_query_fallback: false,
             memory_pool_size: MemoryLimit::default(),
             enable_per_region_metrics: false,
+            enable_promql_series_aggregate: true,
             experimental_spill_mode: QuerySpillMode::Default,
             experimental_spill_path: None,
             experimental_spill_max_temp_directory_size: ReadableSize::gb(1),
