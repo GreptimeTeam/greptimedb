@@ -22,11 +22,13 @@ use arrow_flight::FlightData;
 use common_error::ext::ErrorExt;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::recordbatch::merge_record_batches;
 use common_telemetry::tracing::{Instrument, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, warn};
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
+use futures::future::poll_fn;
 use futures::{SinkExt, Stream, StreamExt};
 use pin_project::{pin_project, pinned_drop};
 use session::context::{
@@ -203,6 +205,7 @@ impl FlightRecordBatchStream {
 
                 match source {
                     Ok(FlightRecordBatchSource::RecordBatches(recordbatches)) => {
+                        // Verbose responses preserve their existing per-batch metrics behavior.
                         let should_send_partial_metrics = query_ctx.explain_verbose();
                         let can_send_metrics_before_batch =
                             query_ctx.explain_verbose()
@@ -255,10 +258,14 @@ impl FlightRecordBatchStream {
         should_send_partial_metrics: bool,
         can_send_metrics_before_batch: bool,
     ) {
+        const MAX_ROWS: usize = 1024;
+        const MAX_BYTES: usize = 256 * 1024;
+        const MAX_BATCHES: usize = 16;
+
         let mut metrics = StreamMetrics::new(should_send_partial_metrics);
         let mut last_metrics_str = None;
-
-        let schema = recordbatches.schema().arrow_schema().clone();
+        let recordbatch_schema = recordbatches.schema();
+        let schema = recordbatch_schema.arrow_schema().clone();
         let start = Instant::now();
         if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
             warn!(e; "stop sending Flight data");
@@ -266,47 +273,120 @@ impl FlightRecordBatchStream {
         }
         metrics.send_schema_duration += start.elapsed();
 
-        loop {
-            let start = Instant::now();
-            let batch_or_err = if should_send_partial_metrics && can_send_metrics_before_batch {
-                match time::timeout(
-                    FLIGHT_METRICS_HEARTBEAT_INTERVAL,
-                    recordbatches.next().in_current_span(),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
+        if should_send_partial_metrics {
+            loop {
+                let start = Instant::now();
+                let batch_or_err = if can_send_metrics_before_batch {
+                    match time::timeout(
+                        FLIGHT_METRICS_HEARTBEAT_INTERVAL,
+                        recordbatches.next().in_current_span(),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            if let Some(metrics_str) = recordbatches
+                                .metrics()
+                                .and_then(|m| serde_json::to_string(&m).ok())
+                                && !Self::send_metrics_if_changed(
+                                    &mut tx,
+                                    &mut metrics,
+                                    &mut last_metrics_str,
+                                    metrics_str,
+                                )
+                                .await
+                            {
+                                return;
+                            }
+                            metrics.fetch_content_duration += start.elapsed();
+                            continue;
+                        }
+                    }
+                } else {
+                    recordbatches.next().in_current_span().await
+                };
+                metrics.fetch_content_duration += start.elapsed();
+                let Some(batch_or_err) = batch_or_err else {
+                    break;
+                };
+                match batch_or_err {
+                    Ok(recordbatch) => {
+                        metrics.total_rows += recordbatch.num_rows();
+                        metrics.record_batch_count += 1;
+                        metrics.total_bytes +=
+                            recordbatch.df_record_batch().get_array_memory_size();
+                        let start = Instant::now();
+                        if let Err(e) = tx
+                            .send(Ok(FlightMessage::RecordBatch(
+                                recordbatch.into_df_record_batch(),
+                            )))
+                            .await
+                        {
+                            warn!(e; "stop sending Flight data");
+                            return;
+                        }
+                        metrics.send_record_batch_duration += start.elapsed();
                         if let Some(metrics_str) = recordbatches
                             .metrics()
                             .and_then(|m| serde_json::to_string(&m).ok())
-                            && !Self::send_metrics_if_changed(
-                                &mut tx,
-                                &mut metrics,
-                                &mut last_metrics_str,
-                                metrics_str,
-                            )
-                            .await
+                            && {
+                                last_metrics_str = Some(metrics_str.clone());
+                                !Self::send_metrics(&mut tx, &mut metrics, metrics_str).await
+                            }
                         {
                             return;
                         }
-                        metrics.fetch_content_duration += start.elapsed();
-                        continue;
+                    }
+                    Err(e) => {
+                        if e.status_code().should_log_error() {
+                            error!("{e:?}");
+                        }
+                        let e = Err(e).context(error::CollectRecordbatchSnafu);
+                        if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
+                            warn!(e; "stop sending Flight data");
+                        }
+                        return;
                     }
                 }
-            } else {
-                recordbatches.next().in_current_span().await
-            };
-            metrics.fetch_content_duration += start.elapsed();
-            let Some(batch_or_err) = batch_or_err else {
-                break;
-            };
-            match batch_or_err {
-                Ok(recordbatch) => {
-                    metrics.total_rows += recordbatch.num_rows();
+            }
+        } else {
+            let mut sent_first_batch = false;
+            let mut pending = None;
+            loop {
+                let (batch_or_err, fetched) = match pending.take() {
+                    Some(recordbatch) => (Ok(recordbatch), false),
+                    None => {
+                        let start = Instant::now();
+                        let batch_or_err = recordbatches.next().in_current_span().await;
+                        metrics.fetch_content_duration += start.elapsed();
+                        let Some(batch_or_err) = batch_or_err else {
+                            break;
+                        };
+                        (batch_or_err, true)
+                    }
+                };
+                let recordbatch = match batch_or_err {
+                    Ok(recordbatch) => recordbatch,
+                    Err(e) => {
+                        if e.status_code().should_log_error() {
+                            error!("{e:?}");
+                        }
+                        let e = Err(e).context(error::CollectRecordbatchSnafu);
+                        if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
+                            warn!(e; "stop sending Flight data");
+                        }
+                        return;
+                    }
+                };
+                let batch_rows = recordbatch.num_rows();
+                let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
+                if fetched {
+                    metrics.total_rows += batch_rows;
                     metrics.record_batch_count += 1;
-                    metrics.total_bytes += recordbatch.df_record_batch().get_array_memory_size();
+                    metrics.total_bytes += batch_bytes;
+                }
 
+                if !sent_first_batch || batch_rows >= MAX_ROWS || batch_bytes >= MAX_BYTES {
                     let start = Instant::now();
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
@@ -318,33 +398,90 @@ impl FlightRecordBatchStream {
                         return;
                     }
                     metrics.send_record_batch_duration += start.elapsed();
+                    sent_first_batch = true;
+                    continue;
+                }
 
-                    if should_send_partial_metrics
-                        && let Some(metrics_str) = recordbatches
-                            .metrics()
-                            .and_then(|m| serde_json::to_string(&m).ok())
-                        && {
-                            last_metrics_str = Some(metrics_str.clone());
-                            !Self::send_metrics(&mut tx, &mut metrics, metrics_str).await
+                let mut batches = vec![recordbatch];
+                let mut rows = batch_rows;
+                let mut bytes = batch_bytes;
+                let mut eof = false;
+                let mut stream_error = None;
+                loop {
+                    if batches.len() == MAX_BATCHES || rows >= MAX_ROWS || bytes >= MAX_BYTES {
+                        break;
+                    }
+                    let start = Instant::now();
+                    let next =
+                        poll_fn(|cx| Poll::Ready(recordbatches.as_mut().poll_next(cx))).await;
+                    metrics.fetch_content_duration += start.elapsed();
+                    match next {
+                        Poll::Ready(Some(Ok(recordbatch))) => {
+                            let batch_rows = recordbatch.num_rows();
+                            let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
+                            if batch_rows > MAX_ROWS - rows || batch_bytes > MAX_BYTES - bytes {
+                                metrics.total_rows += batch_rows;
+                                metrics.record_batch_count += 1;
+                                metrics.total_bytes += batch_bytes;
+                                pending = Some(recordbatch);
+                                break;
+                            }
+                            metrics.total_rows += batch_rows;
+                            metrics.record_batch_count += 1;
+                            metrics.total_bytes += batch_bytes;
+                            rows += batch_rows;
+                            bytes += batch_bytes;
+                            batches.push(recordbatch);
                         }
-                    {
-                        return;
+                        Poll::Ready(Some(Err(e))) => {
+                            stream_error = Some(e);
+                            break;
+                        }
+                        Poll::Ready(None) => {
+                            eof = true;
+                            break;
+                        }
+                        Poll::Pending => break,
                     }
                 }
-                Err(e) => {
+
+                let batches = if batches.len() >= 2 {
+                    match merge_record_batches(recordbatch_schema.clone(), &batches) {
+                        Ok(merged) => vec![merged],
+                        Err(_) => batches,
+                    }
+                } else {
+                    batches
+                };
+                for recordbatch in batches {
+                    let start = Instant::now();
+                    if let Err(e) = tx
+                        .send(Ok(FlightMessage::RecordBatch(
+                            recordbatch.into_df_record_batch(),
+                        )))
+                        .await
+                    {
+                        warn!(e; "stop sending Flight data");
+                        return;
+                    }
+                    metrics.send_record_batch_duration += start.elapsed();
+                }
+                if let Some(e) = stream_error {
                     if e.status_code().should_log_error() {
                         error!("{e:?}");
                     }
-
                     let e = Err(e).context(error::CollectRecordbatchSnafu);
                     if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
                         warn!(e; "stop sending Flight data");
                     }
                     return;
                 }
+                if eof {
+                    break;
+                }
             }
         }
-        // make last package to pass metrics
+        // Make the last package pass metrics exactly once at EOF.
         if let Some(metrics_str) = recordbatches
             .metrics()
             .and_then(|m| serde_json::to_string(&m).ok())
@@ -408,10 +545,13 @@ mod test {
 
     use common_grpc::flight::{FlightDecoder, FlightMessage};
     use common_recordbatch::adapter::RecordBatchMetrics;
+    use common_recordbatch::error::CreateRecordBatchesSnafu;
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, RecordBatches};
+    use datatypes::arrow::array::{DictionaryArray, Int32Array, StringArray};
+    use datatypes::arrow::datatypes::Int32Type;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-    use datatypes::vectors::Int32Vector;
+    use datatypes::vectors::{DictionaryVector, Int32Vector};
     use futures::StreamExt;
     use session::context::{
         LIVE_ANALYZE_METRICS_EXTENSION_KEY, QueryContext,
@@ -429,6 +569,23 @@ mod test {
         schema: SchemaRef,
         metrics: RecordBatchMetrics,
         rx: tokio::sync::mpsc::UnboundedReceiver<common_recordbatch::error::Result<RecordBatch>>,
+    }
+
+    enum ScriptedItem {
+        Batch(common_recordbatch::error::Result<RecordBatch>),
+        Pending,
+        PersistentPending,
+    }
+
+    struct ScriptedBatchStream {
+        schema: SchemaRef,
+        items: VecDeque<ScriptedItem>,
+        poll_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct DropFlagStream {
+        schema: SchemaRef,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
     }
 
     fn query_context_with_matching_capability() -> Arc<QueryContext> {
@@ -493,6 +650,491 @@ mod test {
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             self.rx.poll_recv(cx)
         }
+    }
+
+    impl RecordBatchStream for ScriptedBatchStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            Some(RecordBatchMetrics::default())
+        }
+    }
+
+    impl Stream for ScriptedBatchStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.poll_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match self.items.pop_front() {
+                Some(ScriptedItem::Batch(item)) => Poll::Ready(Some(item)),
+                Some(ScriptedItem::Pending) => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Some(ScriptedItem::PersistentPending) => {
+                    self.items.push_front(ScriptedItem::PersistentPending);
+                    Poll::Pending
+                }
+                None => Poll::Ready(None),
+            }
+        }
+    }
+
+    impl RecordBatchStream for DropFlagStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            None
+        }
+    }
+
+    impl Stream for DropFlagStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for DropFlagStream {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn int_batch(schema: SchemaRef, values: impl IntoIterator<Item = i32>) -> RecordBatch {
+        RecordBatch::new(
+            schema,
+            vec![Arc::new(Int32Vector::from_iter_values(values)) as VectorRef],
+        )
+        .unwrap()
+    }
+
+    async fn flight_messages_with_context(
+        recordbatches: SendableRecordBatchStream,
+        query_ctx: Arc<QueryContext>,
+    ) -> Vec<TonicResult<FlightMessage>> {
+        let mut stream = FlightRecordBatchStream::new(
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
+            TracingContext::default(),
+            FlightCompression::default(),
+            query_ctx,
+        );
+        let decoder = &mut FlightDecoder::default();
+        let mut messages = Vec::new();
+        while let Some(data) = stream.next().await {
+            match data {
+                Ok(data) => {
+                    if let Some(message) = decoder.try_decode(&data).unwrap() {
+                        messages.push(Ok(message));
+                    }
+                }
+                Err(status) => messages.push(Err(status)),
+            }
+        }
+        messages
+    }
+
+    async fn flight_messages(
+        recordbatches: SendableRecordBatchStream,
+    ) -> Vec<TonicResult<FlightMessage>> {
+        flight_messages_with_context(recordbatches, QueryContext::arc()).await
+    }
+
+    #[tokio::test]
+    async fn test_drop_cancels_and_releases_upstream_stream() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stream = FlightRecordBatchStream::new(
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(Box::pin(
+                DropFlagStream {
+                    schema,
+                    dropped: dropped.clone(),
+                },
+            ))),
+            TracingContext::default(),
+            FlightCompression::default(),
+            QueryContext::arc(),
+        );
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping Flight stream must release upstream");
+    }
+
+    #[tokio::test]
+    async fn test_first_batch_is_sent_before_any_additional_poll() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recordbatches = Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::PersistentPending,
+            ]),
+            poll_count: poll_count.clone(),
+        });
+        let mut stream = FlightRecordBatchStream::new(
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
+            TracingContext::default(),
+            FlightCompression::default(),
+            QueryContext::arc(),
+        );
+        let decoder = &mut FlightDecoder::default();
+        let schema_data = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            decoder.try_decode(&schema_data).unwrap().unwrap(),
+            FlightMessage::Schema(_)
+        ));
+        let first = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            decoder.try_decode(&first).unwrap().unwrap(),
+            FlightMessage::RecordBatch(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_ready_only_coalesces_later_batches_without_polling_after_first() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recordbatches = Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [3]))),
+            ]),
+            poll_count: poll_count.clone(),
+        });
+
+        let messages = flight_messages(recordbatches).await;
+        assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 4);
+        assert!(matches!(messages[0], Ok(FlightMessage::Schema(_))));
+        let FlightMessage::RecordBatch(first) = messages[1].as_ref().unwrap() else {
+            panic!("expected the first record batch");
+        };
+        assert_eq!(first.num_rows(), 1);
+        let FlightMessage::RecordBatch(merged) = messages[2].as_ref().unwrap() else {
+            panic!("expected the coalesced record batch");
+        };
+        assert_eq!(merged.num_rows(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_ready_only_exact_row_cap_flushes() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recordbatches = Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..1023))),
+                ScriptedItem::PersistentPending,
+            ]),
+            poll_count: poll_count.clone(),
+        });
+        let (tx, mut rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
+        let handle = tokio::spawn(FlightRecordBatchStream::flight_data_stream(
+            recordbatches,
+            tx,
+            false,
+            false,
+        ));
+
+        assert!(matches!(
+            rx.next().await.unwrap().unwrap(),
+            FlightMessage::Schema(_)
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while poll_count.load(std::sync::atomic::Ordering::Relaxed) != 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("exact-cap group must be formed");
+        assert!(matches!(
+            rx.next().await.unwrap().unwrap(),
+            FlightMessage::RecordBatch(_)
+        ));
+        let FlightMessage::RecordBatch(batch) = rx.next().await.unwrap().unwrap() else {
+            panic!("expected the exact-cap group");
+        };
+        assert_eq!(batch.num_rows(), 1024);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_pending_batch_is_sent_before_upstream_is_polled_again() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recordbatches = Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..1024))),
+                ScriptedItem::PersistentPending,
+            ]),
+            poll_count: poll_count.clone(),
+        });
+        let mut stream = FlightRecordBatchStream::new(
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
+            TracingContext::default(),
+            FlightCompression::default(),
+            QueryContext::arc(),
+        );
+        let decoder = &mut FlightDecoder::default();
+        let schema_data = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            decoder.try_decode(&schema_data).unwrap().unwrap(),
+            FlightMessage::Schema(_)
+        ));
+        let first = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            decoder.try_decode(&first).unwrap().unwrap(),
+            FlightMessage::RecordBatch(_)
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while poll_count.load(std::sync::atomic::Ordering::Relaxed) != 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second group must fetch the held batch");
+        let held = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            decoder.try_decode(&held).unwrap().unwrap(),
+            FlightMessage::RecordBatch(_)
+        ));
+        let pending = stream.next().await.unwrap().unwrap();
+        let FlightMessage::RecordBatch(batch) = decoder.try_decode(&pending).unwrap().unwrap()
+        else {
+            panic!("expected the held oversized batch");
+        };
+        assert_eq!(batch.num_rows(), 1024);
+    }
+
+    #[tokio::test]
+    async fn test_ready_only_flushes_before_pending_and_before_error() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recordbatches = Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
+                ScriptedItem::Pending,
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [3]))),
+                ScriptedItem::Batch(Err(CreateRecordBatchesSnafu {
+                    reason: "expected failure".to_string(),
+                }
+                .build())),
+            ]),
+            poll_count,
+        });
+
+        let messages = flight_messages(recordbatches).await;
+        assert!(matches!(messages[1], Ok(FlightMessage::RecordBatch(_))));
+        assert!(matches!(messages[2], Ok(FlightMessage::RecordBatch(_))));
+        assert!(matches!(messages[3], Ok(FlightMessage::RecordBatch(_))));
+        assert!(messages[4].is_err());
+        assert_eq!(messages.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_verbose_ready_batches_preserve_batch_metrics_order() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let query_ctx = QueryContext::arc();
+        query_ctx.set_explain_verbose(true);
+        let messages = flight_messages_with_context(
+            Box::pin(ScriptedBatchStream {
+                schema: schema.clone(),
+                items: VecDeque::from([
+                    ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                    ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
+                ]),
+                poll_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            query_ctx,
+        )
+        .await;
+        assert!(matches!(messages[1], Ok(FlightMessage::RecordBatch(_))));
+        assert!(matches!(messages[2], Ok(FlightMessage::Metrics(_))));
+        assert!(matches!(messages[3], Ok(FlightMessage::RecordBatch(_))));
+        assert!(matches!(messages[4], Ok(FlightMessage::Metrics(_))));
+    }
+
+    #[tokio::test]
+    async fn test_ready_only_preserves_oversized_and_empty_batch_caps() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let oversized = int_batch(schema.clone(), 0..1024);
+        let mut items = vec![
+            ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+            ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
+            ScriptedItem::Batch(Ok(oversized)),
+        ];
+        items.extend(
+            (0..16).map(|_| ScriptedItem::Batch(Ok(RecordBatch::new_empty(schema.clone())))),
+        );
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let messages = flight_messages(Box::pin(ScriptedBatchStream {
+            schema,
+            items: items.into(),
+            poll_count: poll_count.clone(),
+        }))
+        .await;
+        let batches = messages
+            .iter()
+            .filter_map(|message| match message.as_ref().unwrap() {
+                FlightMessage::RecordBatch(batch) => Some(batch.num_rows()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batches, vec![1, 1, 1024, 0]);
+        assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 20);
+    }
+
+    #[tokio::test]
+    async fn test_ready_only_preserves_byte_oversized_batch() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::string_datatype(),
+            false,
+        )]));
+        let oversized = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(datatypes::vectors::StringVector::from_slice(
+                &vec!["x".repeat(300); 1023],
+            )) as VectorRef],
+        )
+        .unwrap();
+        let messages = flight_messages(Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(RecordBatch::new_empty(schema.clone()))),
+                ScriptedItem::Batch(Ok(RecordBatch::new_empty(schema.clone()))),
+                ScriptedItem::Batch(Ok(oversized)),
+            ]),
+            poll_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }))
+        .await;
+        let batches = messages
+            .iter()
+            .filter_map(|message| match message.as_ref().unwrap() {
+                FlightMessage::RecordBatch(batch) => Some(batch.num_rows()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batches, vec![0, 0, 1023]);
+    }
+
+    #[tokio::test]
+    async fn test_ready_only_coalesces_dictionary_batches_with_different_mappings() {
+        let arrow_schema = Arc::new(datatypes::arrow::datatypes::Schema::new(vec![
+            datatypes::arrow::datatypes::Field::new_dictionary(
+                "a",
+                datatypes::arrow::datatypes::DataType::Int32,
+                datatypes::arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
+        let dictionary_batch = |keys, values| {
+            let array = DictionaryArray::<Int32Type>::new(
+                Int32Array::from(keys),
+                Arc::new(StringArray::from(values)),
+            );
+            RecordBatch::new(
+                schema.clone(),
+                vec![Arc::new(
+                    DictionaryVector::new(array, ConcreteDataType::string_datatype()).unwrap(),
+                ) as VectorRef],
+            )
+            .unwrap()
+        };
+        let recordbatches = Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(dictionary_batch(vec![0], vec!["zero"]))),
+                ScriptedItem::Batch(Ok(dictionary_batch(vec![0], vec!["first"]))),
+                ScriptedItem::Batch(Ok(dictionary_batch(vec![0], vec!["second"]))),
+            ]),
+            poll_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let messages = flight_messages(recordbatches).await;
+        let FlightMessage::RecordBatch(merged) = messages[2].as_ref().unwrap() else {
+            panic!("expected the coalesced dictionary batch");
+        };
+        assert_eq!(merged.num_rows(), 2);
+        let dictionary = merged
+            .column(0)
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int32Type>>();
+        let values = dictionary
+            .unwrap()
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "first");
+        assert_eq!(values.value(1), "second");
     }
 
     #[tokio::test]
