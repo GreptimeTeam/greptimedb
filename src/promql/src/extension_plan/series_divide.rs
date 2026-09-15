@@ -521,13 +521,32 @@ fn concat_series_batches(
     batches: &[RecordBatch],
     tag_indices: &[usize],
 ) -> DataFusionResult<RecordBatch> {
-    if batches.len() <= 1 || tag_indices.is_empty() || schema.fields().is_empty() {
+    if batches.len() <= 1 || tag_indices.is_empty() {
         return Ok(compute::concat_batches(schema, batches)?);
     }
 
     let Some(first_batch) = batches.iter().find(|batch| batch.num_rows() > 0) else {
         return Ok(compute::concat_batches(schema, batches)?);
     };
+
+    // This endpoint-only sanity check does not validate tags in interior rows.
+    #[cfg(debug_assertions)]
+    {
+        let last_batch = batches
+            .iter()
+            .rfind(|batch| batch.num_rows() > 0)
+            .expect("first non-empty batch implies a last non-empty batch");
+        if let (Ok(first_tags), Ok(last_tags)) = (
+            TagIdentifier::try_new(first_batch, tag_indices),
+            TagIdentifier::try_new(last_batch, tag_indices),
+        ) {
+            debug_assert!(
+                first_tags.equal_at(0, &last_tags, last_batch.num_rows() - 1)?,
+                "series batch tag endpoints must match"
+            );
+        }
+    }
+
     let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
     let mut take_indices = None;
     let columns = schema
@@ -771,6 +790,36 @@ mod test {
             .unwrap(),
         ];
         assert_concat_matches_reference(schema, batches, &[0]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "series batch tag endpoints must match")]
+    fn test_concat_series_batches_mismatched_tag_endpoints_panics() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tag", DataType::Utf8, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let batches = vec![
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["first"])),
+                    Arc::new(Int64Array::from(vec![1])),
+                ],
+            )
+            .unwrap(),
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["last"])),
+                    Arc::new(Int64Array::from(vec![2])),
+                ],
+            )
+            .unwrap(),
+        ];
+
+        concat_series_batches(&schema, &batches, &[0]).unwrap();
     }
 
     #[test]
