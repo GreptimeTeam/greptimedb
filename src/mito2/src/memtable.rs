@@ -491,6 +491,7 @@ impl MemtableBuilderProvider {
                 BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
                     .with_config(config.clone())
                     .with_row_group_size(options.row_group_size())
+                    .with_float_field_encoding(options.float_field_encoding)
                     .with_compact_dispatcher(self.compact_dispatcher.clone()),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
@@ -515,6 +516,7 @@ impl MemtableBuilderProvider {
         )
         .with_config(self.default_bulk_memtable_config.clone())
         .with_row_group_size(options.row_group_size())
+        .with_float_field_encoding(options.float_field_encoding)
         .with_compact_dispatcher(self.compact_dispatcher.clone());
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
