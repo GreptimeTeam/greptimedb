@@ -304,6 +304,16 @@ pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 
+    /// Forks a memtable into a new mutable memtable.
+    fn fork(
+        &self,
+        previous: &MemtableRef,
+        id: MemtableId,
+        metadata: &RegionMetadataRef,
+    ) -> MemtableRef {
+        previous.fork(id, metadata)
+    }
+
     /// Returns true if the memtable supports bulk insert and benefits from it.
     fn use_bulk_insert(&self, metadata: &RegionMetadataRef) -> bool {
         let _metadata = metadata;
