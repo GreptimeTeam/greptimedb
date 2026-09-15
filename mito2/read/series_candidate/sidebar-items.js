@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["append_unique_primary_key","candidate_primary_key_stream","decode_metric_series","is_sparse_metric_metadata","merge_primary_key_streams","normalize_candidate_batch","primary_key_schema","validate_metric_metadata"],"struct":["SeriesCandidateRangeBuilder","SeriesCandidateScanner"]};

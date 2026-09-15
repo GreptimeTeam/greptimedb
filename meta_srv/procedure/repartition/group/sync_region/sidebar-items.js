@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_SYNC_REGION_PARALLELISM"],"struct":["SyncRegion"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAD_CONSISTENCY_CONSTANT","MIN_SAMPLES"],"struct":["AnomalyScoreMad","AnomalyScoreMadEvaluator"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PIPE_BUFFER_SIZE_FOR_SENDING_BLOB"],"struct":["BloomFilterFulltextIndexCreator"]};

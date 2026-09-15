@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE"],"fn":["build_wal_entry_distributor_and_receivers"],"struct":["EntryReceiver","WalEntryDistributor","WalEntryReceiver"]};

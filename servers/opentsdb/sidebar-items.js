@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["data_point_to_grpc_row_insert_requests"],"mod":["codec"]};

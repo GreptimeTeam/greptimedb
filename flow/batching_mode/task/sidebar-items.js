@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DirtyRestore","QueryCoverage"],"fn":["determine_query_type","encode_insert_plan_request","format_insert_target_columns","initial_schedule_cursor","is_merge_mode_last_non_null","scheduled_time_millis","sleep_delta_secs","wall_clock_unix_secs"],"mod":["ckpt","inc"],"struct":["BatchingTask","ExecuteOnceOutcome","PlanInfo","TaskArgs","TaskConfig"]};

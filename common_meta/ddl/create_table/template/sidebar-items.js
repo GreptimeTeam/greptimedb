@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_template","build_template_from_raw_table_info","build_template_from_raw_table_info_for_physical_table","prepare_partition_expr"],"struct":["CreateRequestBuilder"]};

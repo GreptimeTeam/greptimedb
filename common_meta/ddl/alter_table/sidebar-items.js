@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AlterTableFlow","AlterTableState"],"fn":["build_executor_from_alter_expr","enables_skip_wal","is_metadata_only_alter","only_enables_skip_wal"],"mod":["executor","metadata","region_request"],"struct":["AlterTableData","AlterTableProcedure","RegionRouteChanged"]};

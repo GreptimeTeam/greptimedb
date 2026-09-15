@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["escape_sql_identifier","escape_sql_literal"]};

@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["common_datasource",[["impl IntoEnumIterator for <a class=\"enum\" href=\"common_datasource/compression/enum.CompressionType.html\" title=\"enum common_datasource::compression::CompressionType\">CompressionType</a>",0]]],["common_error",[["impl IntoEnumIterator for <a class=\"enum\" href=\"common_error/status_code/enum.StatusCode.html\" title=\"enum common_error::status_code::StatusCode\">StatusCode</a>",0]]],["flow",[["impl IntoEnumIterator for <a class=\"enum\" href=\"flow/expr/func/enum.BinaryFunc.html\" title=\"enum flow::expr::func::BinaryFunc\">BinaryFunc</a>",0],["impl IntoEnumIterator for <a class=\"enum\" href=\"flow/expr/relation/func/enum.AggregateFunc.html\" title=\"enum flow::expr::relation::func::AggregateFunc\">AggregateFunc</a>",0]]],["servers",[["impl IntoEnumIterator for <a class=\"enum\" href=\"servers/http/event/enum.EventPayloadResolverInner.html\" title=\"enum servers::http::event::EventPayloadResolverInner\">EventPayloadResolverInner</a>",0],["impl IntoEnumIterator for <a class=\"enum\" href=\"servers/postgres/types/error/enum.PgErrorCode.html\" title=\"enum servers::postgres::types::error::PgErrorCode\">PgErrorCode</a>",0]]],["tests_fuzz",[["impl IntoEnumIterator for <a class=\"enum\" href=\"tests_fuzz/ir/enum.AlterTableOption.html\" title=\"enum tests_fuzz::ir::AlterTableOption\">AlterTableOption</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[221,192,347,407,186]}

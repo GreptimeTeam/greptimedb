@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["HeartbeatMailbox","MessageMeta"],"type":["IncomingMessage","MailboxRef","OutgoingMessage"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FoldMode","HistogramFoldOperation"],"struct":["HistogramFold","HistogramFoldExec","HistogramFoldStream","SafeGroup","UnfixIndices"]};

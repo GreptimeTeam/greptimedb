@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"trait":["FlowServiceHandler","ProcedureServiceHandler","TableMutationHandler"],"type":["FlowServiceHandlerRef","ProcedureServiceHandlerRef","TableMutationHandlerRef"]};

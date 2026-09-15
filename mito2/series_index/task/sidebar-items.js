@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["spawn_series_index_tasks"],"struct":["SeriesIndexTask","SeriesIndexTaskState"]};

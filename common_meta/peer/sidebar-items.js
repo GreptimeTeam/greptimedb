@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["NoopPeerAllocator","Peer","PeerAllocContext"],"trait":["PeerAllocator","PeerDiscovery","PeerResolver"],"type":["PeerAllocatorRef","PeerDiscoveryRef","PeerResolverRef"]};

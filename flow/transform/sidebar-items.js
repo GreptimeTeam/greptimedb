@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["register_function_to_query_engine"],"macro":["not_impl_err","plan_err"],"mod":["aggr","expr","literal","plan"],"struct":["FunctionExtensions","TumbleFunction"]};

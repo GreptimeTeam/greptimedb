@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["known_max_input_sequence","open_compaction_region","output_sequence_metadata","sst_info_from_file_meta"],"struct":["CompactionRegion","CompactionVersion","DefaultCompactor","DefaultSstMerger","MergeOutput","OpenCompactionRegionRequest","OutputSequenceMetadata"],"trait":["Compactor","SstMerger"]};

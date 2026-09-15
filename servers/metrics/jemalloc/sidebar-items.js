@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"static":["JEMALLOC_COLLECTOR"],"struct":["JemallocCollector","SYS_JEMALLOC_ALLOCATED","SYS_JEMALLOC_RESIDEN"]};
