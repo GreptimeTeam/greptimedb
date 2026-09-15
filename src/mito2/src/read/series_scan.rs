@@ -180,7 +180,7 @@ impl SeriesScan {
     }
 
     fn supports_two_phase(input: &ScanInput) -> bool {
-        if input.sequence_range.is_some() || !is_sparse_metric_metadata(input.region_metadata()) {
+        if !is_sparse_metric_metadata(input.region_metadata()) {
             return false;
         }
         #[cfg(feature = "enterprise")]
@@ -1239,7 +1239,7 @@ mod tests {
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
 
     #[tokio::test]
-    async fn two_phase_eligibility_rejects_exact_sequence_range() {
+    async fn two_phase_eligibility_allows_exact_sequence_range() {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             store_api::codec::PrimaryKeyEncoding::Sparse,
@@ -1264,7 +1264,7 @@ mod tests {
             max: 2,
         }))
         .build();
-        assert!(!SeriesScan::supports_two_phase(&exact_sequence));
+        assert!(SeriesScan::supports_two_phase(&exact_sequence));
     }
 
     #[test]
