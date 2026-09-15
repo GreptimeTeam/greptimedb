@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use catalog::memory::MemoryCatalogManager;
 use catalog::{DeregisterTableRequest, RegisterTableRequest};
@@ -577,7 +578,9 @@ fn register_scheduled_now_sink(query_engine: &QueryEngineRef, table_name: &str, 
     memory_catalog.register_table_sync(request).unwrap();
 }
 
-struct ExactDeltaFailureHandler;
+struct ExactDeltaFailureHandler {
+    invoked: Arc<AtomicBool>,
+}
 
 #[async_trait::async_trait]
 impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
@@ -588,8 +591,12 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
         _query: api::v1::greptime_request::Request,
         ctx: QueryContextRef,
     ) -> std::result::Result<Output, BoxedError> {
+        self.invoked.store(true, Ordering::SeqCst);
         assert_eq!(ctx.extension(FLOW_INCREMENTAL_MODE), Some("sequence_range"));
-        assert!(ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS).is_some());
+        assert_eq!(
+            ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS),
+            Some("{\"1\":10}")
+        );
         Err(BoxedError::new(MockError::new(StatusCode::RequestOutdated)))
     }
 }
@@ -2164,7 +2171,7 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
     }
     let sink_schema = aggregate_time_window_sink_schema();
     let plan_info = task
-        .gen_query_with_time_window(query_engine.clone(), &sink_schema, &[], false, Some(1))
+        .gen_insert_plan_unlocked(&query_engine, Some(1))
         .await
         .unwrap()
         .unwrap();
@@ -2173,8 +2180,11 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
         QueryCoverage::IncrementalDelta
     ));
 
+    let handler_invoked = Arc::new(AtomicBool::new(false));
     let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
-        Arc::new(ExactDeltaFailureHandler);
+        Arc::new(ExactDeltaFailureHandler {
+            invoked: handler_invoked.clone(),
+        });
     let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
         Arc::downgrade(&handler),
         QueryOptions::default(),
@@ -2186,7 +2196,11 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
         &plan_info.coverage,
     )
     .await
-    .expect_err("the dispatched exact delta must fail without a frontend handler");
+    .expect_err("the dispatched exact delta must fail through the injected frontend handler");
+    assert!(
+        handler_invoked.load(Ordering::SeqCst),
+        "the injected frontend handler must receive the exact delta"
+    );
     task.handle_executed_query_failure(Some(&plan_info));
 
     {
@@ -2194,6 +2208,10 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
         assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
         assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
         assert_eq!(state.dirty_time_windows.len(), 1);
+        assert_eq!(
+            state.dirty_time_windows.window_size(),
+            std::time::Duration::from_secs(5)
+        );
     }
 
     let repair = task
