@@ -284,6 +284,22 @@ mod test {
 
     use crate::test_util::{TestEnv, alter_logical_region_request, create_logical_region_request};
 
+    async fn check_alter_physical_skip_wal(
+        engine: &super::MetricEngineInner,
+        region_id: RegionId,
+        skip_wal: bool,
+    ) {
+        let request = RegionAlterRequest {
+            kind: AlterKind::SetRegionOptions {
+                options: vec![SetRegionOption::SkipWal(skip_wal)],
+            },
+        };
+        engine
+            .alter_physical_region(region_id, request)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_alter_region() {
         let env = TestEnv::new().await;
@@ -305,17 +321,8 @@ mod test {
         );
 
         // skip-WAL changes on the physical region should be forwarded to the data region
-        for skip_wal in [true, false] {
-            let alter_region_option_request = RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal(skip_wal)],
-                },
-            };
-            engine_inner
-                .alter_physical_region(physical_region_id, alter_region_option_request)
-                .await
-                .unwrap();
-        }
+        check_alter_physical_skip_wal(&engine_inner, physical_region_id, true).await;
+        check_alter_physical_skip_wal(&engine_inner, physical_region_id, false).await;
 
         // alter logical region
         let metadata_region = env.metadata_region();

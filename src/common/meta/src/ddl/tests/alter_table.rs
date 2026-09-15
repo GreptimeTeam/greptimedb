@@ -973,6 +973,66 @@ async fn test_enable_wal_rejects_noop_provider_before_updating_metadata() {
 }
 
 #[tokio::test]
+async fn test_enable_wal_accepts_legacy_raft_regions_without_wal_options() {
+    let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let table_name = "legacy_raft";
+    let table_id = 1024;
+    let mut task = test_create_table_task(table_name, table_id);
+    task.table_info.meta.options.skip_wal = true;
+    task.table_info
+        .meta
+        .options
+        .extra_options
+        .insert(SKIP_WAL_KEY.to_string(), "true".to_string());
+    let table_route = prepare_table_route(table_id);
+    let region_locks = table_route
+        .region_routes()
+        .unwrap()
+        .iter()
+        .map(|route| route.region.id)
+        .collect();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(task.table_info, table_route, HashMap::new())
+        .await
+        .unwrap();
+
+    let alter_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "false".to_string(),
+                }],
+            })),
+        },
+    };
+    let mut procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        alter_task,
+        region_locks,
+        ddl_context.clone(),
+    )
+    .unwrap();
+
+    procedure.on_prepare().await.unwrap();
+    procedure.on_update_metadata().await.unwrap();
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(!table_info.meta.options.skip_wal);
+}
+
+#[tokio::test]
 async fn test_enable_wal_updates_metadata_and_region_request() {
     let (tx, mut rx) = mpsc::channel(8);
     let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));

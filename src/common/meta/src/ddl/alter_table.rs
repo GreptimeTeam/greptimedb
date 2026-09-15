@@ -219,8 +219,11 @@ impl AlterTableProcedure {
                 ensure!(
                     current_region_ids.iter().all(|region_id| {
                         matches!(
-                            region_wal_options.get(&region_id.region_number()),
-                            Some(WalOptions::RaftEngine | WalOptions::Kafka(_))
+                            region_wal_options
+                                .get(&region_id.region_number())
+                                .cloned()
+                                .unwrap_or_default(),
+                            WalOptions::RaftEngine | WalOptions::Kafka(_)
                         )
                     }),
                     UnsupportedSnafu {

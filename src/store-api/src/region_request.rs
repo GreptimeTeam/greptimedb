@@ -42,7 +42,7 @@ use datatypes::error::time_index_not_widening_error;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use num_enum::TryFromPrimitive;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt, ensure};
 use strum::{AsRefStr, IntoStaticStr};
 
@@ -1486,7 +1486,7 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 ///
 /// This type is serialized for request persistence. Keep future changes backward
 /// compatible with previously serialized variants.
-#[derive(Debug, Eq, PartialEq, Clone, Serialize)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum SetRegionOption {
     WriteBufferSize(Option<ReadableSize>),
     Ttl(Option<TimeToLive>),
@@ -1505,7 +1505,7 @@ pub enum SetRegionOption {
     SkipWal(bool),
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 enum SetRegionOptionSerde {
     WriteBufferSize(Option<ReadableSize>),
     Ttl(Option<TimeToLive>),
@@ -1516,6 +1516,31 @@ enum SetRegionOptionSerde {
     MaxRowGroupRowCount(Option<usize>),
     PreserveRowSequence(bool),
     SkipWal(bool),
+}
+
+impl Serialize for SetRegionOption {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Older binaries deserialize the disable request as a unit variant.
+        if matches!(self, Self::SkipWal(true)) {
+            return serializer.serialize_unit_variant("SetRegionOption", 8, "SkipWal");
+        }
+
+        let option = match self {
+            Self::WriteBufferSize(value) => SetRegionOptionSerde::WriteBufferSize(*value),
+            Self::Ttl(value) => SetRegionOptionSerde::Ttl(*value),
+            Self::Twsc(key, value) => SetRegionOptionSerde::Twsc(key.clone(), value.clone()),
+            Self::Format(value) => SetRegionOptionSerde::Format(value.clone()),
+            Self::AppendMode(value) => SetRegionOptionSerde::AppendMode(*value),
+            Self::AutoFlushInterval(value) => SetRegionOptionSerde::AutoFlushInterval(*value),
+            Self::MaxRowGroupRowCount(value) => SetRegionOptionSerde::MaxRowGroupRowCount(*value),
+            Self::PreserveRowSequence(value) => SetRegionOptionSerde::PreserveRowSequence(*value),
+            Self::SkipWal(value) => SetRegionOptionSerde::SkipWal(*value),
+        };
+        option.serialize(serializer)
+    }
 }
 
 #[derive(Deserialize)]
@@ -2134,13 +2159,28 @@ mod tests {
         let legacy = serde_json::from_str::<SetRegionOption>(r#""SkipWal""#).unwrap();
         assert_eq!(SetRegionOption::SkipWal(true), legacy);
 
-        for skip_wal in [true, false] {
-            let option = SetRegionOption::SkipWal(skip_wal);
-            let serialized = serde_json::to_string(&option).unwrap();
-            assert_eq!(format!(r#"{{"SkipWal":{skip_wal}}}"#), serialized);
+        check_set_region_option_skip_wal_serde_compatibility(false);
+        check_set_region_option_skip_wal_serde_compatibility(true);
+    }
+
+    fn check_set_region_option_skip_wal_serde_compatibility(skip_wal: bool) {
+        let option = SetRegionOption::SkipWal(skip_wal);
+        let serialized = serde_json::to_string(&option).unwrap();
+        let expected = if skip_wal {
+            r#""SkipWal""#
+        } else {
+            r#"{"SkipWal":false}"#
+        };
+        assert_eq!(expected, serialized);
+        assert_eq!(
+            option,
+            serde_json::from_str::<SetRegionOption>(&serialized).unwrap()
+        );
+        if skip_wal {
+            assert!(serde_json::from_str::<LegacySetRegionOption>(&serialized).is_ok());
             assert_eq!(
                 option,
-                serde_json::from_str::<SetRegionOption>(&serialized).unwrap()
+                serde_json::from_str::<SetRegionOption>(r#"{"SkipWal":true}"#).unwrap()
             );
         }
     }

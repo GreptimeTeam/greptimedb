@@ -241,6 +241,65 @@ async fn test_alter_skip_wal_round_trip_reuses_provider(factory: Option<LogStore
     assert!(region.version_control.current().last_entry_id > last_entry_id);
 }
 
+#[apply(multiple_log_store_factories)]
+async fn test_create_skipped_region_with_real_wal_can_reenable(factory: Option<LogStoreFactory>) {
+    let Some(factory) = factory else {
+        return;
+    };
+    let mut env = TestEnv::with_prefix("create-skipped-with-real-wal")
+        .await
+        .with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic)
+        .insert_option(SKIP_WAL_KEY, "true")
+        .build();
+    let schema = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let provider = region.provider.clone();
+    assert!(!matches!(&provider, Provider::Noop));
+    assert!(region.version().options.skip_wal);
+
+    let last_entry_id = region.version_control.current().last_entry_id;
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+    assert_eq!(
+        last_entry_id,
+        region.version_control.current().last_entry_id
+    );
+
+    engine
+        .handle_request(region_id, set_skip_wal_request(false))
+        .await
+        .unwrap();
+    assert!(!region.version().options.skip_wal);
+    assert_eq!(&provider, &region.provider);
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(1, 2),
+        },
+    )
+    .await;
+    assert!(region.version_control.current().last_entry_id > last_entry_id);
+}
+
 #[tokio::test]
 async fn test_alter_skip_wal_rejects_noop_provider() {
     let mut env = TestEnv::with_prefix("alter-skip-wal-noop").await;
