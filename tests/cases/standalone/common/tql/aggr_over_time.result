@@ -340,3 +340,57 @@ drop table data;
 
 Affected Rows: 0
 
+-- Sliding min/max regression: overlapping 30s windows expire extrema at the
+-- left boundary, retain equal extrema, and end with a sparse empty window.
+create table moving_extrema (ts timestamp(3) time index, val double, series string primary key);
+
+Affected Rows: 0
+
+insert into moving_extrema values
+    (0, 5::double, 'moving'),
+    (10000, 1::double, 'moving'),
+    (20000, 4::double, 'moving'),
+    (30000, 4::double, 'moving'),
+    (40000, 2::double, 'moving'),
+    (60000, 3::double, 'moving');
+
+Affected Rows: 6
+
+-- eval range from 20s to 100s min_over_time(moving_extrema[30s]); 90s and 100s are empty.
+-- 	{series="moving"} 1 1 2 2 2 3 3
+-- SQLNESS SORT_RESULT 2 1
+tql eval (20, 100, '10s') min_over_time(moving_extrema[30s]);
+
++---------------------+----------------------------------+--------+
+| ts                  | prom_min_over_time(ts_range,val) | series |
++---------------------+----------------------------------+--------+
+| 1970-01-01T00:00:20 | 1.0                              | moving |
+| 1970-01-01T00:00:30 | 1.0                              | moving |
+| 1970-01-01T00:00:40 | 2.0                              | moving |
+| 1970-01-01T00:00:50 | 2.0                              | moving |
+| 1970-01-01T00:01:00 | 2.0                              | moving |
+| 1970-01-01T00:01:10 | 3.0                              | moving |
+| 1970-01-01T00:01:20 | 3.0                              | moving |
++---------------------+----------------------------------+--------+
+
+-- eval range from 20s to 100s max_over_time(moving_extrema[30s]); 90s and 100s are empty.
+-- 	{series="moving"} 5 4 4 4 3 3 3
+-- SQLNESS SORT_RESULT 2 1
+tql eval (20, 100, '10s') max_over_time(moving_extrema[30s]);
+
++---------------------+----------------------------------+--------+
+| ts                  | prom_max_over_time(ts_range,val) | series |
++---------------------+----------------------------------+--------+
+| 1970-01-01T00:00:20 | 5.0                              | moving |
+| 1970-01-01T00:00:30 | 4.0                              | moving |
+| 1970-01-01T00:00:40 | 4.0                              | moving |
+| 1970-01-01T00:00:50 | 4.0                              | moving |
+| 1970-01-01T00:01:00 | 3.0                              | moving |
+| 1970-01-01T00:01:10 | 3.0                              | moving |
+| 1970-01-01T00:01:20 | 3.0                              | moving |
++---------------------+----------------------------------+--------+
+
+drop table moving_extrema;
+
+Affected Rows: 0
+
