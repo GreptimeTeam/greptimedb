@@ -122,6 +122,12 @@ pub const INFORMATION_SCHEMA_STATISTICS_TABLE_ID: u32 = 43;
 pub const INFORMATION_SCHEMA_RECYCLE_BIN_TABLE_ID: u32 = 44;
 /// id for information_schema.flow_statistics
 pub const INFORMATION_SCHEMA_FLOW_STATISTICS_TABLE_ID: u32 = 45;
+/// id for information_schema.PLUGINS
+pub const INFORMATION_SCHEMA_PLUGINS_TABLE_ID: u32 = 47;
+/// id for information_schema.USER_PRIVILEGES
+pub const INFORMATION_SCHEMA_USER_PRIVILEGES_TABLE_ID: u32 = 48;
+/// id for information_schema.PROCESSLIST (for mysql)
+pub const INFORMATION_SCHEMA_PROCESSLIST_TABLE_ID: u32 = 49;
 
 // ----- End of information_schema tables -----
 
