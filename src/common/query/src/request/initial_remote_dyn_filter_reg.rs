@@ -371,7 +371,7 @@ mod tests {
         let decoded = reg
             .decode_children(&TaskContext::default(), &schema, 1024)
             .unwrap();
-        let decoded = decoded[0].as_any().downcast_ref::<Column>().unwrap();
+        let decoded = decoded[0].downcast_ref::<Column>().unwrap();
 
         assert_eq!(reg.filter_id, "filter-1");
         assert_eq!(decoded.name(), "host");

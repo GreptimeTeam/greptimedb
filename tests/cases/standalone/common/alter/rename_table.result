@@ -100,8 +100,10 @@ DESC TABLE "fGhI";
 
 SELECT * FROM "fGhI";
 
-++
-++
++------+------+
+| CoLa | cOlB |
++------+------+
++------+------+
 
 ALTER TABLE "fGhI" RENAME JkLmN;
 

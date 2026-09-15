@@ -18,7 +18,9 @@ use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::{ExecutionPlan, Partitioning};
+use datafusion::physical_plan::{
+    ChildrenPropertiesMode, ExecutionPlan, Partitioning, ReplaceChildrenOptions,
+};
 use datafusion_common::Result as DfResult;
 use datafusion_physical_expr::Distribution;
 use datafusion_physical_expr::utils::map_columns_before_projection;
@@ -68,8 +70,8 @@ impl PassDistribution {
         current_req: Option<Distribution>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         // If this is a MergeScanExec, try to apply the current requirement.
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
-            && let Some(Distribution::HashPartitioned(hash_exprs)) = current_req.as_ref()
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
+            && let Some(Distribution::KeyPartitioned(hash_exprs)) = current_req.as_ref()
         {
             if let Partitioning::Hash(current_hash_exprs, _) = &merge_scan.properties().partitioning
                 && *current_hash_exprs == *hash_exprs
@@ -78,7 +80,7 @@ impl PassDistribution {
             }
 
             if let Some(new_plan) = merge_scan
-                .try_with_new_distribution(Distribution::HashPartitioned(hash_exprs.clone()))
+                .try_with_new_distribution(Distribution::KeyPartitioned(hash_exprs.clone()))
             {
                 // Leaf node; no children to process
                 return Ok(Arc::new(new_plan) as _);
@@ -97,10 +99,10 @@ impl PassDistribution {
             return Ok(plan);
         }
 
-        let required = plan.required_input_distribution();
+        let required = plan.input_distribution_requirements();
         let mut new_children = Vec::with_capacity(children.len());
         for (idx, child) in children.into_iter().enumerate() {
-            let child_req = match required.get(idx) {
+            let child_req = match required.child_distribution(idx) {
                 Some(Distribution::UnspecifiedDistribution) if idx == 0 => {
                     Self::map_hash_requirement_through_projection(plan.as_ref(), &current_req)
                 }
@@ -121,7 +123,10 @@ impl PassDistribution {
         if unchanged {
             Ok(plan)
         } else {
-            plan.with_new_children(new_children)
+            plan.replace_children(
+                new_children,
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
         }
     }
 
@@ -129,11 +134,11 @@ impl PassDistribution {
         plan: &dyn ExecutionPlan,
         current_req: &Option<Distribution>,
     ) -> Option<Distribution> {
-        let Some(Distribution::HashPartitioned(required_exprs)) = current_req else {
+        let Some(Distribution::KeyPartitioned(required_exprs)) = current_req else {
             return None;
         };
 
-        let projection = plan.as_any().downcast_ref::<ProjectionExec>()?;
+        let projection = plan.downcast_ref::<ProjectionExec>()?;
         let proj_exprs = projection
             .expr()
             .iter()
@@ -141,7 +146,7 @@ impl PassDistribution {
             .collect::<Vec<_>>();
         let mapped = map_columns_before_projection(required_exprs, &proj_exprs);
 
-        (mapped.len() == required_exprs.len()).then_some(Distribution::HashPartitioned(mapped))
+        (mapped.len() == required_exprs.len()).then_some(Distribution::KeyPartitioned(mapped))
     }
 }
 
@@ -261,12 +266,8 @@ mod tests {
         let optimized = PassDistribution
             .optimize(join, &ConfigOptions::default())
             .unwrap();
-        let hash_join = optimized.as_any().downcast_ref::<HashJoinExec>().unwrap();
-        let left_projection = hash_join
-            .left()
-            .as_any()
-            .downcast_ref::<ProjectionExec>()
-            .unwrap();
+        let hash_join = optimized.downcast_ref::<HashJoinExec>().unwrap();
+        let left_projection = hash_join.left().downcast_ref::<ProjectionExec>().unwrap();
         let left_partitioning = left_projection.input().output_partitioning();
         let right_partitioning = hash_join.right().output_partitioning();
 
@@ -293,7 +294,7 @@ mod tests {
     fn merge_scan_rejects_hash_requirement_on_partition_key_subset() {
         let merge_scan = test_merge_scan_exec(test_schema());
 
-        let new_plan = merge_scan.try_with_new_distribution(Distribution::HashPartitioned(vec![
+        let new_plan = merge_scan.try_with_new_distribution(Distribution::KeyPartitioned(vec![
             partition_column(DATA_SCHEMA_TSID_COLUMN_NAME, 1),
         ]));
 
@@ -355,12 +356,7 @@ mod tests {
     fn column_names(exprs: &[Arc<dyn PhysicalExpr>]) -> Vec<&str> {
         exprs
             .iter()
-            .map(|expr| {
-                expr.as_any()
-                    .downcast_ref::<PhysicalColumn>()
-                    .unwrap()
-                    .name()
-            })
+            .map(|expr| expr.downcast_ref::<PhysicalColumn>().unwrap().name())
             .collect()
     }
 }

@@ -17,13 +17,17 @@ Affected Rows: 0
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-++
-++
++-----------+---------------+-----------------+--------------------+
+| flow_name | table_catalog | flow_definition | source_table_names |
++-----------+---------------+-----------------+--------------------+
++-----------+---------------+-----------------+--------------------+
 
 SHOW FLOWS LIKE 'filter_numbers_show';
 
-++
-++
++-------+
+| Flows |
++-------+
++-------+
 
 CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number FROM numbers_input_show where number > 10;
 
@@ -63,13 +67,17 @@ Affected Rows: 0
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-++
-++
++-----------+---------------+-----------------+--------------------+
+| flow_name | table_catalog | flow_definition | source_table_names |
++-----------+---------------+-----------------+--------------------+
++-----------+---------------+-----------------+--------------------+
 
 SHOW FLOWS LIKE 'filter_numbers_show';
 
-++
-++
++-------+
+| Flows |
++-------+
++-------+
 
 -- also test `CREATE OR REPLACE` and `IF NOT EXISTS`
 -- (flow exists, replace, if not exists)=(false, false, false)
@@ -235,8 +243,10 @@ Error: 1001(Unsupported), Unsupported operation Create flow with both `IF NOT EX
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-++
-++
++-----------+---------------+-----------------+--------------------+
+| flow_name | table_catalog | flow_definition | source_table_names |
++-----------+---------------+-----------------+--------------------+
++-----------+---------------+-----------------+--------------------+
 
 DROP FLOW filter_numbers_show;
 

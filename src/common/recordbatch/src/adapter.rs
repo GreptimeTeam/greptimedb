@@ -29,6 +29,7 @@ use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::ExecutionProps;
 use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
@@ -98,8 +99,13 @@ where
                 .to_dfschema_ref()
                 .context(error::PhysicalExprSnafu)?;
 
-            let filters = create_physical_expr(&expr, &df_schema, &ExecutionProps::new())
-                .context(error::PhysicalExprSnafu)?;
+            let filters = create_physical_expr(
+                &expr,
+                &df_schema,
+                &ExecutionProps::new(),
+                &PhysicalPlanningContext::default(),
+            )
+            .context(error::PhysicalExprSnafu)?;
             Some(filters)
         } else {
             None
@@ -931,7 +937,6 @@ fn convert_map_to_json_binary(
 
 #[cfg(test)]
 mod test {
-    use std::any::Any;
     use std::time::Duration;
 
     use common_error::ext::BoxedError;
@@ -942,6 +947,7 @@ mod test {
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
     use datafusion::physical_plan::{DisplayAs, PlanProperties};
+    use datafusion_common::tree_node::TreeNodeRecursion;
     use datatypes::arrow::array::{ArrayRef, MapArray, StringArray, StructArray};
     use datatypes::arrow::buffer::OffsetBuffer;
     use datatypes::arrow::datatypes::Field;
@@ -1021,16 +1027,21 @@ mod test {
             REGION_SCAN_EXEC_NAME
         }
 
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
         fn properties(&self) -> &Arc<PlanProperties> {
             &self.properties
         }
 
         fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
             vec![]
+        }
+
+        fn apply_expressions(
+            &self,
+            _f: &mut dyn FnMut(
+                &Arc<dyn PhysicalExpr>,
+            ) -> datafusion_common::Result<TreeNodeRecursion>,
+        ) -> datafusion_common::Result<TreeNodeRecursion> {
+            Ok(TreeNodeRecursion::Continue)
         }
 
         fn with_new_children(

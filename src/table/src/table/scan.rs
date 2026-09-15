@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -38,9 +37,10 @@ use datafusion::physical_plan::filter_pushdown::{
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    RecordBatchStream as DfRecordBatchStream,
+    RecordBatchStream as DfRecordBatchStream, apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
 use datafusion_physical_expr::expressions::{
     BinaryExpr, Column, DynamicFilterPhysicalExpr, is_null,
@@ -391,10 +391,6 @@ impl RegionScanExec {
 }
 
 impl ExecutionPlan for RegionScanExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }
@@ -405,6 +401,20 @@ impl ExecutionPlan for RegionScanExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
+        let pushed_dyn_filters = self.pushed_dyn_filters.lock().unwrap().clone();
+        apply_expression_roots(
+            self.output_ordering
+                .iter()
+                .flat_map(|ordering| ordering.iter().map(|sort_expr| &sort_expr.expr))
+                .chain(pushed_dyn_filters.iter()),
+            f,
+        )
     }
 
     fn with_new_children(
@@ -481,9 +491,9 @@ impl ExecutionPlan for RegionScanExec {
         Ok(self)
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Arc<Statistics>> {
         if partition.is_some() || !self.append_mode {
-            return Ok(Statistics::new_unknown(self.schema().as_ref()));
+            return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
         }
 
         let scanner = self.scanner.lock().unwrap();
@@ -508,7 +518,7 @@ impl ExecutionPlan for RegionScanExec {
         } else {
             Statistics::new_unknown(&self.arrow_schema)
         };
-        Ok(statistics)
+        Ok(Arc::new(statistics))
     }
 
     fn name(&self) -> &str {
@@ -536,11 +546,7 @@ impl ExecutionPlan for RegionScanExec {
         {
             let mut exact_filters = self.pushed_dyn_filters.lock().unwrap();
             for (index, filter) in parent_filters.iter().enumerate() {
-                if filter
-                    .as_any()
-                    .downcast_ref::<DynamicFilterPhysicalExpr>()
-                    .is_some()
-                {
+                if filter.downcast_ref::<DynamicFilterPhysicalExpr>().is_some() {
                     if exact_filters.iter().any(|existing| existing == filter) {
                         supported[index] = true;
                     } else {
@@ -560,7 +566,6 @@ impl ExecutionPlan for RegionScanExec {
         let scanner_supported = self.add_dyn_filters_to_predicate(scanner_filters);
         for (index, is_supported) in scanner_filter_indices.into_iter().zip(scanner_supported) {
             if parent_filters[index]
-                .as_any()
                 .downcast_ref::<DynamicFilterPhysicalExpr>()
                 .is_none()
             {
@@ -848,6 +853,7 @@ mod test {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_count_statistics_require_exact_source_rows() {
         for (append_mode, exact, expected) in [
             (true, false, Precision::Absent),
@@ -983,6 +989,52 @@ mod test {
         );
     }
 
+    #[test]
+    fn test_apply_expressions_visits_pushed_dynamic_filters() {
+        let (_, plan) = dynamic_filter_fixture(5685);
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("a", 0))],
+            lit(true),
+        ));
+        let propagation = plan
+            .handle_child_pushdown_result(
+                FilterPushdownPhase::Post,
+                ChildPushdownResult {
+                    parent_filters: vec![ChildFilterPushdownResult {
+                        filter: dynamic_filter.clone(),
+                        child_results: vec![PushedDown::No],
+                    }],
+                    self_filters: vec![],
+                },
+                &datafusion::config::ConfigOptions::default(),
+            )
+            .unwrap();
+        assert!(matches!(propagation.filters.as_slice(), [PushedDown::Yes]));
+
+        let mut visited = 0;
+        assert_eq!(
+            plan.apply_expressions(&mut |expr| {
+                visited += 1;
+                assert!(plan.pushed_dyn_filters.try_lock().is_ok());
+                assert_eq!(expr.expression_id(), dynamic_filter.expression_id());
+                assert_eq!(
+                    expr.downcast_ref::<DynamicFilterPhysicalExpr>().unwrap(),
+                    dynamic_filter.as_ref()
+                );
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap(),
+            TreeNodeRecursion::Continue
+        );
+        assert_eq!(visited, 1);
+
+        assert_eq!(
+            plan.apply_expressions(&mut |_| Ok(TreeNodeRecursion::Stop))
+                .unwrap(),
+            TreeNodeRecursion::Stop
+        );
+    }
+
     #[tokio::test]
     async fn test_live_dynamic_filter_is_applied_after_stream_creation() {
         let ctx = SessionContext::new();
@@ -1024,7 +1076,6 @@ mod test {
                 .updated_node
                 .as_ref()
                 .unwrap()
-                .as_any()
                 .downcast_ref::<RegionScanExec>()
                 .is_some()
         );
