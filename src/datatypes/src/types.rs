@@ -45,7 +45,7 @@ pub use interval_type::{
 };
 pub use json_type::{
     JSON_TYPE_NAME, JsonFormat, JsonType, jsonb_to_serde_json, jsonb_to_string,
-    parse_string_to_jsonb,
+    parse_string_to_jsonb, validate_json_integer_range,
 };
 pub use list_type::ListType;
 pub use null_type::NullType;

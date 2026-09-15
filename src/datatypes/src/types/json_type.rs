@@ -27,7 +27,8 @@ use snafu::ResultExt;
 use crate::Error;
 use crate::data_type::DataType;
 use crate::error::{
-    DeserializeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result, UnsupportedArrowTypeSnafu,
+    DeserializeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, JsonNumberOutOfRangeSnafu, Result,
+    UnsupportedArrowTypeSnafu,
 };
 use crate::prelude::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
@@ -467,14 +468,151 @@ fn fix_unicode_point(json: &str) -> Result<String> {
 
 /// Parses a string to a json type value
 pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
+    validate_json_integer_range(s)?;
     jsonb::parse_value(s.as_bytes())
         .map_err(|_| InvalidJsonSnafu { value: s }.build())
         .map(|json| json.to_vec())
 }
 
+/// Rejects JSON texts that contain an integer literal outside the exact
+/// range representable by `u64` or `i64`.
+///
+/// `jsonb::parse_value` (and its underlying fast-float fallback) silently
+/// coerces such integers to `f64`, losing precision forever. Instead of
+/// storing a corrupted value, we fail the write with an explicit error,
+/// matching the behavior of PostgreSQL `jsonb` and of our own `BIGINT`
+/// columns on overflow.
+pub fn validate_json_integer_range(s: &str) -> Result<()> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if !in_string => {
+                in_string = true;
+                i += 1;
+            }
+            b'"' if in_string && !escaped => {
+                in_string = false;
+                i += 1;
+            }
+            b'\\' if in_string && !escaped => {
+                escaped = true;
+                i += 1;
+            }
+            b'-' if !in_string && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() => {
+                // Negative number token.
+                let start = i;
+                i += 1;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_digit()
+                        || bytes[i] == b'.'
+                        || bytes[i] == b'e'
+                        || bytes[i] == b'E'
+                        || (i > start + 1 && (bytes[i] == b'+' || bytes[i] == b'-')))
+                {
+                    i += 1;
+                }
+                let token = &s[start..i];
+                if is_bare_integer(token) && !fits_exact_integer(token) {
+                    return JsonNumberOutOfRangeSnafu { value: token }.fail();
+                }
+            }
+            b'0'..=b'9' if !in_string => {
+                // Collect a full number token: digits, '.', exponent 'e/E',
+                // exponent sign. Digits are the leading part here.
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_digit()
+                        || bytes[i] == b'.'
+                        || bytes[i] == b'e'
+                        || bytes[i] == b'E'
+                        || (i > start && (bytes[i] == b'+' || bytes[i] == b'-')))
+                {
+                    i += 1;
+                }
+                let token = &s[start..i];
+                if is_bare_integer(token) && !fits_exact_integer(token) {
+                    return JsonNumberOutOfRangeSnafu { value: token }.fail();
+                }
+            }
+            _ => {
+                if in_string && escaped {
+                    escaped = false;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// A number token is a "bare integer" when it contains no fractional part
+/// and no exponent: e.g. `18446744073709551616` but not `1.5` or `1e3`.
+fn is_bare_integer(token: &str) -> bool {
+    !token.contains(['.', 'e', 'E'])
+}
+
+/// Whether a bare integer token fits exactly in `i64` (negative) or `u64`.
+///
+/// Parses the full token: for a negative number this correctly accepts
+/// `i64::MIN` (`-9223372036854775808`), whose magnitude exceeds `i64::MAX`
+/// and would fail if the sign were stripped before parsing.
+fn fits_exact_integer(token: &str) -> bool {
+    if token.starts_with('-') {
+        token.parse::<i64>().is_ok()
+    } else {
+        token.parse::<u64>().is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_json_integer_range() {
+        // Valid: integers within u64 / i64 range are accepted.
+        for json in [
+            r#"{"n": 18446744073709551615}"#, // u64::MAX
+            r#"{"n": -9223372036854775808}"#, // i64::MIN
+            r#"{"n": 42}"#,
+            r#"{"n": 1.5}"#,                                // float
+            r#"{"n": 1e3}"#,                                // exponent
+            r#"{"n": -1e400}"#,                             // negative exponent
+            r#"{"s": "18446744073709551616 in a string"}"#, // inside string
+        ] {
+            let r = validate_json_integer_range(json);
+            assert!(r.is_ok(), "expected ok for {json}, got {r:?}");
+        }
+
+        // Invalid: bare integers beyond u64 / i64 range are rejected.
+        for json in [
+            r#"{"n": 18446744073709551616}"#, // u64::MAX + 1
+            r#"{"n": 123456789012345678901234567890}"#,
+            r#"{"n": -9223372036854775809}"#, // i64::MIN - 1
+            r#"[18446744073709551616, 1]"#,   // inside array
+            r#"{"nested": {"a": {"b": 999999999999999999999999999999}}}"#,
+        ] {
+            let r = validate_json_integer_range(json);
+            assert!(r.is_err(), "expected err for {json}, got {r:?}");
+        }
+    }
+
+    #[test]
+    fn test_parse_string_to_jsonb_rejects_out_of_range_integer() {
+        let err = parse_string_to_jsonb(r#"{"n": 18446744073709551616}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("out of supported range"),
+            "unexpected error: {err}"
+        );
+
+        // Control: u64::MAX still parses fine.
+        assert!(parse_string_to_jsonb(r#"{"n": 18446744073709551615}"#).is_ok());
+    }
 
     #[test]
     fn test_fix_unicode_point() -> Result<()> {

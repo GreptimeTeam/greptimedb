@@ -20,7 +20,10 @@ use common_time::timezone::Timezone;
 use datatypes::extension::json::{Json2ExtensionType, parse_legacy_json2_settings};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
-use datatypes::types::{JsonFormat, parse_string_to_jsonb, parse_string_to_vector_type_value};
+use datatypes::types::{
+    JsonFormat, parse_string_to_jsonb, parse_string_to_vector_type_value,
+    validate_json_integer_range,
+};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use snafu::{OptionExt, ResultExt, ensure};
 pub use sqlparser::ast::{
@@ -307,6 +310,8 @@ pub(crate) fn parse_string_to_value(
                 Ok(Value::Binary(v.into()))
             }
             JsonFormat::Json2(_) => {
+                validate_json_integer_range(&s).context(DatatypeSnafu)?;
+
                 let v = serde_json::from_str(&s).context(DeserializeSnafu { json: s })?;
 
                 if let Some(extension) = column_schema
