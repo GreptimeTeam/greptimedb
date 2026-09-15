@@ -662,9 +662,11 @@ fn value_bytes(array: &dyn Array, row: usize) -> Result<usize> {
                 _ => return error::UnexpectedSnafu { violated: "invalid dictionary array" }.fail(),
             }
         }
-        other => other.primitive_width().context(InvalidMetricExportSnafu {
-            reason: format!("unsupported Metric Parquet type: {other}"),
-        })?,
+        other => other
+            .primitive_width()
+            .with_context(|| InvalidMetricExportSnafu {
+                reason: format!("unsupported Metric Parquet type: {other}"),
+            })?,
     };
     Ok(bytes.saturating_add(16))
 }
