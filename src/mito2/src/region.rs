@@ -242,7 +242,6 @@ impl StagingPartitionInfo {
 
 impl MitoRegion {
     /// Returns the current immutable series-index snapshot.
-    #[allow(dead_code)] // Used by the upcoming query integration.
     pub(crate) fn series_index_version(&self) -> Arc<SeriesIndexVersion> {
         self.series_index_version_control.current()
     }

@@ -29,22 +29,17 @@ use datafusion::parquet::file::metadata::{
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_datasource::PartitionedFile;
-use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use object_store::{FuturesAsyncReader, ObjectStore};
-use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
-use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
-use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
-use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
+use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
 
-use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder};
-use crate::error::{self, Result, WriteObjectSnafu, WriteParquetSnafu};
+use crate::error::{self, Result};
 use crate::file_format::FileFormat;
+use crate::parquet_writer::ParquetFileWriter;
 use crate::share_buffer::SharedBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -212,59 +207,21 @@ impl ArrowWriterCloser for ArrowWriter<SharedBuffer> {
 /// Returns number of rows written.
 pub async fn stream_to_parquet(
     mut stream: SendableRecordBatchStream,
-    schema: datatypes::schema::SchemaRef,
     store: ObjectStore,
     path: &str,
     concurrency: usize,
 ) -> Result<usize> {
-    let write_props = column_wise_config(
-        WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_statistics_truncate_length(None)
-            .set_column_index_truncate_length(None),
-        schema,
-    )
-    .build();
-    let inner_writer = store
-        .writer_with(path)
-        .concurrent(concurrency)
-        .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-        .await
-        .map(|w| w.into_futures_async_write().compat_write())
-        .context(WriteObjectSnafu { path })?;
-
-    let mut writer = AsyncArrowWriter::try_new(inner_writer, stream.schema(), Some(write_props))
-        .context(WriteParquetSnafu { path })?;
+    let mut writer =
+        ParquetFileWriter::open(stream.schema(), store, path, concurrency, None).await?;
     let mut rows_written = 0;
-
     while let Some(batch) = stream.next().await {
         let batch = batch.context(error::ReadRecordBatchSnafu)?;
-        writer
-            .write(&batch)
-            .await
-            .context(WriteParquetSnafu { path })?;
-        rows_written += batch.num_rows();
+        let rows = batch.num_rows();
+        writer.write(batch, None).await?;
+        rows_written += rows;
     }
-    writer.close().await.context(WriteParquetSnafu { path })?;
+    writer.finish(None).await?;
     Ok(rows_written)
-}
-
-/// Customizes per-column properties.
-fn column_wise_config(
-    mut props: WriterPropertiesBuilder,
-    schema: SchemaRef,
-) -> WriterPropertiesBuilder {
-    // Disable dictionary for timestamp column, since for increasing timestamp column,
-    // the dictionary pages will be larger than data pages.
-    for col in schema.column_schemas() {
-        if col.data_type.is_timestamp() {
-            let path = ColumnPath::new(vec![col.name.clone()]);
-            props = props
-                .set_column_dictionary_enabled(path.clone(), false)
-                .set_column_encoding(path, Encoding::DELTA_BINARY_PACKED)
-        }
-    }
-    props
 }
 
 #[cfg(test)]

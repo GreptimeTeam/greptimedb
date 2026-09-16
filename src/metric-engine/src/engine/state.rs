@@ -15,6 +15,7 @@
 //! Internal states of metric engine
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_time::timestamp::TimeUnit;
@@ -30,7 +31,10 @@ use crate::utils::to_data_region_id;
 
 pub struct PhysicalRegionState {
     logical_regions: HashSet<RegionId>,
-    physical_columns: HashMap<String, ColumnMetadata>,
+    /// Columns of the physical region, wrapped in an [`Arc`] so that hot read
+    /// paths (e.g. write request verification) can hold a cheap snapshot
+    /// instead of deep-cloning the whole map on every row batch.
+    physical_columns: Arc<HashMap<String, ColumnMetadata>>,
     /// Name of the time index column, cached at region load so that the write
     /// path doesn't have to scan `physical_columns` for the timestamp on every
     /// row batch. The time index is fixed at region creation and never
@@ -58,7 +62,7 @@ impl PhysicalRegionState {
             .unwrap_or_default();
         Self {
             logical_regions: HashSet::new(),
-            physical_columns,
+            physical_columns: Arc::new(physical_columns),
             time_index_column_name,
             primary_key_encoding,
             options,
@@ -74,6 +78,12 @@ impl PhysicalRegionState {
     /// Returns a reference to the physical columns.
     pub fn physical_columns(&self) -> &HashMap<String, ColumnMetadata> {
         &self.physical_columns
+    }
+
+    /// Returns a cheap snapshot of the physical columns that stays valid
+    /// after releasing the state lock.
+    pub fn physical_columns_snapshot(&self) -> Arc<HashMap<String, ColumnMetadata>> {
+        self.physical_columns.clone()
     }
 
     /// Returns the cached name of the time index column.
@@ -144,7 +154,7 @@ impl MetricEngineState {
                 SemanticType::Timestamp,
                 "unexpected time index column {col} added to an existing physical region"
             );
-            state.physical_columns.insert(col, meta);
+            Arc::make_mut(&mut state.physical_columns).insert(col, meta);
         }
     }
 

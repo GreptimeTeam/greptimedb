@@ -121,7 +121,8 @@ pub struct RegionOptions {
     /// the configured size; zero disables both limits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_buffer_size: Option<ReadableSize>,
-    /// Whether to preserve per-row sequence numbers through flush and compaction.
+    /// Whether to preserve original per-row sequence numbers when flushing.
+    /// Compaction always retains effective input sequences, regardless of this option.
     ///
     /// Only meaningful for append-only tables (`append_mode = true`): when enabled,
     /// every row keeps its exact sequence number in memtables, flushed SSTs and

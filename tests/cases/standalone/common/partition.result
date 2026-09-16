@@ -104,8 +104,10 @@ Affected Rows: 5
 
 SELECT * FROM my_table;
 
-++
-++
++---+---+----+
+| a | b | ts |
++---+---+----+
++---+---+----+
 
 DROP TABLE my_table;
 
