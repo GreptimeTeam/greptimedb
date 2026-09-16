@@ -26,6 +26,7 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::tracing::{Instrument, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, warn};
+use datatypes::schema::SchemaRef;
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::future::poll_fn;
@@ -183,6 +184,148 @@ impl BatchAccumulator {
     }
 }
 
+/// Non-verbose half of the former inline branch in
+/// `FlightRecordBatchStream::flight_data_stream`: forwards ready record batches and
+/// coalesces consecutive groups before sending them.
+struct CoalescingBatcher {
+    acc: BatchAccumulator,
+    sent_first_batch: bool,
+    recordbatch_schema: SchemaRef,
+}
+
+impl CoalescingBatcher {
+    fn new(recordbatch_schema: SchemaRef) -> Self {
+        Self {
+            acc: BatchAccumulator::new(),
+            sent_first_batch: false,
+            recordbatch_schema,
+        }
+    }
+
+    /// Runs the coalescing loop until the source stream ends or fails. Returns
+    /// `true` on normal EOF, `false` when it stopped early on an error or a failed
+    /// send.
+    async fn run(
+        &mut self,
+        recordbatches: &mut SendableRecordBatchStream,
+        tx: &mut Sender<TonicResult<FlightMessage>>,
+        metrics: &mut StreamMetrics,
+    ) -> bool {
+        loop {
+            let start = Instant::now();
+            let batch_or_err = recordbatches.next().in_current_span().await;
+            metrics.fetch_content_duration += start.elapsed();
+            let Some(batch_or_err) = batch_or_err else {
+                break;
+            };
+            let recordbatch = match batch_or_err {
+                Ok(recordbatch) => recordbatch,
+                Err(e) => {
+                    if e.status_code().should_log_error() {
+                        error!("{e:?}");
+                    }
+                    let e = Err(e).context(error::CollectRecordbatchSnafu);
+                    if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
+                        warn!(e; "stop sending Flight data");
+                    }
+                    return false;
+                }
+            };
+            let batch_rows = recordbatch.num_rows();
+            let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
+            metrics.total_rows += batch_rows;
+            metrics.record_batch_count += 1;
+            metrics.total_bytes += batch_bytes;
+
+            // The first batch is forwarded immediately, and a batch starting a
+            // new group that is already at or over a budget passes through as a
+            // singleton. A batch appended inside a group is coalesced instead.
+            if !self.sent_first_batch || BatchAccumulator::reaches_budget(batch_rows, batch_bytes) {
+                let start = Instant::now();
+                if let Err(e) = tx
+                    .send(Ok(FlightMessage::RecordBatch(
+                        recordbatch.into_df_record_batch(),
+                    )))
+                    .await
+                {
+                    warn!(e; "stop sending Flight data");
+                    return false;
+                }
+                metrics.send_record_batch_duration += start.elapsed();
+                self.sent_first_batch = true;
+                continue;
+            }
+
+            // Coalesce ready batches until a budget is reached: every ready
+            // batch is appended first, then the budgets are checked.
+            debug_assert!(self.acc.is_empty(), "the previous group must be flushed");
+            let mut should_flush = self.acc.push(recordbatch);
+            let mut eof = false;
+            let mut stream_error = None;
+            while !should_flush {
+                let start = Instant::now();
+                let next = poll_fn(|cx| Poll::Ready(recordbatches.as_mut().poll_next(cx))).await;
+                metrics.fetch_content_duration += start.elapsed();
+                match next {
+                    Poll::Ready(Some(Ok(recordbatch))) => {
+                        metrics.total_rows += recordbatch.num_rows();
+                        metrics.record_batch_count += 1;
+                        metrics.total_bytes +=
+                            recordbatch.df_record_batch().get_array_memory_size();
+                        should_flush = self.acc.push(recordbatch);
+                    }
+                    Poll::Ready(Some(Err(e))) => {
+                        stream_error = Some(e);
+                        break;
+                    }
+                    Poll::Ready(None) => {
+                        eof = true;
+                        break;
+                    }
+                    Poll::Pending => break,
+                }
+            }
+
+            let batches = self.acc.drain();
+            let batches = if batches.len() >= 2 {
+                match merge_record_batches(self.recordbatch_schema.clone(), &batches) {
+                    Ok(merged) => vec![merged],
+                    Err(_) => batches,
+                }
+            } else {
+                batches
+            };
+            for recordbatch in batches {
+                let start = Instant::now();
+                if let Err(e) = tx
+                    .send(Ok(FlightMessage::RecordBatch(
+                        recordbatch.into_df_record_batch(),
+                    )))
+                    .await
+                {
+                    warn!(e; "stop sending Flight data");
+                    return false;
+                }
+                metrics.send_record_batch_duration += start.elapsed();
+            }
+            if let Some(e) = stream_error {
+                if e.status_code().should_log_error() {
+                    error!("{e:?}");
+                }
+                let e = Err(e).context(error::CollectRecordbatchSnafu);
+                if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
+                    warn!(e; "stop sending Flight data");
+                }
+                return false;
+            }
+            if eof {
+                break;
+            }
+        }
+        true
+    }
+}
+
 #[pin_project(PinnedDrop)]
 pub struct FlightRecordBatchStream {
     #[pin]
@@ -323,198 +466,28 @@ impl FlightRecordBatchStream {
         }
         metrics.send_schema_duration += start.elapsed();
 
-        if should_send_partial_metrics {
-            loop {
-                let start = Instant::now();
-                let batch_or_err = if can_send_metrics_before_batch {
-                    match time::timeout(
-                        FLIGHT_METRICS_HEARTBEAT_INTERVAL,
-                        recordbatches.next().in_current_span(),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            if let Some(metrics_str) = recordbatches
-                                .metrics()
-                                .and_then(|m| serde_json::to_string(&m).ok())
-                                && !Self::send_metrics_if_changed(
-                                    &mut tx,
-                                    &mut metrics,
-                                    &mut last_metrics_str,
-                                    metrics_str,
-                                )
-                                .await
-                            {
-                                return;
-                            }
-                            metrics.fetch_content_duration += start.elapsed();
-                            continue;
-                        }
-                    }
-                } else {
-                    recordbatches.next().in_current_span().await
-                };
-                metrics.fetch_content_duration += start.elapsed();
-                let Some(batch_or_err) = batch_or_err else {
-                    break;
-                };
-                match batch_or_err {
-                    Ok(recordbatch) => {
-                        metrics.total_rows += recordbatch.num_rows();
-                        metrics.record_batch_count += 1;
-                        metrics.total_bytes +=
-                            recordbatch.df_record_batch().get_array_memory_size();
-                        let start = Instant::now();
-                        if let Err(e) = tx
-                            .send(Ok(FlightMessage::RecordBatch(
-                                recordbatch.into_df_record_batch(),
-                            )))
-                            .await
-                        {
-                            warn!(e; "stop sending Flight data");
-                            return;
-                        }
-                        metrics.send_record_batch_duration += start.elapsed();
-                        if let Some(metrics_str) = recordbatches
-                            .metrics()
-                            .and_then(|m| serde_json::to_string(&m).ok())
-                            && {
-                                last_metrics_str = Some(metrics_str.clone());
-                                !Self::send_metrics(&mut tx, &mut metrics, metrics_str).await
-                            }
-                        {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        if e.status_code().should_log_error() {
-                            error!("{e:?}");
-                        }
-                        let e = Err(e).context(error::CollectRecordbatchSnafu);
-                        if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
-                            warn!(e; "stop sending Flight data");
-                        }
-                        return;
-                    }
-                }
-            }
+        // Each path reports whether it reached normal EOF. On any error or failed
+        // send the path stops early and the final-metrics tail must be skipped,
+        // matching the behavior before the split (an early `return` exited the
+        // whole function and bypassed the tail).
+        let reached_eof = if should_send_partial_metrics {
+            Self::verbose_metrics_stream(
+                &mut recordbatches,
+                &mut tx,
+                &mut metrics,
+                &mut last_metrics_str,
+                can_send_metrics_before_batch,
+            )
+            .await
         } else {
-            let mut sent_first_batch = false;
-            let mut acc = BatchAccumulator::new();
-            loop {
-                let start = Instant::now();
-                let batch_or_err = recordbatches.next().in_current_span().await;
-                metrics.fetch_content_duration += start.elapsed();
-                let Some(batch_or_err) = batch_or_err else {
-                    break;
-                };
-                let recordbatch = match batch_or_err {
-                    Ok(recordbatch) => recordbatch,
-                    Err(e) => {
-                        if e.status_code().should_log_error() {
-                            error!("{e:?}");
-                        }
-                        let e = Err(e).context(error::CollectRecordbatchSnafu);
-                        if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
-                            warn!(e; "stop sending Flight data");
-                        }
-                        return;
-                    }
-                };
-                let batch_rows = recordbatch.num_rows();
-                let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
-                metrics.total_rows += batch_rows;
-                metrics.record_batch_count += 1;
-                metrics.total_bytes += batch_bytes;
-
-                // The first batch is forwarded immediately, and a batch starting a
-                // new group that is already at or over a budget passes through as a
-                // singleton. A batch appended inside a group is coalesced instead.
-                if !sent_first_batch || BatchAccumulator::reaches_budget(batch_rows, batch_bytes) {
-                    let start = Instant::now();
-                    if let Err(e) = tx
-                        .send(Ok(FlightMessage::RecordBatch(
-                            recordbatch.into_df_record_batch(),
-                        )))
-                        .await
-                    {
-                        warn!(e; "stop sending Flight data");
-                        return;
-                    }
-                    metrics.send_record_batch_duration += start.elapsed();
-                    sent_first_batch = true;
-                    continue;
-                }
-
-                // Coalesce ready batches until a budget is reached: every ready
-                // batch is appended first, then the budgets are checked.
-                debug_assert!(acc.is_empty(), "the previous group must be flushed");
-                let mut should_flush = acc.push(recordbatch);
-                let mut eof = false;
-                let mut stream_error = None;
-                while !should_flush {
-                    let start = Instant::now();
-                    let next =
-                        poll_fn(|cx| Poll::Ready(recordbatches.as_mut().poll_next(cx))).await;
-                    metrics.fetch_content_duration += start.elapsed();
-                    match next {
-                        Poll::Ready(Some(Ok(recordbatch))) => {
-                            metrics.total_rows += recordbatch.num_rows();
-                            metrics.record_batch_count += 1;
-                            metrics.total_bytes +=
-                                recordbatch.df_record_batch().get_array_memory_size();
-                            should_flush = acc.push(recordbatch);
-                        }
-                        Poll::Ready(Some(Err(e))) => {
-                            stream_error = Some(e);
-                            break;
-                        }
-                        Poll::Ready(None) => {
-                            eof = true;
-                            break;
-                        }
-                        Poll::Pending => break,
-                    }
-                }
-
-                let batches = acc.drain();
-                let batches = if batches.len() >= 2 {
-                    match merge_record_batches(recordbatch_schema.clone(), &batches) {
-                        Ok(merged) => vec![merged],
-                        Err(_) => batches,
-                    }
-                } else {
-                    batches
-                };
-                for recordbatch in batches {
-                    let start = Instant::now();
-                    if let Err(e) = tx
-                        .send(Ok(FlightMessage::RecordBatch(
-                            recordbatch.into_df_record_batch(),
-                        )))
-                        .await
-                    {
-                        warn!(e; "stop sending Flight data");
-                        return;
-                    }
-                    metrics.send_record_batch_duration += start.elapsed();
-                }
-                if let Some(e) = stream_error {
-                    if e.status_code().should_log_error() {
-                        error!("{e:?}");
-                    }
-                    let e = Err(e).context(error::CollectRecordbatchSnafu);
-                    if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
-                        warn!(e; "stop sending Flight data");
-                    }
-                    return;
-                }
-                if eof {
-                    break;
-                }
-            }
+            CoalescingBatcher::new(recordbatch_schema.clone())
+                .run(&mut recordbatches, &mut tx, &mut metrics)
+                .await
+        };
+        if !reached_eof {
+            return;
         }
+
         // Make the last package pass metrics exactly once at EOF.
         if let Some(metrics_str) = recordbatches
             .metrics()
@@ -522,6 +495,94 @@ impl FlightRecordBatchStream {
         {
             let _ = Self::send_metrics(&mut tx, &mut metrics, metrics_str).await;
         }
+    }
+
+    /// Verbose half of the former inline branch in `flight_data_stream`: sends every
+    /// record batch individually and forwards partial metrics whenever they change.
+    /// Returns `true` when the source stream reached normal EOF, `false` when it
+    /// stopped early on an error or a failed send.
+    async fn verbose_metrics_stream(
+        recordbatches: &mut SendableRecordBatchStream,
+        tx: &mut Sender<TonicResult<FlightMessage>>,
+        metrics: &mut StreamMetrics,
+        last_metrics_str: &mut Option<String>,
+        can_send_metrics_before_batch: bool,
+    ) -> bool {
+        loop {
+            let start = Instant::now();
+            let batch_or_err = if can_send_metrics_before_batch {
+                match time::timeout(
+                    FLIGHT_METRICS_HEARTBEAT_INTERVAL,
+                    recordbatches.next().in_current_span(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if let Some(metrics_str) = recordbatches
+                            .metrics()
+                            .and_then(|m| serde_json::to_string(&m).ok())
+                            && !Self::send_metrics_if_changed(
+                                tx,
+                                metrics,
+                                last_metrics_str,
+                                metrics_str,
+                            )
+                            .await
+                        {
+                            return false;
+                        }
+                        metrics.fetch_content_duration += start.elapsed();
+                        continue;
+                    }
+                }
+            } else {
+                recordbatches.next().in_current_span().await
+            };
+            metrics.fetch_content_duration += start.elapsed();
+            let Some(batch_or_err) = batch_or_err else {
+                break;
+            };
+            match batch_or_err {
+                Ok(recordbatch) => {
+                    metrics.total_rows += recordbatch.num_rows();
+                    metrics.record_batch_count += 1;
+                    metrics.total_bytes += recordbatch.df_record_batch().get_array_memory_size();
+                    let start = Instant::now();
+                    if let Err(e) = tx
+                        .send(Ok(FlightMessage::RecordBatch(
+                            recordbatch.into_df_record_batch(),
+                        )))
+                        .await
+                    {
+                        warn!(e; "stop sending Flight data");
+                        return false;
+                    }
+                    metrics.send_record_batch_duration += start.elapsed();
+                    if let Some(metrics_str) = recordbatches
+                        .metrics()
+                        .and_then(|m| serde_json::to_string(&m).ok())
+                        && {
+                            *last_metrics_str = Some(metrics_str.clone());
+                            !Self::send_metrics(tx, metrics, metrics_str).await
+                        }
+                    {
+                        return false;
+                    }
+                }
+                Err(e) => {
+                    if e.status_code().should_log_error() {
+                        error!("{e:?}");
+                    }
+                    let e = Err(e).context(error::CollectRecordbatchSnafu);
+                    if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
+                        warn!(e; "stop sending Flight data");
+                    }
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -1083,6 +1144,87 @@ mod test {
         assert!(matches!(messages[3], Ok(FlightMessage::RecordBatch(_))));
         assert!(messages[4].is_err());
         assert_eq!(messages.len(), 5);
+    }
+
+    /// A stream that yields one batch then an error, and counts how many times
+    /// `metrics()` is called. Used to prove the verbose error path does NOT invoke
+    /// the shared EOF final-metrics tail (which would call `metrics()` one extra
+    /// time). The public message stream hides the tail after an error, so this
+    /// producer-side counter is what actually detects the regression.
+    struct MetricsCountingErrorStream {
+        schema: SchemaRef,
+        yielded_batch: bool,
+        metrics_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl RecordBatchStream for MetricsCountingErrorStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            self.metrics_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(RecordBatchMetrics::default())
+        }
+    }
+
+    impl Stream for MetricsCountingErrorStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.yielded_batch {
+                return Poll::Ready(Some(Err(CreateRecordBatchesSnafu {
+                    reason: "expected failure".to_string(),
+                }
+                .build())));
+            }
+            self.yielded_batch = true;
+            Poll::Ready(Some(Ok(int_batch(self.schema.clone(), [1]))))
+        }
+    }
+
+    /// On an upstream error the verbose path must stop early and skip the shared
+    /// EOF final-metrics tail, exactly as before the split: `metrics()` must not
+    /// be called again after the error. This drives `flight_data_stream` directly
+    /// and awaits its return, so the producer has fully finished before the
+    /// counter is read (the public message stream alone would hide the tail and
+    /// could race with it).
+    #[tokio::test]
+    async fn test_verbose_error_skips_final_metrics_tail() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let metrics_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recordbatches: SendableRecordBatchStream = Box::pin(MetricsCountingErrorStream {
+            schema: schema.clone(),
+            yielded_batch: false,
+            metrics_calls: metrics_calls.clone(),
+        });
+        let (tx, mut rx) = mpsc::channel::<TonicResult<FlightMessage>>(8);
+        // should_send_partial_metrics = true selects the verbose path;
+        // can_send_metrics_before_batch = false disables the heartbeat arm.
+        FlightRecordBatchStream::flight_data_stream(recordbatches, tx, true, false).await;
+        // Producer fully returned. Exactly one metrics() call (the per-batch one).
+        // If the error path fell through to the EOF final-metrics tail, this
+        // would be 2.
+        assert_eq!(metrics_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // The error is the last message; no trailing final-metrics package.
+        let mut messages = Vec::new();
+        while let Some(msg) = rx.next().await {
+            messages.push(msg);
+        }
+        assert!(matches!(messages[0], Ok(FlightMessage::Schema(_))));
+        assert!(matches!(messages[1], Ok(FlightMessage::RecordBatch(_))));
+        assert!(matches!(messages[2], Ok(FlightMessage::Metrics(_))));
+        assert!(messages[3].is_err());
+        assert_eq!(messages.len(), 4);
     }
 
     #[tokio::test]
