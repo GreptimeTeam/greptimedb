@@ -590,11 +590,8 @@ mod tests {
                 ],
             )]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet,
-            &[Some(NestedSelectionPolicy::Json2)],
-        );
+        let plan =
+            build_projection_plan(&projection, &parquet, &[Some(NestedSelectionPolicy::Json2)]);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [0, 1]), plan.mask);
@@ -609,11 +606,8 @@ mod tests {
                 .with_nested_paths(vec![vec!["j".to_string(), "hot".to_string()]]),
         ]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet,
-            &[Some(NestedSelectionPolicy::Json2)],
-        );
+        let plan =
+            build_projection_plan(&projection, &parquet, &[Some(NestedSelectionPolicy::Json2)]);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [3]), plan.mask);
@@ -628,11 +622,8 @@ mod tests {
                 .with_nested_paths(vec![vec!["j".to_string(), "commit".to_string()]]),
         ]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet,
-            &[Some(NestedSelectionPolicy::Json2)],
-        );
+        let plan =
+            build_projection_plan(&projection, &parquet, &[Some(NestedSelectionPolicy::Json2)]);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [0, 1, 2]), plan.mask);
@@ -654,11 +645,8 @@ mod tests {
                 ]],
             )]);
 
-        let plan = build_projection_plan(
-            &projection,
-            &parquet,
-            &[Some(NestedSelectionPolicy::Json2)],
-        );
+        let plan =
+            build_projection_plan(&projection, &parquet, &[Some(NestedSelectionPolicy::Json2)]);
 
         assert_eq!(vec![true], plan.projected_root_presence);
         assert_eq!(ProjectionMask::leaves(&parquet, [4]), plan.mask);
