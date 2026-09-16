@@ -21,7 +21,10 @@ use std::time::Duration;
 use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::{FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType};
+use common_meta::ddl::create_flow::{
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE, FlowType,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
@@ -465,21 +468,24 @@ impl BatchingEngine {
     fn batch_opts_for_flow_options(
         &self,
         flow_options: &HashMap<String, String>,
+        exact_sequence_range_required: bool,
     ) -> Result<Arc<BatchingModeOptions>, Error> {
         let mut batch_opts = (*self.batch_opts).clone();
         if let Some(enable_incremental_read) =
             flow_options.get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
         {
-            batch_opts.experimental_enable_incremental_read = enable_incremental_read
-                .parse::<bool>()
-                .map_err(|_| {
+            batch_opts.experimental_enable_incremental_read = if exact_sequence_range_required {
+                true
+            } else {
+                enable_incremental_read.parse::<bool>().map_err(|_| {
                     InvalidQuerySnafu {
                         reason: format!(
                             "Invalid flow option {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}: {enable_incremental_read}"
                         ),
                     }
                     .build()
-                })?;
+                })?
+            };
         }
 
         Ok(Arc::new(batch_opts))
@@ -594,7 +600,14 @@ impl BatchingEngine {
             }
         );
 
-        let batch_opts = self.batch_opts_for_flow_options(&flow_options)?;
+        // The meta layer validates this reserved sentinel before it reaches the
+        // flownode. Derive the requirement once and pass it directly to task
+        // config; query-context extensions are irrelevant.
+        let exact_sequence_range_required = flow_options
+            .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+            .is_some_and(|value| value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE);
+        let batch_opts =
+            self.batch_opts_for_flow_options(&flow_options, exact_sequence_range_required)?;
 
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
@@ -697,7 +710,21 @@ impl BatchingEngine {
             eval_schedule,
         };
 
-        let task = BatchingTask::try_new(task_args)?;
+        let task = BatchingTask::try_new_with_exact_sequence_range_required(
+            task_args,
+            exact_sequence_range_required,
+        )?;
+
+        if task.config.exact_sequence_range_required {
+            ensure!(
+                task.sequence_range_capable().await?,
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Flow {flow_id} requires exact sequence-range reads, but a source table lacks the Mito preserve_row_sequence capability"
+                    ),
+                }
+            );
+        }
 
         let task_inner = task.clone();
         let engine = self.query_engine.clone();
@@ -1087,16 +1114,32 @@ mod tests {
     async fn test_flow_option_overrides_incremental_read_switch() {
         let engine = new_test_engine().await;
 
-        let default_opts = engine.batch_opts_for_flow_options(&HashMap::new()).unwrap();
+        let default_opts = engine
+            .batch_opts_for_flow_options(&HashMap::new(), false)
+            .unwrap();
         assert!(!default_opts.experimental_enable_incremental_read);
 
         let enabled_opts = engine
-            .batch_opts_for_flow_options(&HashMap::from([(
-                FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
-                "true".to_string(),
-            )]))
+            .batch_opts_for_flow_options(
+                &HashMap::from([(
+                    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                    "true".to_string(),
+                )]),
+                false,
+            )
             .unwrap();
         assert!(enabled_opts.experimental_enable_incremental_read);
+
+        let exact_opts = engine
+            .batch_opts_for_flow_options(
+                &HashMap::from([(
+                    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE.to_string(),
+                )]),
+                true,
+            )
+            .unwrap();
+        assert!(exact_opts.experimental_enable_incremental_read);
     }
 
     #[test]

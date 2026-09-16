@@ -149,6 +149,7 @@ pub struct TaskConfig {
     pub catalog_manager: CatalogManagerRef,
     pub query_type: QueryType,
     pub batch_opts: Arc<BatchingModeOptions>,
+    pub exact_sequence_range_required: bool,
     pub flow_eval_interval: Option<Duration>,
     /// Typed schedule configuration, pre-parsed at task creation time.
     pub eval_schedule: Option<EvalSchedule>,
@@ -292,7 +293,11 @@ struct ExecuteOnceOutcome {
 
 impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
-    pub fn try_new(
+    pub fn try_new(args: TaskArgs<'_>) -> Result<Self, Error> {
+        Self::try_new_with_exact_sequence_range_required(args, false)
+    }
+
+    pub fn try_new_with_exact_sequence_range_required(
         TaskArgs {
             flow_id,
             query,
@@ -308,6 +313,7 @@ impl BatchingTask {
             flow_eval_interval,
             eval_schedule,
         }: TaskArgs<'_>,
+        exact_sequence_range_required: bool,
     ) -> Result<Self, Error> {
         let mut state = TaskState::with_dirty_time_windows(
             query_ctx.clone(),
@@ -332,6 +338,7 @@ impl BatchingTask {
                 catalog_manager,
                 output_schema: plan.schema().clone(),
                 query_type: determine_query_type(query, &query_ctx)?,
+                exact_sequence_range_required,
                 batch_opts,
                 flow_eval_interval,
                 eval_schedule,

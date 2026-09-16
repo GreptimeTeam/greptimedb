@@ -85,7 +85,7 @@ use crate::sst::parquet::file_range::{
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
-use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
+use crate::sst::parquet::json_align::{AlignMode, JsonSchemaAligner, ProjectedRecordBatchStream};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
@@ -522,13 +522,14 @@ impl ParquetReaderBuilder {
 
         let file_metadata = parquet_meta.file_metadata();
         let parquet_schema_desc = file_metadata.schema_descr();
-        let file_schema =
+        let file_schema = Arc::new(
             parquet_to_arrow_schema(parquet_schema_desc, file_metadata.key_value_metadata())
-                .context(ParquetToArrowSchemaSnafu { file: &file_path })?;
+                .context(ParquetToArrowSchemaSnafu { file: &file_path })?,
+        );
         let mut read_format = FlatReadFormat::new(
             region_meta.clone(),
             read_cols,
-            Some(Arc::new(file_schema)),
+            Some(file_schema.clone()),
             &file_path,
             skip_auto_convert,
         )?;
@@ -565,7 +566,8 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_read_cols = read_format.parquet_read_columns();
-        let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
+        let projection_plan =
+            build_projection_plan(parquet_read_cols, parquet_schema_desc, &file_schema)?;
         let has_nested_projection = parquet_read_cols.has_nested();
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
@@ -2070,12 +2072,20 @@ impl RowGroupReaderBuilder {
             return Ok(stream);
         }
 
-        Ok(NestedSchemaAligner::new(
+        let mode = if self.json2_rewrite_targets.is_empty() {
+            AlignMode::AlignToSchema
+        } else {
+            AlignMode::Rewrite {
+                columns: self.json2_rewrite_targets.clone(),
+            }
+        };
+
+        Ok(JsonSchemaAligner::new(
             stream,
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
+            mode,
         )?
-        .with_json2_rewrite_targets(&self.json2_rewrite_targets)?
         .boxed())
     }
 
@@ -2693,7 +2703,17 @@ mod tests {
 
         let output_schema = read_format.arrow_schema().clone();
         let parquet_schema = parquet_meta.file_metadata().schema_descr();
-        let projection = build_projection_plan(read_format.parquet_read_columns(), parquet_schema);
+        let source_schema = parquet_to_arrow_schema(
+            parquet_schema,
+            parquet_meta.file_metadata().key_value_metadata(),
+        )
+        .unwrap();
+        let projection = build_projection_plan(
+            read_format.parquet_read_columns(),
+            parquet_schema,
+            &source_schema,
+        )
+        .unwrap();
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_meta.clone(), ArrowReaderOptions::new()).unwrap();
         (
@@ -2989,7 +3009,8 @@ mod tests {
             ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
                 vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
             )]);
-        let projection_plan = build_projection_plan(&projection, parquet_schema);
+        let projection_plan =
+            build_projection_plan(&projection, parquet_schema, batch.schema_ref()).unwrap();
         assert_eq!(vec![true], projection_plan.projected_root_presence);
         assert_eq!(
             projection_plan.mask,
