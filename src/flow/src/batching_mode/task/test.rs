@@ -24,8 +24,8 @@ use common_error::ext::BoxedError;
 use common_error::mock::MockError;
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper};
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{
@@ -601,6 +601,47 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
     }
 }
 
+/// Injected frontend handler that serves the exact delta with an empty
+/// (zero-row) stream whose terminal metrics still prove a complete region
+/// watermark. It fails the test when the dispatched request is not the
+/// expected `sequence_range` read after the stored checkpoint.
+struct ExactEmptyDeltaHandler {
+    invoked: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for ExactEmptyDeltaHandler
+{
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        self.invoked.store(true, Ordering::SeqCst);
+        assert_eq!(ctx.extension(FLOW_INCREMENTAL_MODE), Some("sequence_range"));
+        assert_eq!(
+            ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS),
+            Some("{\"1\":10}")
+        );
+        // Reuse the existing record-batch wrapper stream: an empty futures
+        // stream produces no rows, while the public metrics field carries the
+        // complete terminal watermark of the finished exact scan.
+        let wrapper = RecordBatchStreamWrapper::new(
+            aggregate_time_window_sink_schema(),
+            futures::stream::empty::<common_recordbatch::error::Result<RecordBatch>>(),
+        );
+        wrapper.metrics.store(Some(Arc::new(RecordBatchMetrics {
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: 1,
+                watermark: Some(12),
+            }],
+            ..Default::default()
+        })));
+        Ok(Output::new_with_stream(Box::pin(wrapper)))
+    }
+}
+
 struct CaptureScheduledNowHandler {
     expected_extension: String,
     captured_sql: Arc<std::sync::Mutex<Option<String>>>,
@@ -1096,6 +1137,35 @@ fn test_apply_query_result_to_state_advances_incremental_subset() {
         state.checkpoints(),
         &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 35_u64)])
     );
+}
+
+#[test]
+fn test_apply_query_result_to_state_empty_delta_complete_watermark_keeps_incremental() {
+    // An empty (zero-row) delta result is not a missing proof: the terminal
+    // watermark of the completed exact scan still advances the checkpoint and
+    // keeps incremental mode.
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    let result = output_with_region_watermarks([(1_u64, Some(12_u64))]);
+
+    let decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &result,
+        std::time::Duration::from_millis(1),
+        &QueryCoverage::IncrementalDelta,
+    );
+
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::AdvancedIncremental {
+            participating_regions: 1,
+            watermarks: 1,
+        }
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 12_u64)]));
 }
 
 #[test]
@@ -2223,6 +2293,100 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
     assert!(matches!(repair.coverage, QueryCoverage::ScopedBaseRepair));
     assert!(repair.plan.to_string().contains("Filter:"));
     assert!(!repair.plan.to_string().contains("Left Join"));
+}
+
+#[tokio::test]
+async fn test_exact_required_empty_delta_complete_watermark_advances_checkpoint() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    register_twe_sink(&query_engine, "missing_sink", 9201);
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .exact_sequence_range_required = true;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+
+    let plan_info = task
+        .gen_insert_plan_unlocked(&query_engine, Some(1))
+        .await
+        .unwrap()
+        .expect("dirty incremental flow must generate an exact delta plan");
+    assert!(matches!(
+        plan_info.coverage,
+        QueryCoverage::IncrementalDelta
+    ));
+
+    let handler_invoked = Arc::new(AtomicBool::new(false));
+    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
+        Arc::new(ExactEmptyDeltaHandler {
+            invoked: handler_invoked.clone(),
+        });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+    let (affected_rows, _) = task
+        .execute_logical_plan_unlocked(
+            &frontend_client,
+            &plan_info.plan,
+            &plan_info.dirty_restore,
+            &plan_info.coverage,
+        )
+        .await
+        .expect("the dispatched exact delta must execute through the injected frontend handler")
+        .expect("executed exact delta must report its affected rows");
+    assert!(
+        handler_invoked.load(Ordering::SeqCst),
+        "the injected frontend handler must receive the exact delta"
+    );
+    assert_eq!(
+        affected_rows, 0,
+        "an empty exact delta must report zero rows"
+    );
+
+    {
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 12_u64)]));
+        assert!(state.dirty_time_windows.is_empty());
+    }
+
+    // Without a new dirty signal the incremental flow skips the next round
+    // instead of re-reading the delta or falling back to a full snapshot.
+    let skipped = task
+        .gen_insert_plan_unlocked(&query_engine, Some(1))
+        .await
+        .unwrap();
+    assert!(
+        skipped.is_none(),
+        "without a dirty signal the incremental flow must skip the round"
+    );
+
+    // New dirty work still advances through the exact delta, not through a
+    // filtered base repair or an unfiltered full snapshot.
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(5), Some(Timestamp::new_second(10)));
+    let followup = task
+        .gen_insert_plan_unlocked(&query_engine, Some(1))
+        .await
+        .unwrap()
+        .expect("new dirty work must still generate an exact delta plan");
+    assert!(matches!(followup.coverage, QueryCoverage::IncrementalDelta));
 }
 
 #[tokio::test]
