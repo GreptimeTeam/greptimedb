@@ -184,9 +184,8 @@ impl BatchAccumulator {
     }
 }
 
-/// Non-verbose half of the former inline branch in
-/// `FlightRecordBatchStream::flight_data_stream`: forwards ready record batches and
-/// coalesces consecutive groups before sending them.
+/// Forwards ready record batches on the non-verbose path, coalescing
+/// consecutive small batches into one outgoing group before sending.
 struct CoalescingBatcher {
     acc: BatchAccumulator,
     sent_first_batch: bool,
@@ -467,9 +466,8 @@ impl FlightRecordBatchStream {
         metrics.send_schema_duration += start.elapsed();
 
         // Each path reports whether it reached normal EOF. On any error or failed
-        // send the path stops early and the final-metrics tail must be skipped,
-        // matching the behavior before the split (an early `return` exited the
-        // whole function and bypassed the tail).
+        // send the path stops early and the final-metrics tail must be skipped:
+        // final metrics are only sent after a cleanly completed stream.
         let reached_eof = if should_send_partial_metrics {
             Self::verbose_metrics_stream(
                 &mut recordbatches,
@@ -497,8 +495,8 @@ impl FlightRecordBatchStream {
         }
     }
 
-    /// Verbose half of the former inline branch in `flight_data_stream`: sends every
-    /// record batch individually and forwards partial metrics whenever they change.
+    /// On the verbose path, sends every record batch individually and forwards
+    /// partial metrics whenever they change.
     /// Returns `true` when the source stream reached normal EOF, `false` when it
     /// stopped early on an error or a failed send.
     async fn verbose_metrics_stream(
@@ -1188,12 +1186,11 @@ mod test {
         }
     }
 
-    /// On an upstream error the verbose path must stop early and skip the shared
-    /// EOF final-metrics tail, exactly as before the split: `metrics()` must not
-    /// be called again after the error. This drives `flight_data_stream` directly
-    /// and awaits its return, so the producer has fully finished before the
-    /// counter is read (the public message stream alone would hide the tail and
-    /// could race with it).
+    /// On an upstream error the verbose path stops early and skips the shared
+    /// EOF final-metrics tail: `metrics()` must not be called again after the
+    /// error. This drives `flight_data_stream` directly and awaits its return,
+    /// so the producer has fully finished before the counter is read (the public
+    /// message stream alone would hide the tail and could race with it).
     #[tokio::test]
     async fn test_verbose_error_skips_final_metrics_tail() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
