@@ -231,6 +231,41 @@ fn min_max_input_type() -> Vec<DataType> {
     ]
 }
 
+/// Batches with fewer windows than this have too little repeated work to reclaim.
+const MIN_SLIDING_WINDOWS: usize = 4;
+/// Below this window length the per-sample bookkeeping is comparable to the scan
+/// it would replace.
+const MIN_SLIDING_WINDOW_LENGTH: u32 = 32;
+/// Reuse is taken only when a step advances at most this fraction of the window.
+const MAX_SLIDING_STEP_FRACTION: u32 = 4;
+
+/// Whether reusing candidates across windows is expected to beat rescanning each one.
+///
+/// Reuse pays off in proportion to how much consecutive windows overlap, and loses to
+/// a plain scan on wide windows that barely overlap: maintaining the deque then costs
+/// more than the rescan it replaces. `RangeManipulate` emits one window length and one
+/// step for a whole batch, so the first two windows decide for all of them. A wrong
+/// guess costs time, not correctness — both paths return the same bits.
+fn reuses_candidates(window_keys: &[i64]) -> bool {
+    if window_keys.len() < MIN_SLIDING_WINDOWS {
+        return false;
+    }
+
+    let (first_offset, first_length) = unpack(window_keys[0]);
+    let (second_offset, _) = unpack(window_keys[1]);
+    first_length >= MIN_SLIDING_WINDOW_LENGTH
+        && second_offset >= first_offset
+        && second_offset - first_offset <= first_length / MAX_SLIDING_STEP_FRACTION
+}
+
+fn is_better(value: f64, current: f64, is_min: bool) -> bool {
+    if is_min {
+        value < current
+    } else {
+        value > current
+    }
+}
+
 fn min_max_over_time_batch(
     input: &[ColumnarValue],
     is_min: bool,
@@ -275,9 +310,7 @@ fn min_max_over_time_batch(
                 "{func_name}: expect value range vector values of type Float64"
             ))
         })?;
-    let mut extrema = VecDeque::new();
-    let mut latest_nan = None;
-    let mut previous_window = None;
+    let mut sliding = reuses_candidates(value_keys).then(|| SlidingExtrema::new(is_min));
     let mut result = Vec::with_capacity(value_keys.len());
 
     for index in 0..value_keys.len() {
@@ -291,43 +324,10 @@ fn min_max_over_time_batch(
 
         let start = value_offset as usize;
         let end = start + value_length as usize;
-        let append_start = match previous_window {
-            Some((previous_start, previous_end))
-                if start >= previous_start && end >= previous_end =>
-            {
-                while extrema
-                    .front()
-                    .is_some_and(|&value_index| value_index < start)
-                {
-                    extrema.pop_front();
-                }
-                if latest_nan.is_some_and(|value_index| value_index < start) {
-                    latest_nan = None;
-                }
-                previous_end.max(start)
-            }
-            Some(_) | None => {
-                extrema.clear();
-                latest_nan = None;
-                start
-            }
-        };
-        append_min_max_values(
-            values,
-            append_start,
-            end,
-            is_min,
-            &mut extrema,
-            &mut latest_nan,
-        );
-
-        result.push(
-            extrema
-                .front()
-                .map(|&value_index| values.value(value_index))
-                .or_else(|| latest_nan.map(|value_index| values.value(value_index))),
-        );
-        previous_window = Some((start, end));
+        result.push(match sliding.as_mut() {
+            Some(sliding) => sliding.evaluate(values, start, end),
+            None => scan_extremum(values, start, end, is_min),
+        });
     }
 
     Ok(ColumnarValue::Array(Arc::new(Float64Array::from_iter(
@@ -335,41 +335,103 @@ fn min_max_over_time_batch(
     ))))
 }
 
-fn append_min_max_values(
-    values: &Float64Array,
-    start: usize,
-    end: usize,
+/// Reuses extrema candidates across windows whose bounds do not retreat.
+struct SlidingExtrema {
     is_min: bool,
-    extrema: &mut VecDeque<usize>,
-    latest_nan: &mut Option<usize>,
-) {
+    /// Indices of the samples that can still become the extremum, in arrival order.
+    /// A strictly better sample evicts the ones queued before it, so the front is the
+    /// extremum of the current window and tied values keep their arrival order — and
+    /// with it the sign of tied zeros.
+    candidates: VecDeque<usize>,
+    /// Backs the all-NaN window, which keeps the last NaN of the window.
+    latest_nan: Option<usize>,
+    previous_window: Option<(usize, usize)>,
+}
+
+impl SlidingExtrema {
+    fn new(is_min: bool) -> Self {
+        Self {
+            is_min,
+            candidates: VecDeque::new(),
+            latest_nan: None,
+            previous_window: None,
+        }
+    }
+
+    fn evaluate(&mut self, values: &Float64Array, start: usize, end: usize) -> Option<f64> {
+        let append_start = match self.previous_window {
+            Some((previous_start, previous_end))
+                if start >= previous_start && end >= previous_end =>
+            {
+                while self.candidates.front().is_some_and(|&index| index < start) {
+                    self.candidates.pop_front();
+                }
+                if self.latest_nan.is_some_and(|index| index < start) {
+                    self.latest_nan = None;
+                }
+                // Samples between two disjoint windows belong to neither, and later
+                // windows only move right, so skipping them keeps the state exact.
+                previous_end.max(start)
+            }
+            // A retreating bound can bring back samples that are no longer tracked.
+            Some(_) | None => {
+                self.candidates.clear();
+                self.latest_nan = None;
+                start
+            }
+        };
+        self.append(values, append_start, end);
+        self.previous_window = Some((start, end));
+
+        self.candidates
+            .front()
+            .or(self.latest_nan.as_ref())
+            .map(|&index| values.value(index))
+    }
+
+    fn append(&mut self, values: &Float64Array, start: usize, end: usize) {
+        for index in start..end {
+            if values.is_null(index) {
+                continue;
+            }
+
+            let value = values.value(index);
+            if value.is_nan() {
+                // Keep the latest payload while no non-NaN value is in the window.
+                self.latest_nan = Some(index);
+                continue;
+            }
+
+            while let Some(&tail_index) = self.candidates.back() {
+                if !is_better(value, values.value(tail_index), self.is_min) {
+                    break;
+                }
+                self.candidates.pop_back();
+            }
+            self.candidates.push_back(index);
+        }
+    }
+}
+
+/// Folds one window on its own, the way the per-window scan used to.
+fn scan_extremum(values: &Float64Array, start: usize, end: usize, is_min: bool) -> Option<f64> {
+    let mut extremum: Option<f64> = None;
     for index in start..end {
         if values.is_null(index) {
             continue;
         }
 
         let value = values.value(index);
-        if value.is_nan() {
-            // Keep the latest payload while no non-NaN value is in the window.
-            *latest_nan = Some(index);
-            continue;
+        let replace = match extremum {
+            None => true,
+            // A NaN only holds the slot until any other sample arrives.
+            Some(current) => current.is_nan() || is_better(value, current, is_min),
+        };
+        if replace {
+            extremum = Some(value);
         }
-
-        while let Some(&tail_index) = extrema.back() {
-            let tail_value = values.value(tail_index);
-            // Strict comparison retains the first equal value, including signed zero.
-            if if is_min {
-                value < tail_value
-            } else {
-                value > tail_value
-            } {
-                extrema.pop_back();
-            } else {
-                break;
-            }
-        }
-        extrema.push_back(index);
     }
+    extremum
 }
 
 #[cfg(test)]
@@ -613,6 +675,23 @@ mod test {
         )
     }
 
+    fn window_keys(ranges: &[(u32, u32)]) -> Vec<i64> {
+        let length = ranges
+            .iter()
+            .map(|&(offset, length)| (offset + length) as usize)
+            .max()
+            .unwrap_or_default();
+        RangeArray::from_ranges(
+            Arc::new(Float64Array::from(vec![0.0; length])),
+            ranges.iter().copied(),
+        )
+        .unwrap()
+        .into_dict()
+        .keys()
+        .values()
+        .to_vec()
+    }
+
     fn assert_min_max_udfs_match_oracle(
         timestamp_values: &TimestampMillisecondArray,
         all_values: &Float64Array,
@@ -823,6 +902,146 @@ mod test {
         let error = invoke_range_udf(MaxOverTime::scalar_udf(), timestamp_ranges, value_ranges)
             .unwrap_err();
         assert!(error.to_string().contains("different lengths at window 0"));
+    }
+
+    #[test]
+    fn sliding_evaluator_is_selected_only_for_overlapping_window_batches() {
+        // Enough windows, long enough, advancing by at most a quarter of the window.
+        assert!(reuses_candidates(&window_keys(&[
+            (0, 32),
+            (8, 32),
+            (16, 32),
+            (24, 32)
+        ])));
+
+        // One window too few.
+        assert!(!reuses_candidates(&window_keys(&[
+            (0, 32),
+            (8, 32),
+            (16, 32)
+        ])));
+        // One sample too short.
+        assert!(!reuses_candidates(&window_keys(&[
+            (0, 31),
+            (7, 31),
+            (14, 31),
+            (21, 31)
+        ])));
+        // One sample too far apart.
+        assert!(!reuses_candidates(&window_keys(&[
+            (0, 32),
+            (9, 32),
+            (18, 32),
+            (27, 32)
+        ])));
+        // Windows that start by retreating.
+        assert!(!reuses_candidates(&window_keys(&[
+            (8, 32),
+            (0, 32),
+            (16, 32),
+            (24, 32)
+        ])));
+    }
+
+    #[test]
+    fn min_max_over_time_batch_matches_oracle_on_overlapping_window_batches() {
+        let values = sliced_float_values(
+            (0..96)
+                .map(|index| match index % 13 {
+                    0 => None,
+                    1 => Some(f64::from_bits(0x7ff8_0000_0000_0200 + index as u64)),
+                    2 => Some(-0.0),
+                    3 => Some(0.0),
+                    4 => Some(f64::INFINITY),
+                    5 => Some(f64::NEG_INFINITY),
+                    6 | 7 => Some(5.0),
+                    _ => Some(((index * 37) % 23) as f64),
+                })
+                .collect(),
+        );
+        let timestamps = TimestampMillisecondArray::from_iter((0..96).map(Some));
+        // The first two windows open the sliding path; the rest then grow, repeat,
+        // jump over a gap, collapse to empty, retreat, and rebuild from scratch.
+        let ranges = [
+            (0, 32),
+            (4, 32),
+            (8, 32),
+            (12, 32),
+            (16, 40),
+            (20, 36),
+            (20, 36),
+            (64, 32),
+            (64, 0),
+            (60, 20),
+            (0, 96),
+        ];
+        assert!(reuses_candidates(&window_keys(&ranges)));
+
+        assert_min_max_udfs_match_oracle(&timestamps, &values, &ranges, &ranges);
+    }
+
+    #[test]
+    fn both_extrema_paths_match_the_scalar_oracle_on_every_four_sample_window() {
+        let alphabet = [
+            None,
+            Some(-0.0),
+            Some(0.0),
+            Some(-3.0),
+            Some(2.0),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::from_bits(0x7ff8_0000_0000_0042)),
+            Some(f64::from_bits(0xfff8_0000_0000_0066)),
+        ];
+        // Every window of a four-sample array, walked forwards and then backwards, so
+        // the evaluator sees growing, shrinking, disjoint, empty and retreating bounds.
+        let windows = (0..=4)
+            .flat_map(|start| (0..=4 - start).map(move |length| (start, start + length)))
+            .collect::<Vec<_>>();
+
+        for encoded in 0..alphabet.len().pow(4) {
+            let mut remaining = encoded;
+            let values = Float64Array::from(
+                (0..4)
+                    .map(|_| {
+                        let value = alphabet[remaining % alphabet.len()];
+                        remaining /= alphabet.len();
+                        value
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let mut sliding_min = SlidingExtrema::new(true);
+            let mut sliding_max = SlidingExtrema::new(false);
+
+            for &(start, end) in windows.iter().chain(windows.iter().rev()) {
+                let window = values.slice(start, end - start);
+                let timestamps = TimestampMillisecondArray::new_null(window.len());
+
+                let expected = min_over_time(&timestamps, &window).map(f64::to_bits);
+                assert_eq!(
+                    sliding_min.evaluate(&values, start, end).map(f64::to_bits),
+                    expected,
+                    "sliding min, values {encoded}, window {start}..{end}"
+                );
+                assert_eq!(
+                    scan_extremum(&values, start, end, true).map(f64::to_bits),
+                    expected,
+                    "scanned min, values {encoded}, window {start}..{end}"
+                );
+
+                let expected = max_over_time(&timestamps, &window).map(f64::to_bits);
+                assert_eq!(
+                    sliding_max.evaluate(&values, start, end).map(f64::to_bits),
+                    expected,
+                    "sliding max, values {encoded}, window {start}..{end}"
+                );
+                assert_eq!(
+                    scan_extremum(&values, start, end, false).map(f64::to_bits),
+                    expected,
+                    "scanned max, values {encoded}, window {start}..{end}"
+                );
+            }
+        }
     }
 
     fn assert_over_time_value(actual: Option<f64>, expected: Option<f64>) {
