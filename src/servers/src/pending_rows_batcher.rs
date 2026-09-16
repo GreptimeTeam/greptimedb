@@ -23,22 +23,27 @@ use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
-use arrow::array::Array;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use bytes::Bytes;
 use catalog::CatalogManagerRef;
-use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_batcher::flush_limiter::FlushLimiter;
+use common_batcher::flush_policy::FlushTrigger;
+use common_batcher::flush_policy::timing::TimingFlushPolicy;
+use common_batcher::notifier::{Notifier, run_notifier};
+use common_batcher::pending_worker::PendingWorker as PendingCore;
+use common_batcher::request_limiter::RequestLimiter;
+use common_batcher::worker_registry::WorkerRegistry;
+use common_grpc::error::Error as GrpcError;
+use common_grpc::flight::record_batch_to_ipc;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
+use common_runtime::spawn_global;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
-use dashmap::DashMap;
-use dashmap::mapref::entry::Entry;
-use futures::StreamExt;
+use datatypes::timestamp::append_timestamps;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use partition::partition::PartitionRuleRef;
@@ -81,7 +86,7 @@ pub fn pending_rows_batch_sync_enabled() -> bool {
 }
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
-const MAX_CONCURRENT_FLOW_NOTIFICATIONS: usize = 8;
+const MAX_CONCURRENT_FLOW_NOTIFICATIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
     /// Batch-create multiple logical tables that are missing.
@@ -292,15 +297,13 @@ struct TableResolutionPlan {
 
 struct PendingBatch {
     tables: HashMap<TableId, TableBatch>,
-    total_row_count: usize,
     db_string: String,
     ctx: QueryContextRef,
-    waiters: Vec<FlushWaiter>,
 }
 
 struct FlushWaiter {
     response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
-    _permit: OwnedSemaphorePermit,
+    _permit: Arc<OwnedSemaphorePermit>,
 }
 
 struct FlushBatch {
@@ -322,7 +325,7 @@ enum WorkerCommand {
         total_rows: usize,
         ctx: QueryContextRef,
         response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
-        _permit: OwnedSemaphorePermit,
+        _permit: Arc<OwnedSemaphorePermit>,
     },
     #[cfg(test)]
     Ack { ack_tx: oneshot::Sender<()> },
@@ -344,15 +347,15 @@ fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
 
 /// Prometheus remote write pending rows batcher.
 pub struct PendingRowsBatcher {
-    workers: Arc<DashMap<BatchKey, PendingWorker>>,
+    workers: Arc<WorkerRegistry<BatchKey, WorkerCommand>>,
     flush_interval: Duration,
-    max_batch_rows: usize,
+    flush_policy: TimingFlushPolicy,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    flow_notification_tx: mpsc::Sender<FlowNotification>,
-    flush_semaphore: Arc<Semaphore>,
-    inflight_semaphore: Arc<Semaphore>,
+    flow_notification_tx: Notifier<FlowNotification>,
+    flush_limiter: FlushLimiter,
+    request_limiter: RequestLimiter,
     worker_channel_capacity: usize,
     prom_store_with_metric_engine: bool,
     schema_alterer: PendingRowsSchemaAltererRef,
@@ -376,24 +379,21 @@ impl PendingRowsBatcher {
         max_inflight_requests: usize,
         flow_notification_queue_capacity: NonZeroUsize,
     ) -> Option<Arc<Self>> {
-        // Disable the batcher if flush is disabled or configuration is invalid.
-        // Zero values for these knobs either cause panics (e.g., zero-capacity channels)
-        // or deadlocks (e.g., semaphores with no permits).
-        if flush_interval.is_zero()
-            || max_batch_rows == 0
-            || max_concurrent_flushes == 0
-            || worker_channel_capacity == 0
-            || max_inflight_requests == 0
-        {
+        if worker_channel_capacity == 0 || worker_channel_capacity > Semaphore::MAX_PERMITS {
             return None;
         }
 
+        let flush_policy = TimingFlushPolicy::try_new(flush_interval, max_batch_rows)?;
+        let flush_limiter = FlushLimiter::try_new(max_concurrent_flushes)?;
+
+        let request_limiter = RequestLimiter::try_new(max_inflight_requests)?;
+        let (flow_notification_tx, flow_notification_rx) =
+            Notifier::try_new(flow_notification_queue_capacity.get())?;
+
         let (shutdown, _) = broadcast::channel(1);
         let pending_rows_batch_sync = pending_rows_batch_sync_enabled();
-        let workers = Arc::new(DashMap::new());
-        PENDING_WORKERS.set(workers.len() as i64);
-        let (flow_notification_tx, flow_notification_rx) =
-            mpsc::channel(flow_notification_queue_capacity.get());
+        let workers = Arc::new(WorkerRegistry::new());
+        PENDING_WORKERS.set(0);
         start_flow_notification_worker(
             flow_notification_rx,
             table_flownode_set_cache,
@@ -403,15 +403,15 @@ impl PendingRowsBatcher {
         Some(Arc::new(Self {
             workers,
             flush_interval,
-            max_batch_rows,
+            flush_policy,
             partition_manager,
             node_manager,
             catalog_manager,
             flow_notification_tx,
             prom_store_with_metric_engine,
             schema_alterer,
-            flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
-            inflight_semaphore: Arc::new(Semaphore::new(max_inflight_requests)),
+            flush_limiter,
+            request_limiter,
             worker_channel_capacity,
             pending_rows_batch_sync,
             shutdown,
@@ -433,9 +433,8 @@ impl PendingRowsBatcher {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["submit_acquire_inflight_permit"])
                 .start_timer();
-            self.inflight_semaphore
-                .clone()
-                .acquire_owned()
+            self.request_limiter
+                .acquire()
                 .await
                 .map_err(|_| error::BatcherChannelClosedSnafu.build())?
         };
@@ -457,7 +456,7 @@ impl PendingRowsBatcher {
                 .start_timer();
 
             for _ in 0..2 {
-                let worker = self.get_or_spawn_worker(batch_key.clone());
+                let worker = self.get_or_spawn_worker(batch_key.clone()).await;
                 let Some(worker_cmd) = cmd.take() else {
                     break;
                 };
@@ -470,7 +469,8 @@ impl PendingRowsBatcher {
                             self.workers.as_ref(),
                             &batch_key,
                             &worker.tx,
-                        );
+                        )
+                        .await;
                     }
                 }
             }
@@ -832,39 +832,24 @@ impl PendingRowsBatcher {
 
         Ok(aligned_batches)
     }
-
-    fn get_or_spawn_worker(&self, key: BatchKey) -> PendingWorker {
-        if let Some(worker) = self.workers.get(&key)
-            && !worker.tx.is_closed()
-        {
-            return worker.clone();
+    async fn get_or_spawn_worker(&self, key: BatchKey) -> PendingWorker {
+        let (tx, receiver) = self
+            .workers
+            .get_or_create(key.clone(), self.worker_channel_capacity)
+            .await;
+        if let Some(rx) = receiver {
+            self.spawn_worker(key, tx.clone(), rx);
+            PENDING_WORKERS.set(self.workers.len().await as i64);
         }
-
-        let entry = self.workers.entry(key.clone());
-        match entry {
-            Entry::Occupied(mut worker) => {
-                if worker.get().tx.is_closed() {
-                    let new_worker = self.spawn_worker(key);
-                    worker.insert(new_worker.clone());
-                    PENDING_WORKERS.set(self.workers.len() as i64);
-                    new_worker
-                } else {
-                    worker.get().clone()
-                }
-            }
-            Entry::Vacant(vacant) => {
-                let worker = self.spawn_worker(key);
-
-                vacant.insert(worker.clone());
-                PENDING_WORKERS.set(self.workers.len() as i64);
-                worker
-            }
-        }
+        PendingWorker { tx }
     }
 
-    fn spawn_worker(&self, key: BatchKey) -> PendingWorker {
-        let (tx, rx) = mpsc::channel(self.worker_channel_capacity);
-        let worker = PendingWorker { tx: tx.clone() };
+    fn spawn_worker(
+        &self,
+        key: BatchKey,
+        tx: mpsc::Sender<WorkerCommand>,
+        rx: mpsc::Receiver<WorkerCommand>,
+    ) {
         let worker_idle_timeout = self
             .flush_interval
             .checked_mul(WORKER_IDLE_TIMEOUT_MULTIPLIER)
@@ -872,7 +857,7 @@ impl PendingRowsBatcher {
 
         start_worker(
             key,
-            worker.tx.clone(),
+            tx,
             self.workers.clone(),
             rx,
             self.shutdown.clone(),
@@ -880,13 +865,10 @@ impl PendingRowsBatcher {
             self.node_manager.clone(),
             self.catalog_manager.clone(),
             self.flow_notification_tx.clone(),
-            self.flush_interval,
             worker_idle_timeout,
-            self.max_batch_rows,
-            self.flush_semaphore.clone(),
+            self.flush_policy,
+            self.flush_limiter.clone(),
         );
-
-        worker
     }
 }
 
@@ -901,10 +883,8 @@ impl PendingBatch {
         let db_string = ctx.get_db_string();
         Self {
             tables: HashMap::new(),
-            total_row_count: 0,
             db_string,
             ctx,
-            waiters: Vec::new(),
         }
     }
 
@@ -929,22 +909,21 @@ impl PendingBatch {
 fn start_worker(
     key: BatchKey,
     worker_tx: mpsc::Sender<WorkerCommand>,
-    workers: Arc<DashMap<BatchKey, PendingWorker>>,
+    workers: Arc<WorkerRegistry<BatchKey, WorkerCommand>>,
     mut rx: mpsc::Receiver<WorkerCommand>,
     shutdown: broadcast::Sender<()>,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    flow_notification_tx: mpsc::Sender<FlowNotification>,
-    flush_interval: Duration,
+    flow_notification_tx: Notifier<FlowNotification>,
     worker_idle_timeout: Duration,
-    max_batch_rows: usize,
-    flush_semaphore: Arc<Semaphore>,
+    flush_policy: TimingFlushPolicy,
+    flush_limiter: FlushLimiter,
 ) {
     tokio::spawn(async move {
+        // The business batch and pending flush are populated and drained together.
         let mut batch = None;
-        let flush_timer = tokio::time::sleep(flush_interval);
-        tokio::pin!(flush_timer);
+        let mut pending_flush = PendingCore::new(flush_policy);
         let mut shutdown_rx = shutdown.subscribe();
         let idle_deadline = tokio::time::Instant::now() + worker_idle_timeout;
         let idle_timer = tokio::time::sleep_until(idle_deadline);
@@ -955,43 +934,37 @@ fn start_worker(
                 cmd = rx.recv() => {
                     match cmd {
                         Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
-                            idle_timer.as_mut().reset(tokio::time::Instant::now() + worker_idle_timeout);
+                            let submitted_at = tokio::time::Instant::now();
+                            idle_timer.as_mut().reset(submitted_at + worker_idle_timeout);
 
-                            if batch.is_none() {
-                                // Anchor the flush deadline to this batch's first submission,
-                                // rather than to the worker's creation time.
-                                flush_timer
-                                    .as_mut()
-                                    .reset(tokio::time::Instant::now() + flush_interval);
-                            }
+                            pending_flush.submit(
+                                FlushWaiter { response_tx, _permit },
+                                total_rows,
+                            );
                             let pending_batch = batch.get_or_insert_with(||{
                                 PENDING_BATCHES.inc();
                                 PendingBatch::new(ctx)
                             });
 
-                            pending_batch.waiters.push(FlushWaiter { response_tx, _permit });
-
                             for (table_name, table_id, record_batch) in table_batches {
                                 pending_batch.add_table_batch(table_name, table_id, record_batch);
                             }
 
-                            pending_batch.total_row_count += total_rows;
                             PENDING_ROWS.add(total_rows as i64);
 
-                            if pending_batch.total_row_count >= max_batch_rows
-                                && let Some(flush) = drain_batch(&mut batch) {
-                                    spawn_flush(
-                                        flush,
-                                        partition_manager.clone(),
-                                        node_manager.clone(),
-                                        catalog_manager.clone(),
-                                        flow_notification_tx.clone(),
-                                        flush_semaphore.clone(),
-                                    ).await;
+                            if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, Some(FlushTrigger::Submission)) {
+                                spawn_flush(
+                                    flush,
+                                    partition_manager.clone(),
+                                    node_manager.clone(),
+                                    catalog_manager.clone(),
+                                    flow_notification_tx.clone(),
+                                    flush_limiter.clone(),
+                                ).await;
                             }
                         }
                         None => {
-                            if let Some(flush) = drain_batch(&mut batch) {
+                            if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, None) {
                                 flush_batch_with_managers(
                                     flush,
                                     partition_manager.clone(),
@@ -1010,7 +983,7 @@ fn start_worker(
                 }
                 _ = &mut idle_timer => {
                     if !should_close_worker_on_idle_timeout(
-                        batch.as_ref().map_or(0, |batch| batch.total_row_count),
+                        pending_flush.total_rows(),
                         rx.len(),
                     ) {
                         idle_timer
@@ -1027,20 +1000,20 @@ fn start_worker(
                     );
                     break;
                 }
-                _ = &mut flush_timer, if batch.is_some() => {
-                    if let Some(flush) = drain_batch(&mut batch) {
+                _ = pending_flush.wait_flush() => {
+                    if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, Some(FlushTrigger::Deadline)) {
                         spawn_flush(
                             flush,
                             partition_manager.clone(),
                             node_manager.clone(),
                             catalog_manager.clone(),
                             flow_notification_tx.clone(),
-                            flush_semaphore.clone(),
+                            flush_limiter.clone(),
                         ).await;
                     }
                 }
                 _ = shutdown_rx.recv() => {
-                    if let Some(flush) = drain_batch(&mut batch) {
+                    if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, None) {
                         flush_batch_with_managers(
                             flush,
                             partition_manager.clone(),
@@ -1054,41 +1027,46 @@ fn start_worker(
             }
         }
 
-        remove_worker_if_same_channel(workers.as_ref(), &key, &worker_tx);
+        remove_worker_if_same_channel(workers.as_ref(), &key, &worker_tx).await;
     });
 }
 
-fn remove_worker_if_same_channel(
-    workers: &DashMap<BatchKey, PendingWorker>,
+async fn remove_worker_if_same_channel(
+    workers: &WorkerRegistry<BatchKey, WorkerCommand>,
     key: &BatchKey,
     worker_tx: &mpsc::Sender<WorkerCommand>,
 ) -> bool {
-    if let Some(worker) = workers.get(key)
-        && worker.tx.same_channel(worker_tx)
-    {
-        drop(worker);
-        workers.remove(key);
-        PENDING_WORKERS.set(workers.len() as i64);
-        return true;
+    if workers.remove_if_same(key, worker_tx).await {
+        PENDING_WORKERS.set(workers.len().await as i64);
+        true
+    } else {
+        false
     }
-
-    false
 }
 
 fn should_close_worker_on_idle_timeout(total_row_count: usize, queued_requests: usize) -> bool {
     total_row_count == 0 && queued_requests == 0
 }
 
-fn drain_batch(batch: &mut Option<PendingBatch>) -> Option<FlushBatch> {
+/// Transfers the ready batch, or drains unconditionally when no trigger is given.
+/// Execution and flush permits remain owned by the caller.
+fn drain_batch(
+    batch: &mut Option<PendingBatch>,
+    pending_flush: &mut PendingCore<FlushWaiter, TimingFlushPolicy>,
+    trigger: Option<FlushTrigger>,
+) -> Option<FlushBatch> {
+    let total_row_count = pending_flush.total_rows();
+    let waiters = match trigger {
+        Some(trigger) => pending_flush.take_ready(trigger)?,
+        None => pending_flush.take_pending()?,
+    };
     let batch = batch.take()?;
-    let total_row_count = batch.total_row_count;
 
     if total_row_count == 0 {
         return None;
     }
 
     let table_batches = batch.tables.into_values().collect();
-    let waiters = batch.waiters;
 
     PENDING_ROWS.sub(total_row_count as i64);
     PENDING_BATCHES.dec();
@@ -1107,10 +1085,10 @@ async fn spawn_flush(
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    flow_notification_tx: mpsc::Sender<FlowNotification>,
-    semaphore: Arc<Semaphore>,
+    flow_notification_tx: Notifier<FlowNotification>,
+    flush_limiter: FlushLimiter,
 ) {
-    match semaphore.acquire_owned().await {
+    match flush_limiter.acquire().await {
         Ok(permit) => {
             tokio::spawn(async move {
                 let _permit = permit;
@@ -1323,7 +1301,7 @@ async fn flush_batch_with_managers(
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    flow_notification_tx: mpsc::Sender<FlowNotification>,
+    flow_notification_tx: Notifier<FlowNotification>,
 ) {
     let partition_provider = PartitionManagerPhysicalFlushAdapter { partition_manager };
     let node_requester = NodeManagerPhysicalFlushAdapter {
@@ -1345,7 +1323,7 @@ async fn flush_batch(
     partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
     node_manager: &(impl PhysicalFlushNodeRequester + ?Sized),
     catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
-    flow_notification_tx: mpsc::Sender<FlowNotification>,
+    flow_notification_tx: Notifier<FlowNotification>,
 ) {
     let FlushBatch {
         table_batches,
@@ -1403,21 +1381,13 @@ fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
     let mut timestamps = Vec::with_capacity(table_batch.row_count);
     for batch in &table_batch.batches {
         let timestamp_column = batch.batch.column(batch.timestamp_index);
-        let Some((timestamp_values, _)) =
-            datatypes::timestamp::timestamp_array_to_primitive(timestamp_column)
-        else {
+        let Some(()) = append_timestamps(timestamp_column, &mut timestamps) else {
             error!(
                 "Failed to extract timestamps from record batch, table_id: {}, timestamp_index: {}",
                 table_batch.table_id, batch.timestamp_index
             );
             continue;
         };
-
-        if timestamp_values.null_count() == 0 {
-            timestamps.extend_from_slice(timestamp_values.values());
-        } else {
-            timestamps.extend(timestamp_values.iter().flatten());
-        }
     }
     timestamps
 }
@@ -1428,10 +1398,10 @@ struct FlowNotification {
 }
 
 fn try_enqueue_flow_notification(
-    tx: &mpsc::Sender<FlowNotification>,
+    tx: &Notifier<FlowNotification>,
     notification: FlowNotification,
 ) -> bool {
-    match tx.try_send(notification) {
+    match tx.try_notify(notification) {
         Ok(()) => true,
         Err(mpsc::error::TrySendError::Full(notification)) => {
             FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]).inc();
@@ -1456,7 +1426,7 @@ fn try_enqueue_flow_notification(
     }
 }
 
-fn enqueue_flow_notifications(table_batches: Vec<TableBatch>, tx: &mpsc::Sender<FlowNotification>) {
+fn enqueue_flow_notifications(table_batches: Vec<TableBatch>, tx: &Notifier<FlowNotification>) {
     for table_batch in table_batches {
         let timestamps = extract_timestamps(&table_batch);
         if timestamps.is_empty() {
@@ -1517,14 +1487,17 @@ fn start_flow_notification_worker(
     table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
-    common_runtime::spawn_global(async move {
-        tokio_stream::wrappers::ReceiverStream::new(notification_rx)
-            .for_each_concurrent(MAX_CONCURRENT_FLOW_NOTIFICATIONS, |notification| {
+    spawn_global(async move {
+        run_notifier(
+            notification_rx,
+            MAX_CONCURRENT_FLOW_NOTIFICATIONS,
+            |notification| {
                 let table_flownode_set_cache = table_flownode_set_cache.clone();
                 let node_manager = node_manager.clone();
                 handle_flow_notification(notification, table_flownode_set_cache, node_manager)
-            })
-            .await;
+            },
+        )
+        .await;
     });
 }
 
@@ -1534,7 +1507,7 @@ fn notify_flow_dirty_windows_after_flush(
     table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
-    let (tx, rx) = mpsc::channel(table_batches.len().max(1));
+    let (tx, rx) = Notifier::try_new(table_batches.len().max(1)).unwrap();
     start_flow_notification_worker(rx, table_flownode_set_cache, node_manager);
     enqueue_flow_notifications(table_batches, &tx);
 }
@@ -1804,7 +1777,7 @@ fn encode_region_write_requests(
             let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_physical_encode_ipc"])
                 .start_timer();
-            record_batch_to_ipc(resolved.planned.batch)?
+            record_batch_to_ipc(resolved.planned.batch).map_err(map_ipc_error)?
         };
 
         let request = RegionRequest {
@@ -1847,36 +1820,24 @@ fn notify_waiters(waiters: Vec<FlushWaiter>, result: Result<()>) {
     }
 }
 
-fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes)> {
-    let mut encoder = FlightEncoder::default();
-    let schema = encoder.encode_schema(record_batch.schema().as_ref());
-    let mut iter = encoder
-        .encode(FlightMessage::RecordBatch(record_batch))
-        .into_iter();
-    let Some(flight_data) = iter.next() else {
-        return Err(Error::Internal {
-            err_msg: "Failed to encode empty flight data".to_string(),
-        });
-    };
-    if iter.next().is_some() {
-        return Err(Error::NotSupported {
-            feat: "bulk insert RecordBatch with dictionary arrays".to_string(),
-        });
+fn map_ipc_error(error: GrpcError) -> Error {
+    match error {
+        GrpcError::NotSupported { feat } => Error::NotSupported { feat },
+        GrpcError::InvalidFlightData { reason, .. } => Error::Internal { err_msg: reason },
+        error => Error::Internal {
+            err_msg: error.to_string(),
+        },
     }
-
-    Ok((
-        schema.data_header,
-        flight_data.data_header,
-        flight_data.data_body,
-    ))
 }
 
 #[cfg(test)]
 mod tests {
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
+    use std::future::{Future, poll_fn};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::task::Poll;
     use std::time::Duration;
 
     use api::region::RegionResponse;
@@ -1912,7 +1873,6 @@ mod tests {
     };
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
-    use dashmap::DashMap;
     use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
     use moka::future::CacheBuilder;
     use partition::cache::new_partition_info_cache;
@@ -1927,21 +1887,22 @@ mod tests {
     use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot};
     use tokio::time::{advance, sleep};
 
-    use super::{
-        BatchKey, Error, FlushBatch, FlushRegionWrite, FlushWaiter, PendingBatch,
-        PendingRowsBatcher, PendingWorker, PhysicalFlushCatalogProvider,
+    use crate::error;
+    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
+    use crate::pending_rows_batcher::{
+        BatchKey, Error, FlushBatch, FlushLimiter, FlushRegionWrite, FlushTrigger, FlushWaiter,
+        Notifier, PendingBatch, PendingCore, PendingRowsBatcher, PhysicalFlushCatalogProvider,
         PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
-        PlannedRegionBatch, RecordBatchWithTsIdx, ResolvedRegionBatch, TableBatch, WorkerCommand,
-        batch_key_from_ctx, columns_taxonomy, drain_batch, encode_region_write_requests,
-        extract_timestamps, flush_batch, flush_batch_physical, flush_region_writes_concurrently,
-        greptime_timestamp, notify_flow_dirty_windows_after_flush, plan_region_batches,
+        PlannedRegionBatch, RecordBatchWithTsIdx, RequestLimiter, ResolvedRegionBatch, TableBatch,
+        TimingFlushPolicy, WorkerCommand, WorkerRegistry, batch_key_from_ctx, columns_taxonomy,
+        drain_batch, encode_region_write_requests, extract_timestamps, flush_batch,
+        flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
+        notify_flow_dirty_windows_after_flush, notify_waiters, plan_region_batches,
         remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
         should_dispatch_concurrently, start_flow_notification_worker, start_worker,
         strip_partition_columns_from_batch, transform_logical_batches_to_physical,
         try_enqueue_flow_notification,
     };
-    use crate::error;
-    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
     use crate::prom_row_builder::rows_to_aligned_record_batch;
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
@@ -2165,8 +2126,8 @@ mod tests {
 
     #[test]
     fn test_flow_notification_queue_drops_when_full() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let notification = |table_id| super::FlowNotification {
+        let (tx, mut rx) = Notifier::try_new(1).unwrap();
+        let notification = |table_id| crate::pending_rows_batcher::FlowNotification {
             table_id,
             timestamps: vec![table_id as i64],
         };
@@ -2178,6 +2139,12 @@ mod tests {
 
         assert_eq!(1, rx.try_recv().unwrap().table_id);
         assert_eq!(dropped_before + 1, dropped.get());
+
+        let closed = FLOW_NOTIFICATION_DROPPED.with_label_values(&["closed"]);
+        let closed_before = closed.get();
+        drop(rx);
+        assert!(!try_enqueue_flow_notification(&tx, notification(3)));
+        assert_eq!(closed_before + 1, closed.get());
     }
 
     fn mock_physical_table_metadata(table_id: TableId) -> PhysicalTableMetadata {
@@ -2375,11 +2342,20 @@ mod tests {
         assert_eq!(2, table_rows[0].1.rows.len());
     }
 
-    #[test]
-    fn test_drain_batch_takes_initialized_pending_batch_from_option() {
+    #[tokio::test]
+    async fn test_drain_batch_takes_initialized_pending_batch_from_option() {
         let ctx = session::context::QueryContext::arc();
         let (response_tx, _response_rx) = oneshot::channel();
         let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+        let mut pending_flush =
+            PendingCore::new(TimingFlushPolicy::try_new(Duration::from_secs(10), 1).unwrap());
+        pending_flush.submit(
+            FlushWaiter {
+                response_tx,
+                _permit: Arc::new(permit),
+            },
+            1,
+        );
         let mut batch = Some(PendingBatch {
             tables: HashMap::from([(
                 42,
@@ -2390,22 +2366,75 @@ mod tests {
                     row_count: 1,
                 },
             )]),
-            total_row_count: 1,
             db_string: ctx.get_db_string(),
             ctx: ctx.clone(),
-            waiters: vec![FlushWaiter {
-                response_tx,
-                _permit: permit,
-            }],
         });
 
-        let flush = drain_batch(&mut batch).unwrap();
+        let flush = drain_batch(
+            &mut batch,
+            &mut pending_flush,
+            Some(FlushTrigger::Submission),
+        )
+        .unwrap();
 
         assert!(batch.is_none());
+        assert!(pending_flush.is_empty());
+        assert_eq!(0, pending_flush.total_rows());
+        assert_eq!(1, flush.waiters.len());
         assert_eq!(1, flush.total_row_count);
         assert_eq!(1, flush.table_batches.len());
         assert_eq!(ctx.get_db_string(), flush.db_string);
         assert_eq!(ctx.current_catalog(), flush.ctx.current_catalog());
+    }
+
+    #[tokio::test]
+    async fn test_drain_batch_preserves_unready_state_and_clears_zero_rows() {
+        for total_rows in [0, 1] {
+            let mut pending_flush =
+                PendingCore::new(TimingFlushPolicy::try_new(Duration::from_secs(10), 2).unwrap());
+            let mut batch = Some(PendingBatch::new(session::context::QueryContext::arc()));
+            let semaphore = Arc::new(Semaphore::new(1));
+            let (response_tx, mut response_rx) = oneshot::channel();
+            pending_flush.submit(
+                FlushWaiter {
+                    response_tx,
+                    _permit: Arc::new(semaphore.clone().acquire_owned().await.unwrap()),
+                },
+                total_rows,
+            );
+            assert!(
+                drain_batch(
+                    &mut batch,
+                    &mut pending_flush,
+                    Some(FlushTrigger::Submission)
+                )
+                .is_none()
+            );
+            assert!(batch.is_some());
+            assert!(!pending_flush.is_empty());
+            assert_eq!(total_rows, pending_flush.total_rows());
+            assert_eq!(0, semaphore.available_permits());
+
+            let drained = drain_batch(&mut batch, &mut pending_flush, None);
+            assert!(batch.is_none());
+            assert!(pending_flush.is_empty());
+            assert_eq!(0, pending_flush.total_rows());
+            if total_rows == 0 {
+                assert!(drained.is_none());
+                assert_eq!(1, semaphore.available_permits());
+                assert!(matches!(
+                    response_rx.try_recv(),
+                    Err(oneshot::error::TryRecvError::Closed)
+                ));
+            } else {
+                let drained = drained.unwrap();
+                assert_eq!(1, drained.total_row_count);
+                assert_eq!(1, drained.waiters.len());
+                assert_eq!(0, semaphore.available_permits());
+                drop(drained);
+                assert_eq!(1, semaphore.available_permits());
+            }
+        }
     }
 
     #[test]
@@ -2572,8 +2601,8 @@ mod tests {
     fn mock_flow_notification_sender(
         cache: TableFlownodeSetCacheRef,
         node_manager: NodeManagerRef,
-    ) -> mpsc::Sender<super::FlowNotification> {
-        let (tx, rx) = mpsc::channel(16);
+    ) -> Notifier<crate::pending_rows_batcher::FlowNotification> {
+        let (tx, rx) = Notifier::try_new(16).unwrap();
         start_flow_notification_worker(rx, cache, node_manager);
         tx
     }
@@ -2930,9 +2959,25 @@ mod tests {
         assert_eq!(batches[&batch_key_from_ctx(&skip_wal_ctx)], 2);
     }
 
-    #[test]
-    fn test_remove_worker_if_same_channel_removes_matching_entry() {
-        let workers = DashMap::new();
+    #[tokio::test]
+    async fn test_cancelled_waiter_retains_request_slot_until_notification() {
+        let limiter = RequestLimiter::try_new(1).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        let waiter = FlushWaiter {
+            response_tx,
+            _permit: limiter.acquire().await.unwrap(),
+        };
+        drop(response_rx);
+        let next = limiter.acquire();
+        tokio::pin!(next);
+        assert!(poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx).is_pending())).await);
+        notify_waiters(vec![waiter], Ok(()));
+        let _permit = next.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_remove_worker_if_same_channel_removes_matching_entry() {
+        let workers = WorkerRegistry::new();
         let key = BatchKey {
             catalog: "greptime".to_string(),
             schema: "public".to_string(),
@@ -2941,15 +2986,15 @@ mod tests {
         };
 
         let (tx, _rx) = mpsc::channel::<WorkerCommand>(1);
-        workers.insert(key.clone(), PendingWorker { tx: tx.clone() });
+        workers.get_or_insert_with(key.clone(), || tx.clone()).await;
 
-        assert!(remove_worker_if_same_channel(&workers, &key, &tx));
-        assert!(!workers.contains_key(&key));
+        assert!(remove_worker_if_same_channel(&workers, &key, &tx).await);
+        assert!(workers.is_empty().await);
     }
 
-    #[test]
-    fn test_remove_worker_if_same_channel_keeps_newer_entry() {
-        let workers = DashMap::new();
+    #[tokio::test]
+    async fn test_remove_worker_if_same_channel_keeps_newer_entry() {
+        let workers = WorkerRegistry::new();
         let key = BatchKey {
             catalog: "greptime".to_string(),
             schema: "public".to_string(),
@@ -2959,16 +3004,13 @@ mod tests {
 
         let (stale_tx, _stale_rx) = mpsc::channel::<WorkerCommand>(1);
         let (fresh_tx, _fresh_rx) = mpsc::channel::<WorkerCommand>(1);
-        workers.insert(
-            key.clone(),
-            PendingWorker {
-                tx: fresh_tx.clone(),
-            },
-        );
+        workers
+            .get_or_insert_with(key.clone(), || fresh_tx.clone())
+            .await;
 
-        assert!(!remove_worker_if_same_channel(&workers, &key, &stale_tx));
-        assert!(workers.contains_key(&key));
-        assert!(workers.get(&key).unwrap().tx.same_channel(&fresh_tx));
+        assert!(!remove_worker_if_same_channel(&workers, &key, &stale_tx).await);
+        assert!(workers.get(&key).await.is_some());
+        assert!(workers.get(&key).await.unwrap().same_channel(&fresh_tx));
     }
 
     #[test]
@@ -2997,7 +3039,7 @@ mod tests {
                 total_rows,
                 ctx: session::context::QueryContext::arc(),
                 response_tx,
-                _permit: permit,
+                _permit: Arc::new(permit),
             })
             .await
             .unwrap();
@@ -3039,7 +3081,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_worker_rearms_creation_relative_deadline_after_size_flush() {
+    async fn test_worker_preserves_first_deadline_and_inline_shutdown() {
         let flush_interval = Duration::from_secs(10);
         let worker_idle_timeout = Duration::from_secs(30);
         let key = BatchKey {
@@ -3048,14 +3090,11 @@ mod tests {
             physical_table: "phy".to_string(),
             skip_wal: false,
         };
-        let workers = Arc::new(DashMap::new());
+        let workers = Arc::new(WorkerRegistry::new());
         let (worker_tx, worker_rx) = mpsc::channel(1);
-        workers.insert(
-            key.clone(),
-            PendingWorker {
-                tx: worker_tx.clone(),
-            },
-        );
+        workers
+            .get_or_insert_with(key.clone(), || worker_tx.clone())
+            .await;
 
         let backend = Arc::new(MemoryKvBackend::default());
         let table_route_cache = Arc::new(new_table_route_cache(
@@ -3077,9 +3116,10 @@ mod tests {
             datanodes: Arc::new(HashMap::new()),
         });
         let catalog_manager = MemoryCatalogManager::with_default_setup();
-        let (flow_notification_tx, _flow_notification_rx) = mpsc::channel(1);
+        let (flow_notification_tx, _flow_notification_rx) = Notifier::try_new(1).unwrap();
         let (shutdown, _) = broadcast::channel(1);
 
+        let flush_limiter = FlushLimiter::try_new(1).unwrap();
         start_worker(
             key.clone(),
             worker_tx.clone(),
@@ -3090,10 +3130,9 @@ mod tests {
             node_manager,
             catalog_manager,
             flow_notification_tx,
-            flush_interval,
             worker_idle_timeout,
-            2,
-            Arc::new(Semaphore::new(1)),
+            TimingFlushPolicy::try_new(flush_interval, 3).unwrap(),
+            flush_limiter.clone(),
         );
 
         // Start the worker, then size-flush a batch halfway to the first
@@ -3101,7 +3140,7 @@ mod tests {
         // drains the batch before that deadline is reached.
         tokio::task::yield_now().await;
         advance(flush_interval / 2).await;
-        let size_flush_rx = submit_mock_worker_batch(&worker_tx, 2, 1000).await;
+        let size_flush_rx = submit_mock_worker_batch(&worker_tx, 3, 1000).await;
         let size_flush_result =
             receive_mock_flush_result(size_flush_rx, "row threshold did not flush the first batch")
                 .await;
@@ -3112,7 +3151,10 @@ mod tests {
         advance(flush_interval / 5).await;
         let mut timed_flush_rx = submit_mock_worker_batch(&worker_tx, 1, 2000).await;
 
-        advance(flush_interval - Duration::from_millis(1)).await;
+        let first_submission = tokio::time::Instant::now();
+        advance(flush_interval / 2).await;
+        let later_flush_rx = submit_mock_worker_batch(&worker_tx, 1, 3000).await;
+        advance(flush_interval / 2 - Duration::from_millis(1)).await;
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
@@ -3129,15 +3171,39 @@ mod tests {
         .await;
         assert_missing_physical_table(timed_flush_result);
 
+        assert_eq!(
+            first_submission + flush_interval,
+            tokio::time::Instant::now()
+        );
+        assert_missing_physical_table(
+            receive_mock_flush_result(
+                later_flush_rx,
+                "later submission was not included in the timed flush",
+            )
+            .await,
+        );
+
+        // Shutdown retains the existing inline path even with no flush permits.
+        let _held_permit = flush_limiter.acquire().await.unwrap();
+        let shutdown_flush_rx = submit_mock_worker_batch(&worker_tx, 1, 4000).await;
+        let shutdown_at = tokio::time::Instant::now();
         let _ = shutdown.send(());
+        assert_missing_physical_table(
+            receive_mock_flush_result(
+                shutdown_flush_rx,
+                "shutdown incorrectly waited for a flush permit",
+            )
+            .await,
+        );
+        assert_eq!(shutdown_at, tokio::time::Instant::now());
         for _ in 0..10 {
-            if !workers.contains_key(&key) {
+            if workers.is_empty().await {
                 break;
             }
             tokio::task::yield_now().await;
         }
         assert!(
-            !workers.contains_key(&key),
+            workers.is_empty().await,
             "worker did not exit after shutdown"
         );
     }

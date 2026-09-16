@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use arrow_array::{
-    ArrayRef, PrimitiveArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    Array, ArrayRef, PrimitiveArray, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondArray,
 };
 use arrow_schema::DataType;
@@ -179,8 +179,24 @@ pub fn timestamp_array_to_primitive(
     Some((ts_primitive, *unit))
 }
 
+/// Appends non-null timestamps in the source array's native time unit.
+///
+/// Returns `None` for a non-timestamp array without changing `timestamps`.
+pub fn append_timestamps(ts_array: &ArrayRef, timestamps: &mut Vec<i64>) -> Option<()> {
+    let (values, _) = timestamp_array_to_primitive(ts_array)?;
+    if values.null_count() == 0 {
+        timestamps.extend_from_slice(values.values());
+    } else {
+        timestamps.extend(values.iter().flatten());
+    }
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow_array::Int64Array;
     use common_time::timezone::set_default_timezone;
 
     use super::*;
@@ -212,5 +228,47 @@ mod tests {
         let ts = TimestampNanosecond::new(123);
         assert_eq!(ts, ts.as_scalar_ref());
         assert_eq!(ts, ts.to_owned_scalar());
+    }
+
+    #[test]
+    fn test_append_timestamps() {
+        let cases = [
+            vec![Some(i64::MIN), Some(-1), Some(0), Some(i64::MAX)],
+            vec![Some(-1), None, Some(2), None],
+            vec![None, None],
+            vec![],
+        ];
+        for values in cases {
+            let arrays: [ArrayRef; 4] = [
+                Arc::new(TimestampSecondArray::from(values.clone())),
+                Arc::new(TimestampMillisecondArray::from(values.clone())),
+                Arc::new(TimestampMicrosecondArray::from(values.clone())),
+                Arc::new(TimestampNanosecondArray::from(values.clone())),
+            ];
+            let mut expected = vec![42];
+            expected.extend(values.iter().flatten().copied());
+            for array in arrays {
+                for _ in 0..2 {
+                    let (primitive, _) = timestamp_array_to_primitive(&array).unwrap();
+                    let mut reference = vec![42];
+                    reference.extend(primitive.iter().flatten());
+
+                    let mut timestamps = vec![42];
+                    assert_eq!(append_timestamps(&array, &mut timestamps), Some(()));
+                    assert_eq!(timestamps, expected);
+                    assert_eq!(timestamps, reference);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_append_timestamps_invalid_array_preserves_prefix() {
+        for values in [vec![], vec![Some(1), None]] {
+            let array: ArrayRef = Arc::new(Int64Array::from(values));
+            let mut timestamps = vec![42, -1];
+            assert_eq!(append_timestamps(&array, &mut timestamps), None);
+            assert_eq!(timestamps, vec![42, -1]);
+        }
     }
 }

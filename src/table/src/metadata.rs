@@ -431,13 +431,13 @@ impl TableMeta {
                         new_options.extra_options.remove(PRESERVE_ROW_SEQUENCE);
                     }
                 }
-                SetRegionOption::SkipWal => {
-                    new_options.skip_wal = true;
+                SetRegionOption::SkipWal(skip_wal) => {
+                    new_options.skip_wal = *skip_wal;
                     // Keep the explicit table option so it remains distinguishable
                     // from a value inherited from the schema.
                     new_options
                         .extra_options
-                        .insert(SKIP_WAL_KEY.to_string(), true.to_string());
+                        .insert(SKIP_WAL_KEY.to_string(), skip_wal.to_string());
                 }
             }
         }
@@ -1926,7 +1926,7 @@ mod tests {
             .insert(SKIP_WAL_KEY.to_string(), false.to_string());
 
         let alter_kind = AlterKind::SetTableOptions {
-            options: vec![SetRegionOption::SkipWal],
+            options: vec![SetRegionOption::SkipWal(true)],
         };
         let new_meta = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1937,6 +1937,25 @@ mod tests {
         assert!(new_meta.options.skip_wal);
         assert_eq!(
             Some("true"),
+            new_meta
+                .options
+                .extra_options
+                .get(SKIP_WAL_KEY)
+                .map(String::as_str)
+        );
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::SkipWal(false)],
+        };
+        let new_meta = new_meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(!new_meta.options.skip_wal);
+        assert_eq!(
+            Some("false"),
             new_meta
                 .options
                 .extra_options
