@@ -343,6 +343,14 @@ impl Inserter {
         ctx: QueryContextRef,
         batcher: &Arc<dyn PendingRowsBatcher>,
     ) -> Result<Output> {
+        // All entry points, including single-table and SQL writes, skip empty input
+        // before evaluating defaults or converting prepared rows.
+        requests.inserts.retain(|request| {
+            request
+                .rows
+                .as_ref()
+                .is_some_and(|rows| !rows.rows.is_empty())
+        });
         let by_name = table_infos
             .values()
             .map(|info| (info.name.as_str(), info))
@@ -2097,5 +2105,93 @@ mod tests {
             Some("last_row"),
             table_options.get(MERGE_MODE_KEY).map(String::as_str)
         );
+    }
+
+    struct UnexpectedBatcher;
+
+    #[async_trait::async_trait]
+    impl PendingRowsBatcher for UnexpectedBatcher {
+        async fn acquire(&self) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
+            panic!("empty writes must not acquire batch admission")
+        }
+
+        async fn submit(
+            &self,
+            _table_info: TableInfoRef,
+            _batch: arrow::record_batch::RecordBatch,
+            _ctx: QueryContextRef,
+            _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+        ) -> Result<usize> {
+            panic!("empty writes must not submit a batch")
+        }
+    }
+
+    async fn batcher_test_inserter() -> Inserter {
+        let kv_backend = prepare_mocked_backend().await;
+        Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            create_partition_rule_manager(kv_backend.clone()).await,
+            Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
+            Arc::new(new_table_flownode_set_cache(
+                String::new(),
+                Cache::new(100),
+                kv_backend,
+            )),
+            true,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_instant_table_bypasses_batcher() {
+        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+        let inserter = batcher_test_inserter()
+            .await
+            .with_pending_rows_batcher(Some(batcher));
+        let mut ctx = session::context::QueryContextBuilder::default().build();
+        ctx.set_batching_enabled(true);
+        let ctx = Arc::new(ctx);
+        let table = make_table_ref_with_schema("ts", "value", ConcreteDataType::float64_datatype())
+            .table_info();
+        assert!(inserter.table_batcher(&table, &ctx).is_some());
+        let mut instant = (*table).clone();
+        instant.meta.options.ttl = Some(common_time::ttl::TimeToLive::Instant);
+        assert!(inserter.table_batcher(&Arc::new(instant), &ctx).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_empty_prepared_rows_skip_batcher() {
+        let inserter = batcher_test_inserter().await;
+        let table = make_table_ref_with_schema("ts", "value", ConcreteDataType::float64_datatype())
+            .table_info();
+        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+        let ctx = QueryContext::arc();
+        let output = inserter
+            .submit_table_rows(
+                Rows {
+                    schema: vec![],
+                    rows: vec![],
+                },
+                table.clone(),
+                ctx.clone(),
+                &batcher,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+        let output = inserter
+            .submit_pending_rows(
+                RowInsertRequests {
+                    inserts: vec![RowInsertRequest {
+                        table_name: table.name.clone(),
+                        rows: None,
+                    }],
+                },
+                HashMap::from_iter([(table.table_id(), table)]),
+                ctx,
+                &batcher,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
     }
 }
