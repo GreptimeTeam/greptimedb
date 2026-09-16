@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use arrow_flight::FlightData;
 use common_error::ext::ErrorExt;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
-use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::recordbatch::merge_record_batches;
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::tracing::{Instrument, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, warn};
@@ -126,6 +126,60 @@ impl Drop for StreamMetrics {
                 self.total_bytes
             );
         }
+    }
+}
+
+/// Coalesces consecutive ready record batches into one outgoing group.
+///
+/// The budgets are soft limits (flush thresholds) rather than strict admission
+/// caps: `push` appends a batch before reporting whether to flush, so a group may
+/// exceed a budget by up to one batch.
+struct BatchAccumulator {
+    batches: Vec<RecordBatch>,
+    rows: usize,
+    bytes: usize,
+}
+
+impl BatchAccumulator {
+    const MAX_ROWS: usize = 1024;
+    const MAX_BYTES: usize = 256 * 1024;
+    const MAX_BATCHES: usize = 16;
+
+    fn new() -> Self {
+        Self {
+            batches: Vec::new(),
+            rows: 0,
+            bytes: 0,
+        }
+    }
+
+    /// Whether a batch fetched to start a new group already reaches a budget, in
+    /// which case the stream forwards it as a singleton instead of coalescing it.
+    /// A batch appended inside a group is coalesced even if it exceeds a budget.
+    fn reaches_budget(rows: usize, bytes: usize) -> bool {
+        rows >= Self::MAX_ROWS || bytes >= Self::MAX_BYTES
+    }
+
+    fn is_empty(&self) -> bool {
+        self.batches.is_empty()
+    }
+
+    /// Appends `batch` and reports whether the group should be flushed now.
+    fn push(&mut self, batch: RecordBatch) -> bool {
+        self.rows += batch.num_rows();
+        self.bytes += batch.df_record_batch().get_array_memory_size();
+        self.batches.push(batch);
+        // Append-then-check: the group may exceed a budget by this batch.
+        self.batches.len() >= Self::MAX_BATCHES || Self::reaches_budget(self.rows, self.bytes)
+    }
+
+    /// Removes and returns the accumulated batches in arrival order.
+    ///
+    /// Merging is left to the caller, which owns the stream schema.
+    fn drain(&mut self) -> Vec<RecordBatch> {
+        self.rows = 0;
+        self.bytes = 0;
+        std::mem::take(&mut self.batches)
     }
 }
 
@@ -258,10 +312,6 @@ impl FlightRecordBatchStream {
         should_send_partial_metrics: bool,
         can_send_metrics_before_batch: bool,
     ) {
-        const MAX_ROWS: usize = 1024;
-        const MAX_BYTES: usize = 256 * 1024;
-        const MAX_BATCHES: usize = 16;
-
         let mut metrics = StreamMetrics::new(should_send_partial_metrics);
         let mut last_metrics_str = None;
         let recordbatch_schema = recordbatches.schema();
@@ -351,19 +401,13 @@ impl FlightRecordBatchStream {
             }
         } else {
             let mut sent_first_batch = false;
-            let mut pending = None;
+            let mut acc = BatchAccumulator::new();
             loop {
-                let (batch_or_err, fetched) = match pending.take() {
-                    Some(recordbatch) => (Ok(recordbatch), false),
-                    None => {
-                        let start = Instant::now();
-                        let batch_or_err = recordbatches.next().in_current_span().await;
-                        metrics.fetch_content_duration += start.elapsed();
-                        let Some(batch_or_err) = batch_or_err else {
-                            break;
-                        };
-                        (batch_or_err, true)
-                    }
+                let start = Instant::now();
+                let batch_or_err = recordbatches.next().in_current_span().await;
+                metrics.fetch_content_duration += start.elapsed();
+                let Some(batch_or_err) = batch_or_err else {
+                    break;
                 };
                 let recordbatch = match batch_or_err {
                     Ok(recordbatch) => recordbatch,
@@ -380,13 +424,14 @@ impl FlightRecordBatchStream {
                 };
                 let batch_rows = recordbatch.num_rows();
                 let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
-                if fetched {
-                    metrics.total_rows += batch_rows;
-                    metrics.record_batch_count += 1;
-                    metrics.total_bytes += batch_bytes;
-                }
+                metrics.total_rows += batch_rows;
+                metrics.record_batch_count += 1;
+                metrics.total_bytes += batch_bytes;
 
-                if !sent_first_batch || batch_rows >= MAX_ROWS || batch_bytes >= MAX_BYTES {
+                // The first batch is forwarded immediately, and a batch starting a
+                // new group that is already at or over a budget passes through as a
+                // singleton. A batch appended inside a group is coalesced instead.
+                if !sent_first_batch || BatchAccumulator::reaches_budget(batch_rows, batch_bytes) {
                     let start = Instant::now();
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
@@ -402,36 +447,24 @@ impl FlightRecordBatchStream {
                     continue;
                 }
 
-                let mut batches = vec![recordbatch];
-                let mut rows = batch_rows;
-                let mut bytes = batch_bytes;
+                // Coalesce ready batches until a budget is reached: every ready
+                // batch is appended first, then the budgets are checked.
+                debug_assert!(acc.is_empty(), "the previous group must be flushed");
+                let mut should_flush = acc.push(recordbatch);
                 let mut eof = false;
                 let mut stream_error = None;
-                loop {
-                    if batches.len() == MAX_BATCHES || rows >= MAX_ROWS || bytes >= MAX_BYTES {
-                        break;
-                    }
+                while !should_flush {
                     let start = Instant::now();
                     let next =
                         poll_fn(|cx| Poll::Ready(recordbatches.as_mut().poll_next(cx))).await;
                     metrics.fetch_content_duration += start.elapsed();
                     match next {
                         Poll::Ready(Some(Ok(recordbatch))) => {
-                            let batch_rows = recordbatch.num_rows();
-                            let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
-                            if batch_rows > MAX_ROWS - rows || batch_bytes > MAX_BYTES - bytes {
-                                metrics.total_rows += batch_rows;
-                                metrics.record_batch_count += 1;
-                                metrics.total_bytes += batch_bytes;
-                                pending = Some(recordbatch);
-                                break;
-                            }
-                            metrics.total_rows += batch_rows;
+                            metrics.total_rows += recordbatch.num_rows();
                             metrics.record_batch_count += 1;
-                            metrics.total_bytes += batch_bytes;
-                            rows += batch_rows;
-                            bytes += batch_bytes;
-                            batches.push(recordbatch);
+                            metrics.total_bytes +=
+                                recordbatch.df_record_batch().get_array_memory_size();
+                            should_flush = acc.push(recordbatch);
                         }
                         Poll::Ready(Some(Err(e))) => {
                             stream_error = Some(e);
@@ -445,6 +478,7 @@ impl FlightRecordBatchStream {
                     }
                 }
 
+                let batches = acc.drain();
                 let batches = if batches.len() >= 2 {
                     match merge_record_batches(recordbatch_schema.clone(), &batches) {
                         Ok(merged) => vec![merged],
@@ -903,7 +937,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_pending_batch_is_sent_before_upstream_is_polled_again() {
+    async fn test_over_cap_batch_merges_into_current_aggregate() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::int32_datatype(),
@@ -940,23 +974,84 @@ mod test {
             FlightMessage::RecordBatch(_)
         ));
         tokio::time::timeout(Duration::from_secs(1), async {
-            while poll_count.load(std::sync::atomic::Ordering::Relaxed) != 3 {
+            while poll_count.load(std::sync::atomic::Ordering::Relaxed) < 3 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("second group must fetch the held batch");
-        let held = stream.next().await.unwrap().unwrap();
-        assert!(matches!(
-            decoder.try_decode(&held).unwrap().unwrap(),
-            FlightMessage::RecordBatch(_)
-        ));
-        let pending = stream.next().await.unwrap().unwrap();
-        let FlightMessage::RecordBatch(batch) = decoder.try_decode(&pending).unwrap().unwrap()
+        .expect("the second group must fetch the at-cap batch");
+        let aggregated = stream.next().await.unwrap().unwrap();
+        let FlightMessage::RecordBatch(batch) = decoder.try_decode(&aggregated).unwrap().unwrap()
         else {
-            panic!("expected the held oversized batch");
+            panic!("expected the oversized aggregate");
         };
-        assert_eq!(batch.num_rows(), 1024);
+        // The at-cap batch is appended before the budget is checked, so the aggregate
+        // exceeds the row budget by one batch instead of being held back as a
+        // separate singleton.
+        assert_eq!(batch.num_rows(), 1025);
+    }
+
+    #[tokio::test]
+    async fn test_ready_only_soft_row_budget_flushes_oversized_group() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let messages = flight_messages(Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..600))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..600))),
+            ]),
+            poll_count: poll_count.clone(),
+        }))
+        .await;
+        let batches = messages
+            .iter()
+            .filter_map(|message| match message.as_ref().unwrap() {
+                FlightMessage::RecordBatch(batch) => Some(batch.num_rows()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // 600 + 600 exceeds the 1024-row budget, but the second batch is appended
+        // before the budget is checked, so the group flushes as one 1200-row batch.
+        assert_eq!(batches, vec![1, 1200]);
+        // Three fetches, plus the poll that reports end of stream.
+        assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 4);
+    }
+
+    #[tokio::test]
+    async fn test_ready_only_current_at_cap_batch_is_sent_as_singleton() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let messages = flight_messages(Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..1024))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
+            ]),
+            poll_count: poll_count.clone(),
+        }))
+        .await;
+        let batches = messages
+            .iter()
+            .filter_map(|message| match message.as_ref().unwrap() {
+                FlightMessage::RecordBatch(batch) => Some(batch.num_rows()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // The at-cap batch is current when it is fetched, so it passes through as a
+        // singleton instead of joining an aggregate.
+        assert_eq!(batches, vec![1, 1024, 1]);
+        assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
 
     #[tokio::test]
@@ -1018,7 +1113,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_ready_only_preserves_oversized_and_empty_batch_caps() {
+    async fn test_ready_only_merges_at_cap_batch_and_coalesces_empty_batches() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::int32_datatype(),
@@ -1030,8 +1125,11 @@ mod test {
             ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
             ScriptedItem::Batch(Ok(oversized)),
         ];
+        // 17 trailing empty batches: the 16-batch budget flushes the first 16 as
+        // one group, leaving one empty batch for a second group. This exercises the
+        // batch-count bound rather than relying on EOF to flush.
         items.extend(
-            (0..16).map(|_| ScriptedItem::Batch(Ok(RecordBatch::new_empty(schema.clone())))),
+            (0..17).map(|_| ScriptedItem::Batch(Ok(RecordBatch::new_empty(schema.clone())))),
         );
         let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let messages = flight_messages(Box::pin(ScriptedBatchStream {
@@ -1047,12 +1145,15 @@ mod test {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(batches, vec![1, 1, 1024, 0]);
-        assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 20);
+        // The at-cap batch is appended to the current aggregate, so the flushed
+        // aggregate exceeds the row budget by one batch. The 17 trailing empty
+        // batches split into two empty groups at the 16-batch budget.
+        assert_eq!(batches, vec![1, 1025, 0, 0]);
+        assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 21);
     }
 
     #[tokio::test]
-    async fn test_ready_only_preserves_byte_oversized_batch() {
+    async fn test_ready_only_merges_byte_oversized_batch_into_aggregate() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::string_datatype(),
@@ -1082,7 +1183,9 @@ mod test {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(batches, vec![0, 0, 1023]);
+        // The byte-oversized batch is appended to the leading empty batch, so the
+        // aggregate exceeds the byte budget by one batch.
+        assert_eq!(batches, vec![0, 1023]);
     }
 
     #[tokio::test]
