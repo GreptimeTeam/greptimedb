@@ -616,6 +616,7 @@ mod test {
     use std::sync::Arc;
 
     use datafusion::execution::context::ExecutionProps;
+    use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
     use datafusion::logical_expr::{BinaryExpr, col, lit};
     use datafusion::physical_expr::create_physical_expr;
     use datafusion_common::{Column, DFSchema};
@@ -737,7 +738,13 @@ mod test {
         ]);
         let df_schema = DFSchema::try_from(schema.clone()).unwrap();
         let props = ExecutionProps::new();
-        let physical_expr = create_physical_expr(&expr, &df_schema, &props).unwrap();
+        let physical_expr = create_physical_expr(
+            &expr,
+            &df_schema,
+            &props,
+            &PhysicalPlanningContext::default(),
+        )
+        .unwrap();
         let batch = RecordBatch::try_new(
             Arc::new(schema),
             vec![
@@ -783,7 +790,13 @@ mod test {
         let schema = Schema::new(vec![Field::new("col", DataType::Utf8, false)]);
         let df_schema = DFSchema::try_from(schema.clone()).unwrap();
         let props = ExecutionProps::new();
-        let physical_expr = create_physical_expr(&col_or_expr, &df_schema, &props).unwrap();
+        let physical_expr = create_physical_expr(
+            &col_or_expr,
+            &df_schema,
+            &props,
+            &PhysicalPlanningContext::default(),
+        )
+        .unwrap();
 
         // Create test data
         let col_data = Arc::new(datatypes::arrow::array::StringArray::from(vec![

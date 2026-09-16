@@ -94,8 +94,10 @@ TQL EVAL (1, 1, '1s', '1ms') native_time_us{series="exact"};
 -- Future-only selection is empty before flushing, exercising the memtable path.
 TQL EVAL (1, 1, '1s', '300s') native_time_us{series="future"};
 
-++
-++
++-----+--------+----+
+| val | series | ts |
++-----+--------+----+
++-----+--------+----+
 
 ADMIN FLUSH_TABLE('native_time_us');
 
@@ -116,8 +118,10 @@ TQL EVAL (1, 1, '1s', '1ms') native_time_us{series="exact"};
 
 TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_us{series="future"});
 
-++
-++
++----+-------+--------+
+| ts | value | series |
++----+-------+--------+
++----+-------+--------+
 
 TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_us{series="exact"});
 
@@ -337,8 +341,10 @@ TQL EVAL (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 -- Future-only selection is empty before flushing, exercising the memtable path.
 TQL EVAL (1, 1, '1s', '300s') native_time_ns{series="future"};
 
-++
-++
++-----+--------+----+
+| val | series | ts |
++-----+--------+----+
++-----+--------+----+
 
 ADMIN FLUSH_TABLE('native_time_ns');
 
@@ -359,8 +365,10 @@ TQL EVAL (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 
 TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_ns{series="future"});
 
-++
-++
++----+-------+--------+
+| ts | value | series |
++----+-------+--------+
++----+-------+--------+
 
 TQL EVAL (1, 1, '1s', '300s') timestamp(native_time_ns{series="exact"});
 

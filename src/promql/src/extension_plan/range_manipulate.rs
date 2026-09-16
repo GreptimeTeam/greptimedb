@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -25,7 +24,8 @@ use datafusion::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
-use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{DFSchema, DFSchemaRef, TableReference};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -34,10 +34,10 @@ use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream, Statistics,
+    ChildStats, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
+    InputDistributionRequirements, PhysicalExpr, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream, Statistics, StatisticsArgs,
 };
-use datafusion::sql::TableReference;
 use datafusion_expr::col;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt, ready};
@@ -181,7 +181,7 @@ impl RangeManipulate {
 
         Ok(Arc::new(DFSchema::new_with_metadata(
             new_columns,
-            HashMap::new(),
+            input_schema.metadata().clone(),
         )?))
     }
 
@@ -452,8 +452,11 @@ pub struct RangeManipulateExec {
 }
 
 impl ExecutionPlan for RangeManipulateExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn schema(&self) -> SchemaRef {
@@ -472,14 +475,17 @@ impl ExecutionPlan for RangeManipulateExec {
         vec![&self.input]
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
-        let input_requirement = self.input.required_input_distribution();
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        let input_requirement = self
+            .input
+            .input_distribution_requirements()
+            .into_per_child();
         if input_requirement.is_empty() {
             // if the input is EmptyMetric, its required_input_distribution() is empty so we can't
             // use its input distribution.
-            vec![Distribution::UnspecifiedDistribution]
+            InputDistributionRequirements::new(vec![Distribution::UnspecifiedDistribution])
         } else {
-            input_requirement
+            InputDistributionRequirements::new(input_requirement)
         }
     }
 
@@ -567,8 +573,16 @@ impl ExecutionPlan for RangeManipulateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
-        let input_stats = self.input.partition_statistics(partition)?;
+    fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(partition)]
+    }
+
+    fn statistics_from_inputs(
+        &self,
+        input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> DataFusionResult<Arc<Statistics>> {
+        let input_stats = &input_stats[0];
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
@@ -580,12 +594,12 @@ impl ExecutionPlan for RangeManipulateExec {
             })
             .unwrap_or_default();
 
-        Ok(Statistics {
+        Ok(Arc::new(Statistics {
             num_rows: Precision::Inexact(estimated_row_num as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
             column_statistics: Statistics::unknown_column(&self.schema()),
-        })
+        }))
     }
 
     fn name(&self) -> &str {
@@ -836,6 +850,7 @@ mod test {
     use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::memory::MemoryStream;
+    use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
     use futures::FutureExt;
@@ -1228,7 +1243,10 @@ mod test {
                 )));
                 let exec = rebuilt
                     .to_execution_plan(empty_exec_input)
-                    .with_new_children(vec![exec_input])
+                    .replace_children(
+                        vec![exec_input],
+                        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                    )
                     .unwrap();
                 let output =
                     datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())

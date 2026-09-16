@@ -24,7 +24,7 @@ use common_procedure::{ProcedureContext, ProcedureWithId, watcher};
 use common_query::Output;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
-use common_test_util::temp_dir::create_temp_dir;
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use frontend::instance::Instance;
 use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions, GcTickerRef};
@@ -115,6 +115,189 @@ macro_rules! repartition_tests {
             }
         )*
     };
+}
+
+/// COUNT must use visible rows rather than the full row counts of shared SSTs.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repartition_append_count_file() {
+    let (cluster, _home_guard) = append_count_cluster("repartition_append_count").await;
+    let instance = cluster.fe_instance();
+    let table = "count_repartition";
+    prepare_append_count_table(instance, table, "").await;
+    assert_append_count(instance, table, 100, 1).await;
+    flush_append_count_table(instance, table).await;
+    assert_append_count(instance, table, 100, 1).await;
+
+    let sql = "ALTER TABLE count_repartition PARTITION ON COLUMNS (device_id) \
+               (device_id < 50, device_id >= 50)";
+    run_sql(instance, sql, QueryContext::arc()).await.unwrap();
+    wait_for_append_count_regions(instance, table, 2).await;
+    assert_append_count(instance, table, 100, 0).await;
+    check_append_count_after_write(instance, table, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_split_append_count_file() {
+    let (cluster, _home_guard) = append_count_cluster("split_append_count").await;
+    let instance = cluster.fe_instance();
+    let table = "count_split";
+    prepare_append_count_table(
+        instance,
+        table,
+        "PARTITION ON COLUMNS (device_id) (device_id < 50, device_id >= 50)",
+    )
+    .await;
+    assert_append_count(instance, table, 100, 2).await;
+    flush_append_count_table(instance, table).await;
+    assert_append_count(instance, table, 100, 2).await;
+
+    let sql = "ALTER TABLE count_split SPLIT PARTITION (device_id < 50) INTO \
+               (device_id < 25, device_id >= 25 AND device_id < 50)";
+    run_sql(instance, sql, QueryContext::arc()).await.unwrap();
+    wait_for_append_count_regions(instance, table, 3).await;
+    assert_append_count(instance, table, 100, 1).await;
+    check_append_count_after_write(instance, table, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repartition_append_count_memtable_file() {
+    let (cluster, home_guard) = append_count_cluster("repartition_append_count_memtable").await;
+    assert!(home_guard.path().is_dir());
+    let instance = cluster.fe_instance();
+    let table = "count_repartition_memtable";
+    prepare_append_count_table(instance, table, "").await;
+    assert_append_count(instance, table, 100, 1).await;
+
+    // Entering staging must flush the populated memtable before changing partitions.
+    let sql = "ALTER TABLE count_repartition_memtable PARTITION ON COLUMNS (device_id) \
+               (device_id < 50, device_id >= 50)";
+    run_sql(instance, sql, QueryContext::arc()).await.unwrap();
+    wait_for_append_count_regions(instance, table, 2).await;
+    assert_append_count(instance, table, 100, 0).await;
+    check_append_count_after_write(instance, table, 0).await;
+    assert!(home_guard.path().is_dir());
+}
+
+async fn append_count_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
+    common_telemetry::init_default_ut_logging();
+    let (store_config, _guard) = get_test_store_config(&StorageType::File);
+    let home_dir = Arc::new(create_temp_dir(name));
+    let cluster = GreptimeDbClusterBuilder::new(name)
+        .await
+        .with_shared_home_dir(Arc::clone(&home_dir))
+        .with_datanodes(3)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            ..Default::default()
+        })
+        .build(true)
+        .await;
+    (cluster, home_dir)
+}
+
+async fn prepare_append_count_table(instance: &Arc<Instance>, table: &str, partitions: &str) {
+    let sql = format!(
+        "CREATE TABLE {table} (ts TIMESTAMP TIME INDEX, device_id INT) \
+         {partitions} ENGINE=mito WITH(append_mode='true')"
+    );
+    run_sql(instance, &sql, QueryContext::arc()).await.unwrap();
+    let sql = format!(
+        "INSERT INTO {table} SELECT to_timestamp_millis(value), CAST(value AS INT) \
+         FROM generate_series(0, 99)"
+    );
+    run_sql(instance, &sql, QueryContext::arc()).await.unwrap();
+}
+
+async fn flush_append_count_table(instance: &Arc<Instance>, table: &str) {
+    run_sql(
+        instance,
+        &format!("ADMIN flush_table('{table}')"),
+        QueryContext::arc(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn check_append_count_after_write(
+    instance: &Arc<Instance>,
+    table: &str,
+    statistics_regions: usize,
+) {
+    run_sql(
+        instance,
+        &format!("INSERT INTO {table} VALUES (to_timestamp_millis(100), 100)"),
+        QueryContext::arc(),
+    )
+    .await
+    .unwrap();
+    assert_append_count(instance, table, 101, statistics_regions).await;
+    flush_append_count_table(instance, table).await;
+    assert_append_count(instance, table, 101, statistics_regions).await;
+}
+
+async fn wait_for_append_count_regions(instance: &Arc<Instance>, table: &str, expected: usize) {
+    // Wait for frontend routing, not for COUNT to become correct.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let plan =
+                append_count_query(instance, &format!("EXPLAIN ANALYZE SELECT * FROM {table}"))
+                    .await;
+            if plan.matches("UnorderedScan: region=").count() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("new partition routes must become visible");
+}
+
+async fn append_count_query(instance: &Arc<Instance>, sql: &str) -> String {
+    let output = run_sql(instance, sql, QueryContext::arc()).await.unwrap();
+    let batches = match output.data {
+        common_query::OutputData::Stream(stream) => {
+            common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+        }
+        common_query::OutputData::RecordBatches(batches) => batches,
+        _ => panic!("expected query output: {sql}"),
+    };
+    batches.pretty_print().unwrap()
+}
+
+async fn assert_append_count(
+    instance: &Arc<Instance>,
+    table: &str,
+    rows: usize,
+    statistics_regions: usize,
+) {
+    let expected = format!("+-----+\n| n   |\n+-----+\n| {rows:<3} |\n+-----+");
+    let count = append_count_query(instance, &format!("SELECT count(*) AS n FROM {table}")).await;
+    assert_eq!(count, expected, "unbounded COUNT for {table}");
+    let scanned_count = append_count_query(
+        instance,
+        &format!("SELECT count(*) AS n FROM (SELECT * FROM {table} LIMIT 1000)"),
+    )
+    .await;
+    assert_eq!(scanned_count, expected, "scanned COUNT for {table}");
+    // Only regions whose source row counts are exact may use statistics.
+    let plan = append_count_query(
+        instance,
+        &format!("EXPLAIN ANALYZE SELECT count(*) FROM {table}"),
+    )
+    .await;
+    assert_eq!(
+        plan.matches("PlaceholderRowExec").count(),
+        statistics_regions,
+        "{plan}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

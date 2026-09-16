@@ -2,13 +2,17 @@
 -- virtual tables: readable, but rejecting every DDL/DML path.
 select observed_at, entity_type, entity_id, scope from greptime_private.semantic_entities;
 
-++
-++
++-------------+-------------+-----------+-------+
+| observed_at | entity_type | entity_id | scope |
++-------------+-------------+-----------+-------+
++-------------+-------------+-----------+-------+
 
 select observed_at, src_id, dst_id, rel_type from greptime_private.semantic_relationships;
 
-++
-++
++-------------+--------+--------+----------+
+| observed_at | src_id | dst_id | rel_type |
++-------------+--------+--------+----------+
++-------------+--------+--------+----------+
 
 insert into greptime_private.semantic_entities (observed_at, entity_type, entity_id) values (now(), 'service', 'svc-a');
 
@@ -137,8 +141,10 @@ Affected Rows: 1
 
 select entity_type, entity_id from greptime_private.semantic_entities order by entity_type, entity_id;
 
-++
-++
++-------------+-----------+
+| entity_type | entity_id |
++-------------+-----------+
++-------------+-----------+
 
 alter table graph_late_metrics set 'greptime.semantic.entity.service.id' = 'svc', 'greptime.semantic.entity.service.scope' = 'env';
 
@@ -167,8 +173,10 @@ Affected Rows: 0
 
 select entity_type, entity_id from greptime_private.semantic_entities order by entity_type, entity_id;
 
-++
-++
++-------------+-----------+
+| entity_type | entity_id |
++-------------+-----------+
++-------------+-----------+
 
 drop table graph_late_metrics;
 
@@ -362,8 +370,10 @@ Affected Rows: 4
 
 select src_id from greptime_private.semantic_relationships order by src_id;
 
-++
-++
++--------+
+| src_id |
++--------+
++--------+
 
 -- DROP is allowed (nothing structural is lost: the next INSERT recreates the
 -- canonical table) and cleans up after this test.

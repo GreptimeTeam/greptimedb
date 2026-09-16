@@ -89,5 +89,6 @@ axum.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
+object-store = { workspace = true, features = ["testing"] }
 path-slash = "0.2"
 url.workspace = true

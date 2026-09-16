@@ -147,8 +147,10 @@ EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 
 SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 
-++
-++
++---+
+| v |
++---+
++---+
 
 DROP TABLE sc_t;
 

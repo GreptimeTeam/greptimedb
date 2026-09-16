@@ -1688,6 +1688,27 @@ impl ScanInput {
         );
     }
 
+    /// Whether physical source row counts equal the rows visible to this region,
+    /// before applying query predicates.
+    pub(crate) fn total_rows_is_exact(&self) -> bool {
+        if self.region_partition_expr.is_none() {
+            return true;
+        }
+
+        // Extension ranges do not expose their partition expressions.
+        #[cfg(feature = "enterprise")]
+        if !self.extension_ranges.is_empty() {
+            return false;
+        }
+
+        // Repartition flushes existing memtables before entering staging. New
+        // writes are routed under the target partition rules, whereas historical
+        // SSTs can be shared by regions and still need partition filtering.
+        self.files
+            .iter()
+            .all(|file| self.should_skip_region_partition(file))
+    }
+
     pub(crate) fn total_rows(&self) -> usize {
         let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
         let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
@@ -1796,7 +1817,7 @@ impl PruningStatistics for FileLevelPruningStats {
         }
     }
 
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         None
     }
 
@@ -1836,9 +1857,10 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 /// contribute a row to `(C, H]`.
 ///
 /// Unmarked local files use `FileMeta.sequence` as an admission barrier rather
-/// than a row maximum. Compaction and edit assign it as `committed_sequence + 1`;
-/// `C >= barrier` proves Flow has already consumed the entire file, so such a
-/// file is excluded before the capability check.
+/// than a row maximum. Region edits allocate this barrier; compaction inherits
+/// the maximum input bound without assigning a new barrier. `C >= barrier`
+/// proves Flow has already consumed the entire file, so such a file is excluded
+/// before the capability check. An unknown bound cannot prove this exclusion.
 ///
 /// A foreign file is different: the parquet reader virtualizes every row to its
 /// target-local `FileMeta.sequence`. Consequently, a present sequence is the
@@ -2322,6 +2344,43 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
+    }
+
+    #[tokio::test]
+    async fn test_total_rows_is_exact_after_partition_filter() {
+        let expr = partition_col("k0").gt_eq(Value::String("foo".into()));
+        let other = partition_col("k0").gt_eq(Value::String("bar".into()));
+        for (region_expr, file_exprs, exact) in [
+            (None, vec![None], true),
+            (None, vec![Some(expr.clone())], true),
+            (Some(expr.clone()), vec![], true),
+            (Some(expr.clone()), vec![Some(expr.clone())], true),
+            (Some(expr.clone()), vec![None], false),
+            (Some(expr.clone()), vec![Some(other)], false),
+            (Some(expr.clone()), vec![Some(expr), None], false),
+        ] {
+            let mut builder =
+                RegionMetadataBuilder::from_existing(metadata_with_primary_key(vec![0, 1], false));
+            builder.partition_expr_json(region_expr.map(|expr| expr.as_json_str().unwrap()));
+            let metadata = Arc::new(builder.build_without_validation().unwrap());
+            let files = file_exprs
+                .into_iter()
+                .map(|partition_expr| {
+                    FileHandle::new(
+                        FileMeta {
+                            partition_expr,
+                            ..Default::default()
+                        },
+                        Arc::new(crate::sst::file_purger::NoopFilePurger),
+                    )
+                })
+                .collect();
+            let input = new_scan_input(metadata, vec![])
+                .await
+                .with_files(files)
+                .build();
+            assert_eq!(input.total_rows_is_exact(), exact);
+        }
     }
 
     /// Helper to create a timestamp millisecond literal.

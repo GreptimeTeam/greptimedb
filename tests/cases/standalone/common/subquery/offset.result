@@ -11,8 +11,11 @@ Affected Rows: 1
 
 SELECT (SELECT c0 FROM temp_values OFFSET 1) as result;
 
-++
-++
++--------+
+| result |
++--------+
+|        |
++--------+
 
 -- Test with actual data
 SELECT (SELECT c0 FROM temp_values OFFSET 0) as result;
