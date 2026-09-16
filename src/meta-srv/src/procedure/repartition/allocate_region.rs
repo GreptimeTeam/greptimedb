@@ -181,13 +181,11 @@ impl ExecutePlan {
                 .unwrap()
                 .iter()
                 .all(|route| {
-                    matches!(
-                        region_wal_options
-                            .get(&route.region.id.region_number())
-                            .cloned()
-                            .unwrap_or_default(),
-                        WalOptions::RaftEngine | WalOptions::Kafka(_)
-                    )
+                    region_wal_options
+                        .get(&route.region.id.region_number())
+                        .is_none_or(|option| {
+                            matches!(option, WalOptions::RaftEngine | WalOptions::Kafka(_))
+                        })
                 })
         } else {
             false
