@@ -16,5 +16,7 @@ checkout = true
 list_files = true
 internal_use_git2 = false
 
-[env]
-CARGO_WORKSPACE_DIR = { value = "", relative = true }
+# Intentionally no [env] CARGO_WORKSPACE_DIR here: src/common/version/build.rs derives
+# the workspace root relative to CARGO_MANIFEST_DIR so build-script inputs stay
+# checkout-relative (portable across worktrees and shared build caches). Set it
+# explicitly in your environment only when this repo is built as a submodule.

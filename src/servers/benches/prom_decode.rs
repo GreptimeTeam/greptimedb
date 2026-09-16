@@ -27,7 +27,9 @@ use servers::prom_remote_write::validation::{PromValidationMode, validate_label_
 use servers::prom_store::to_grpc_row_insert_requests;
 
 fn load_fixture_v1_bytes() -> Vec<u8> {
-    let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut d = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
+    );
     d.push("benches");
     d.push("write_request.pb.data");
     std::fs::read(d).expect("read write_request.pb.data fixture")
