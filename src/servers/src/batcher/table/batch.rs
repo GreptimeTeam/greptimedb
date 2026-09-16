@@ -19,6 +19,7 @@ use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use operator::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
+use operator::metrics::DIST_INGEST_ROW_COUNT;
 use snafu::ResultExt;
 use table::metadata::TableInfoRef;
 
@@ -46,6 +47,9 @@ pub(in crate::batcher::table) async fn flush_batch(
         Ok((table, combined)) => {
             FLUSH_TOTAL.inc();
             FLUSH_ROWS.observe(batch.total_rows as f64);
+            DIST_INGEST_ROW_COUNT
+                .with_label_values(&[batch.submissions[0].ctx.get_db_string().as_str()])
+                .inc_by(batch.total_rows as u64);
             notify_batches(batch.submissions, Ok(()));
             // Admission is best-effort and only occurs after affected-row validation.
             notifier.notify(table, &combined);

@@ -226,6 +226,7 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -253,6 +254,7 @@ mod tests {
     use operator::batcher::PendingRowsBatcher;
     use operator::error::Error;
     use operator::insert::Inserter;
+    use operator::metrics::DIST_INGEST_ROW_COUNT;
     use operator::req_convert::insert::rows_to_record_batch;
     use operator::test_util::{
         create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
@@ -274,13 +276,14 @@ mod tests {
         requests: Arc<Mutex<Vec<RecordBatch>>>,
         report_missing_row: bool,
         expected_skip_wal: bool,
+        expected_schema: String,
     }
 
     #[async_trait::async_trait]
     impl MockDatanodeHandler for BulkHandler {
         async fn handle(&self, peer: &Peer, request: RegionRequest) -> MetaResult<RegionResponse> {
             assert_eq!(3, peer.id);
-            assert_eq!("public", request.header.unwrap().dbname);
+            assert_eq!(self.expected_schema, request.header.unwrap().dbname);
             let Some(region_request::Body::BulkInsert(request)) = request.body else {
                 panic!("expected bulk insert")
             };
@@ -348,10 +351,17 @@ mod tests {
         let backend = prepare_mocked_backend().await;
         let partitions = create_partition_rule_manager(backend.clone()).await;
         let captured = Arc::new(Mutex::new(Vec::new()));
+        // Isolate the database counter across concurrent test cases.
+        static NEXT_DATABASE: AtomicUsize = AtomicUsize::new(0);
+        let schema_name = format!(
+            "ingest_count_{}",
+            NEXT_DATABASE.fetch_add(1, Ordering::Relaxed)
+        );
         let nodes = Arc::new(MockDatanodeManager::new(BulkHandler {
             requests: captured.clone(),
             report_missing_row,
             expected_skip_wal: skip_wal,
+            expected_schema: schema_name.clone(),
         }));
         let inserter = Arc::new(Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
@@ -361,6 +371,7 @@ mod tests {
             true,
         ));
         let mut table = new_test_table_info(1, "table_1", [1, 2, 3].into_iter());
+        table.schema_name = schema_name;
         let mut columns = table.meta.schema.column_schemas().to_vec();
         columns[2] = columns[2]
             .clone()
@@ -390,14 +401,17 @@ mod tests {
         .unwrap();
         let influx_ctx = Arc::new(QueryContext::with_channel(
             "greptime",
-            "public",
+            &table.schema_name,
             Channel::Influx,
         ));
         let opentsdb_ctx = Arc::new(QueryContext::with_channel(
             "greptime",
-            "public",
+            &table.schema_name,
             Channel::Opentsdb,
         ));
+        let ingest_count =
+            DIST_INGEST_ROW_COUNT.with_label_values(&[influx_ctx.get_db_string().as_str()]);
+        assert_eq!(0, ingest_count.get());
         influx_ctx.set_skip_wal(skip_wal);
         opentsdb_ctx.set_skip_wal(skip_wal);
         let first_permit = batcher.acquire().await.unwrap();
@@ -421,6 +435,7 @@ mod tests {
             assert_eq!(1, first_result.unwrap());
             assert_eq!(1, second_result.unwrap());
         }
+        assert_eq!(if report_missing_row { 0 } else { 2 }, ingest_count.get());
         let requests = captured.lock().unwrap();
         let mut actual_rows = Vec::new();
         for batch in requests.iter() {
@@ -559,6 +574,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     report_missing_row: false,
                     expected_skip_wal: false,
+                    expected_schema: "public".to_string(),
                 },
                 entered: entered_tx,
             }));
