@@ -203,8 +203,15 @@ struct IslandLeaf {
 }
 
 #[derive(Debug, Clone)]
+struct IslandRangeCall {
+    func: Function,
+    selector: MatrixSelector,
+}
+
+#[derive(Debug, Clone)]
 enum IslandExpr {
     VectorLeaf(usize),
+    RangeCall(usize),
     Scalar(DfExpr),
     Unary {
         input: Box<IslandExpr>,
@@ -223,6 +230,42 @@ impl IslandExpr {
         }
 
         match expr {
+            // One-argument range functions that summarize the samples inside a window.
+            // `absent_over_time` is left out: it reports missing input instead of
+            // summarizing present input.
+            PromExpr::Call(call) if call.args.args.len() == 1 => {
+                let PromExpr::MatrixSelector(selector) = call.args.args[0].as_ref() else {
+                    return None;
+                };
+                if !matches!(
+                    call.func.name,
+                    "avg_over_time"
+                        | "changes"
+                        | "count_over_time"
+                        | "delta"
+                        | "deriv"
+                        | "idelta"
+                        | "increase"
+                        | "irate"
+                        | "last_over_time"
+                        | "max_over_time"
+                        | "min_over_time"
+                        | "present_over_time"
+                        | "rate"
+                        | "resets"
+                        | "stddev_over_time"
+                        | "stdvar_over_time"
+                        | "sum_over_time"
+                ) {
+                    return None;
+                }
+                let id = env.range_calls.len();
+                env.range_calls.push(IslandRangeCall {
+                    func: call.func.clone(),
+                    selector: selector.clone(),
+                });
+                Some(Self::RangeCall(id))
+            }
             PromExpr::Paren(ParenExpr { expr }) => Self::try_new(expr, env),
             PromExpr::VectorSelector(selector) => {
                 let leaf = env.intern_leaf(selector)?;
@@ -273,6 +316,7 @@ impl IslandExpr {
 struct IslandCollectEnv {
     leaf_by_key: HashMap<VectorLeafKey, usize>,
     leaves: Vec<IslandLeaf>,
+    range_calls: Vec<IslandRangeCall>,
     vector_occurrences: usize,
 }
 
@@ -961,6 +1005,109 @@ impl PromPlanner {
         })
     }
 
+    /// Plans arithmetic between range functions that read the same selector and window
+    /// from a single input.
+    ///
+    /// Every function keeps its own implementation; only the scan, the series normalization
+    /// and the window materialization are shared. Requiring every function column to be
+    /// non-NULL reproduces the inner join the per-operand plans rely on, so a function
+    /// without a sample in a window still removes the whole point instead of borrowing one
+    /// from the other operand.
+    async fn try_plan_range_island(
+        &mut self,
+        binary_expr: &PromBinaryExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Option<LogicalPlan>> {
+        let mut collect_env = IslandCollectEnv::default();
+        let Some(island_expr) =
+            IslandExpr::try_new(&PromExpr::Binary(binary_expr.clone()), &mut collect_env)
+        else {
+            return Ok(None);
+        };
+        // An instant operand still needs the join this path removes.
+        if !collect_env.leaves.is_empty() || collect_env.range_calls.len() < 2 {
+            return Ok(None);
+        }
+
+        let first = &collect_env.range_calls[0].selector;
+        let Some(key) = VectorLeafKey::from_selector(&first.vs) else {
+            return Ok(None);
+        };
+        // `@` is not implemented for range selectors, so keep it on the original path.
+        if collect_env.range_calls.iter().any(|call| {
+            call.selector.vs.at.is_some()
+                || call.selector.range != first.range
+                || VectorLeafKey::from_selector(&call.selector.vs).as_ref() != Some(&key)
+        }) {
+            return Ok(None);
+        }
+
+        let original_ctx = self.ctx.clone();
+        let input = self.prom_matrix_selector_to_plan(first).await?;
+        // Multiple fields and native histograms both let one function emit several columns,
+        // which the single shared projection below does not model.
+        if self.ctx.field_columns.len() != 1
+            || !Self::field_column_is_float_range(input.schema(), &self.ctx.field_columns[0])
+        {
+            self.ctx = original_ctx;
+            return Ok(None);
+        }
+
+        let base_ctx = self.ctx.clone();
+        let mut projections = vec![self.create_time_index_column_expr()?];
+        projections.extend(self.create_tag_column_exprs()?);
+        projections.extend(Self::optional_tsid_projection(
+            input.schema(),
+            None,
+            base_ctx.use_tsid,
+        ));
+
+        let mut function_columns: Vec<String> = Vec::with_capacity(collect_env.range_calls.len());
+        let mut call_contexts = Vec::with_capacity(collect_env.range_calls.len());
+        for call in &collect_env.range_calls {
+            self.ctx = base_ctx.clone();
+            let (functions, _) =
+                self.create_function_expr(&call.func, vec![], input.schema(), query_engine_state)?;
+            for function in functions {
+                let name = function.schema_name().to_string();
+                if !function_columns.contains(&name) {
+                    function_columns.push(name);
+                    projections.push(function);
+                }
+            }
+            call_contexts.push(self.ctx.clone());
+        }
+
+        self.ctx = base_ctx.clone();
+        self.ctx.field_columns = function_columns;
+        let values_filter = self.create_empty_values_filter_expr(false)?;
+
+        let alias = TableReference::bare(format!("{BINARY_ISLAND_LEAF_ALIAS_PREFIX}0"));
+        let input = LogicalPlanBuilder::from(input)
+            .project(projections)
+            .context(DataFusionPlanningSnafu)?
+            .filter(values_filter)
+            .context(DataFusionPlanningSnafu)?
+            .alias(alias.clone())
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        let leaves = call_contexts
+            .into_iter()
+            .map(|ctx| PlannedIslandLeaf {
+                plan: input.clone(),
+                ctx,
+                alias: alias.clone(),
+                display_table: key.metric_name.clone(),
+            })
+            .collect_vec();
+        let field_exprs =
+            Self::build_binary_island_field_exprs(&island_expr, &leaves, input.schema())?;
+        self.project_binary_island(input, &alias, &base_ctx, field_exprs)
+            .map(Some)
+    }
+
     async fn try_plan_binary_island(
         &mut self,
         binary_expr: &PromBinaryExpr,
@@ -973,7 +1120,10 @@ impl PromPlanner {
             return Ok(None);
         };
 
-        if collect_env.leaves.is_empty()
+        // Range operands are either shared by `try_plan_range_island` or unsupported here;
+        // this path only interns instant selectors.
+        if !collect_env.range_calls.is_empty()
+            || collect_env.leaves.is_empty()
             || collect_env.vector_occurrences <= collect_env.leaves.len()
         {
             return Ok(None);
@@ -1118,7 +1268,7 @@ impl PromPlanner {
         schema: &DFSchemaRef,
     ) -> Result<IslandFieldExprs> {
         match expr {
-            IslandExpr::VectorLeaf(id) => {
+            IslandExpr::VectorLeaf(id) | IslandExpr::RangeCall(id) => {
                 let leaf = &leaves[*id];
                 let exprs = leaf
                     .ctx
@@ -1300,6 +1450,13 @@ impl PromPlanner {
                     name: "PromQL fill modifiers"
                 }
             );
+        }
+
+        if let Some(plan) = self
+            .try_plan_range_island(binary_expr, query_engine_state)
+            .await?
+        {
+            return Ok(plan);
         }
 
         if let Some(plan) = self.try_plan_binary_island(binary_expr).await? {
@@ -9667,6 +9824,92 @@ mod test {
             3,
             "{plan_str}"
         );
+    }
+
+    async fn plan_promql_with_fields(query: &str, num_field: usize) -> String {
+        let eval_stmt = build_eval_stmt(query);
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            num_field,
+        )
+        .await;
+        PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+            .await
+            .unwrap()
+            .display_indent_schema()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn range_island_reads_one_shared_window() {
+        // The second element is how many distinct functions the shared input must keep a
+        // presence predicate for: a point survives only where every one of them has a sample.
+        for (query, presence_predicates) in [
+            (
+                "avg_over_time(some_metric[5m]) + 2 * stddev_over_time(some_metric[5m])",
+                2,
+            ),
+            (
+                "rate(some_metric[5m]) / count_over_time(some_metric[5m])",
+                2,
+            ),
+            (
+                "min_over_time(some_metric[5m] offset 1m) - max_over_time(some_metric[5m] offset 1m)",
+                2,
+            ),
+            (
+                "-(sum_over_time(some_metric[5m]) / count_over_time(some_metric[5m]))",
+                2,
+            ),
+            (
+                "avg_over_time(some_metric[5m]) + avg_over_time(some_metric[5m])",
+                1,
+            ),
+        ] {
+            let plan = plan_promql_with_fields(query, 1).await;
+            assert_eq!(
+                plan.matches("PromRangeManipulate").count(),
+                1,
+                "{query}: {plan}"
+            );
+            assert_eq!(plan.matches("Join:").count(), 0, "{query}: {plan}");
+            assert_eq!(
+                plan.matches("IS NOT NULL").count(),
+                presence_predicates,
+                "{query}: {plan}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn range_island_falls_back_to_separate_windows() {
+        for (query, num_field) in [
+            (
+                "avg_over_time(some_metric[5m]) + stddev_over_time(some_metric[10m])",
+                1,
+            ),
+            (
+                "avg_over_time(some_metric[5m]) + stddev_over_time(some_metric[5m] offset 1m)",
+                1,
+            ),
+            (
+                "avg_over_time(some_metric[5m]) + on(tag_0) stddev_over_time(some_metric[5m])",
+                1,
+            ),
+            ("avg_over_time(some_metric[5m]) + some_metric", 1),
+            (
+                "quantile_over_time(0.5, some_metric[5m]) + avg_over_time(some_metric[5m])",
+                1,
+            ),
+            (
+                "avg_over_time(some_metric[5m]) + stddev_over_time(some_metric[5m])",
+                2,
+            ),
+        ] {
+            let plan = plan_promql_with_fields(query, num_field).await;
+            assert_eq!(plan.matches("Join:").count(), 1, "{query}: {plan}");
+        }
     }
 
     #[tokio::test]
