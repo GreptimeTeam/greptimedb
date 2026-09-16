@@ -711,7 +711,7 @@ impl RangeBase {
         let Some(column_index) = metadata.column_index_by_id(column_id) else {
             return Ok(None);
         };
-        let Some(decoded) = tag_decode_state.decoded_pks.as_ref() else {
+        let Some(decoded) = tag_decode_state.decoded_pks.as_mut() else {
             return Ok(None);
         };
 

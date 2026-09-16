@@ -84,6 +84,34 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
         self.cache.finished = true;
         Ok(None)
     }
+
+    /// Returns the big-endian value bytes of a reserved column, excluding the
+    /// non-null marker byte, or None if the column is absent.
+    ///
+    /// Reserved values are written as one marker byte followed by fixed-width
+    /// big-endian bytes (`u32` for `__table_id`, `u64` for `__tsid`).
+    pub fn reserved_value(&mut self, column_id: ColumnId) -> Result<Option<&'a [u8]>> {
+        let value_len = match column_id {
+            RESERVED_COLUMN_ID_TABLE_ID => 4,
+            RESERVED_COLUMN_ID_TSID => 8,
+            _ => {
+                return InvalidSparsePrimaryKeySnafu {
+                    reason: format!("column {column_id} is not a reserved column"),
+                }
+                .fail();
+            }
+        };
+        let Some(encoded) = self.encoded_value(column_id)? else {
+            return Ok(None);
+        };
+        ensure!(
+            encoded.len() == value_len + 1 && encoded[0] == 1,
+            InvalidSparsePrimaryKeySnafu {
+                reason: format!("invalid reserved column {column_id} encoding"),
+            }
+        );
+        Ok(Some(&encoded[1..]))
+    }
 }
 
 /// Finds the end of an Option<String> without allocating or reading its payload.
@@ -207,6 +235,27 @@ mod tests {
                 assert!(view.encoded_value(999).unwrap().is_none());
             }
         }
+    }
+
+    #[test]
+    fn reserved_value_returns_fixed_width_big_endian_bytes() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut pk = Vec::new();
+        codec.encode_internal(42, u64::MAX, &mut pk).unwrap();
+        codec
+            .encode_raw_tag_value([(1, b"tag".as_slice())].into_iter(), &mut pk)
+            .unwrap();
+        let mut cache = SparseOffsetsCache::new();
+        let mut view = SparsePrimaryKeyView::new(&pk, &mut cache).unwrap();
+        assert_eq!(
+            view.reserved_value(RESERVED_COLUMN_ID_TABLE_ID).unwrap(),
+            Some(42u32.to_be_bytes().as_slice())
+        );
+        assert_eq!(
+            view.reserved_value(RESERVED_COLUMN_ID_TSID).unwrap(),
+            Some(u64::MAX.to_be_bytes().as_slice())
+        );
+        assert!(view.reserved_value(1).is_err());
     }
 
     #[test]

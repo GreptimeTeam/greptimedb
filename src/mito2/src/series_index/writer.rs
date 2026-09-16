@@ -26,8 +26,11 @@ use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::timestamp::timestamp_array_to_primitive;
-use datatypes::value::Value;
-use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
+use mito_codec::index::IndexValueCodec;
+use mito_codec::row_converter::SparseOffsetsCache;
+use mito_codec::row_converter::sparse::{
+    RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID, SparsePrimaryKeyView,
+};
 use object_store::ObjectStore;
 use parquet::file::metadata::KeyValue;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -111,7 +114,6 @@ struct SeriesIndexRow {
 
 /// Incrementally aggregates sorted flat record batches into series-index Parquet files.
 pub struct SeriesIndexWriter {
-    codec: Arc<dyn PrimaryKeyCodec>,
     tag_columns: Vec<(ColumnId, String)>,
     schema: SchemaRef,
     /// Unit of the min/max ts Timestamp columns, i.e. the region's time
@@ -121,6 +123,10 @@ pub struct SeriesIndexWriter {
     current_primary_key: Option<Vec<u8>>,
     current_row: Option<SeriesIndexRow>,
     buffered_rows: Vec<SeriesIndexRow>,
+    /// Scratch offsets shared when extracting tags from sparse primary keys.
+    pk_offsets: SparseOffsetsCache,
+    /// Reusable buffer for extracting tag values.
+    tag_buf: Vec<u8>,
     metrics: SeriesIndexWriterMetrics,
     failed: bool,
 }
@@ -145,6 +151,15 @@ impl SeriesIndexWriter {
             }
         );
         let time_unit = time_index_unit(&metadata)?;
+        ensure!(
+            metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
+            InvalidMetaSnafu {
+                reason: format!(
+                    "series index requires sparse primary key encoding, got {:?}",
+                    metadata.primary_key_encoding
+                ),
+            }
+        );
         let schema = series_index_schema(&metadata)?;
         let tag_columns = tag_columns(&metadata);
         let writer = ParquetIndexWriter::try_new(
@@ -156,10 +171,8 @@ impl SeriesIndexWriter {
             key_value_metadata,
         )
         .await?;
-        let codec = build_primary_key_codec(&metadata);
 
         Ok(Self {
-            codec,
             tag_columns,
             schema,
             time_unit,
@@ -167,6 +180,8 @@ impl SeriesIndexWriter {
             current_primary_key: None,
             current_row: None,
             buffered_rows: Vec::with_capacity(WRITE_BATCH_SIZE),
+            pk_offsets: SparseOffsetsCache::new(),
+            tag_buf: Vec::new(),
             metrics: SeriesIndexWriterMetrics {
                 open_elapsed: open_start.elapsed(),
                 ..Default::default()
@@ -373,12 +388,13 @@ impl SeriesIndexWriter {
         }
 
         let row = decode_primary_key(
-            self.codec.as_ref(),
             primary_key,
             min_ts,
             max_ts,
             row_count,
             &self.tag_columns,
+            &mut self.pk_offsets,
+            &mut self.tag_buf,
         )?;
         self.current_primary_key = Some(primary_key.to_vec());
         self.current_row = Some(row);
@@ -579,52 +595,65 @@ fn timestamp_values(array: &ArrayRef, unit: TimeUnit) -> Result<Int64Array> {
     Ok(values)
 }
 
-// TODO(yingwen): Bench and optimize the performance if this is costly.
+/// Decodes one sparse primary key into a series-index row by extracting only
+/// the reserved ids and the tag columns the index needs, instead of decoding
+/// every label into owned values.
 fn decode_primary_key(
-    codec: &dyn PrimaryKeyCodec,
     primary_key: &[u8],
     min_ts: i64,
     max_ts: i64,
     row_count: u64,
     tag_columns: &[(ColumnId, String)],
+    offsets: &mut SparseOffsetsCache,
+    buf: &mut Vec<u8>,
 ) -> Result<SeriesIndexRow> {
-    let CompositeValues::Sparse(values) = codec.decode(primary_key).context(DecodeSnafu)? else {
+    let mut view = SparsePrimaryKeyView::new(primary_key, offsets).context(DecodeSnafu)?;
+
+    let Some(table_id) = view
+        .reserved_value(RESERVED_COLUMN_ID_TABLE_ID)
+        .context(DecodeSnafu)?
+    else {
         return InvalidRecordBatchSnafu {
-            reason: "decoded primary key is not sparse",
+            reason: "missing sparse __table_id",
         }
         .fail();
     };
-    let table_id = match values.get(&ReservedColumnId::table_id()) {
-        Some(Value::UInt32(value)) => *value,
-        value => {
-            return InvalidRecordBatchSnafu {
-                reason: format!("missing or invalid sparse __table_id: {value:?}"),
-            }
-            .fail();
+    // The reserved value is a fixed-width big-endian integer.
+    let table_id = u32::from_be_bytes(table_id.try_into().unwrap());
+    let Some(tsid) = view
+        .reserved_value(RESERVED_COLUMN_ID_TSID)
+        .context(DecodeSnafu)?
+    else {
+        return InvalidRecordBatchSnafu {
+            reason: "missing sparse __tsid",
         }
+        .fail();
     };
-    let tsid = match values.get(&ReservedColumnId::tsid()) {
-        Some(Value::UInt64(value)) => *value,
-        value => {
-            return InvalidRecordBatchSnafu {
-                reason: format!("missing or invalid sparse __tsid: {value:?}"),
+    let tsid = u64::from_be_bytes(tsid.try_into().unwrap());
+
+    let mut tags = Vec::with_capacity(tag_columns.len());
+    for (column_id, _) in tag_columns {
+        // `encode_sparse_value` returns None for missing and null labels and
+        // validates UTF-8 for string labels.
+        let value = IndexValueCodec::encode_sparse_value(&mut view, *column_id, buf)
+            .context(DecodeSnafu)?;
+        let tag = match value {
+            None => None,
+            Some(bytes) => {
+                let value = std::str::from_utf8(bytes).map_err(|_| {
+                    InvalidRecordBatchSnafu {
+                        reason: format!(
+                            "sparse tag value of column {column_id} is not valid UTF-8"
+                        ),
+                    }
+                    .build()
+                })?;
+                Some(value.to_string())
             }
-            .fail();
-        }
-    };
-    let tags = tag_columns
-        .iter()
-        .map(|(column_id, _)| match values.get(column_id) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(value)) => Ok(Some(value.as_utf8().to_string())),
-            value => InvalidRecordBatchSnafu {
-                reason: format!(
-                    "invalid sparse string tag value for column {column_id}: {value:?}"
-                ),
-            }
-            .fail(),
-        })
-        .collect::<Result<Vec<_>>>()?;
+        };
+        tags.push(tag);
+    }
+
     Ok(SeriesIndexRow {
         min_ts,
         max_ts,

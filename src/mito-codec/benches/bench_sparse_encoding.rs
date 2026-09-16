@@ -21,7 +21,7 @@ use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main};
 use datatypes::prelude::ValueRef;
 use datatypes::value::Value;
 use mito_codec::row_converter::sparse::{RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID};
-use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
+use mito_codec::row_converter::{PrimaryKeyCodec, SparseOffsetsCache, SparsePrimaryKeyCodec};
 use store_api::storage::ColumnId;
 
 fn encode_sparse(c: &mut Criterion) {
@@ -498,9 +498,38 @@ fn bench_sparse_values_lookup(c: &mut Criterion) {
     }
 }
 
+/// Decodes sparse primary keys with different tag counts and value lengths,
+/// measuring the full `PrimaryKeyCodec::decode` path.
+fn bench_decode_sparse(c: &mut Criterion) {
+    for num_tags in [10u32, 40] {
+        for value_len in [10usize, 24, 64] {
+            let codec = SparsePrimaryKeyCodec::schemaless();
+            let tags: Vec<_> = (0..num_tags)
+                .map(|idx| {
+                    let value = format!("{idx:0>value_len$}");
+                    (idx, Bytes::copy_from_slice(value.as_bytes()))
+                })
+                .collect();
+            let mut pk = Vec::new();
+            codec.encode_internal(1024, 42, &mut pk).unwrap();
+            codec
+                .encode_raw_tag_value(tags.iter().map(|(c, b)| (*c, &b[..])), &mut pk)
+                .unwrap();
+
+            c.bench_function(
+                format!("decode_sparse/{num_tags}tags/{value_len}B").as_str(),
+                |b| {
+                    b.iter(|| black_box(codec.decode(black_box(&pk)).unwrap()));
+                },
+            );
+        }
+    }
+}
+
 criterion_group!(
     benches,
     encode_sparse,
+    bench_decode_sparse,
     bench_has_column,
     bench_inline_threshold,
     bench_sparse_values_threshold,
