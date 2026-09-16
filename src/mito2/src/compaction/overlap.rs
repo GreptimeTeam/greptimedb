@@ -26,11 +26,24 @@ use crate::sst::file::{FileHandle, RegionFileId};
 /// PK-disjoint files with overlapping times can still cost O(N) per query, so a
 /// complete closure has O(N²) worst-case time and O(N) auxiliary space.
 pub(super) struct FileOverlapIndex<'a> {
+    /// Current region metadata used to decide whether PK bounds can safely exclude overlaps.
     metadata: &'a RegionMetadata,
+    /// Candidates in original snapshot order, retained after removal so their
+    /// indices remain stable and drained matches can preserve merge input order.
     files: Vec<FileHandle>,
+    /// Indices into `files`, sorted by start time with the snapshot index as a
+    /// tie-breaker. Sorted offset `i` corresponds to leaf `leaf_base + i`.
     by_start: Vec<usize>,
+    /// Active region/file identities mapped to leaf indices in `max_ends` for
+    /// removal without searching `by_start`. Entries are deleted when visited.
     positions: HashMap<RegionFileId, usize>,
+    /// Array-backed segment tree rooted at index 1 (index 0 is unused).
+    /// Leaves store inclusive file end times; internal nodes store the maximum
+    /// active end in their subtree. Removed/padding leaves and empty subtrees
+    /// hold `None`, allowing overlap queries to prune them.
     max_ends: Vec<Option<Timestamp>>,
+    /// First leaf index in `max_ends`, also the padded leaf count: a power of two
+    /// with at least one leaf, even for an empty snapshot.
     leaf_base: usize,
 }
 
