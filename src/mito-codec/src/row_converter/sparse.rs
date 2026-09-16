@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod checked;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -34,6 +36,7 @@ use crate::error::{
 use crate::key_values::KeyValue;
 use crate::primary_key_filter::SparsePrimaryKeyFilter;
 use crate::row_converter::dense::SortField;
+pub use crate::row_converter::sparse::checked::SparsePrimaryKeyView;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 
 /// A codec for sparse key of metrics.

@@ -288,42 +288,6 @@ mod tests {
     use super::*;
     use crate::external_provider::MockExternalTempFileProvider;
 
-    #[tokio::test]
-    async fn borrowed_single_value_matches_owned_rows_across_segments() {
-        let make_creator = || {
-            BloomFilterCreator::new(
-                3,
-                0.01,
-                Arc::new(MockExternalTempFileProvider::new()),
-                Arc::new(AtomicUsize::new(0)),
-                None,
-            )
-        };
-        let mut borrowed = make_creator();
-        let mut owned = make_creator();
-        // Zero rows, nulls, empty values, duplicates and runs crossing segment boundaries.
-        for (rows, elem) in [
-            (0, Some(b"ignored".as_slice())),
-            (1, None),
-            (5, Some(b"".as_slice())),
-            (1, Some(b"".as_slice())),
-            (8, Some(b"label".as_slice())),
-            (1, None),
-        ] {
-            borrowed.push_n_row_elem(rows, elem).await.unwrap();
-            owned
-                .push_n_row_elems(rows, elem.map(<[u8]>::to_vec))
-                .await
-                .unwrap();
-            assert_eq!(borrowed.memory_usage(), owned.memory_usage());
-        }
-        let mut borrowed_blob = Cursor::new(Vec::new());
-        let mut owned_blob = Cursor::new(Vec::new());
-        borrowed.finish(&mut borrowed_blob).await.unwrap();
-        owned.finish(&mut owned_blob).await.unwrap();
-        assert_eq!(borrowed_blob.into_inner(), owned_blob.into_inner());
-    }
-
     /// Converts a slice of bytes to a vector of `u64`.
     pub fn u64_vec_from_bytes(bytes: &[u8]) -> Vec<u64> {
         bytes
@@ -487,6 +451,42 @@ mod tests {
             assert!(bf.contains(&b"e"));
             assert!(bf.contains(&b"f"));
         }
+    }
+
+    #[tokio::test]
+    async fn borrowed_single_value_matches_owned_rows_across_segments() {
+        let make_creator = || {
+            BloomFilterCreator::new(
+                3,
+                0.01,
+                Arc::new(MockExternalTempFileProvider::new()),
+                Arc::new(AtomicUsize::new(0)),
+                None,
+            )
+        };
+        let mut borrowed = make_creator();
+        let mut owned = make_creator();
+        // Zero rows, nulls, empty values, duplicates and runs crossing segment boundaries.
+        for (rows, elem) in [
+            (0, Some(b"ignored".as_slice())),
+            (1, None),
+            (5, Some(b"".as_slice())),
+            (1, Some(b"".as_slice())),
+            (8, Some(b"label".as_slice())),
+            (1, None),
+        ] {
+            borrowed.push_n_row_elem(rows, elem).await.unwrap();
+            owned
+                .push_n_row_elems(rows, elem.map(<[u8]>::to_vec))
+                .await
+                .unwrap();
+            assert_eq!(borrowed.memory_usage(), owned.memory_usage());
+        }
+        let mut borrowed_blob = Cursor::new(Vec::new());
+        let mut owned_blob = Cursor::new(Vec::new());
+        borrowed.finish(&mut borrowed_blob).await.unwrap();
+        owned.finish(&mut owned_blob).await.unwrap();
+        assert_eq!(borrowed_blob.into_inner(), owned_blob.into_inner());
     }
 
     #[tokio::test]
