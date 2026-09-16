@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 
 use common_datasource::file_format::Format;
-use common_datasource::object_store::build_backend_for_write;
+use common_datasource::object_store::{FILE_SCHEMA, FS_SCHEMA, build_backend_for_write, parse_url};
 use common_meta::key::table_route::TableRouteValue;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -135,6 +135,9 @@ impl StatementExecutor {
             matches!(format, Format::Parquet(_)),
             error::UnsupportedFormatSnafu { format }
         );
+        let (scheme, _, _) = parse_url(&req.location).context(error::BuildBackendSnafu)?;
+        let local =
+            scheme.eq_ignore_ascii_case(FS_SCHEMA) || scheme.eq_ignore_ascii_case(FILE_SCHEMA);
         let mut filenames = HashSet::new();
         let mut output_files = Vec::with_capacity(tables.len());
         let mut logical = Vec::new();
@@ -147,7 +150,11 @@ impl StatementExecutor {
                     && name != "."
                     && name != ".."
                     && !name.contains(['/', '\\', '\0', '?', '#', '%', ':'])
-                    && filenames.insert(format!("{name}.parquet")),
+                    && filenames.insert(if local {
+                        name.to_ascii_lowercase()
+                    } else {
+                        name.clone()
+                    }),
                 InvalidDatabaseExportSnafu {
                     reason: format!("unsafe or duplicate output name: {name}")
                 }

@@ -462,6 +462,45 @@ async fn database_export_rejects_invalid_members_before_output() {
     let (_, tables, physical) = source_tables(instance, "invalid_phy", "dense").await;
     let executor = instance.statement_executor();
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    for name in ["Foo", "foo"] {
+        sql(
+            instance,
+            &format!("CREATE TABLE \"{name}\" (ts TIMESTAMP TIME INDEX)"),
+        )
+        .await;
+    }
+    let case_tables = vec![table(instance, "Foo").await, table(instance, "foo").await];
+    assert_ne!(
+        case_tables[0].table_info().table_id(),
+        case_tables[1].table_info().table_id()
+    );
+    let case_path = destination.path().join("case_aliases");
+    let mut case_req = database_request(&case_path);
+    case_req.with.insert("parallelism".into(), "1".into());
+    let result = instance
+        .export_database_for_test(
+            case_req.clone(),
+            Some(&["Foo".into(), "foo".into()]),
+            &CancellationToken::new(),
+            QueryContext::arc(),
+        )
+        .await;
+    assert!(matches!(result,
+        Err(frontend::error::Error::TableOperation {
+            source: operator::error::Error::InvalidDatabaseExport { reason }, ..
+        }) if reason == "unsafe or duplicate output name: foo"));
+    assert!(!case_path.exists());
+    case_req.location = "s3://export-bucket/data/".into();
+    case_req.connection.extend([
+        ("region".into(), "us-east-1".into()),
+        ("access_key_id".into(), "test-key".into()),
+        ("secret_access_key".into(), "test-secret".into()),
+    ]);
+    let plan = executor
+        .prepare_database_export(case_req, case_tables)
+        .await
+        .unwrap();
+    assert_eq!(plan.job_count_for_test(), 2);
     let req = database_request(&destination.path().join("data"));
     let key = TableRouteKey::new(tables[2].table_info().table_id()).to_bytes();
     let original = standalone
