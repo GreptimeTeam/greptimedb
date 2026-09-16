@@ -1053,6 +1053,15 @@ impl EngineInner {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self.find_region(region_id)?;
+        // Pin the index before the data snapshot: compaction and index publication
+        // could otherwise give us a newer index that omits series still visible
+        // in the query's older SST snapshot.
+        let series_index = region.series_index_store.as_ref().map(|store| {
+            crate::series_index::SeriesIndexReadContext {
+                store: store.clone(),
+                version: region.series_index_version(),
+            }
+        });
         let version_data = region.version_control.current();
         let version = version_data.version;
 
@@ -1146,12 +1155,7 @@ impl EngineInner {
             request,
             CacheStrategy::EnableAll(cache_manager),
         )
-        .with_series_index(region.series_index_store.as_ref().map(|store| {
-            crate::series_index::SeriesIndexReadContext {
-                store: store.clone(),
-                version: region.series_index_version(),
-            }
-        }))
+        .with_series_index(series_index)
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_scan_memory_pool(self.scan_memory_pool.clone())
