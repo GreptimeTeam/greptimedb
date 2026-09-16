@@ -39,7 +39,7 @@ use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type,
 };
 use datatypes::data_type::DataType;
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::align_schema_with_json_array;
 use datatypes::prelude::{MutableVector, Vector};
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
@@ -739,26 +739,6 @@ impl BulkPartConverter {
             raw_data: None,
         })
     }
-}
-
-fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
-    if schema.fields().iter().all(|f| !is_json2_extension_type(f)) {
-        return schema;
-    }
-
-    let mut fields = Vec::with_capacity(schema.fields().len());
-    for (field, array) in schema.fields().iter().zip(columns) {
-        if !is_json2_extension_type(field) {
-            fields.push(field.clone());
-            continue;
-        }
-
-        let mut field = field.as_ref().clone();
-        field.set_data_type(array.data_type().clone());
-        fields.push(Arc::new(field));
-    }
-
-    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 fn new_primary_key_column_builders(

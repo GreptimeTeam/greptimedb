@@ -1,0 +1,85 @@
+name: Create Aliyun ECS runner
+description: Reuse the ephemeral runner lifecycle, including existing janitor ownership
+  tags.
+inputs:
+  access-key-id:
+    description: Aliyun access key ID
+    required: true
+  access-key-secret:
+    description: Aliyun access key secret
+    required: true
+  github-token:
+    description: Token authorized to register and remove repository runners
+    required: true
+  region-id:
+    description: ECS region
+    required: true
+  vswitch-id:
+    description: ECS VSwitch
+    required: true
+  security-group-id:
+    description: ECS security group
+    required: true
+  image-id:
+    description: Prepared ephemeral runner ECS image
+    required: true
+  instance-type:
+    description: ECS instance type
+    required: true
+  system-disk-gib:
+    description: System disk size in GiB (20..2048)
+    required: false
+    default: '80'
+  ttl-hours:
+    description: Optional per-instance janitor TTL (1..168 hours); empty preserves the janitor fallback
+    required: false
+    default: ''
+  enable-docker:
+    description: Start image-provided Docker and grant the runner Docker group access (root-equivalent)
+    required: false
+    default: 'false'
+  resource-group-id:
+    description: Optional ECS resource group
+    required: false
+    default: ''
+  runner-uid:
+    description: Runner user ID baked into the image
+    required: false
+    default: '1001'
+  runner-gid:
+    description: Runner group ID baked into the image
+    required: false
+    default: '1001'
+outputs:
+  label:
+    description: label
+    value: ${{ steps.provision.outputs.label }}
+  instance_id:
+    description: instance_id
+    value: ${{ steps.provision.outputs.instance_id }}
+  runner_name:
+    description: runner_name
+    value: ${{ steps.provision.outputs.runner_name }}
+runs:
+  using: composite
+  steps:
+  - uses: astral-sh/setup-uv@v6
+  - id: provision
+    shell: bash
+    env:
+      ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+      ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ inputs.access-key-secret }}
+      GH_PERSONAL_ACCESS_TOKEN: ${{ inputs.github-token }}
+      ALIYUN_ECS_REGION_ID: ${{ inputs.region-id }}
+      ALIYUN_ECS_VSWITCH_ID: ${{ inputs.vswitch-id }}
+      ALIYUN_ECS_SECURITY_GROUP_ID: ${{ inputs.security-group-id }}
+      QUERY_REGRESSION_ECS_IMAGE_ID: ${{ inputs.image-id }}
+      ALIYUN_ECS_INSTANCE_TYPE: ${{ inputs.instance-type }}
+      ALIYUN_ECS_SYSTEM_DISK_GIB: ${{ inputs.system-disk-gib }}
+      ALIYUN_ECS_TTL_HOURS: ${{ inputs.ttl-hours }}
+      ALIYUN_ECS_ENABLE_DOCKER: ${{ inputs.enable-docker }}
+      ALIYUN_ECS_RESOURCE_GROUP_ID: ${{ inputs.resource-group-id }}
+      QUERY_REGRESSION_RUNNER_UID: ${{ inputs.runner-uid }}
+      QUERY_REGRESSION_RUNNER_GID: ${{ inputs.runner-gid }}
+      ACTION_PATH: ${{ github.action_path }}
+    run: uv run "$ACTION_PATH/../../scripts/aliyun-ecs-runner-provision.py"
