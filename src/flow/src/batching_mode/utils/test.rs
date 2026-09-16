@@ -22,7 +22,7 @@ use common_recordbatch::{RecordBatch, util};
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datafusion_common::tree_node::TreeNode as _;
-use datafusion_expr::GroupingSet;
+use datafusion_expr::{GroupingSet, TableScanBuilder};
 use datatypes::arrow::array::{Array, AsArray};
 use datatypes::arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
 use datatypes::prelude::{ConcreteDataType, MutableVector, Scalar, ScalarVectorBuilder, VectorRef};
@@ -98,17 +98,15 @@ fn test_sink_scan(sink_table: TableRef, sink_table_name: &TableName) -> LogicalP
     let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
     let table_source = Arc::new(DefaultTableSource::new(table_provider));
     LogicalPlan::TableScan(
-        TableScan::try_new(
+        TableScanBuilder::new(
             TableReference::Full {
                 catalog: sink_table_name[0].clone().into(),
                 schema: sink_table_name[1].clone().into(),
                 table: sink_table_name[2].clone().into(),
             },
             table_source,
-            None,
-            vec![],
-            None,
         )
+        .build()
         .unwrap(),
     )
 }
@@ -302,7 +300,7 @@ async fn test_add_filter() {
         // complex subquery without alias
         (
             "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) GROUP BY number, time_window, bucket_name;",
-            "SELECT sum(numbers_with_ts.number), numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) GROUP BY numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts), bucket_name",
+            "SELECT sum(number), number, date_bin('5 minutes', ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) GROUP BY number, date_bin('5 minutes', ts), bucket_name",
         ),
         // complex subquery alias
         (

@@ -6,7 +6,7 @@ SELECT median(NULL), median(1);
 +--------------+------------------+
 | median(NULL) | median(Int64(1)) |
 +--------------+------------------+
-|              | 1                |
+|              | 1.0              |
 +--------------+------------------+
 
 -- test with simple table
@@ -26,7 +26,7 @@ SELECT median(r)::VARCHAR FROM quantile;
 +--------------------+
 | median(quantile.r) |
 +--------------------+
-| 4                  |
+| 4.5                |
 +--------------------+
 
 SELECT median(r::FLOAT)::VARCHAR FROM quantile;
@@ -50,7 +50,7 @@ SELECT median(r::SMALLINT)::VARCHAR FROM quantile WHERE r < 100;
 +--------------------+
 | median(quantile.r) |
 +--------------------+
-| 4                  |
+| 4.5                |
 +--------------------+
 
 SELECT median(r::INTEGER)::VARCHAR FROM quantile;
@@ -58,7 +58,7 @@ SELECT median(r::INTEGER)::VARCHAR FROM quantile;
 +--------------------+
 | median(quantile.r) |
 +--------------------+
-| 4                  |
+| 4.5                |
 +--------------------+
 
 SELECT median(r::BIGINT)::VARCHAR FROM quantile;
@@ -66,7 +66,7 @@ SELECT median(r::BIGINT)::VARCHAR FROM quantile;
 +--------------------+
 | median(quantile.r) |
 +--------------------+
-| 4                  |
+| 4.5                |
 +--------------------+
 
 -- test with NULL values
@@ -83,7 +83,7 @@ SELECT median(42) FROM quantile;
 +-------------------+
 | median(Int64(42)) |
 +-------------------+
-| 42                |
+| 42.0              |
 +-------------------+
 
 -- test with grouped data
@@ -103,8 +103,8 @@ SELECT grp, median(val) FROM median_groups GROUP BY grp ORDER BY grp;
 +-----+---------------------------+
 | grp | median(median_groups.val) |
 +-----+---------------------------+
-| 1   | 3                         |
-| 2   | 30                        |
+| 1   | 3.0                       |
+| 2   | 30.0                      |
 | 3   |                           |
 +-----+---------------------------+
 

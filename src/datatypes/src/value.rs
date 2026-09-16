@@ -1240,6 +1240,8 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
+            | ScalarValue::ListView(_)
+            | ScalarValue::LargeListView(_)
             | ScalarValue::Union(_, _, _)
             | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)

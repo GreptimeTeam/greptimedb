@@ -105,11 +105,11 @@ impl IntoResponse for JsonResponse {
                     })
                     .collect();
 
-                json!({
-                    "data": data,
-                    "execution_time_ms": execution_time,
-                })
-                .to_string()
+                let data = Value::Array(data.into_iter().map(Value::Object).collect());
+                let mut payload = Map::new();
+                payload.insert("data".to_string(), data);
+                payload.insert("execution_time_ms".to_string(), Value::from(execution_time));
+                Value::Object(payload).to_string()
             }
         };
 

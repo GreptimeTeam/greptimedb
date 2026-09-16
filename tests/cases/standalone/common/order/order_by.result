@@ -196,7 +196,8 @@ SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY k;
 -- CONTROVERSIAL: SQLite allows both "k" and "l" to be referenced here, Postgres and MonetDB give an error.
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY l;
 
-Error: 3000(PlanQuery), Failed to plan SQL: No field named l. Valid fields are k.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named l.
+Valid fields are k.
 
 -- Not compatible with duckdb, work in gretimedb
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY 1-k;

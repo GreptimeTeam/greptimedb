@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -25,6 +24,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use common_telemetry::init_default_ut_logging;
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::average::avg_udaf;
@@ -39,16 +39,16 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion_common::arrow::array::AsArray;
 use datafusion_common::arrow::datatypes::{Float64Type, UInt64Type};
-use datafusion_common::{Column, TableReference};
+use datafusion_common::{Column, Result, TableReference};
 use datafusion_expr::expr::{AggregateFunction, NullTreatment};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{
     Aggregate, AggregateUDFImpl, ColumnarValue, Expr, LogicalPlan, ScalarFunctionArgs, SortExpr,
-    TableScan, TypeSignature, lit,
+    TableScanBuilder, TypeSignature, lit,
 };
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
 use datafusion_physical_expr::expressions::{Column as PhysicalColumn, col, lit as physical_lit};
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use futures::{Stream, StreamExt as _};
 use hyperloglogplus::HyperLogLog;
 use pretty_assertions::assert_eq;
@@ -97,16 +97,19 @@ impl ExecutionPlan for MockInputExec {
         "MockInputExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -203,10 +206,6 @@ impl Default for DummyTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for DummyTableProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> Arc<arrow_schema::Schema> {
         self.schema.clone()
     }
@@ -237,14 +236,12 @@ fn dummy_table_scan() -> LogicalPlan {
     let table_provider = Arc::new(DummyTableProvider::default());
     let table_source = DefaultTableSource::new(table_provider);
     LogicalPlan::TableScan(
-        TableScan::try_new(
-            TableReference::bare("Number"),
-            Arc::new(table_source),
-            None,
-            vec![],
-            None,
-        )
-        .unwrap(),
+        TableScanBuilder::new(TableReference::bare("Number"), Arc::new(table_source))
+            .with_projection(None)
+            .with_filters(vec![])
+            .with_fetch(None)
+            .build()
+            .unwrap(),
     )
 }
 
@@ -252,14 +249,12 @@ fn dummy_table_scan_with_ts() -> LogicalPlan {
     let table_provider = Arc::new(DummyTableProvider::with_ts(None));
     let table_source = DefaultTableSource::new(table_provider);
     LogicalPlan::TableScan(
-        TableScan::try_new(
-            TableReference::bare("Number"),
-            Arc::new(table_source),
-            None,
-            vec![],
-            None,
-        )
-        .unwrap(),
+        TableScanBuilder::new(TableReference::bare("Number"), Arc::new(table_source))
+            .with_projection(None)
+            .with_filters(vec![])
+            .with_fetch(None)
+            .build()
+            .unwrap(),
     )
 }
 
@@ -381,10 +376,7 @@ async fn test_sum_udaf() {
         .create_physical_plan(&res.lower_state, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -414,10 +406,7 @@ async fn test_sum_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -543,10 +532,7 @@ async fn test_avg_udaf() {
         .create_physical_plan(&coerced_aggr_state_plan, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -582,10 +568,7 @@ async fn test_avg_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
@@ -703,10 +686,7 @@ async fn test_last_value_order_by_udaf() {
         .create_physical_plan(&fixed_aggr_state_plan, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let merge_input_fields = vec![Arc::new(Field::new(
@@ -796,10 +776,7 @@ async fn test_last_value_order_by_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
@@ -900,7 +877,7 @@ fn test_avg_state_groups_accumulator_state_merge_evaluate() {
         .update_batch(&merged_values, &merged_group_indices, None, 3)
         .unwrap();
     merged_accum
-        .merge_batch(&source_state, &[1, 2, 0], None, 3)
+        .merge_batch(&source_state, &[1, 2, 0], 3)
         .unwrap();
 
     let result = merged_accum.evaluate(EmitTo::All).unwrap();
@@ -1324,14 +1301,12 @@ async fn test_udaf_correct_eval_result() {
         );
         let table_source = DefaultTableSource::new(Arc::new(table_provider));
         let logical_plan = LogicalPlan::TableScan(
-            TableScan::try_new(
-                test_table_ref.clone(),
-                Arc::new(table_source),
-                None,
-                vec![],
-                None,
-            )
-            .unwrap(),
+            TableScanBuilder::new(test_table_ref.clone(), Arc::new(table_source))
+                .with_projection(None)
+                .with_filters(vec![])
+                .with_fetch(None)
+                .build()
+                .unwrap(),
         );
 
         let args = case.args;

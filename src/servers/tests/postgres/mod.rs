@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,6 +28,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
 use pgwire::api::Type;
+use postgres_types::FromSql;
 use rand::Rng;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Error, SignatureScheme};
@@ -486,6 +488,66 @@ async fn test_using_db() -> Result<()> {
         create_connection_with_given_catalog_schema(server_port, DEFAULT_CATALOG_NAME, "notfound")
             .await;
     assert!(client.is_err());
+    Ok(())
+}
+
+struct RegprocOid(u32);
+
+impl<'a> FromSql<'a> for RegprocOid {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        if ty != &Type::REGPROC {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected REGPROC, got {ty}"),
+            )));
+        }
+
+        let oid = raw.try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected a four-byte OID, got {} bytes", raw.len()),
+            )
+        })?;
+        Ok(Self(u32::from_be_bytes(oid)))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        ty == &Type::REGPROC
+    }
+}
+
+#[tokio::test]
+async fn test_extended_query_regproc_response() -> Result<()> {
+    let server_port = start_test_server(TlsOption::default()).await?;
+    let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
+        .await
+        .unwrap();
+    let stmt = client
+        .prepare("SELECT typreceive FROM pg_catalog.pg_type WHERE oid = 16")
+        .await
+        .unwrap();
+    assert_eq!(stmt.columns()[0].type_(), &Type::REGPROC);
+
+    let rows = client.query(&stmt, &[]).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<usize, RegprocOid>(0).0, 2436);
+
+    let result = client
+        .simple_query("SELECT typreceive FROM pg_catalog.pg_type WHERE oid = 16")
+        .await
+        .unwrap();
+    let row = result
+        .iter()
+        .find_map(|message| match message {
+            SimpleQueryMessage::Row(row) => Some(row),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(row.get(0), Some("boolrecv"));
+
     Ok(())
 }
 

@@ -781,10 +781,9 @@ jobs:
           kubectl -n kafka-cluster apply \
             -f .github/actions/setup-greptimedb-cluster/kafka-wal-helper.yaml
 
-          kubectl -n kafka-cluster wait \
-            --for=condition=Ready \
-            pod -l app=kafka-wal-helper \
-            --timeout=120s
+          kubectl rollout status deployment/kafka-wal-helper \
+            --timeout=120s \
+            -n kafka-cluster
       - name: Print etcd info
         shell: bash
         run: kubectl get all --show-labels -n etcd-cluster
