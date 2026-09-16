@@ -99,7 +99,9 @@ iterations = 9
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 20
 
-# Sliding extrema cover small, representative, and wide overlapping windows.
+# Sliding extrema cover small, representative, and wide overlapping windows. At this
+# cadence the 1m and 5m windows hold about 5 and 21 samples, below the 32-sample
+# average the UDF requires before it reuses candidates, so they measure the rescan.
 [[scenario.queries]]
 name = "min_over_time_1m"
 kind = "tql"
@@ -154,6 +156,28 @@ max_candidate_latency_regression_pct = 20
 name = "max_over_time_1h"
 kind = "tql"
 query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') max_over_time(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# A ten-minute step keeps the one-hour window on the reuse path without the
+# single-sample step the two cases above use.
+[[scenario.queries]]
+name = "min_over_time_1h_step10m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '10m') min_over_time(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "max_over_time_1h_step10m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '10m') max_over_time(promql_range_boundary{host=~'host.*'}[1h])"
 warmup = 3
 iterations = 9
 

@@ -236,29 +236,42 @@ fn min_max_input_type() -> Vec<DataType> {
 
 /// Batches with fewer windows than this have too little repeated work to reclaim.
 const MIN_SLIDING_WINDOWS: usize = 4;
-/// Below this window length the per-sample bookkeeping is comparable to the scan
-/// it would replace.
-const MIN_SLIDING_WINDOW_LENGTH: u32 = 32;
+/// Below this average window length the per-sample bookkeeping is comparable to the
+/// scan it would replace.
+const MIN_SLIDING_WINDOW_LENGTH: u64 = 32;
 /// Reuse is taken only when a step advances at most this fraction of the window.
-const MAX_SLIDING_STEP_FRACTION: u32 = 4;
+const MAX_SLIDING_STEP_FRACTION: u64 = 4;
 
 /// Whether reusing candidates across windows is expected to beat rescanning each one.
 ///
 /// Reuse pays off in proportion to how much consecutive windows overlap, and loses to
 /// a plain scan on wide windows that barely overlap: maintaining the deque then costs
-/// more than the rescan it replaces. `RangeManipulate` emits one window length and one
-/// step for a whole batch, so the first two windows decide for all of them. A wrong
-/// guess costs time, not correctness — both paths return the same bits.
+/// more than the rescan it replaces.
+///
+/// The shape is read from the whole batch rather than from its leading windows.
+/// `RangeManipulate` holds the window duration and the evaluation step fixed, but the
+/// sample counts still vary: a series that starts inside the query range gets a first
+/// window covering roughly one step, and a window covering no sample at all is emitted
+/// as `(0, 0)`. Averages survive both; the first two windows do not.
+///
+/// A wrong answer costs time, not correctness — both evaluators return the same bits.
 fn reuses_candidates(window_keys: &[i64]) -> bool {
     if window_keys.len() < MIN_SLIDING_WINDOWS {
         return false;
     }
 
-    let (first_offset, first_length) = unpack(window_keys[0]);
-    let (second_offset, _) = unpack(window_keys[1]);
-    first_length >= MIN_SLIDING_WINDOW_LENGTH
-        && second_offset >= first_offset
-        && second_offset - first_offset <= first_length / MAX_SLIDING_STEP_FRACTION
+    let windows = window_keys.len() as u64;
+    let total_length: u64 = window_keys.iter().map(|&key| unpack(key).1 as u64).sum();
+    // What reuse skips re-reading: the distance the left bound travels over the batch.
+    let first_offset = unpack(window_keys[0]).0;
+    let last_offset = unpack(window_keys[window_keys.len() - 1]).0;
+    let total_advance = u64::from(last_offset.saturating_sub(first_offset));
+
+    // `total_length / windows >= MIN_SLIDING_WINDOW_LENGTH` and
+    // `total_advance / (windows - 1) <= (total_length / windows) / MAX_SLIDING_STEP_FRACTION`,
+    // cross-multiplied to keep the averages exact.
+    total_length >= windows * MIN_SLIDING_WINDOW_LENGTH
+        && total_advance * MAX_SLIDING_STEP_FRACTION * windows <= total_length * (windows - 1)
 }
 
 fn is_better(value: f64, current: f64, is_min: bool) -> bool {
@@ -915,27 +928,35 @@ mod test {
             (8, 32),
             (16, 32)
         ])));
-        // One sample too short.
+        // One sample per window too short.
         assert!(!reuses_candidates(&window_keys(&[
             (0, 31),
             (7, 31),
             (14, 31),
             (21, 31)
         ])));
-        // One sample too far apart.
+        // One sample per step too far apart.
         assert!(!reuses_candidates(&window_keys(&[
             (0, 32),
             (9, 32),
             (18, 32),
             (27, 32)
         ])));
-        // Windows that start by retreating.
-        assert!(!reuses_candidates(&window_keys(&[
-            (8, 32),
-            (0, 32),
-            (16, 32),
-            (24, 32)
-        ])));
+    }
+
+    #[test]
+    fn sliding_evaluator_survives_an_unrepresentative_leading_window() {
+        // `RangeManipulate` gives a series that starts inside the query range a first
+        // window covering roughly one step, and emits a window covering no sample at
+        // all as (0, 0). Reading either one as the batch shape hides the overlap that
+        // the twenty windows behind it do have.
+        let overlapping = (0..20u32).map(|index| (index * 8, 40));
+        for leading in [(0, 1), (0, 0)] {
+            let ranges = std::iter::once(leading)
+                .chain(overlapping.clone())
+                .collect::<Vec<_>>();
+            assert!(reuses_candidates(&window_keys(&ranges)));
+        }
     }
 
     #[test]

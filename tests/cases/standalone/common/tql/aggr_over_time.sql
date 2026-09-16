@@ -209,3 +209,40 @@ tql eval (20, 100, '10s') min_over_time(moving_extrema[30s]);
 tql eval (20, 100, '10s') max_over_time(moving_extrema[30s]);
 
 drop table moving_extrema;
+
+-- Dense sliding min/max: 40-sample windows advancing 5 samples, the shape the UDF
+-- reuses candidates for rather than rescanning. Values follow the timestamp, so each
+-- window's minimum is its oldest sample and its maximum is its newest, and both
+-- extrema expire on every step.
+create table dense_extrema (ts timestamp_s time index, val double, series string primary key);
+
+insert into dense_extrema values (0, 0::double, 'dense');
+
+-- Doubling eight times gives 256 rows at a one-second cadence, with val = ts.
+insert into dense_extrema select to_unixtime(ts) + 1, val + 1, series from dense_extrema;
+
+insert into dense_extrema select to_unixtime(ts) + 2, val + 2, series from dense_extrema;
+
+insert into dense_extrema select to_unixtime(ts) + 4, val + 4, series from dense_extrema;
+
+insert into dense_extrema select to_unixtime(ts) + 8, val + 8, series from dense_extrema;
+
+insert into dense_extrema select to_unixtime(ts) + 16, val + 16, series from dense_extrema;
+
+insert into dense_extrema select to_unixtime(ts) + 32, val + 32, series from dense_extrema;
+
+insert into dense_extrema select to_unixtime(ts) + 64, val + 64, series from dense_extrema;
+
+insert into dense_extrema select to_unixtime(ts) + 128, val + 128, series from dense_extrema;
+
+select count(*), min(val), max(val) from dense_extrema;
+
+-- 	{series="dense"} 61 66 71 76 81 86 91 96 101 106 111 116 121
+-- SQLNESS SORT_RESULT 2 1
+tql eval (100, 160, '5s') min_over_time(dense_extrema[40s]);
+
+-- 	{series="dense"} 100 105 110 115 120 125 130 135 140 145 150 155 160
+-- SQLNESS SORT_RESULT 2 1
+tql eval (100, 160, '5s') max_over_time(dense_extrema[40s]);
+
+drop table dense_extrema;

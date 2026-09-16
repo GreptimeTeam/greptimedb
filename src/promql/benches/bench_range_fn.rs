@@ -753,11 +753,13 @@ fn bench_extrema_functions(c: &mut Criterion) {
     let values = build_gauge_values(num_points);
     let min_udf = MinOverTime::scalar_udf();
     let max_udf = MaxOverTime::scalar_udf();
-    let mut backwards_ranges = (0..=num_points - 20)
+    // Cases meant to reuse candidates use 40-sample windows: the UDF rescans batches
+    // whose windows average fewer than 32 samples.
+    let mut backwards_ranges = (0..=num_points - 40)
         .step_by(5)
-        .map(|offset| (offset as u32, 20))
+        .map(|offset| (offset as u32, 40))
         .collect::<Vec<_>>();
-    backwards_ranges.extend((0..=512).step_by(5).map(|offset| (offset as u32, 20)));
+    backwards_ranges.extend((0..=512).step_by(5).map(|offset| (offset as u32, 40)));
 
     // The last two controls use explicit ranges instead of a regular window/step sweep.
     let cases = vec![
@@ -768,21 +770,29 @@ fn bench_extrema_functions(c: &mut Criterion) {
                 .collect::<Vec<_>>(),
         ),
         (
-            "w20_step1",
-            (0..=num_points - 20)
-                .map(|offset| (offset as u32, 20))
+            "w40_step1",
+            (0..=num_points - 40)
+                .map(|offset| (offset as u32, 40))
                 .collect::<Vec<_>>(),
         ),
         (
-            "w20_step5",
-            (0..=num_points - 20)
+            "w40_step5",
+            (0..=num_points - 40)
                 .step_by(5)
-                .map(|offset| (offset as u32, 20))
+                .map(|offset| (offset as u32, 40))
                 .collect::<Vec<_>>(),
         ),
         (
             "w240_step1",
             (0..=num_points - 240)
+                .map(|offset| (offset as u32, 240))
+                .collect::<Vec<_>>(),
+        ),
+        // A quarter of the window is the widest step that still reuses candidates.
+        (
+            "w240_step60",
+            (0..=num_points - 240)
+                .step_by(60)
                 .map(|offset| (offset as u32, 240))
                 .collect::<Vec<_>>(),
         ),
@@ -793,7 +803,7 @@ fn bench_extrema_functions(c: &mut Criterion) {
                 .map(|offset| (offset as u32, 240))
                 .collect::<Vec<_>>(),
         ),
-        ("backwards_reset_rebuild_w20_step5", backwards_ranges),
+        ("backwards_reset_rebuild_w40_step5", backwards_ranges),
         (
             "low_coverage_full_backing_w4",
             vec![
