@@ -18,8 +18,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::common::Result;
-use datafusion::execution::context::SessionState;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::physical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::Column;
@@ -176,7 +177,7 @@ fn remap_physical_expr_columns(
     expr: Arc<dyn PhysicalExpr>,
     input_schema: &datafusion::arrow::datatypes::Schema,
 ) -> Result<Arc<dyn PhysicalExpr>> {
-    if let Some(column) = expr.as_any().downcast_ref::<Column>() {
+    if let Some(column) = expr.downcast_ref::<Column>() {
         return Ok(Arc::new(Column::new_with_schema(
             column.name(),
             input_schema,
@@ -205,7 +206,8 @@ impl ExtensionPlanner for RemoteDynFilterReceiverExtensionPlanner {
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
-        _session_state: &SessionState,
+        _session: &dyn Session,
+        _planning_ctx: &PhysicalPlanningContext,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
         let Some(receiver) = node
             .as_any()

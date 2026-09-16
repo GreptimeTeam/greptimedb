@@ -1331,6 +1331,125 @@ async fn test_skip_wal_grpc_unary_stream_and_flight_sql(distributed: bool) {
     env.shutdown().await;
 }
 
+#[apply(both_deployment_cases)]
+async fn test_grpc_json2_row_inserts(distributed: bool) {
+    let mut env = MockInstanceImpl::new("grpc_json2_row_inserts", distributed).await;
+    let server = setup_grpc_server_for_frontend_instance(env.frontend(), None).await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let database = Database::new_with_dbname("greptime-public", Client::with_urls(vec![addr]));
+    database
+        .sql(
+            "CREATE TABLE grpc_json2 (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, j JSON2) \
+             WITH (append_mode='true', 'memtable.type'='bulk')",
+        )
+        .await
+        .unwrap();
+
+    let (datatype, extension) =
+        api::helper::ColumnDataTypeWrapper::try_from(datatypes::prelude::ConcreteDataType::json2(
+            datatypes::types::json_type::JsonNativeType::Null,
+        ))
+        .unwrap()
+        .into_parts();
+
+    // Send the all-NULL JSON2 batch separately to check its type marker.
+    for (index, (host, payload)) in [
+        (
+            "host-a",
+            Some(serde_json::json!({
+                "active": true,
+                "nested": {"items": [1, "two", null, {"ok": false}], "ratio": 1.5},
+                "tags": ["api", "prod"]
+            })),
+        ),
+        (
+            "host-b",
+            Some(serde_json::json!({
+                "active": false,
+                "nested": {"items": [-2, "three", null, {"ok": true}], "ratio": -0.25},
+                "tags": ["worker"]
+            })),
+        ),
+        ("host-a", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = database
+            .row_inserts(RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: "grpc_json2".into(),
+                    rows: Some(Rows {
+                        schema: vec![
+                            ColumnSchema {
+                                column_name: "ts".into(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "host".into(),
+                                datatype: ColumnDataType::String as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "j".into(),
+                                datatype: datatype as i32,
+                                datatype_extension: extension.clone(),
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            },
+                        ],
+                        rows: vec![Row {
+                            values: vec![
+                                Value {
+                                    value_data: Some(ValueData::TimestampMillisecondValue(
+                                        index as i64,
+                                    )),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::StringValue(host.into())),
+                                },
+                                Value {
+                                    value_data: payload.map(|x| {
+                                        ValueData::JsonValue(api::helper::encode_json_value(
+                                            x.into(),
+                                        ))
+                                    }),
+                                },
+                            ],
+                        }],
+                    }),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(output, 1);
+    }
+
+    let output = database
+        .sql("SELECT host, j FROM grpc_json2 ORDER BY ts")
+        .await
+        .unwrap();
+    let batches = match output.data {
+        OutputData::RecordBatches(batches) => batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    let pretty = batches.pretty_print().unwrap();
+    let expected = r#"+--------+---------------------------------------------------------------------------------------------------+
+| host   | j                                                                                                 |
++--------+---------------------------------------------------------------------------------------------------+
+| host-a | {"active":true,"nested":{"items":[1,"two",null,{"ok":false}],"ratio":1.5},"tags":["api","prod"]}  |
+| host-b | {"active":false,"nested":{"items":[-2,"three",null,{"ok":true}],"ratio":-0.25},"tags":["worker"]} |
+| host-a |                                                                                                   |
++--------+---------------------------------------------------------------------------------------------------+"#;
+    assert_eq!(pretty, expected);
+    server.shutdown().await.unwrap();
+    env.shutdown().await;
+}
+
 pub async fn test_insert_and_select(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_insert_and_select").await;

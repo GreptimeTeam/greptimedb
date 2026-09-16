@@ -449,7 +449,14 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         }),
                         JsonFormat::Json2(native_type) => {
                             if native_type.is_null() {
-                                None
+                                Some(ColumnDataTypeExtension {
+                                    type_ext: Some(TypeExt::JsonNativeType(Box::new(
+                                        JsonNativeTypeExtension {
+                                            datatype: ColumnDataType::Json as i32,
+                                            datatype_extension: None,
+                                        },
+                                    ))),
+                                })
                             } else {
                                 let concrete_type =
                                     ConcreteDataType::from_arrow_type(&native_type.as_arrow_type());
@@ -1289,6 +1296,32 @@ mod tests {
 
         let values = values_with_capacity(ColumnDataType::Dictionary, 2);
         assert!(values.bool_values.is_empty());
+    }
+
+    #[test]
+    fn test_json2_unknown_type_encoding() {
+        let datatype = ConcreteDataType::json2(JsonNativeType::Null);
+        let wrapper = ColumnDataTypeWrapper::try_from(datatype.clone()).unwrap();
+        assert_eq!(
+            wrapper.to_parts(),
+            (
+                ColumnDataType::Json,
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+                        datatype: ColumnDataType::Json as i32,
+                        datatype_extension: None,
+                    }))),
+                }),
+            )
+        );
+        assert_eq!(ConcreteDataType::from(wrapper), datatype);
+
+        for extension in [None, Some(ColumnDataTypeExtension::default())] {
+            assert_eq!(
+                ConcreteDataType::from(ColumnDataTypeWrapper::new(ColumnDataType::Json, extension)),
+                datatype
+            );
+        }
     }
 
     #[test]
