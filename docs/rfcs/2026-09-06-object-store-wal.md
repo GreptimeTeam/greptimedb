@@ -1,6 +1,6 @@
 ---
 Feature Name: Object Store WAL
-Tracking Issue: TBD
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/9197
 Date: 2026-09-06
 Author: jeremyhi
 ---
