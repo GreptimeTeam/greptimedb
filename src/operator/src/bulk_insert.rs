@@ -43,6 +43,9 @@ use crate::{error, metrics};
 
 impl Inserter {
     /// Routes and writes a prepared table batch, returning the affected row count.
+    ///
+    /// Callers must exclude instant-TTL tables and handle Flow notifications after
+    /// successful writes. This execution helper does not perform either step.
     pub async fn flush_bulk_batch(
         &self,
         table_info: TableInfoRef,

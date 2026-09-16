@@ -14,8 +14,12 @@
 
 use std::collections::HashMap;
 
-use api::helper::{ColumnDataTypeWrapper, pb_value_to_value_ref};
-use api::v1::{Rows, SemanticType};
+use api::helper::{
+    ColumnDataTypeWrapper, pb_value_to_value_ref, proto_value_type, proto_value_type_match,
+};
+use api::v1::column_data_type_extension::TypeExt;
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, ColumnDataTypeExtension, Rows, SemanticType, Value};
 use arrow::record_batch::RecordBatch;
 use common_error::ext::BoxedError;
 use datatypes::data_type::ConcreteDataType;
@@ -29,7 +33,12 @@ use crate::error::{self, Result};
 /// Missing columns evaluate their defaults once per conversion. Explicit nulls
 /// remain nulls. Semantic types are checked against the table time index and
 /// primary-key indices.
+///
+/// # Panics
+///
+/// Panics if `rows.rows` is empty. Callers must skip empty writes before conversion.
 pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<RecordBatch> {
+    assert!(!rows.rows.is_empty(), "prepared rows must not be empty");
     let schema = &table_info.meta.schema;
     let mut source_columns = HashMap::with_capacity(rows.schema.len());
     for (index, source) in rows.schema.iter().enumerate() {
@@ -106,6 +115,16 @@ pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<Recor
                         reason: format!("Null supplied for non-nullable column {}", column.name),
                     }
                 );
+                ensure!(
+                    value_matches_type(
+                        value,
+                        rows.schema[index].datatype,
+                        rows.schema[index].datatype_extension.as_ref(),
+                    ),
+                    error::InvalidInsertRequestSnafu {
+                        reason: format!("Value datatype differs for column {}", column.name),
+                    }
+                );
                 builder
                     .try_push_value_ref(&pb_value_to_value_ref(
                         value,
@@ -127,6 +146,49 @@ pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<Recor
         arrays.push(vector.to_arrow_array());
     }
     RecordBatch::try_new(schema.arrow_schema().clone(), arrays).context(error::ComputeArrowSnafu)
+}
+
+// Validate nested values before the infallible protobuf conversion reads type extensions.
+fn value_matches_type(
+    value: &Value,
+    datatype: i32,
+    extension: Option<&ColumnDataTypeExtension>,
+) -> bool {
+    let Some(value_type) = proto_value_type(value) else {
+        return true;
+    };
+    let Ok(column_type) = ColumnDataType::try_from(datatype) else {
+        return false;
+    };
+    if !proto_value_type_match(column_type, value_type) {
+        return false;
+    }
+    match value.value_data.as_ref() {
+        Some(ValueData::ListValue(list)) => {
+            let Some(TypeExt::ListType(item)) = extension.and_then(|ext| ext.type_ext.as_ref())
+            else {
+                return false;
+            };
+            list.items.iter().all(|value| {
+                value_matches_type(value, item.datatype, item.datatype_extension.as_deref())
+            })
+        }
+        Some(ValueData::StructValue(value)) => {
+            let Some(TypeExt::StructType(schema)) = extension.and_then(|ext| ext.type_ext.as_ref())
+            else {
+                return false;
+            };
+            value.items.len() == schema.fields.len()
+                && value
+                    .items
+                    .iter()
+                    .zip(&schema.fields)
+                    .all(|(value, field)| {
+                        value_matches_type(value, field.datatype, field.datatype_extension.as_ref())
+                    })
+        }
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -375,5 +437,94 @@ mod tests {
                 "case {case}"
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "prepared rows must not be empty")]
+    fn test_empty_rows_contract() {
+        let (mut rows, schema) = fixture();
+        rows.rows.clear();
+        let _ = rows_to_record_batch(&rows, &table_info(schema));
+    }
+
+    #[test]
+    fn test_reject_nested_values_for_scalar_column() {
+        for value in [
+            ValueData::ListValue(api::v1::ListValue { items: vec![] }),
+            ValueData::StructValue(api::v1::StructValue { items: vec![] }),
+        ] {
+            let (mut rows, schema) = fixture();
+            rows.rows[0].values[1].value_data = Some(value);
+            assert!(matches!(
+                rows_to_record_batch(&rows, &table_info(schema)),
+                Err(error::Error::InvalidInsertRequest { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn test_nested_value_validation() {
+        let int = Value {
+            value_data: Some(ValueData::I32Value(1)),
+        };
+        let list = Value {
+            value_data: Some(ValueData::ListValue(api::v1::ListValue {
+                items: vec![int.clone()],
+            })),
+        };
+        let structure = Value {
+            value_data: Some(ValueData::StructValue(api::v1::StructValue {
+                items: vec![int.clone()],
+            })),
+        };
+        let types = [
+            (
+                ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int32_datatype()),
+                list.clone(),
+            ),
+            (
+                ColumnDataTypeWrapper::struct_datatype(vec![(
+                    "count".to_string(),
+                    ColumnDataTypeWrapper::int32_datatype(),
+                )]),
+                structure.clone(),
+            ),
+        ];
+        for (datatype, valid) in types {
+            let (kind, extension) = datatype.to_parts();
+            let schema = Schema::new(vec![ColumnSchema::new("nested", datatype.into(), true)]);
+            let mut column = source("nested", kind);
+            column.datatype_extension = extension;
+            let mut rows = Rows {
+                schema: vec![column],
+                rows: vec![Row {
+                    values: vec![valid],
+                }],
+            };
+            let table = table_info(schema);
+            assert_eq!(rows_to_record_batch(&rows, &table).unwrap().num_rows(), 1);
+            for invalid in [list.clone(), structure.clone()] {
+                match rows.rows[0].values[0].value_data.as_mut().unwrap() {
+                    ValueData::ListValue(v) => v.items = vec![invalid],
+                    ValueData::StructValue(v) => v.items = vec![invalid],
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    rows_to_record_batch(&rows, &table),
+                    Err(error::Error::InvalidInsertRequest { .. })
+                ));
+            }
+        }
+        let datatype = ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::list_datatype(
+            ColumnDataTypeWrapper::int32_datatype(),
+        ));
+        let (kind, extension) = datatype.to_parts();
+        let value = Value {
+            value_data: Some(ValueData::ListValue(api::v1::ListValue {
+                items: vec![list],
+            })),
+        };
+        assert!(value_matches_type(&value, kind as i32, extension.as_ref()));
+        assert!(!value_matches_type(&value, kind as i32, None));
     }
 }
