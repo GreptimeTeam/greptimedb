@@ -2937,7 +2937,12 @@ mod tests {
             time_range: None,
         };
         let result = instance
-            .prepare_database_export(req.clone(), None, &QueryContext::arc())
+            .export_database_for_test(
+                req.clone(),
+                None,
+                &tokio_util::sync::CancellationToken::new(),
+                QueryContext::arc(),
+            )
             .await;
         assert!(matches!(result, Err(Error::Permission { .. })));
         let expected = PermissionTableTargets::resolved(vec![
@@ -2948,9 +2953,16 @@ mod tests {
         // An empty selection must still check the operation privilege.
         instance
             .plugins
-            .insert::<PermissionCheckerRef>(Arc::new(WriteOnlyPermissionChecker));
+            .map_mut::<PermissionCheckerRef, _, _>(|checker| {
+                *checker.unwrap() = Arc::new(WriteOnlyPermissionChecker)
+            });
         let result = instance
-            .prepare_database_export(req, Some(&[]), &QueryContext::arc())
+            .export_database_for_test(
+                req,
+                Some(&[]),
+                &tokio_util::sync::CancellationToken::new(),
+                QueryContext::arc(),
+            )
             .await;
         assert!(matches!(result, Err(Error::Permission { .. })));
         Ok(())

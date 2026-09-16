@@ -39,6 +39,7 @@ use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
+use table::TableRef;
 use table::metadata::TableInfo;
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -248,19 +249,25 @@ impl DistExtensionPlanner {
         table_name: &TableName,
         logical_plan: &LogicalPlan,
     ) -> Result<Vec<RegionId>> {
-        let table = self
-            .catalog_manager
-            .table(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-                None,
-            )
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table: table_name.to_string(),
-            })?;
+        let mut extractor = TableNameExtractor::default();
+        let _ = logical_plan.visit(&mut extractor)?;
+        // Resolving by name again could bind an authorized scan to a replacement table.
+        let table = match extractor.table {
+            Some(table) => table,
+            None => self
+                .catalog_manager
+                .table(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                    None,
+                )
+                .await
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table: table_name.to_string(),
+                })?,
+        };
 
         let table_info = table.table_info();
         let (physical_table_id, physical_table_route) = self
@@ -468,6 +475,7 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
 #[derive(Default)]
 struct TableNameExtractor {
     pub table_name: Option<TableName>,
+    table: Option<TableRef>,
 }
 
 impl TreeNodeVisitor<'_> for TableNameExtractor {
@@ -482,6 +490,7 @@ impl TreeNodeVisitor<'_> for TableNameExtractor {
                         .downcast_ref::<DfTableProviderAdapter>()
                 {
                     if provider.table().table_type() == TableType::Base {
+                        self.table = Some(provider.table());
                         let info = provider.table().table_info();
                         self.table_name = Some(TableName::new(
                             info.catalog_name.clone(),
@@ -770,6 +779,16 @@ mod tests {
                     .and(partition_col("rack").gt_eq(Value::String("n".into()))),
             ),
         ]
+    }
+
+    #[tokio::test]
+    async fn region_routing_uses_captured_table() {
+        let (mut planner, plan, table_name) = planner_and_plan(vec![0], vec![None]).await;
+        planner.catalog_manager = MemoryCatalogManager::with_default_setup();
+        assert_eq!(
+            vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
+            planner.get_regions(&table_name, &plan).await.unwrap()
+        );
     }
 
     #[tokio::test]

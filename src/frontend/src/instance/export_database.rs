@@ -37,6 +37,9 @@ impl Instance {
         cancellation: &CancellationToken,
         ctx: QueryContextRef,
     ) -> Result<DatabaseExportSummary> {
+        if cancellation.is_cancelled() {
+            return Err(operator::error::DatabaseExportCancelledSnafu.build().into());
+        }
         let plan = self.prepare_database_export(req, names, &ctx).await?;
         Ok(self
             .statement_executor
@@ -45,7 +48,7 @@ impl Instance {
     }
 
     /// Exercise the internal authenticated entry without exposing SQL/CLI activation.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     pub async fn export_database_for_test(
         &self,
         req: CopyDatabaseRequest,
@@ -56,7 +59,7 @@ impl Instance {
         self.export_database(req, names, cancellation, ctx).await
     }
 
-    pub(crate) async fn prepare_database_export(
+    async fn prepare_database_export(
         &self,
         req: CopyDatabaseRequest,
         names: Option<&[String]>,
