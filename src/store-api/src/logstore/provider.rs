@@ -141,9 +141,6 @@ impl Provider {
     }
 
     /// Returns true if it's remote WAL.
-    ///
-    /// Remote WAL entries are shared, immutable objects that are read and obsoleted per
-    /// region, so replay starts from the latest entry id of the WAL instead of 0.
     pub fn is_remote_wal(&self) -> bool {
         matches!(self, Provider::Kafka(_) | Provider::ObjectStore(_))
     }
@@ -174,7 +171,7 @@ impl Provider {
         None
     }
 
-    /// Returns the reference of [`ObjectStoreProvider`] if it's the type of [`LogStoreProvider::ObjectStore`].
+    /// Returns the reference of [`ObjectStoreProvider`] if it's the type of [`Provider::ObjectStore`].
     pub fn as_object_store_provider(&self) -> Option<&Arc<ObjectStoreProvider>> {
         if let Provider::ObjectStore(ns) = self {
             return Some(ns);
