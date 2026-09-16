@@ -161,7 +161,7 @@ pub(crate) enum NestedSelectionPolicy {
     /// remainder because it may contain `j.cold`. When requesting a materialized
     /// object such as `j.commit`, also read the remainder because it may contain
     /// unmaterialized children of `j.commit`.
-    Json2V2,
+    Json2,
 }
 
 impl NestedSelectionPolicy {
@@ -173,7 +173,7 @@ impl NestedSelectionPolicy {
         col: &ParquetReadColumn,
         selected: &mut HashSet<usize>,
     ) {
-        select_json2_v2_leaves(schema, leaf_range, col, selected);
+        select_json2_leaves(schema, leaf_range, col, selected);
     }
 }
 
@@ -268,7 +268,7 @@ fn build_parquet_leaves_indices(
         if col.nested_paths().is_empty() {
             matched_leaves.extend(leaf_range);
         } else if is_json2_extension_type(&source_schema.fields()[col.root_index()]) {
-            NestedSelectionPolicy::Json2V2.select_leaves(
+            NestedSelectionPolicy::Json2.select_leaves(
                 parquet_schema_desc,
                 leaf_range,
                 col,
@@ -317,7 +317,7 @@ fn group_requested_leaf_ranges(
 }
 
 /// V2 can additionally store missing paths and object children in the remainder.
-fn select_json2_v2_leaves(
+fn select_json2_leaves(
     schema: &SchemaDescriptor,
     leaf_range: Range<usize>,
     col: &ParquetReadColumn,
@@ -593,7 +593,7 @@ mod tests {
         let plan = build_projection_plan(
             &projection,
             &parquet,
-            &[Some(NestedSelectionPolicy::Json2V2)],
+            &[Some(NestedSelectionPolicy::Json2)],
         );
 
         assert_eq!(vec![true], plan.projected_root_presence);
@@ -612,7 +612,7 @@ mod tests {
         let plan = build_projection_plan(
             &projection,
             &parquet,
-            &[Some(NestedSelectionPolicy::Json2V2)],
+            &[Some(NestedSelectionPolicy::Json2)],
         );
 
         assert_eq!(vec![true], plan.projected_root_presence);
@@ -631,7 +631,7 @@ mod tests {
         let plan = build_projection_plan(
             &projection,
             &parquet,
-            &[Some(NestedSelectionPolicy::Json2V2)],
+            &[Some(NestedSelectionPolicy::Json2)],
         );
 
         assert_eq!(vec![true], plan.projected_root_presence);
@@ -657,7 +657,7 @@ mod tests {
         let plan = build_projection_plan(
             &projection,
             &parquet,
-            &[Some(NestedSelectionPolicy::Json2V2)],
+            &[Some(NestedSelectionPolicy::Json2)],
         );
 
         assert_eq!(vec![true], plan.projected_root_presence);
@@ -839,7 +839,7 @@ mod tests {
                     );
                     match policy {
                         None => field,
-                        Some(NestedSelectionPolicy::Json2V2) => {
+                        Some(NestedSelectionPolicy::Json2) => {
                             field.with_extension_type(Json2ExtensionType::new(Arc::new(
                                 JsonMetadata::new(JsonSettings::default()),
                             )))
