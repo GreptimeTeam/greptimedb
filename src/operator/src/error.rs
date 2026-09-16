@@ -1183,7 +1183,7 @@ define_into_tonic_status!(Error);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::error::*;
 
     #[test]
     fn admin_function_preserves_external_error_metadata() {
