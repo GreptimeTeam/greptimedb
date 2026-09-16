@@ -8125,6 +8125,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-wal",
+ "crc32fast",
  "dashmap",
  "delta-encoding",
  "derive_builder 0.20.2",
