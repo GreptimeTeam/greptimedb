@@ -83,6 +83,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
@@ -91,4 +92,3 @@ common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 object-store = { workspace = true, features = ["testing"] }
 path-slash = "0.2"
-url.workspace = true

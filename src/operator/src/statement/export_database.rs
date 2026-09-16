@@ -31,6 +31,7 @@ use table::metadata::TableType;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::table_reference::TableReference;
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use crate::error::{self, InvalidDatabaseExportSnafu, Result};
 use crate::statement::StatementExecutor;
@@ -55,6 +56,20 @@ impl PreparedDatabaseExport {
 enum DatabaseExportJob {
     Ordinary(TableRef),
     Metric(LogicalTableExport),
+}
+
+fn validate_directory(location: &str) -> Result<()> {
+    let parsed_directory = match Url::parse(location) {
+        Ok(url) => {
+            url.query().is_none() && url.fragment().is_none() && is_directory_location(url.path())
+        }
+        Err(_) => true,
+    };
+    ensure!(
+        is_directory_location(location) && parsed_directory,
+        error::InvalidCopyDatabasePathSnafu { value: location }
+    );
+    Ok(())
 }
 
 impl StatementExecutor {
@@ -106,12 +121,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         tables: Vec<TableRef>,
     ) -> Result<PreparedDatabaseExport> {
-        ensure!(
-            is_directory_location(&req.location),
-            error::InvalidCopyDatabasePathSnafu {
-                value: &req.location,
-            }
-        );
+        validate_directory(&req.location)?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         ensure!(
             matches!(format, Format::Parquet(_)),
@@ -340,6 +350,22 @@ mod tests {
     use tokio::sync::{Semaphore, mpsc};
 
     use super::*;
+
+    #[test]
+    fn directory_url_components_cannot_capture_output_names() {
+        for location in [
+            "file:///copy/fresh?attempt=/",
+            "file:///copy/fresh#attempt/",
+            "s3://bucket/fresh?attempt=/",
+            "s3://bucket/fresh#attempt/",
+            "file:///copy/fresh",
+        ] {
+            assert!(validate_directory(location).is_err(), "{location}");
+        }
+        for location in ["/copy/fresh/", "file:///copy/fresh/", "s3://bucket/fresh/"] {
+            validate_directory(location).unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn bounded_admission_and_drain() {

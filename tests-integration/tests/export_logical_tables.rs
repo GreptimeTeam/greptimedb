@@ -386,6 +386,28 @@ async fn database_roundtrip(instance: &Arc<Instance>) {
         )
         .await
     );
+    for suffix in ["?attempt=/", "#attempt/"] {
+        let path = destination.path().join("invalid_destination");
+        let mut req = database_request(&path);
+        req.location = format!("{}{suffix}", url::Url::from_file_path(&path).unwrap());
+        req.with.insert("parallelism".into(), "1".into());
+        let result = instance
+            .export_database_for_test(
+                req,
+                Some(&["audit".into(), "original_audit".into()]),
+                &CancellationToken::new(),
+                QueryContext::arc(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(frontend::error::Error::TableOperation {
+                source: operator::error::Error::InvalidCopyDatabasePath { .. },
+                ..
+            })
+        ));
+        assert!(!path.exists());
+    }
     let token = CancellationToken::new();
     token.cancel();
     let req = database_request(&destination.path().join("cancelled"));
