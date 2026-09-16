@@ -133,6 +133,7 @@ impl Configurable for StandaloneOptions {
             "heartbeat_env_vars",
             "wal.broker_endpoints",
             "event_recorder.event_types",
+            "experimental_pending_rows_batcher.protocols",
         ])
     }
 }
@@ -213,6 +214,28 @@ mod tests {
     use common_event_recorder::EventTypeFilter;
 
     use crate::options::*;
+
+    #[test]
+    fn test_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [(
+                "STANDALONE_BATCHER_TEST__EXPERIMENTAL_PENDING_ROWS_BATCHER__PROTOCOLS",
+                Some("influxdb,http_sql"),
+            )],
+            || {
+                let options =
+                    StandaloneOptions::load_layered_options(None, "STANDALONE_BATCHER_TEST")
+                        .unwrap();
+                assert_eq!(
+                    options.experimental_pending_rows_batcher.protocols,
+                    vec![
+                        servers::http::BatchingProtocol::Influxdb,
+                        servers::http::BatchingProtocol::HttpSql
+                    ]
+                );
+            },
+        );
+    }
 
     #[test]
     fn test_protocol_pending_rows_batcher_config() {

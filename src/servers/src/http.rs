@@ -276,6 +276,8 @@ impl HttpServer {
 pub struct HttpOptions {
     pub addr: String,
 
+    /// Request timeout; zero disables it. Frontend raises a nonzero timeout to at least
+    /// the largest active synchronous Prom or shared table batch flush interval plus one second.
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
 

@@ -127,6 +127,7 @@ impl Configurable for FrontendOptions {
             "heartbeat_env_vars",
             "meta_client.metasrv_addrs",
             "event_recorder.event_types",
+            "experimental_pending_rows_batcher.protocols",
         ])
     }
 }
@@ -220,6 +221,27 @@ mod tests {
 
     type GrpcStream<T> =
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
+
+    #[test]
+    fn test_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [(
+                "FRONTEND_BATCHER_TEST__EXPERIMENTAL_PENDING_ROWS_BATCHER__PROTOCOLS",
+                Some("influxdb,http_sql"),
+            )],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_BATCHER_TEST").unwrap();
+                assert_eq!(
+                    options.experimental_pending_rows_batcher.protocols,
+                    vec![
+                        servers::http::BatchingProtocol::Influxdb,
+                        servers::http::BatchingProtocol::HttpSql
+                    ]
+                );
+            },
+        );
+    }
 
     #[test]
     fn test_protocol_pending_rows_batcher_config() {
