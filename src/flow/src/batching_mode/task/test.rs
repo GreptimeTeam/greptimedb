@@ -2339,6 +2339,7 @@ async fn test_exact_required_empty_delta_complete_watermark_advances_checkpoint(
     ));
     let (affected_rows, _) = task
         .execute_logical_plan_unlocked(
+            &query_engine,
             &frontend_client,
             &plan_info.plan,
             &plan_info.dirty_restore,
