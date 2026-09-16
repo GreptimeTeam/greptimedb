@@ -96,7 +96,7 @@ use crate::error::{
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-use crate::statement::set::set_allow_query_fallback;
+use crate::statement::set::{set_allow_query_fallback, set_nested_broadcast_join_build_table};
 
 /// A configurator that customizes or enhances a [`StatementExecutor`].
 #[async_trait::async_trait]
@@ -549,6 +549,12 @@ impl StatementExecutor {
 
             // Allow query to fallback when failed to push down.
             "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,
+
+            // PoC: build side table of the nested broadcast join rewrite, e.g.
+            // `SET dist_planner.nested_broadcast_join_build_table = 'device_limits'`.
+            "DIST_PLANNER.NESTED_BROADCAST_JOIN_BUILD_TABLE" => {
+                set_nested_broadcast_join_build_table(set_var.value, query_ctx)?
+            }
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {

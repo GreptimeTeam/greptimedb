@@ -249,6 +249,49 @@ pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Resul
     }
 }
 
+/// PoC: set the build side table of the nested broadcast join rewrite, e.g.
+/// `SET dist_planner.nested_broadcast_join_build_table = 'device_limits'`.
+///
+/// An empty value (`''`) disables the rewrite.
+pub fn set_nested_broadcast_join_build_table(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let Some((expr, [])) = exprs.split_first() else {
+        return NotSupportedSnafu {
+            feat: "Set variable value must have one and only one value for nested broadcast join build table",
+        }
+        .fail();
+    };
+
+    let value = match expr {
+        Expr::Identifier(Ident {
+            value,
+            quote_style: _,
+            span: _,
+        })
+        | Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(value),
+            ..
+        })
+        | Expr::Value(ValueWithSpan {
+            value: Value::DoubleQuotedString(value),
+            ..
+        }) => value.clone(),
+        expr => {
+            return NotSupportedSnafu {
+                feat: format!(
+                    "Unsupported nested broadcast join build table expr {} in set variable statement",
+                    expr
+                ),
+            }
+            .fail();
+        }
+    };
+
+    let value = value.trim().to_string();
+    ctx.configuration_parameter()
+        .set_nested_broadcast_join_build_table((!value.is_empty()).then_some(value));
+    Ok(())
+}
+
 pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let Some((var_value, [])) = exprs.split_first() else {
         return NotSupportedSnafu {

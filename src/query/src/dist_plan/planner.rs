@@ -438,7 +438,7 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
 
 /// Visitor to extract table name from logical plan (TableScan node)
 #[derive(Default)]
-struct TableNameExtractor {
+pub(crate) struct TableNameExtractor {
     pub table_name: Option<TableName>,
 }
 

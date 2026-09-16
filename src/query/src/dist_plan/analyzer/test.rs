@@ -34,7 +34,7 @@ use datafusion_common::{ExprSchema, JoinType, ScalarValue};
 use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
-    binary_expr, col, lit,
+    binary_expr, build_join_schema, col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
@@ -837,6 +837,7 @@ fn expand_sort_alias_conflict_limit() {
     let mut config = ConfigOptions::default();
     config.extensions.insert(DistPlannerOptions {
         allow_query_fallback: true,
+        ..Default::default()
     });
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
@@ -2889,4 +2890,270 @@ fn scheduled_none_falls_back_to_wall_clock() {
         remote_section.contains("TimestampNanosecond("),
         "Remote should contain TimestampNanosecond:\n{result_str}"
     );
+}
+
+/// PoC: builds `t1 <join_type> JOIN t2` on `t1.number = t2.number`, i.e. the plan the
+/// distributed planner sees before the nested broadcast join pass runs.
+fn nested_broadcast_join_plan_with(join_type: JoinType) -> LogicalPlan {
+    let left_table = TestTable::table_with_name(0, "t1".to_string());
+    let right_table = TestTable::table_with_name(1, "t2".to_string());
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let right_plan = LogicalPlanBuilder::scan_with_filters("t2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    LogicalPlanBuilder::scan_with_filters("t1", left_source, None, vec![])
+        .unwrap()
+        .join_on(
+            right_plan,
+            join_type,
+            vec![col("t1.number").eq(col("t2.number"))],
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// Distributed plan of `t1 INNER JOIN t2`.
+fn nested_broadcast_join_plan() -> LogicalPlan {
+    nested_broadcast_join_plan_with(JoinType::Inner)
+}
+
+fn nested_broadcast_join_config(build_table: &str) -> ConfigOptions {
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(DistPlannerOptions {
+        nested_broadcast_join_build_table: Some(build_table.to_string()),
+        ..Default::default()
+    });
+    config
+}
+
+/// Distributed plan of `t1 INNER JOIN t2` with the nested broadcast join switch enabled
+/// for `build_table`.
+fn rewrite_nested_broadcast_join(plan: LogicalPlan, build_table: &str) -> LogicalPlan {
+    DistPlannerAnalyzer {}
+        .analyze(plan, &nested_broadcast_join_config(build_table))
+        .unwrap()
+}
+
+/// Returns the outer `MergeScan` of a rewritten plan.
+fn find_outer_merge_scan(plan: &LogicalPlan) -> &MergeScanLogicalPlan {
+    let LogicalPlan::Extension(extension) = plan else {
+        panic!("expected the outer node to be a MergeScan, got: {plan}");
+    };
+
+    extension
+        .node
+        .as_any()
+        .downcast_ref::<MergeScanLogicalPlan>()
+        .unwrap_or_else(|| panic!("expected the outer node to be a MergeScan, got: {plan}"))
+}
+
+/// Returns the join wrapped by the outer `MergeScan`.
+fn outer_join(plan: &LogicalPlan) -> &datafusion_expr::Join {
+    let outer = find_outer_merge_scan(plan);
+    let LogicalPlan::Join(join) = outer.input() else {
+        panic!(
+            "expected the outer MergeScan to wrap a join, got: {}",
+            outer.input()
+        );
+    };
+
+    join
+}
+
+/// Without the switch, the join of the two `MergeScan`s is left alone.
+#[test]
+fn nested_broadcast_join_rewrite_disabled_keeps_join_above_merge_scans() {
+    let plan = nested_broadcast_join_plan();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+
+    let expected = [
+        "Inner Join: t1.number = t2.number",
+        "  Projection: t1.pk1, t1.pk2, t1.pk3, t1.ts, t1.number",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Filter: t1.number IS NOT NULL",
+        "  TableScan: t1",
+        "]]",
+        "  Projection: t2.pk1, t2.pk2, t2.pk3, t2.ts, t2.number",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Filter: t2.number IS NOT NULL",
+        "  TableScan: t2",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// With the switch enabled, the build side `MergeScan` becomes the inner scan of the
+/// outer `MergeScan` (which reads the probe table's regions and runs the join locally).
+#[test]
+fn nested_broadcast_join_rewrite_nests_build_side_merge_scan() {
+    let result = rewrite_nested_broadcast_join(nested_broadcast_join_plan(), "t2");
+
+    let expected = [
+        "MergeScan [is_placeholder=false, remote_input=[",
+        "Inner Join: t1.number = t2.number",
+        "  Projection: t1.pk1, t1.pk2, t1.pk3, t1.ts, t1.number",
+        "    Filter: t1.number IS NOT NULL",
+        "      TableScan: t1",
+        "  Projection: t2.pk1, t2.pk2, t2.pk3, t2.ts, t2.number",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Filter: t2.number IS NOT NULL",
+        "  TableScan: t2",
+        "]]",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+
+    // The probe side must be a local plan, the build side must keep its MergeScan.
+    let join = outer_join(&result);
+    assert_eq!(JoinType::Inner, join.join_type);
+    assert_eq!(1, join.on.len());
+    assert!(
+        !contains_merge_scan(&join.left),
+        "probe side must be local, got: {}",
+        join.left
+    );
+    assert!(
+        find_merge_scan(&join.right).is_some(),
+        "build side must keep its MergeScan, got: {}",
+        join.right
+    );
+    // The probe table must be visited first so that the outer MergeScan is routed by the
+    // probe table's regions.
+    assert_eq!(
+        "t1",
+        table_name_of(find_outer_merge_scan(&result).input())
+            .unwrap()
+            .table_name,
+        "expected t1 to route the outer scan, got: {result}"
+    );
+}
+
+/// A build table matching neither side keeps the plan unchanged.
+#[test]
+fn nested_broadcast_join_rewrite_ignores_unknown_build_table() {
+    let result = rewrite_nested_broadcast_join(nested_broadcast_join_plan(), "unknown_table");
+
+    let expected = DistPlannerAnalyzer {}
+        .analyze(nested_broadcast_join_plan(), &ConfigOptions::default())
+        .unwrap();
+    assert_eq!(expected.to_string(), result.to_string());
+}
+
+/// Only `INNER` equi joins are rewritten.
+#[test]
+fn nested_broadcast_join_rewrite_ignores_non_inner_join() {
+    let result =
+        rewrite_nested_broadcast_join(nested_broadcast_join_plan_with(JoinType::Left), "t2");
+
+    let expected = DistPlannerAnalyzer {}
+        .analyze(
+            nested_broadcast_join_plan_with(JoinType::Left),
+            &ConfigOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(expected.to_string(), result.to_string());
+}
+
+/// A build table on the left input is not rewritten: swapping it to the right would
+/// change the output schema (column order) of the join, which the rewrite must preserve.
+/// The plan is kept unchanged (a follow-up may support it by restoring the schema).
+#[test]
+fn nested_broadcast_join_rewrite_ignores_left_side_build() {
+    // `t2 INNER JOIN t1`, i.e. the build table (`t2`) on the left input.
+    let plan = swap_join_inputs(&nested_broadcast_join_plan());
+    let result = rewrite_nested_broadcast_join(plan.clone(), "t2");
+
+    // A left-side build is not rewritten: the result equals the plan the analyzer produces
+    // with the switch turned off.
+    let expected = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    assert_eq!(expected.to_string(), result.to_string());
+}
+
+/// A right-side build is rewritten without changing the output schema of the original
+/// join: the outer MergeScan exposes exactly the same columns in the same order as the
+/// plan the analyzer would produce with the switch turned off.
+#[test]
+fn nested_broadcast_join_rewrite_preserves_join_schema() {
+    let plan = nested_broadcast_join_plan();
+    let result = rewrite_nested_broadcast_join(plan.clone(), "t2");
+
+    // The rewritten plan must expose the same output schema as the non-rewritten one
+    // (switch off): the rewrite only moves where the join runs, never its output columns.
+    let expected = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    assert_eq!(
+        expected.schema().as_arrow(),
+        result.schema().as_arrow(),
+        "expected the rewritten plan to preserve the original output schema"
+    );
+}
+
+/// The rewrite must stay at two levels: a probe side that already contains a `MergeScan`
+/// keeps the plan unchanged.
+#[test]
+fn nested_broadcast_join_pass_ignores_plans_with_more_than_two_levels() {
+    // `MergeScan(t1 regions) { Join(t1, MergeScan(t2)) }` joined with `t3`.
+    let inner = rewrite_nested_broadcast_join(nested_broadcast_join_plan(), "t2");
+    let other_table = TestTable::table_with_name(2, "t3".to_string());
+    let other_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(other_table),
+    )));
+    let other_scan = LogicalPlanBuilder::scan_with_filters("t3", other_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    let plan = LogicalPlanBuilder::from(inner)
+        .join_on(
+            other_scan,
+            JoinType::Inner,
+            vec![col("t2.number").eq(col("t3.number"))],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut rewriter = NestedBroadcastJoinRewriter { build_table: "t3" };
+    let result = plan.clone().rewrite(&mut rewriter).unwrap().data;
+    assert_eq!(
+        plan.to_string(),
+        result.to_string(),
+        "expected the plan to be unchanged"
+    );
+}
+
+/// Swaps the inputs of an inner equi join, e.g. `t1 JOIN t2` becomes `t2 JOIN t1`.
+fn swap_join_inputs(plan: &LogicalPlan) -> LogicalPlan {
+    let LogicalPlan::Join(join) = plan else {
+        panic!("expected a join, got: {plan}");
+    };
+
+    LogicalPlan::Join(Join {
+        left: join.right.clone(),
+        right: join.left.clone(),
+        on: join
+            .on
+            .iter()
+            .map(|(left, right)| (right.clone(), left.clone()))
+            .collect(),
+        schema: Arc::new(
+            build_join_schema(join.right.schema(), join.left.schema(), &join.join_type).unwrap(),
+        ),
+        ..join.clone()
+    })
 }

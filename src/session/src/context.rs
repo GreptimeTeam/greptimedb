@@ -634,6 +634,8 @@ pub struct ConfigurationVariables {
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
     allow_query_fallback: ArcSwap<bool>,
+    /// PoC: build side table of the nested broadcast join rewrite, `None` if disabled.
+    nested_broadcast_join_build_table: ArcSwap<Option<String>>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -643,6 +645,9 @@ impl Clone for ConfigurationVariables {
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
             allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+            nested_broadcast_join_build_table: ArcSwap::new(
+                self.nested_broadcast_join_build_table.load().clone(),
+            ),
         }
     }
 }
@@ -682,6 +687,19 @@ impl ConfigurationVariables {
 
     pub fn set_allow_query_fallback(&self, allow: bool) {
         self.allow_query_fallback.swap(Arc::new(allow));
+    }
+
+    /// PoC: build side table of the nested broadcast join rewrite, `None` if disabled.
+    pub fn nested_broadcast_join_build_table(&self) -> Option<String> {
+        self.nested_broadcast_join_build_table
+            .load()
+            .as_ref()
+            .clone()
+    }
+
+    pub fn set_nested_broadcast_join_build_table(&self, build_table: Option<String>) {
+        self.nested_broadcast_join_build_table
+            .swap(Arc::new(build_table));
     }
 }
 

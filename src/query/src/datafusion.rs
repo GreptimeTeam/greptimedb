@@ -80,6 +80,10 @@ pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
 
 /// Whether to fallback to the original plan when failed to push down.
 pub const QUERY_FALLBACK_HINT: &str = "query_fallback";
+/// PoC gRPC hint to enable the nested broadcast join rewrite for the given build side
+/// table, see [`DistPlannerOptions::nested_broadcast_join_build_table`].
+pub const NESTED_BROADCAST_JOIN_BUILD_TABLE_HINT: &str =
+    "dist_planner.nested_broadcast_join_build_table";
 
 // An unbounded queue keeps draining source RPCs while mutation RPCs on a shared
 // HTTP/2 connection are pending, trading bounded memory for request liveness.
@@ -642,26 +646,54 @@ impl QueryEngine for DatafusionQueryEngine {
 
         // usually it's impossible to have both `set variable` set by sql client and
         // hint in header by grpc client, so only need to deal with them separately
+        // PoC: `dist_planner.nested_broadcast_join_build_table` follows the same two
+        // paths (query context variable or gRPC hint).
+        // Start from the options already configured on the session config (e.g. the
+        // engine level `allow_query_fallback`) so that an insert below doesn't drop them.
+        let mut dist_planner_options = state
+            .config()
+            .options()
+            .extensions
+            .get::<DistPlannerOptions>()
+            .cloned()
+            .unwrap_or_default();
+        let mut has_dist_planner_options = false;
         if query_ctx.configuration_parameter().allow_query_fallback() {
-            state
-                .config_mut()
-                .options_mut()
-                .extensions
-                .insert(DistPlannerOptions {
-                    allow_query_fallback: true,
-                });
+            dist_planner_options.allow_query_fallback = true;
+            has_dist_planner_options = true;
         } else if let Some(fallback) = query_ctx.extension(QUERY_FALLBACK_HINT) {
             // also check the query context for fallback hint
             // if it is set, we will enable the fallback
             if fallback.to_lowercase().parse::<bool>().unwrap_or(false) {
-                state
-                    .config_mut()
-                    .options_mut()
-                    .extensions
-                    .insert(DistPlannerOptions {
-                        allow_query_fallback: true,
-                    });
+                dist_planner_options.allow_query_fallback = true;
+                has_dist_planner_options = true;
             }
+        }
+
+        if let Some(build_table) = query_ctx
+            .configuration_parameter()
+            .nested_broadcast_join_build_table()
+        {
+            dist_planner_options.nested_broadcast_join_build_table = Some(build_table);
+            has_dist_planner_options = true;
+        } else if let Some(build_table) =
+            query_ctx.extension(NESTED_BROADCAST_JOIN_BUILD_TABLE_HINT)
+        {
+            // the hint is set by the client, e.g. `x-greptime-hint` header
+            let build_table = build_table.trim().trim_matches(&['\'', '"'][..]);
+            if !build_table.is_empty() {
+                dist_planner_options.nested_broadcast_join_build_table =
+                    Some(build_table.to_string());
+                has_dist_planner_options = true;
+            }
+        }
+
+        if has_dist_planner_options {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(dist_planner_options);
         }
 
         state

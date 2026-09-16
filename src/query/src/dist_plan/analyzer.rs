@@ -20,11 +20,15 @@ use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+use datafusion_common::tree_node::{
+    Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
+};
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
-use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
+use datafusion_expr::{
+    Expr, Join, JoinType, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn,
+};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::decorrelate_lateral_join::DecorrelateLateralJoin;
 use datafusion_optimizer::decorrelate_predicate_subquery::DecorrelatePredicateSubquery;
@@ -41,6 +45,7 @@ use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
+use table::table_name::TableName;
 
 use crate::dist_plan::RemoteDynFilterProducerId;
 use crate::dist_plan::analyzer::utils::{
@@ -52,6 +57,7 @@ use crate::dist_plan::commutativity::{
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
+use crate::dist_plan::planner::TableNameExtractor;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
@@ -68,9 +74,16 @@ pub(crate) use utils::AliasMapping;
 /// Placeholder for other physical partition columns that are not in logical table
 const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
+    /// PoC switch for the nested broadcast join rewrite: name of the (small) build side
+    /// table, e.g. `device_limits`. `None` (the default) disables the rewrite entirely.
+    ///
+    /// When set, a distributed `Join(MergeScan, MergeScan)` whose build side reads this
+    /// table is rewritten into a nested plan, see
+    /// `DistPlannerAnalyzer::rewrite_nested_broadcast_join`.
+    pub nested_broadcast_join_build_table: Option<String>,
 }
 
 impl ConfigExtension for DistPlannerOptions {
@@ -91,17 +104,32 @@ impl ExtensionOptions for DistPlannerOptions {
     }
 
     fn set(&mut self, key: &str, value: &str) -> DfResult<()> {
-        Err(datafusion_common::DataFusionError::NotImplemented(format!(
-            "DistPlannerOptions does not support set key: {key} with value: {value}"
-        )))
+        match key {
+            "nested_broadcast_join_build_table" => {
+                let value = value.trim().trim_matches(&['\'', '"'][..]);
+                self.nested_broadcast_join_build_table =
+                    (!value.is_empty()).then(|| value.to_string());
+                Ok(())
+            }
+            _ => Err(datafusion_common::DataFusionError::NotImplemented(format!(
+                "DistPlannerOptions does not support set key: {key} with value: {value}"
+            ))),
+        }
     }
 
     fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
-        vec![datafusion::config::ConfigEntry {
-            key: "allow_query_fallback".to_string(),
-            value: Some(self.allow_query_fallback.to_string()),
-            description: "Allow query fallback to fallback plan rewriter",
-        }]
+        vec![
+            datafusion::config::ConfigEntry {
+                key: "allow_query_fallback".to_string(),
+                value: Some(self.allow_query_fallback.to_string()),
+                description: "Allow query fallback to fallback plan rewriter",
+            },
+            datafusion::config::ConfigEntry {
+                key: "nested_broadcast_join_build_table".to_string(),
+                value: self.nested_broadcast_join_build_table.clone(),
+                description: "Build side table of the nested broadcast join rewrite (PoC)",
+            },
+        ]
     }
 }
 
@@ -124,6 +152,8 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let config = Arc::new(config);
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
+        // PoC switch: only rewrite join plans when the build side table is configured.
+        let nested_build_table = opt.and_then(|o| o.nested_broadcast_join_build_table.clone());
 
         // When the query is running under a scheduled Flow context, carry the
         // logical "now" so that `SimplifyExpressions` does not constant-fold
@@ -172,7 +202,12 @@ impl AnalyzerRule for DistPlannerAnalyzer {
             .data;
 
         let result = match self.try_push_down(plan.clone()) {
-            Ok(plan) => plan,
+            Ok(plan) => match nested_build_table.as_deref() {
+                // PoC: `try_push_down` wrapped both join inputs in `MergeScan`, so the
+                // nested broadcast join shape (if any) is visible here.
+                Some(build_table) => Self::rewrite_nested_broadcast_join(plan, build_table)?,
+                None => plan,
+            },
             Err(err) => {
                 if allow_fallback {
                     common_telemetry::warn!(err; "Failed to push down plan, using fallback plan rewriter for plan: {plan}");
@@ -251,6 +286,33 @@ impl DistPlannerAnalyzer {
         let mut rewriter = PlanRewriter::default();
         let result = plan.data.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
+    }
+
+    /// PoC post-pass of [`Self::try_push_down`]: rewrite a distributed join of two
+    /// `MergeScan`s into a nested plan.
+    ///
+    /// Input shape (both inputs may hide the `MergeScan` below pass-through projections):
+    /// ```ignore
+    /// Join
+    /// ├─ probe side: <Projection> -> MergeScan(local A)
+    /// └─ build side: <Projection> -> MergeScan(local B)
+    /// ```
+    ///
+    /// Output shape:
+    /// ```ignore
+    /// MergeScan (probe side's partition columns, reads one partition of A per region)
+    /// └─ Join (the original join conditions, probe side is the left input)
+    ///    ├─ probe side without the MergeScan wrapper (local A plan)
+    ///    └─ build side as-is (inner MergeScan reading all regions of B)
+    /// ```
+    ///
+    /// Every shape that does not match exactly is returned unchanged.
+    fn rewrite_nested_broadcast_join(
+        plan: LogicalPlan,
+        build_table: &str,
+    ) -> DfResult<LogicalPlan> {
+        let mut rewriter = NestedBroadcastJoinRewriter { build_table };
+        Ok(plan.rewrite(&mut rewriter)?.data)
     }
 
     /// Use fallback plan rewriter to rewrite the plan and only push down table scan nodes
@@ -1025,4 +1087,159 @@ impl TreeNodeRewriter for PlanRewriter {
         self.pop_stack();
         Ok(Transformed::no(node))
     }
+}
+
+/// Rewriter for the PoC nested broadcast join pass, see
+/// [`DistPlannerAnalyzer::rewrite_nested_broadcast_join`].
+struct NestedBroadcastJoinRewriter<'a> {
+    /// Name of the build side table, either bare (`device_limits`) or fully qualified.
+    build_table: &'a str,
+}
+
+impl NestedBroadcastJoinRewriter<'_> {
+    /// Returns the rewritten plan if `node` is a join matching the nested broadcast join
+    /// shape, otherwise `None` to keep the plan unchanged.
+    fn try_rewrite_join(&self, node: &LogicalPlan) -> Option<LogicalPlan> {
+        let LogicalPlan::Join(join) = node else {
+            return None;
+        };
+
+        // Guard: this PoC only handles INNER equi-joins.
+        if join.join_type != JoinType::Inner || join.on.is_empty() {
+            return None;
+        }
+
+        // Guard: both inputs must be `MergeScan`s (possibly below pass-through projections).
+        let (left_probe, left_merge_scan) = strip_merge_scan(&join.left)?;
+        let (right_probe, right_merge_scan) = strip_merge_scan(&join.right)?;
+        if left_merge_scan.is_placeholder() || right_merge_scan.is_placeholder() {
+            return None;
+        }
+
+        // Identify the build side by the configured table name. Exactly one side must
+        // match; no match (or both sides matching, e.g. a self join) keeps the plan
+        // unchanged.
+        let left_is_build = table_name_of(left_merge_scan.input())
+            .is_some_and(|name| table_name_matches(&name, self.build_table));
+        let right_is_build = table_name_of(right_merge_scan.input())
+            .is_some_and(|name| table_name_matches(&name, self.build_table));
+
+        // The probe side must be the left input. Swapping a left-side build to the right
+        // would change the output schema (column order) of the join, which the rewrite
+        // must preserve, so this PoC only rewrites when the build side is already the
+        // right input (the optimizer places the build side there for the supported
+        // shapes). A left-side build keeps the plan unchanged (a follow-up may support it
+        // by restoring the original schema with a projection).
+        let (probe_plan, probe_merge_scan, build_plan, build_plan_without_scan) =
+            match (left_is_build, right_is_build) {
+                (false, true) => (left_probe, left_merge_scan, join.right.clone(), right_probe),
+                _ => return None,
+            };
+
+        // Guard: keep the rewrite at two levels. The probe side must be a purely local
+        // plan and the build side must not contain another (visible) `MergeScan`.
+        if contains_merge_scan(&probe_plan) || contains_merge_scan(&build_plan_without_scan) {
+            return None;
+        }
+
+        let new_join = Join {
+            left: Arc::new(probe_plan),
+            right: build_plan,
+            ..join.clone()
+        };
+
+        let mut merge_scan = MergeScanLogicalPlan::new(
+            LogicalPlan::Join(new_join),
+            false,
+            probe_merge_scan.partition_cols().clone(),
+        );
+        // Keep the remote dynamic filter producer id of the scan that was replaced, so
+        // that the id assignment of `try_push_down` stays valid for the whole plan.
+        if let Some(producer_id) = probe_merge_scan.remote_dyn_filter_producer_id() {
+            merge_scan = merge_scan.with_remote_dyn_filter_producer_id(producer_id);
+        }
+
+        Some(merge_scan.into_logical_plan())
+    }
+}
+
+impl TreeNodeRewriter for NestedBroadcastJoinRewriter<'_> {
+    type Node = LogicalPlan;
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        match self.try_rewrite_join(&node) {
+            Some(rewritten) => Ok(Transformed::yes(rewritten)),
+            None => Ok(Transformed::no(node)),
+        }
+    }
+}
+
+/// Strips the outermost `MergeScan` of a join input, which may be hidden below
+/// pass-through projections, and returns the input plan without the wrapper together
+/// with the removed `MergeScan`.
+///
+/// Returns `None` if the input is not wrapped in a `MergeScan`.
+fn strip_merge_scan(plan: &LogicalPlan) -> Option<(LogicalPlan, MergeScanLogicalPlan)> {
+    match plan {
+        LogicalPlan::Extension(extension) => {
+            let merge_scan = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()?;
+            Some((merge_scan.input().clone(), merge_scan.clone()))
+        }
+        LogicalPlan::Projection(projection) => {
+            let (input, merge_scan) = strip_merge_scan(&projection.input)?;
+            let plan = plan
+                .with_new_exprs(projection.expr.clone(), vec![input])
+                .ok()?;
+            Some((plan, merge_scan))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `plan` contains a visible `MergeScan` node.
+fn contains_merge_scan(plan: &LogicalPlan) -> bool {
+    let mut finder = MergeScanFinder::default();
+    let _ = plan.visit(&mut finder);
+    finder.found
+}
+
+#[derive(Default)]
+struct MergeScanFinder {
+    found: bool,
+}
+
+impl TreeNodeVisitor<'_> for MergeScanFinder {
+    type Node = LogicalPlan;
+
+    fn f_down(&mut self, node: &Self::Node) -> DfResult<TreeNodeRecursion> {
+        if is_merge_scan(node) {
+            self.found = true;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+
+        Ok(TreeNodeRecursion::Continue)
+    }
+}
+
+fn is_merge_scan(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<MergeScanLogicalPlan>())
+}
+
+/// Returns the name of the first base table found in `plan`.
+fn table_name_of(plan: &LogicalPlan) -> Option<TableName> {
+    let mut extractor = TableNameExtractor::default();
+    plan.visit(&mut extractor).ok()?;
+    extractor.table_name
+}
+
+/// Whether the configured build side table name refers to `name`. Accepts the bare table
+/// name or the fully qualified `catalog.schema.table` form, ignoring case.
+fn table_name_matches(name: &TableName, configured: &str) -> bool {
+    let configured = configured.trim().trim_matches(&['\'', '"'][..]);
+    !configured.is_empty()
+        && (name.table_name.eq_ignore_ascii_case(configured)
+            || name.to_string().eq_ignore_ascii_case(configured))
 }

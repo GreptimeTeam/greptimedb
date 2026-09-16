@@ -18,16 +18,24 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use catalog::CatalogManagerRef;
+use catalog::information_schema::NoopInformationExtension;
+use catalog::kvbackend::KvBackendCatalogManagerBuilder;
+use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
+use common_grpc::channel_manager::ChannelConfig;
+use common_meta::cache::{
+    LayeredCacheRegistry, SchemaCacheRef, TableRouteCacheRef, TableSchemaCacheRef,
+};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::TopicStatsReporter;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::node_manager::NodeManagerRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_query::prelude::set_default_prefix;
 use common_stat::ResourceStatImpl;
@@ -48,8 +56,10 @@ use mito2::region::opener::PartitionExprFetcherRef;
 use mito2::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
+use partition::cache::PartitionInfoCacheRef;
+use partition::manager::PartitionRuleManager;
 use query::QueryEngineFactory;
-use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
+use query::dummy_catalog::TableProviderFactoryRef;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::path_utils::WAL_DIR;
@@ -72,6 +82,7 @@ use crate::event_listener::{
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::partition_expr_fetcher::MetaPartitionExprFetcher;
+use crate::region_query::DatanodeRegionQueryHandler;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store::{self, new_object_store_without_cache};
 use crate::utils::{RegionOpenRequests, build_region_open_requests};
@@ -298,6 +309,7 @@ impl DatanodeBuilder {
                 schema_metadata_manager,
                 region_event_listener,
                 file_ref_manager,
+                cache_registry.clone(),
             )
             .await?;
 
@@ -437,14 +449,61 @@ impl DatanodeBuilder {
         schema_metadata_manager: SchemaMetadataManagerRef,
         event_listener: RegionServerEventListenerRef,
         file_ref_manager: FileReferenceManagerRef,
+        cache_registry: Arc<LayeredCacheRegistry>,
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
 
+        // The datanode executes the plans of the region queries it receives. Such a plan may
+        // contain a `MergeScan` node: the dist planner of the datanode plans it into a
+        // `MergeScanExec`, which resolves the metadata of the target table from the catalog and the
+        // routes of its regions from the partition rule manager, then queries their leaders through
+        // the datanode client.
+        //
+        // Notes:
+        // - The `DistExtensionPlanner` is registered as long as both the partition rule manager and
+        //   the region query handler are given (see `DfQueryPlanner::new`), it doesn't depend on
+        //   `with_dist_planner`.
+        // - `with_dist_planner` stays `false` on purpose: the datanode only executes the plans it
+        //   receives, it must not rewrite its own plans into distributed ones.
+        let catalog_manager: CatalogManagerRef = KvBackendCatalogManagerBuilder::new(
+            Arc::new(NoopInformationExtension),
+            self.kv_backend.clone(),
+            cache_registry.clone(),
+        )
+        .build();
+
+        let table_route_cache: TableRouteCacheRef =
+            cache_registry.get().context(MissingCacheSnafu)?;
+        let partition_info_cache: PartitionInfoCacheRef =
+            cache_registry.get().context(MissingCacheSnafu)?;
+        let partition_manager = Arc::new(PartitionRuleManager::new(
+            self.kv_backend.clone(),
+            table_route_cache,
+            partition_info_cache,
+        ));
+
+        // Clients to the other datanodes. They are only used when a plan contains a `MergeScan`
+        // node, i.e. they stay idle for the plans that the datanode executes locally.
+        //
+        // A region query is a streaming request, so it must not be cut off by the request timeout:
+        // same as the frontend to datanode client.
+        let mut channel_config = ChannelConfig {
+            timeout: None,
+            ..Default::default()
+        };
+        if opts.grpc.flight_compression.transport_compression() {
+            channel_config.accept_compression = true;
+            channel_config.send_compression = true;
+        }
+        let node_manager: NodeManagerRef = Arc::new(NodeClients::new(channel_config));
+        let region_query_handler =
+            DatanodeRegionQueryHandler::arc(partition_manager.clone(), node_manager);
+
         let query_engine_factory = QueryEngineFactory::try_new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
-            DummyCatalogManager::arc(),
-            None,
-            None,
+            catalog_manager,
+            Some(partition_manager),
+            Some(region_query_handler),
             None,
             None,
             None,
