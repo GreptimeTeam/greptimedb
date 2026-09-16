@@ -40,9 +40,10 @@ on:
         type: string
         required: false
       ecs_instance_type:
-        description: Optional ECS type override (default uses ALIYUN_ECS_INSTANCE_TYPE)
+        description: ECS instance type (independent of Query Regression)
         type: string
-        required: false
+        default: ecs.c9i.2xlarge
+        required: true
       system_disk_gib:
         description: ECS system disk size in GiB (20..2048; includes corpus, DB, images and swap)
         type: number
@@ -78,7 +79,7 @@ env:
   VICTORIALOGS_TAG: ${{ inputs.victorialogs_tag }}
   O11YBENCH_REF: ${{ inputs.o11ybench_ref }}
   RUNTIME_IMAGE: ${{ inputs.runtime_image || vars.O11YBENCH_RUNTIME_IMAGE }}
-  ECS_INSTANCE_TYPE: ${{ inputs.ecs_instance_type || vars.ALIYUN_ECS_INSTANCE_TYPE }}
+  ECS_INSTANCE_TYPE: ${{ inputs.ecs_instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
   BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
   JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}

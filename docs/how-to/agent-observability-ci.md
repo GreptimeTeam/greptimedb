@@ -9,7 +9,7 @@ regression verdict or publishable cross-database benchmark.
 - Configure the same Aliyun secrets and repository variables as Query Regression:
   `ALICLOUD_ECS_ACCESS_KEY_ID`, `ALICLOUD_ECS_ACCESS_KEY_SECRET`,
   `GH_PERSONAL_ACCESS_TOKEN`; `ALIYUN_ECS_REGION_ID`, `ALIYUN_ECS_VSWITCH_ID`,
-  `ALIYUN_ECS_SECURITY_GROUP_ID`, `ALIYUN_ECS_INSTANCE_TYPE`, and
+  `ALIYUN_ECS_SECURITY_GROUP_ID`, and
   `QUERY_REGRESSION_ECS_IMAGE_ID`. Optional resource group and runner UID/GID
   inputs also use the existing variables.
 - The prepared Linux x86-64 ECS runner image must allow passwordless sudo and
@@ -90,7 +90,7 @@ All of these dispatch inputs have defaults:
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `ecs_instance_type` | `ALIYUN_ECS_INSTANCE_TYPE` repository variable | Whole-machine ECS type; independent of DB container limits |
+| `ecs_instance_type` | `ecs.c9i.2xlarge` (explicit dispatch default) | Whole-machine ECS type; independent of DB container limits |
 | `system_disk_gib` | 500 | System disk in GiB, including corpus, DB, images, OS and existing 16 GiB swap |
 | `benchmark_timeout_minutes` | 360 | Whole benchmark job budget, including setup and artifact upload (1..360) |
 | `janitor_ttl_hours` | 8 | Per-instance lifetime before janitor cleanup eligibility (1..168) |
