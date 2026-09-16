@@ -1,18 +1,30 @@
-# Ephemeral Aliyun ECS runners
+# Aliyun ECS runners
 
-`aliyun-ecs-create` and `../aliyun-ecs-delete` wrap the existing provisioning
-and teardown scripts. They must run on GitHub-hosted Linux runners, with the
-repository checked out. Pass credentials explicitly; composite actions do not
-read repository secrets themselves.
+Use `aliyun-ecs-create` to create an ECS runner and `aliyun-ecs-delete` to
+remove the instance and unregister the runner. Both actions run on GitHub-hosted
+Linux runners after checkout. Pass credentials through action inputs.
 
-Use three jobs: create, workload (`runs-on: needs.create.outputs.label`), and
-delete. The delete job must use `always()` and depend on both earlier jobs.
-Pass its `instance-id` and `runner-name` from create's outputs, including when
-provisioning fails after creating an instance. See `agent-observability.yml`.
+Split the workflow into three jobs:
 
-The prepared ECS image, UID/GID, repository variables and secrets are the same
-as query regression. Existing ownership tags and runner naming are retained. `system-disk-gib`
-defaults to 80; optional `ttl-hours` sets a per-instance janitor deadline relative
-to ECS creation time. Without that tag, the existing four-hour fallback applies.
-Budget for provisioning, queueing, workload and teardown before the TTL. The
-updated janitor must be deployed before tagged long-lived runs are launched. No general-purpose ECS image or Kubernetes cluster is provisioned.
+1. Create the runner from a prepared ECS image.
+2. Run the workload with `runs-on: ${{ needs.create.outputs.label }}`.
+3. Delete the runner in a job with `if: always()` and dependencies on both jobs.
+   Pass `instance_id` and `runner_name` from the create job's outputs, even if
+   provisioning fails after creating the instance.
+
+See [agent-observability.yml](../../workflows/agent-observability.yml) for a caller
+and [action.yml](action.yml) for all inputs and outputs.
+
+`system-disk-gib` defaults to 80. Optional `ttl-hours` sets when the janitor may
+remove the instance, measured from ECS creation. Without it, the janitor uses
+its four-hour fallback. Allow time for provisioning, queueing, the workload and
+teardown. Normal teardown does not wait for the TTL.
+
+Deploy the TTL-aware janitor to the default branch before using a TTL above
+four hours; the old janitor ignores this setting. The actions retain the existing
+query-regression ownership tags and runner naming.
+
+Set `enable-docker: 'true'` for container workloads. Root cloud-init starts the
+image-provided Docker CE service and adds the runner to the Docker group before
+starting the runner. Docker group access is root-equivalent. This option defaults
+to `false`, so existing query-regression jobs keep their current permissions.

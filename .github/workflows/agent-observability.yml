@@ -155,6 +155,7 @@ jobs:
           security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
           image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
           instance-type: ${{ env.ECS_INSTANCE_TYPE }}
+          enable-docker: 'true'
           system-disk-gib: ${{ inputs.system_disk_gib }}
           ttl-hours: ${{ inputs.janitor_ttl_hours }}
           resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
@@ -181,15 +182,12 @@ jobs:
         with:
           path: greptimedb
           persist-credentials: false
-      - name: Set up Docker on ephemeral Linux host
+      - name: Check Docker on ephemeral Linux host
         shell: bash
         run: |
           set -euo pipefail
           [[ "$(uname -m)" == x86_64 ]]
-          sudo apt-get update
-          sudo apt-get install -y docker.io jq acl
-          sudo systemctl start docker
-          sudo setfacl -m "u:$(id -u):rw" /var/run/docker.sock
+          jq --version
           docker info
           # The workspace (and Docker state) must not use a small /tmp filesystem.
           df -h "$GITHUB_WORKSPACE" /var/lib/docker

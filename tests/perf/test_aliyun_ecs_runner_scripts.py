@@ -19,6 +19,7 @@ import base64
 import importlib.util
 import io
 import os
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stderr
@@ -140,22 +141,27 @@ class ProvisionResourcesTest(unittest.TestCase):
             "token",
         ]
         cases = [
-            ({}, [], 80, None),
+            ({}, [], 80, None, False),
             (
                 {"ALIYUN_ECS_SYSTEM_DISK_GIB": "500", "ALIYUN_ECS_TTL_HOURS": "8"},
                 [],
                 500,
                 8,
+                False,
             ),
             (
                 {"ALIYUN_ECS_SYSTEM_DISK_GIB": "500", "ALIYUN_ECS_TTL_HOURS": "8"},
                 ["--system-disk-gib", "600", "--ttl-hours", "12"],
                 600,
                 12,
+                False,
             ),
-            ({"ALIYUN_ECS_TTL_HOURS": ""}, [], 80, None),
+            ({"ALIYUN_ECS_TTL_HOURS": ""}, [], 80, None, False),
+            ({"ALIYUN_ECS_ENABLE_DOCKER": "true"}, [], 80, None, True),
+            ({"ALIYUN_ECS_ENABLE_DOCKER": "true"}, ["--enable-docker", "false"], 80, None, False),
+            ({}, ["--enable-docker", "true"], 80, None, True),
         ]
-        for env, extra, disk, ttl in cases:
+        for env, extra, disk, ttl, docker in cases:
             with (
                 self.subTest(env=env, extra=extra),
                 patch.dict(os.environ, env, clear=True),
@@ -165,7 +171,7 @@ class ProvisionResourcesTest(unittest.TestCase):
                 self.assertEqual(provision.main(), 0)
                 config = run.call_args.args[0]
                 self.assertEqual(
-                    (config.system_disk_gib, config.ttl_hours), (disk, ttl)
+                    (config.system_disk_gib, config.ttl_hours, config.enable_docker), (disk, ttl, docker)
                 )
 
 
@@ -194,6 +200,40 @@ class ProvisionUserDataTest(unittest.TestCase):
         self.assertIn("REPO_URL=https://github.com/GreptimeTeam/greptimedb", script)
         self.assertIn("PATH=/opt/cargo/bin:", script)
         self.assertIn("systemctl restart --no-block ephemeral-github-runner.service", script)
+
+    def test_docker_setup_is_opt_in_and_precedes_runner(self):
+        args = ("runner-name", "label", "token", "owner/repo")
+        default = provision.render_user_data(*args)
+        self.assertEqual(default, provision.render_user_data(*args, enable_docker=False))
+        self.assertNotIn("systemctl start docker", default)
+        self.assertNotIn("usermod", default)
+        enabled = provision.render_user_data(*args, runner_uid="2001", enable_docker=True)
+        start = enabled.index("# Reuse Docker CE")
+        end = enabled.index("cat > /etc/ephemeral-github-runner.env")
+        setup = enabled[start:end]
+        self.assertEqual(enabled[:start] + enabled[end:],
+                         provision.render_user_data(*args, runner_uid="2001"))
+        self.assertLess(end, enabled.index("systemctl restart --no-block ephemeral-github-runner.service"))
+        for forbidden in ("apt-get", "sudo", "setfacl"):
+            self.assertNotIn(forbidden, setup)
+        mocks = '''
+docker() { :; }
+jq() { :; }
+systemctl() { echo "systemctl $*"; return "$FAIL_START"; }
+id() { [[ "$*" == "-nu 2001" ]] || return 1; echo custom-runner; }
+usermod() { echo "usermod $*"; }
+runuser() { echo "runuser $*"; }
+'''
+        for fail in ("0", "1"):
+            with self.subTest(fail_start=fail):
+                result = subprocess.run(["bash", "-euc", mocks + setup],
+                                        env=os.environ | {"FAIL_START": fail},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, int(fail), result.stderr)
+                calls = result.stdout.splitlines()
+                self.assertEqual(calls, ["docker", "jq", "systemctl start docker"] + (
+                    ["usermod -aG docker custom-runner", "runuser -u custom-runner -- docker info"]
+                    if fail == "0" else []))
 
     def test_encode_user_data_round_trips(self) -> None:
         script = self.render()

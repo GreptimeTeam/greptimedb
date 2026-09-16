@@ -103,6 +103,7 @@ class ProvisionConfig:
     runner_gid: str = "1001"
     system_disk_gib: int = SYSTEM_DISK_GIB
     ttl_hours: int | None = None
+    enable_docker: bool = False
 
     def __post_init__(self) -> None:
         if not 20 <= self.system_disk_gib <= 2048:
@@ -126,8 +127,20 @@ def render_user_data(
     repo: str,
     runner_uid: str = "1001",
     runner_gid: str = "1001",
+    enable_docker: bool = False,
 ) -> str:
     """Render the cloud-init shell script for the runner instance."""
+    docker_setup = ""
+    if enable_docker:
+        docker_setup = f'''# Reuse Docker CE from the ECS image; run before dropping runner privileges.
+command -v docker
+command -v jq
+systemctl start docker
+runner_user=$(id -nu {runner_uid})
+usermod -aG docker "$runner_user"
+runuser -u "$runner_user" -- docker info
+
+'''
     destinations = " ".join(f'"{dst}"' for dst in CACHE_PATHS)
     cache_setup = f"""# Caches live on the system disk, are deleted with the instance, and every
 # run compiles cold. Within-run reuse (base warming candidate via the shared
@@ -167,7 +180,7 @@ set -euo pipefail
 
 {swap_setup}
 
-cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
+{docker_setup}cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
 RUNNER_NAME={runner_name}
 RUNNER_LABELS={runner_label}
 RUNNER_TOKEN={runner_token}
@@ -419,6 +432,7 @@ def provision(config: ProvisionConfig) -> int:
             config.repo,
             config.runner_uid,
             config.runner_gid,
+            enable_docker=config.enable_docker,
         )
     )
 
@@ -478,6 +492,10 @@ def main() -> int:
     parser.add_argument(
         "--ttl-hours", type=int, default=os.environ.get("ALIYUN_ECS_TTL_HOURS") or None
     )
+    parser.add_argument(
+        "--enable-docker", choices=("true", "false"),
+        default=os.environ.get("ALIYUN_ECS_ENABLE_DOCKER", "false"),
+    )
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--github-token", default=os.environ.get("GH_PERSONAL_ACCESS_TOKEN"))
@@ -510,6 +528,7 @@ def main() -> int:
         runner_gid=args.runner_gid,
         system_disk_gib=args.system_disk_gib,
         ttl_hours=args.ttl_hours,
+        enable_docker=args.enable_docker == "true",
     )
     return provision(config)
 
