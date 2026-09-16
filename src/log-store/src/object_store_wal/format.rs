@@ -911,6 +911,142 @@ mod tests {
         );
     }
 
+    /// A version 1 object holding entries 1, 2 and 3 of region 1 and entries
+    /// 10 and 11 of region 2. The bytes were derived from the layout described in
+    /// the module documentation, independently of [`encode_object`], so a change
+    /// to field order, endianness or checksum coverage fails this test even when
+    /// the encoder and the decoder change together.
+    const FIXTURE_V1_HEX: &str = concat!(
+        // Header: magic, version 1, object sequence 7, writer instance.
+        "475457414c4f424a",
+        "0001",
+        "0000000000000007",
+        "7772697465722d666978747572652d31",
+        // Segment of region 1 at offset 34: region id, entry count, then
+        // (entry id, payload length, payload) per entry.
+        "0000000100000001",
+        "00000003",
+        "0000000000000001",
+        "00000001",
+        "61",
+        "0000000000000002",
+        "00000002",
+        "6262",
+        "0000000000000003",
+        "00000003",
+        "636363",
+        // Segment of region 2 at offset 88.
+        "0000000200000001",
+        "00000002",
+        "000000000000000a",
+        "00000001",
+        "78",
+        "000000000000000b",
+        "00000002",
+        "7979",
+        // Footer at offset 127: entry count, then per segment region id, min and
+        // max entry id, entry count, segment offset, length and CRC32.
+        "00000002",
+        "0000000100000001",
+        "0000000000000001",
+        "0000000000000003",
+        "00000003",
+        "0000000000000022",
+        "0000000000000036",
+        "25ac0486",
+        "0000000200000001",
+        "000000000000000a",
+        "000000000000000b",
+        "00000002",
+        "0000000000000058",
+        "0000000000000027",
+        "65dc08ec",
+        // Trailer: footer offset, footer length, footer CRC32, object CRC32, magic.
+        "000000000000007f",
+        "0000000000000064",
+        "8298e0f7",
+        "7a009db1",
+        "475457414c54524c",
+    );
+
+    fn fixture_bytes() -> Vec<u8> {
+        let hex = FIXTURE_V1_HEX.as_bytes();
+        hex.chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn fixture_records() -> Vec<Record> {
+        [
+            (RegionId::new(1, 1), 1, &b"a"[..]),
+            (RegionId::new(1, 1), 2, b"bb"),
+            (RegionId::new(1, 1), 3, b"ccc"),
+            (RegionId::new(2, 1), 10, b"x"),
+            (RegionId::new(2, 1), 11, b"yy"),
+        ]
+        .into_iter()
+        .map(|(region_id, entry_id, payload)| Record {
+            region_id,
+            entry_id,
+            payload: Bytes::copy_from_slice(payload),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn test_format_matches_version_1_fixture() {
+        let fixture = fixture_bytes();
+        let header = Header {
+            object_seq: 7,
+            writer_instance: *b"writer-fixture-1",
+        };
+        let footer = vec![
+            FooterEntry {
+                region_id: RegionId::new(1, 1),
+                min_entry_id: 1,
+                max_entry_id: 3,
+                entry_count: 3,
+                segment_offset: 34,
+                segment_len: 54,
+                segment_crc32: 0x25ac0486,
+            },
+            FooterEntry {
+                region_id: RegionId::new(2, 1),
+                min_entry_id: 10,
+                max_entry_id: 11,
+                entry_count: 2,
+                segment_offset: 88,
+                segment_len: 39,
+                segment_crc32: 0x65dc08ec,
+            },
+        ];
+        assert_eq!(259, fixture.len());
+
+        let decoded = decode_object(&fixture).unwrap();
+        assert_eq!(header, decoded.header);
+        assert_eq!(footer, decoded.footer);
+        assert_eq!(fixture_records(), decoded.records);
+        assert_eq!(
+            FixedTrailer {
+                footer_offset: 127,
+                footer_len: 100,
+                footer_crc32: 0x8298e0f7,
+                object_crc32: 0x7a009db1,
+            },
+            decode_trailer(&fixture[fixture.len() - TRAILER_LEN..]).unwrap()
+        );
+
+        // The encoding does not depend on the order records are passed in.
+        let mut reversed = fixture_records();
+        reversed.reverse();
+        for records in [fixture_records(), reversed] {
+            let encoded = encode_object(header.clone(), &records).unwrap();
+            assert_eq!(fixture, encoded.bytes.as_ref());
+            assert_eq!(footer, encoded.footer);
+            assert_eq!(fixture.len() as u64, object_len(&encoded.footer));
+        }
+    }
+
     fn footer_ids(entry: &FooterEntry) -> (u64, u64, u32) {
         (entry.min_entry_id, entry.max_entry_id, entry.entry_count)
     }
