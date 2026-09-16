@@ -1,0 +1,240 @@
+name: Agent Observability Benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: all or comma-separated greptimedb,clickhouse,victorialogs
+        type: string
+        default: greptimedb
+        required: true
+      dataset:
+        description: 'Dataset size: S=5K, P=10M, M=100M'
+        type: choice
+        options:
+          - S
+          - P
+          - M
+        default: S
+        required: true
+      greptimedb_tag:
+        description: Docker Hub greptime/greptimedb tag
+        type: string
+        default: latest
+        required: true
+      clickhouse_tag:
+        description: Docker Hub clickhouse/clickhouse-server tag
+        type: string
+        default: 26.6.1.1193
+        required: true
+      victorialogs_tag:
+        description: Docker Hub victoriametrics/victoria-logs tag
+        type: string
+        default: latest
+        required: true
+      o11ybench_ref:
+        description: Full o11ybench commit SHA matching runtime OCI revision label
+        type: string
+        required: true
+      runtime_image:
+        description: Published Aliyun o11ybench-runtime image (tag or digest)
+        type: string
+        required: true
+      db_cpus:
+        description: CPU limit per DB container
+        type: string
+        default: '4'
+        required: true
+      db_memory:
+        description: Memory limit per DB container
+        type: string
+        default: 8g
+        required: true
+permissions:
+  contents: read
+env:
+  TARGETS: ${{ inputs.targets }}
+  PROFILE: ${{ inputs.dataset }}
+  GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
+  CLICKHOUSE_TAG: ${{ inputs.clickhouse_tag }}
+  VICTORIALOGS_TAG: ${{ inputs.victorialogs_tag }}
+  O11YBENCH_REF: ${{ inputs.o11ybench_ref }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  DB_CPUS: ${{ inputs.db_cpus }}
+  DB_MEMORY: ${{ inputs.db_memory }}
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      greptimedb: ${{ steps.inputs.outputs.greptimedb }}
+      clickhouse: ${{ steps.inputs.outputs.clickhouse }}
+      victorialogs: ${{ steps.inputs.outputs.victorialogs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: greptimedb
+          persist-credentials: false
+      - name: Test CI helpers
+        run: |-
+          python3 greptimedb/tests/perf/test_o11ybench_ci.py
+          python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
+      - name: Validate requested benchmark
+        id: inputs
+        run: python3 greptimedb/.github/scripts/o11ybench-ci.py validate
+  provision:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      label: ${{ steps.ecs.outputs.label }}
+      instance_id: ${{ steps.ecs.outputs.instance_id }}
+      runner_name: ${{ steps.ecs.outputs.runner_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: greptimedb
+          persist-credentials: false
+      - name: Create ephemeral ECS runner
+        id: ecs
+        uses: ./greptimedb/.github/actions/aliyun-ecs-create
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          vswitch-id: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
+          security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
+          image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
+          instance-type: ${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}
+          resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
+          runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+          runner-gid: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
+  benchmark:
+    needs:
+      - validate
+      - provision
+    runs-on: ${{ needs.provision.outputs.label }}
+    timeout-minutes: 120
+    env:
+      OWNER: o11ybench-${{ github.run_id }}-${{ github.run_attempt }}
+      ARTIFACT_ROOT: ${{ github.workspace }}/benchmark-data/${{ github.run_id }}-${{ github.run_attempt }}
+      MANIFEST_PATH: ${{ github.workspace }}/run-manifest.json
+      O11YBENCH_DIR: ${{ github.workspace }}/o11ybench
+      GREPTIMEDB_HTTP_PORT: '14000'
+      GREPTIMEDB_GRPC_PORT: '14001'
+      CLICKHOUSE_HTTP_PORT: '18123'
+      CLICKHOUSE_NATIVE_PORT: '19000'
+      VICTORIALOGS_HTTP_PORT: '19428'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: greptimedb
+          persist-credentials: false
+      - name: Checkout benchmark tools
+        uses: actions/checkout@v4
+        with:
+          repository: GreptimeTeam/o11ybench
+          ref: ${{ inputs.o11ybench_ref }}
+          path: o11ybench
+          persist-credentials: false
+      - name: Set up Docker on ephemeral Linux host
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == x86_64 ]]
+          sudo apt-get update
+          sudo apt-get install -y docker.io jq acl
+          sudo systemctl start docker
+          sudo setfacl -m "u:$(id -u):rw" /var/run/docker.sock
+          docker info
+          # The workspace (and Docker state) must not use a small /tmp filesystem.
+          df -h "$GITHUB_WORKSPACE" /var/lib/docker
+      - name: Resolve image tags and verify runtime revision
+        run: python3 greptimedb/.github/scripts/o11ybench-ci.py prepare
+      - name: Generate dataset once
+        id: generate
+        run: |-
+          bash o11ybench/scripts/run-agent-observability.sh --stage generate --execute \
+            --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" \
+            --root "$ARTIFACT_ROOT" --profile "$PROFILE"
+          cp "$MANIFEST_PATH" "$ARTIFACT_ROOT/run-manifest.json"
+      - name: Load and benchmark greptimedb
+        id: greptimedb
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' }}
+        run: |-
+          bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
+            --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --root "$ARTIFACT_ROOT" \
+            --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+            --target greptimedb --image "$GREPTIMEDB_IMAGE" \
+            --greptimedb-http-port "$GREPTIMEDB_HTTP_PORT" --greptimedb-grpc-port "$GREPTIMEDB_GRPC_PORT"
+      - name: Load and benchmark clickhouse
+        id: clickhouse
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.clickhouse == 'true' }}
+        run: |-
+          bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
+            --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --root "$ARTIFACT_ROOT" \
+            --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+            --target clickhouse --image "$CLICKHOUSE_IMAGE" \
+            --clickhouse-http-port "$CLICKHOUSE_HTTP_PORT" --clickhouse-native-port "$CLICKHOUSE_NATIVE_PORT"
+      - name: Load and benchmark victorialogs
+        id: victorialogs
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.victorialogs == 'true' }}
+        run: |-
+          bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
+            --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --root "$ARTIFACT_ROOT" \
+            --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+            --target victorialogs --image "$VICTORIALOGS_IMAGE" \
+            --victorialogs-http-port "$VICTORIALOGS_HTTP_PORT"
+      - name: Compare all three targets
+        if: ${{ !cancelled() && steps.greptimedb.outcome == 'success' && steps.clickhouse.outcome == 'success' && steps.victorialogs.outcome
+          == 'success' }}
+        run: |-
+          docker run --rm --user "$(id -u):$(id -g)" --label "o11ybench.owner=$OWNER" \
+            --mount "type=bind,src=$ARTIFACT_ROOT,dst=/results" "$RESOLVED_RUNTIME_IMAGE" \
+            scripts/finalize_logbench_agent_observability_measured.py \
+            --greptimedb-summary /results/greptimedb-1/greptimedb-1/measured-summary.json \
+            --clickhouse-summary /results/clickhouse-1/clickhouse-1/measured-summary.json \
+            --victorialogs-summary /results/victorialogs-1/victorialogs-1/measured-summary.json \
+            --output /results/comparison.json
+      - name: Summarize selected targets
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        run: python3 greptimedb/.github/scripts/o11ybench-ci.py summarize
+      - name: Clean up owned containers
+        if: always()
+        run: |-
+          if [[ -f o11ybench/scripts/run-agent-observability.sh ]]; then
+            bash o11ybench/scripts/run-agent-observability.sh --stage cleanup --execute \
+              --owner "$OWNER" --root "$ARTIFACT_ROOT"
+          fi
+      - name: Upload results (no dataset)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-observability-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            ${{ env.MANIFEST_PATH }}
+            ${{ env.ARTIFACT_ROOT }}
+            !${{ env.ARTIFACT_ROOT }}/corpus/agent_observations.jsonl
+          if-no-files-found: warn
+          retention-days: 14
+  teardown:
+    needs:
+      - provision
+      - benchmark
+    if: ${{ always() && needs.provision.outputs.instance_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: greptimedb
+          persist-credentials: false
+      - name: Delete ECS and unregister runner
+        uses: ./greptimedb/.github/actions/aliyun-ecs-delete
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          instance-id: ${{ needs.provision.outputs.instance_id }}
+          runner-name: ${{ needs.provision.outputs.runner_name }}
