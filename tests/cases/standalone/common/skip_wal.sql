@@ -29,6 +29,9 @@ ADMIN flush_table('system_metrics');
 -- SQLNESS ARG restart=true
 SELECT * FROM system_metrics;
 
+-- A table created without a real WAL provider cannot enable WAL later.
+ALTER TABLE system_metrics SET 'skip_wal' = 'false';
+
 DROP TABLE system_metrics;
 
 CREATE TABLE alter_skip_wal (
@@ -45,15 +48,24 @@ ALTER TABLE alter_skip_wal SET 'skip_wal' = 'true';
 
 SHOW CREATE TABLE alter_skip_wal;
 
+-- This row is intentionally not written to WAL.
+INSERT INTO alter_skip_wal VALUES ('host2', 2, 2000);
+
+ALTER TABLE alter_skip_wal SET 'skip_wal' = 'false';
+
+SHOW CREATE TABLE alter_skip_wal;
+
+-- Repeating the transition is idempotent.
 ALTER TABLE alter_skip_wal SET 'skip_wal' = 'false';
 
 ALTER TABLE alter_skip_wal UNSET 'skip_wal';
 
-INSERT INTO alter_skip_wal VALUES ('host2', 2, 2000);
+-- This row uses the restored WAL provider.
+INSERT INTO alter_skip_wal VALUES ('host3', 3, 3000);
 
 SELECT * FROM alter_skip_wal ORDER BY ts;
 
--- The post-ALTER row can be lost because restart does not flush skip-WAL memtables.
+-- Re-enabling WAL does not retroactively write the skipped row to WAL.
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE alter_skip_wal;
 
