@@ -93,11 +93,6 @@ impl PartitionPruner {
         self
     }
 
-    /// Balances a range replaced by another source without pruning its data.
-    pub(crate) fn skip_file_range(&self, index: RowGroupIndex, metrics: &mut ReaderMetrics) {
-        self.pruner.skip_file_range(index, metrics);
-    }
-
     /// Gets or creates the FileRangeBuilder for a file.
     ///
     /// This method also triggers pre-fetching of upcoming files in the background
@@ -748,7 +743,7 @@ impl Pruner {
 #[cfg(test)]
 impl Pruner {
     /// Returns the remaining range count for a file (test-only).
-    fn test_remaining_ranges(&self, file_index: usize) -> usize {
+    pub(crate) fn test_remaining_ranges(&self, file_index: usize) -> usize {
         self.inner.file_entries[file_index]
             .lock()
             .unwrap()

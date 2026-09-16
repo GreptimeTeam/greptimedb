@@ -434,9 +434,9 @@ impl SeriesCandidateRangeBuilder {
 
         if self.stream_ctx.is_file_range_index(index) {
             if self.coverage.covers_source(&self.stream_ctx, index) {
-                let mut metrics = ReaderMetrics::default();
-                self.partition_pruner.skip_file_range(index, &mut metrics);
-                self.part_metrics.merge_reader_metrics(&metrics, None);
+                // Leave the range reference for the data phase so its first
+                // read can cache the builder. Retaining builders only prevents
+                // eviction; it does not allow caching at zero references.
                 return Ok(None);
             }
             let file = self.stream_ctx.input.file_from_index(index);
@@ -771,7 +771,7 @@ mod tests {
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
 
     /// Uses absent SST objects so any covered-SST read fails the test.
-    async fn indexed_scanner() -> (SchedulerEnv, SeriesCandidateScanner) {
+    async fn indexed_scanner() -> (SchedulerEnv, SeriesCandidateScanner, Arc<Pruner>) {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
@@ -893,19 +893,19 @@ mod tests {
         let scanner = SeriesCandidateScanner::try_new(
             stream_ctx,
             ranges.into_iter().map(|range| vec![range]).collect(),
-            pruner,
+            pruner.clone(),
             Arc::new(Semaphore::new(1)),
             Arc::new(UnboundedMemoryPool::default()),
             metrics_set,
             part_metrics,
         )
         .unwrap();
-        (env, scanner)
+        (env, scanner, pruner)
     }
 
     #[tokio::test]
     async fn index_is_shared_across_ranges_without_caching_partial_candidates() {
-        let (_env, scanner) = indexed_scanner().await;
+        let (_env, scanner, pruner) = indexed_scanner().await;
         let keys: Vec<_> = scanner
             .partitions
             .iter()
@@ -925,6 +925,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             groups.into_iter().flatten().collect::<Vec<_>>()
         );
+        // Covered SSTs have no builder yet. Keep their references so the data
+        // phase can cache each builder on its first read and reuse it later.
+        for file_index in 0..2 {
+            assert_eq!(1, pruner.test_remaining_ranges(file_index));
+        }
         assert_eq!(
             1,
             scanner
@@ -960,7 +965,7 @@ mod tests {
 
     #[tokio::test]
     async fn index_read_failure_after_output_is_propagated() {
-        let (_env, scanner) = indexed_scanner().await;
+        let (_env, scanner, _pruner) = indexed_scanner().await;
         let context = scanner.stream_ctx.input.series_index.clone().unwrap();
         let index = scanner.coverage.indexes[0].clone();
         let path = series_index_path(
