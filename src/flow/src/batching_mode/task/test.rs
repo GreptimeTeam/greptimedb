@@ -2190,6 +2190,7 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
         QueryOptions::default(),
     ));
     task.execute_logical_plan_unlocked(
+        &query_engine,
         &frontend_client,
         &plan_info.plan,
         &plan_info.dirty_restore,
@@ -2459,6 +2460,7 @@ async fn test_exact_required_unsupported_plan_keeps_exact_retry_state() {
     for _ in 0..2 {
         let err = task
             .execute_logical_plan_unlocked(
+                &query_engine,
                 &frontend_client,
                 &dml_plan,
                 &DirtyRestore::Unscoped(dirty_range(10, 15)),
@@ -2544,7 +2546,7 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         CheckpointMode::Incremental
     );
 
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+    let incremental_plan = task.prepare_plan_for_incremental(&query_engine, &dml_plan).await.unwrap();
     assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
@@ -2621,6 +2623,7 @@ async fn test_unsafe_incremental_plan_skip_restores_dirty_without_query() {
 
     let result = task
         .execute_logical_plan_unlocked(
+            &query_engine,
             &Arc::new(frontend_client),
             &dml_plan,
             &dirty_restore,
@@ -2707,7 +2710,7 @@ async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_o
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
 
     let incremental_plan = task
-        .prepare_plan_for_incremental(&dml_plan)
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
         .await
         .unwrap()
         .expect("plain GROUP BY is incremental-safe without a rewrite");
@@ -2752,7 +2755,7 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
         .write()
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+    let incremental_plan = task.prepare_plan_for_incremental(&query_engine, &dml_plan).await.unwrap();
     let incremental_safe = incremental_plan.is_some();
 
     assert!(incremental_safe);
