@@ -45,7 +45,7 @@ use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, warn};
 use datatypes::schema::SkippingIndexOptions;
 use futures_util::future;
 use meter_macros::write_meter;
@@ -918,7 +918,7 @@ impl Inserter {
         }
 
         let table_reference = TableReference::full(catalog_name, &schema_name, &physical_table);
-        info!("Physical metric table `{table_reference}` does not exist, try creating table");
+        debug!("Ensuring physical metric table `{table_reference}` exists for insert");
 
         // schema with timestamp and field column
         let default_schema = vec![
@@ -956,10 +956,7 @@ impl Inserter {
             .await;
 
         match res {
-            Ok(_) => {
-                info!("Successfully created table {table_reference}",);
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(err) => {
                 error!(err; "Failed to create table {table_reference}");
                 Err(err)
@@ -1014,7 +1011,7 @@ impl Inserter {
             reorder_splunk_primary_keys(&mut create_table_expr.primary_keys);
         }
 
-        info!("Table `{table_ref}` does not exist, try creating table");
+        debug!("Ensuring table `{table_ref}` exists for insert");
         create_table_expr.table_options.extend(table_options);
         Ok(create_table_expr)
     }
@@ -1145,15 +1142,6 @@ impl Inserter {
         ctx: &QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<TableRef> {
-        {
-            let table_ref = TableReference::full(
-                &create_table_expr.catalog_name,
-                &create_table_expr.schema_name,
-                &create_table_expr.table_name,
-            );
-
-            info!("Table `{table_ref}` does not exist, try creating table");
-        }
         let res = statement_executor
             .create_table_inner(
                 &mut create_table_expr,
@@ -1170,13 +1158,7 @@ impl Inserter {
         );
 
         match res {
-            Ok(table) => {
-                info!(
-                    "Successfully created table {} with options: {:?}",
-                    table_ref, create_table_expr.table_options,
-                );
-                Ok(table)
-            }
+            Ok(table) => Ok(table),
             Err(err) => {
                 error!(err; "Failed to create table {}", table_ref);
                 Err(err)
@@ -1195,10 +1177,7 @@ impl Inserter {
             .await;
 
         match res {
-            Ok(res) => {
-                info!("Successfully created logical tables");
-                Ok(res)
-            }
+            Ok(res) => Ok(res),
             Err(err) => {
                 let failed_tables = create_table_exprs
                     .into_iter()
