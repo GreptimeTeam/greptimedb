@@ -23,15 +23,23 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use criterion::{Criterion, criterion_group, criterion_main};
+use datafusion_expr::{col, lit};
 use datatypes::arrow::array::{
     ArrayRef, BinaryDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
 };
 use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use mito2::sst::parquet::flat_format::decode_primary_keys;
+use mito2::test_util::bench_util::tag_filter_for_bench;
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+use store_api::storage::RegionId;
+use store_api::storage::consts::ReservedColumnId;
 
 const ROWS: usize = 4096;
 
@@ -40,6 +48,46 @@ struct Shape {
     tags: u32,
     projected_tags: u32,
     rows_per_key: usize,
+}
+
+fn metadata(tags: u32) -> RegionMetadataRef {
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+    let mut primary_key = Vec::new();
+    let tag_columns = [
+        (
+            ReservedColumnId::table_id(),
+            "__table_id".into(),
+            ConcreteDataType::uint32_datatype(),
+        ),
+        (
+            ReservedColumnId::tsid(),
+            "__tsid".into(),
+            ConcreteDataType::uint64_datatype(),
+        ),
+    ]
+    .into_iter()
+    .chain((0..tags).map(|id| (id, format!("tag_{id}"), ConcreteDataType::string_datatype())));
+    for (column_id, name, data_type) in tag_columns {
+        primary_key.push(column_id);
+        builder.push_column_metadata(ColumnMetadata {
+            column_id,
+            column_schema: ColumnSchema::new(name, data_type, true),
+            semantic_type: SemanticType::Tag,
+        });
+    }
+    builder.push_column_metadata(ColumnMetadata {
+        column_id: tags,
+        column_schema: ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        ),
+        semantic_type: SemanticType::Timestamp,
+    });
+    builder
+        .primary_key(primary_key)
+        .primary_key_encoding(PrimaryKeyEncoding::Sparse);
+    Arc::new(builder.build().unwrap())
 }
 
 /// Builds a sparse flat batch whose primary key dictionary holds
@@ -144,6 +192,15 @@ fn bench_pk_tag_column(c: &mut Criterion) {
                 let mut decoded = decode_primary_keys(&codec, black_box(&batch)).unwrap();
                 black_box(decoded.get_sparse_tag_columns(black_box(&columns)).unwrap());
             });
+        });
+
+        let filters: Vec<_> = projected
+            .iter()
+            .map(|id| col(format!("tag_{id}")).gt_eq(lit("")))
+            .collect();
+        let filter = tag_filter_for_bench(metadata(shape.tags), &filters);
+        group.bench_function(format!("{}/filters", shape.name), |b| {
+            b.iter(|| black_box(filter(black_box(batch.clone())).unwrap()));
         });
     }
     group.finish();

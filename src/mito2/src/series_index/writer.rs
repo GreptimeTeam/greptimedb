@@ -28,9 +28,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SparseOffsetsCache;
-use mito_codec::row_converter::sparse::{
-    RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID, SparsePrimaryKeyView,
-};
+use mito_codec::row_converter::sparse::SparsePrimaryKeyView;
 use object_store::ObjectStore;
 use parquet::file::metadata::KeyValue;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -151,15 +149,6 @@ impl SeriesIndexWriter {
             }
         );
         let time_unit = time_index_unit(&metadata)?;
-        ensure!(
-            metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
-            InvalidMetaSnafu {
-                reason: format!(
-                    "series index requires sparse primary key encoding, got {:?}",
-                    metadata.primary_key_encoding
-                ),
-            }
-        );
         let schema = series_index_schema(&metadata)?;
         let tag_columns = tag_columns(&metadata);
         let writer = ParquetIndexWriter::try_new(
@@ -609,27 +598,8 @@ fn decode_primary_key(
 ) -> Result<SeriesIndexRow> {
     let mut view = SparsePrimaryKeyView::new(primary_key, offsets).context(DecodeSnafu)?;
 
-    let Some(table_id) = view
-        .reserved_value(RESERVED_COLUMN_ID_TABLE_ID)
-        .context(DecodeSnafu)?
-    else {
-        return InvalidRecordBatchSnafu {
-            reason: "missing sparse __table_id",
-        }
-        .fail();
-    };
-    // The reserved value is a fixed-width big-endian integer.
-    let table_id = u32::from_be_bytes(table_id.try_into().unwrap());
-    let Some(tsid) = view
-        .reserved_value(RESERVED_COLUMN_ID_TSID)
-        .context(DecodeSnafu)?
-    else {
-        return InvalidRecordBatchSnafu {
-            reason: "missing sparse __tsid",
-        }
-        .fail();
-    };
-    let tsid = u64::from_be_bytes(tsid.try_into().unwrap());
+    let table_id = view.table_id();
+    let tsid = view.tsid();
 
     let mut tags = Vec::with_capacity(tag_columns.len());
     for (column_id, _) in tag_columns {
@@ -1184,5 +1154,69 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_series_tags_survive_scratch_reuse_across_batches() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let tags = [
+            ["a".repeat(160), String::new()],
+            [String::new(), "中文\0".into()],
+            ["x".into(), "tail".into()],
+            ["y".into(), "z".repeat(130)],
+            [String::new(), String::new()],
+        ];
+        let keys: Vec<_> = tags
+            .iter()
+            .enumerate()
+            .map(|(idx, tags)| {
+                new_sparse_primary_key(&[&tags[0], &tags[1]], &metadata, u32::MAX, idx as u64)
+            })
+            .collect();
+        let store = object_store();
+        let mut writer = SeriesIndexWriter::try_new(
+            metadata.clone(),
+            store.clone(),
+            "scratch-reuse.parquet",
+            SeriesIndexWriterOptions::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        writer
+            .write(&binary_batch(&[&keys[0], &keys[0], &keys[1]], &[1, 2, 3]))
+            .await
+            .unwrap();
+        writer
+            .write(&dictionary_batch(
+                &[&keys[1], &keys[2], &keys[3], &keys[4]],
+                &[4, 5, 6, 7],
+            ))
+            .await
+            .unwrap();
+        writer.finish().await.unwrap();
+
+        let (_, _, batches) = read_index(&store, "scratch-reuse.parquet").await;
+        assert_eq!(batches.len(), 1);
+        let expected = RecordBatch::try_new(
+            series_index_schema(&metadata).unwrap(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1, 3, 5, 6, 7])),
+                Arc::new(TimestampMillisecondArray::from(vec![2, 4, 5, 6, 7])),
+                Arc::new(UInt64Array::from(vec![2, 2, 1, 1, 1])),
+                Arc::new(UInt32Array::from(vec![u32::MAX; 5])),
+                Arc::new(UInt64Array::from_iter_values(0..5)),
+                Arc::new(StringArray::from_iter_values(
+                    tags.iter().map(|tags| tags[0].as_str()),
+                )),
+                Arc::new(StringArray::from_iter_values(
+                    tags.iter().map(|tags| tags[1].as_str()),
+                )),
+            ],
+        )
+        .unwrap();
+        assert_eq!(batches[0], expected);
     }
 }

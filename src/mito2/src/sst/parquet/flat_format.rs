@@ -795,22 +795,8 @@ fn push_sparse_tag_value_in_view(
     value_buf: &mut Vec<u8>,
 ) -> Result<()> {
     match column_id {
-        RESERVED_COLUMN_ID_TABLE_ID | RESERVED_COLUMN_ID_TSID => {
-            let Some(value) = view.reserved_value(column_id).context(DecodeSnafu)? else {
-                builder.push_null();
-                return Ok(());
-            };
-            // The reserved value is a fixed-width big-endian integer.
-            if column_id == RESERVED_COLUMN_ID_TABLE_ID {
-                builder.push_value_ref(&ValueRef::UInt32(u32::from_be_bytes(
-                    value.try_into().unwrap(),
-                )));
-            } else {
-                builder.push_value_ref(&ValueRef::UInt64(u64::from_be_bytes(
-                    value.try_into().unwrap(),
-                )));
-            }
-        }
+        RESERVED_COLUMN_ID_TABLE_ID => builder.push_value_ref(&ValueRef::UInt32(view.table_id())),
+        RESERVED_COLUMN_ID_TSID => builder.push_value_ref(&ValueRef::UInt64(view.tsid())),
         _ => {
             // `encode_sparse_value` returns None for missing and null labels
             // and validates UTF-8 for string labels.
