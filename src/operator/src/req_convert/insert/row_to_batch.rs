@@ -23,6 +23,7 @@ use api::v1::{ColumnDataType, ColumnDataTypeExtension, Rows, SemanticType, Value
 use arrow::record_batch::RecordBatch;
 use common_error::ext::BoxedError;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::align_schema_with_json_array;
 use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableInfo;
 
@@ -145,7 +146,8 @@ pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<Recor
         };
         arrays.push(vector.to_arrow_array());
     }
-    RecordBatch::try_new(schema.arrow_schema().clone(), arrays).context(error::ComputeArrowSnafu)
+    let arrow_schema = align_schema_with_json_array(schema.arrow_schema().clone(), &arrays);
+    RecordBatch::try_new(arrow_schema, arrays).context(error::ComputeArrowSnafu)
 }
 
 // Validate nested values before the infallible protobuf conversion reads type extensions.
@@ -343,6 +345,65 @@ mod tests {
             assert_eq!(batch.num_rows(), 1);
             assert_eq!(batch.column(0).null_count(), 0);
         }
+    }
+
+    #[test]
+    fn test_json2_expanded_schema() {
+        use api::helper::to_grpc_value;
+        use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+        use datatypes::json::JsonSettings;
+        use datatypes::schema::SchemaBuilder;
+        use datatypes::types::json_type::JsonNativeType;
+
+        let settings = JsonSettings::default();
+        let mut column_schema = ColumnSchema::new(
+            "data",
+            ConcreteDataType::json2(JsonNativeType::object()),
+            true,
+        );
+        column_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            settings.clone(),
+        ))));
+        let schema = SchemaBuilder::try_from(vec![column_schema])
+            .unwrap()
+            .add_metadata("test", "metadata")
+            .build()
+            .unwrap();
+        let arrow_schema = schema.arrow_schema().clone();
+        let field = arrow_schema.field(0);
+        let datatype =
+            ColumnDataTypeWrapper::try_from(schema.column_schemas()[0].data_type.clone()).unwrap();
+        let (kind, extension) = datatype.to_parts();
+        let mut column = source("data", kind);
+        column.datatype_extension = extension;
+        let rows = Rows {
+            schema: vec![column],
+            rows: vec![Row {
+                values: vec![to_grpc_value(
+                    settings.encode(serde_json::json!({"id": 3})).unwrap(),
+                )],
+            }],
+        };
+        let batch = rows_to_record_batch(&rows, &table_info(schema)).unwrap();
+        // The same arrays fail with the static table schema used before alignment.
+        assert!(RecordBatch::try_new(arrow_schema.clone(), batch.columns().to_vec()).is_err());
+        let actual_schema = batch.schema();
+        assert_eq!(actual_schema.metadata(), arrow_schema.metadata());
+        assert_eq!(actual_schema.field(0).metadata(), field.metadata());
+        assert_eq!(actual_schema.field(0).name(), field.name());
+        assert_eq!(actual_schema.field(0).is_nullable(), field.is_nullable());
+        assert_eq!(
+            actual_schema.field(0).data_type(),
+            batch.column(0).data_type()
+        );
+        let array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::StructArray>()
+            .unwrap();
+        assert!(array.column_by_name("id").is_some());
+        assert!(array.column_by_name("!__remainder__!").is_some());
+        assert_eq!(batch.num_rows(), 1);
     }
 
     #[test]
