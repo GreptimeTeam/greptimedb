@@ -235,6 +235,8 @@ mod tests {
     #[case::unlimited(2, None, false, None, vec![vec![2], vec![1], vec![0]])]
     #[case::fewer_eligible_outputs(2, Some(20), false, Some(3), vec![vec![1], vec![0]])]
     #[case::absorbed_seeds(1, None, false, Some(2), vec![vec![2, 1], vec![0]])]
+    #[case::busy_bridge_defers_both_seeds(1, None, true, Some(2), vec![vec![0]])]
+    #[case::memtable_barrier_defers_both_seeds(1, Some(20), false, Some(2), vec![vec![0]])]
     #[tokio::test]
     async fn test_output_limit_counts_eligible_closures(
         #[case] dependency_start_window: usize,
@@ -245,6 +247,8 @@ mod tests {
     ) {
         // Three independent, eligible L0 windows. A large L1 dependency is not
         // a seed, but can reject the newest closure or connect two seeds.
+        // Rejecting that bridge must defer both connected seeds, leaving only
+        // the independent oldest window eligible rather than a partial merge.
         let windows: Vec<Vec<_>> = (0..3)
             .map(|window| {
                 (0..4)
