@@ -44,6 +44,7 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::sst::index::TYPE_INVERTED_INDEX;
+use crate::sst::index::column::column_index_rows;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
@@ -196,27 +197,17 @@ impl InvertedIndexer {
                     .context(crate::error::ConvertVectorSnafu)?;
                 let sort_field = SortField::new(vector.data_type());
 
-                for row in 0..batch.num_rows() {
-                    self.value_buf.clear();
-                    let value_ref = vector.get_ref(row);
-
-                    if value_ref.is_null() {
-                        self.index_creator
-                            .push_with_name(target_key, None)
-                            .await
-                            .context(PushIndexValueSnafu)?;
-                    } else {
-                        IndexValueCodec::encode_nonnull_value(
-                            value_ref,
-                            &sort_field,
-                            &mut self.value_buf,
-                        )
-                        .context(EncodeSnafu)?;
-                        self.index_creator
-                            .push_with_name(target_key, Some(&self.value_buf))
-                            .await
-                            .context(PushIndexValueSnafu)?;
-                    }
+                for (row, count) in column_index_rows(batch, column_meta.semantic_type) {
+                    let elem = IndexValueCodec::encode_value(
+                        vector.get_ref(row),
+                        &sort_field,
+                        &mut self.value_buf,
+                    )
+                    .context(EncodeSnafu)?;
+                    self.index_creator
+                        .push_with_name_n(target_key, elem, count)
+                        .await
+                        .context(PushIndexValueSnafu)?;
                 }
             } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
                 if self.codec.pk_col_info(*col_id).is_some() {
