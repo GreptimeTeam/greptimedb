@@ -17,11 +17,15 @@
 
 import base64
 import importlib.util
+import io
+import os
 import sys
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 SCRIPTS_DIR = Path(__file__).parents[2] / ".github/scripts"
 
@@ -35,14 +39,134 @@ def load_module(name: str, filename: str):
     return module
 
 
-provision = load_module("aliyun_ecs_runner_provision_under_test", "aliyun-ecs-runner-provision.py")
-teardown = load_module("aliyun_ecs_runner_teardown_under_test", "aliyun-ecs-runner-teardown.py")
+provision = load_module(
+    "aliyun_ecs_runner_provision_under_test", "aliyun-ecs-runner-provision.py"
+)
+teardown = load_module(
+    "aliyun_ecs_runner_teardown_under_test", "aliyun-ecs-runner-teardown.py"
+)
 
 
 class ProvisionNamingTest(unittest.TestCase):
     def test_runner_name_and_label_derive_from_run_id(self) -> None:
         self.assertEqual(provision.runner_name_for_run("12345"), "qreg-ecs-12345")
         self.assertEqual(provision.runner_label_for_run("12345"), "query-regression-ecs-12345")
+
+
+class ProvisionResourcesTest(unittest.TestCase):
+    @staticmethod
+    def config(**overrides):
+        values = {
+            "region_id": "region", "vswitch_id": "vswitch", "security_group_id": "sg",
+            "image_id": "image", "instance_type": "ecs.u1-c1m1.2xlarge", "repo": "owner/repo",
+            "run_id": "12345", "github_token": "token",
+        }
+        return provision.ProvisionConfig(**(values | overrides))
+
+    def test_sdk_request_defaults_and_overrides(self):
+        models = SimpleNamespace(
+            RunInstancesRequest=SimpleNamespace,
+            RunInstancesRequestSystemDisk=SimpleNamespace,
+            RunInstancesRequestTag=SimpleNamespace,
+        )
+        for overrides, disk, ttl in (
+            ({}, "80", None),
+            ({"system_disk_gib": 500, "ttl_hours": 8}, "500", "8"),
+        ):
+            with (
+                self.subTest(overrides=overrides),
+                patch.dict(
+                    sys.modules,
+                    {"alibabacloud_ecs20140526": SimpleNamespace(models=models)},
+                ),
+            ):
+                client = Mock()
+                client.run_instances.return_value = SimpleNamespace(
+                    body=SimpleNamespace(
+                        instance_id_sets=SimpleNamespace(instance_id_set=["i-test"])
+                    )
+                )
+                self.assertEqual(
+                    provision.run_instance(
+                        client, self.config(**overrides), "userdata"
+                    ),
+                    "i-test",
+                )
+                request = client.run_instances.call_args.args[0]
+                self.assertEqual(request.system_disk.size, disk)
+                self.assertEqual(request.system_disk.category, "cloud_essd")
+                self.assertEqual(request.instance_type, "ecs.u1-c1m1.2xlarge")
+                tags = {tag.key: tag.value for tag in request.tag}
+                expected = {
+                    provision.MANAGED_BY_TAG_KEY: provision.MANAGED_BY_TAG_VALUE,
+                    provision.RUN_TAG_KEY: "12345",
+                }
+                if ttl is not None:
+                    expected[provision.TTL_TAG_KEY] = ttl
+                self.assertEqual(tags, expected)
+
+    def test_invalid_resource_bounds(self):
+        for overrides in (
+            {"system_disk_gib": 19},
+            {"system_disk_gib": 2049},
+            {"ttl_hours": 0},
+            {"ttl_hours": 169},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                self.config(**overrides)
+        for disk in (20, 2048):
+            self.assertEqual(self.config(system_disk_gib=disk).system_disk_gib, disk)
+        for ttl in (1, 168):
+            self.assertEqual(self.config(ttl_hours=ttl).ttl_hours, ttl)
+
+    def test_cli_environment_defaults_and_overrides(self):
+        args = [
+            "provision",
+            "--region-id",
+            "region",
+            "--vswitch-id",
+            "vswitch",
+            "--security-group-id",
+            "sg",
+            "--image-id",
+            "image",
+            "--instance-type",
+            "ecs.u1-c1m1.2xlarge",
+            "--repo",
+            "owner/repo",
+            "--run-id",
+            "12345",
+            "--github-token",
+            "token",
+        ]
+        cases = [
+            ({}, [], 80, None),
+            (
+                {"ALIYUN_ECS_SYSTEM_DISK_GIB": "500", "ALIYUN_ECS_TTL_HOURS": "8"},
+                [],
+                500,
+                8,
+            ),
+            (
+                {"ALIYUN_ECS_SYSTEM_DISK_GIB": "500", "ALIYUN_ECS_TTL_HOURS": "8"},
+                ["--system-disk-gib", "600", "--ttl-hours", "12"],
+                600,
+                12,
+            ),
+            ({"ALIYUN_ECS_TTL_HOURS": ""}, [], 80, None),
+        ]
+        for env, extra, disk, ttl in cases:
+            with (
+                self.subTest(env=env, extra=extra),
+                patch.dict(os.environ, env, clear=True),
+                patch.object(sys, "argv", args + extra),
+                patch.object(provision, "provision", return_value=0) as run,
+            ):
+                self.assertEqual(provision.main(), 0)
+                config = run.call_args.args[0]
+                self.assertEqual(
+                    (config.system_disk_gib, config.ttl_hours), (disk, ttl)
+                )
 
 
 class ProvisionUserDataTest(unittest.TestCase):
@@ -108,13 +232,98 @@ class TeardownExpiryTest(unittest.TestCase):
 
     def test_expired_instance_names_selects_only_old_instances(self) -> None:
         instances = [
-            ("i-old", "qreg-ecs-1", "2026-08-17T01:00Z"),  # 5h old: expired
-            ("i-edge", "qreg-ecs-2", "2026-08-17T02:00Z"),  # exactly TTL: expired
-            ("i-fresh", "qreg-ecs-3", "2026-08-17T05:30Z"),  # 30m old: kept
+            ("i-old", "qreg-ecs-1", "2026-08-17T01:00Z", None),  # 5h old: expired
+            ("i-edge", "qreg-ecs-2", "2026-08-17T02:00Z", None),  # exactly TTL: expired
+            ("i-fresh", "qreg-ecs-3", "2026-08-17T05:30Z", None),  # 30m old: kept
         ]
         self.assertEqual(
             teardown.expired_instance_names(instances, self.NOW, self.TTL),
             [("i-old", "qreg-ecs-1"), ("i-edge", "qreg-ecs-2")],
+        )
+
+    def test_tagged_ttl_overrides_fallback_and_preserves_legacy(self):
+        instances = [
+            ("i-legacy", "legacy", "2026-08-17T01:00Z", None),
+            ("i-long", "long", "2026-08-17T01:00Z", "8"),
+            ("i-short", "short", "2026-08-17T03:00Z", "2"),
+            ("i-edge", "edge", "2026-08-16T22:00Z", "8"),
+            ("i-not-yet", "not-yet", "2026-08-16T22:00:01Z", "8"),
+        ]
+        self.assertEqual(
+            teardown.expired_instance_names(instances, self.NOW, self.TTL),
+            [("i-legacy", "legacy"), ("i-short", "short"), ("i-edge", "edge")],
+        )
+
+    def test_malformed_ttl_never_falls_back_to_earlier_deletion(self):
+        for ttl in ("", "bad", "-1", "0", "169", "8.5", "nan"):
+            with self.subTest(ttl=ttl), redirect_stderr(io.StringIO()) as logs:
+                self.assertEqual(
+                    teardown.expired_instance_names(
+                        [("i-live", "live", "2026-08-16T01:00Z", ttl)],
+                        self.NOW,
+                        self.TTL,
+                    ),
+                    [],
+                )
+                self.assertIn("Skipping i-live", logs.getvalue())
+
+    def test_list_instances_preserves_tags_and_pagination(self):
+        models = SimpleNamespace(
+            DescribeInstancesRequest=SimpleNamespace,
+            DescribeInstancesRequestTag=SimpleNamespace,
+        )
+        client = Mock()
+
+        def response(instance, token):
+            return SimpleNamespace(
+                body=SimpleNamespace(
+                    instances=SimpleNamespace(instance=[instance]), next_token=token
+                )
+            )
+
+        client.describe_instances.side_effect = [
+            response(
+                SimpleNamespace(
+                    instance_id="i-1",
+                    instance_name="one",
+                    creation_time="2026-08-17T01:00Z",
+                    tags=SimpleNamespace(
+                        tag=[
+                            SimpleNamespace(
+                                tag_key=provision.TTL_TAG_KEY, tag_value="8"
+                            )
+                        ]
+                    ),
+                ),
+                "next",
+            ),
+            response(
+                SimpleNamespace(
+                    instance_id="i-2",
+                    instance_name="two",
+                    creation_time="2026-08-17T02:00Z",
+                    tags=None,
+                ),
+                None,
+            ),
+        ]
+        with patch.dict(
+            sys.modules, {"alibabacloud_ecs20140526": SimpleNamespace(models=models)}
+        ):
+            self.assertEqual(
+                teardown.list_managed_instances(client, "region"),
+                [
+                    ("i-1", "one", "2026-08-17T01:00Z", "8"),
+                    ("i-2", "two", "2026-08-17T02:00Z", None),
+                ],
+            )
+        self.assertEqual(
+            client.describe_instances.call_args_list[1].args[0].next_token, "next"
+        )
+        tag = client.describe_instances.call_args_list[0].args[0].tag[0]
+        self.assertEqual(
+            (tag.key, tag.value),
+            (provision.MANAGED_BY_TAG_KEY, provision.MANAGED_BY_TAG_VALUE),
         )
 
 

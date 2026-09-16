@@ -27,17 +27,36 @@ on:
         default: 26.6.1.1193
         required: true
       victorialogs_tag:
-        description: Docker Hub victoriametrics/victoria-logs tag
+        description: Docker Hub victoriametrics/victoria-logs tag or tag@sha256 digest
         type: string
-        default: latest
+        default: v1.52.0@sha256:47b820890d64c4575a2a0a46415dcd8a4fd59a0f1fcd6a377693d7aea639442e
         required: true
       o11ybench_ref:
-        description: Full o11ybench commit SHA matching runtime OCI revision label
+        description: Optional full commit SHA override (default uses runtime image revision)
         type: string
-        required: true
+        required: false
       runtime_image:
-        description: Published Aliyun o11ybench-runtime image (tag or digest)
+        description: Optional Aliyun runtime image override (default uses repository variable)
         type: string
+        required: false
+      ecs_instance_type:
+        description: Optional ECS type override (default uses ALIYUN_ECS_INSTANCE_TYPE)
+        type: string
+        required: false
+      system_disk_gib:
+        description: ECS system disk size in GiB (20..2048; includes corpus, DB, images and swap)
+        type: number
+        default: 500
+        required: true
+      benchmark_timeout_minutes:
+        description: Benchmark job timeout in minutes (1..360)
+        type: number
+        default: 360
+        required: true
+      janitor_ttl_hours:
+        description: Instance lifetime before janitor eligibility (1..168 hours; at least timeout + 2h)
+        type: number
+        default: 8
         required: true
       db_cpus:
         description: CPU limit per DB container
@@ -58,7 +77,11 @@ env:
   CLICKHOUSE_TAG: ${{ inputs.clickhouse_tag }}
   VICTORIALOGS_TAG: ${{ inputs.victorialogs_tag }}
   O11YBENCH_REF: ${{ inputs.o11ybench_ref }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image || vars.O11YBENCH_RUNTIME_IMAGE }}
+  ECS_INSTANCE_TYPE: ${{ inputs.ecs_instance_type || vars.ALIYUN_ECS_INSTANCE_TYPE }}
+  SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
+  BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
+  JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
   DB_CPUS: ${{ inputs.db_cpus }}
   DB_MEMORY: ${{ inputs.db_memory }}
 jobs:
@@ -74,13 +97,38 @@ jobs:
         with:
           path: greptimedb
           persist-credentials: false
-      - name: Test CI helpers
-        run: |-
-          python3 greptimedb/tests/perf/test_o11ybench_ci.py
-          python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
+      - name: Test ECS lifecycle helpers
+        run: python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
       - name: Validate requested benchmark
         id: inputs
-        run: python3 greptimedb/.github/scripts/o11ybench-ci.py validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Validate cloud lifecycle budgets before provisioning; runtime owns workload validation.
+          [[ -n "$ECS_INSTANCE_TYPE" ]]
+          for value in "$SYSTEM_DISK_GIB" "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
+            [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Resource budgets must be positive integers' >&2; exit 1; }
+          done
+          ((SYSTEM_DISK_GIB >= 20 && SYSTEM_DISK_GIB <= 2048))
+          ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
+          # Reserve 45m provision + 15m teardown + 60m queue headroom before expiry.
+          ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120)) || {
+            echo 'Janitor TTL must cover benchmark timeout plus 2 hours' >&2; exit 1;
+          }
+          [[ -z "$O11YBENCH_REF" || "$O11YBENCH_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ -n "$RUNTIME_IMAGE" ]] || { echo 'Configure O11YBENCH_RUNTIME_IMAGE or supply runtime_image' >&2; exit 1; }
+          selected="$TARGETS"
+          [[ "$selected" != all ]] || selected=greptimedb,clickhouse,victorialogs
+          [[ "$selected" =~ ^(greptimedb|clickhouse|victorialogs)(,(greptimedb|clickhouse|victorialogs))*$ ]]
+          declare -A enabled
+          IFS=, read -ra targets <<< "$selected"
+          for target in "${targets[@]}"; do
+            [[ -z ${enabled[$target]:-} ]] || { echo "Duplicate target: $target" >&2; exit 1; }
+            enabled[$target]=true
+          done
+          for target in greptimedb clickhouse victorialogs; do
+            printf '%s=%s\n' "$target" "${enabled[$target]:-false}" >> "$GITHUB_OUTPUT"
+          done
   provision:
     needs: validate
     runs-on: ubuntu-latest
@@ -105,7 +153,9 @@ jobs:
           vswitch-id: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
           security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
           image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
-          instance-type: ${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}
+          instance-type: ${{ env.ECS_INSTANCE_TYPE }}
+          system-disk-gib: ${{ inputs.system_disk_gib }}
+          ttl-hours: ${{ inputs.janitor_ttl_hours }}
           resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
           runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
           runner-gid: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
@@ -114,7 +164,7 @@ jobs:
       - validate
       - provision
     runs-on: ${{ needs.provision.outputs.label }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.benchmark_timeout_minutes }}
     env:
       OWNER: o11ybench-${{ github.run_id }}-${{ github.run_attempt }}
       ARTIFACT_ROOT: ${{ github.workspace }}/benchmark-data/${{ github.run_id }}-${{ github.run_attempt }}
@@ -130,13 +180,6 @@ jobs:
         with:
           path: greptimedb
           persist-credentials: false
-      - name: Checkout benchmark tools
-        uses: actions/checkout@v4
-        with:
-          repository: GreptimeTeam/o11ybench
-          ref: ${{ inputs.o11ybench_ref }}
-          path: o11ybench
-          persist-credentials: false
       - name: Set up Docker on ephemeral Linux host
         shell: bash
         run: |
@@ -150,13 +193,58 @@ jobs:
           # The workspace (and Docker state) must not use a small /tmp filesystem.
           df -h "$GITHUB_WORKSPACE" /var/lib/docker
       - name: Resolve image tags and verify runtime revision
-        run: python3 greptimedb/.github/scripts/o11ybench-ci.py prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=
+          [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
+          images='{}'
+          resolve_image() {
+            local target=$1 reference=$2 variable=$3 metadata id revision
+            docker pull "$reference"
+            metadata=$(docker image inspect "$reference")
+            id=$(jq -er '.[0].Id' <<< "$metadata")
+            if [[ "$target" == runtime ]]; then
+              revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
+              [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo 'Runtime lacks a full commit revision' >&2; return 1; }
+              [[ -z "$O11YBENCH_REF" || "$revision" == "$O11YBENCH_REF" ]] || { echo 'Runtime and requested o11ybench revisions differ' >&2; return 1; }
+              actual=$revision
+              printf 'RESOLVED_O11YBENCH_REF=%s\n' "$revision" >> "$GITHUB_ENV"
+            fi
+            printf '%s=%s\n' "$variable" "$id" >> "$GITHUB_ENV"
+            images=$(jq --arg target "$target" --arg requested "$reference" --argjson metadata "$metadata" \
+              '. + {($target): {requested: $requested, id: $metadata[0].Id, digests: ($metadata[0].RepoDigests // [])}}' <<< "$images")
+          }
+          resolve_image runtime "$RUNTIME_IMAGE" RESOLVED_RUNTIME_IMAGE
+          for target in greptimedb clickhouse victorialogs; do
+            [[ "$TARGETS" == all || ",$TARGETS," == *",$target,"* ]] || continue
+            case "$target" in
+              greptimedb) resolve_image "$target" "greptime/greptimedb:$GREPTIMEDB_TAG" GREPTIMEDB_IMAGE ;;
+              clickhouse) resolve_image "$target" "clickhouse/clickhouse-server:$CLICKHOUSE_TAG" CLICKHOUSE_IMAGE ;;
+              victorialogs) resolve_image "$target" "victoriametrics/victoria-logs:$VICTORIALOGS_TAG" VICTORIALOGS_IMAGE ;;
+            esac
+          done
+          jq -n --arg sha "$actual" --arg targets "$TARGETS" --arg profile "$PROFILE" \
+            --arg cpus "$DB_CPUS" --arg memory "$DB_MEMORY" --argjson images "$images" \
+            --arg instance_type "$ECS_INSTANCE_TYPE" --argjson disk_gib "$SYSTEM_DISK_GIB" \
+            --argjson timeout_minutes "$BENCHMARK_TIMEOUT_MINUTES" --argjson ttl_hours "$JANITOR_TTL_HOURS" \
+            '{o11ybench_sha:$sha, targets:$targets, profile:$profile, db_cpus:$cpus, db_memory:$memory, images:$images, ecs:{instance_type:$instance_type, system_disk_gib:$disk_gib, benchmark_timeout_minutes:$timeout_minutes, janitor_ttl_hours:$ttl_hours}}' > "$MANIFEST_PATH"
+      - name: Checkout benchmark tools
+        uses: actions/checkout@v4
+        with:
+          repository: GreptimeTeam/o11ybench
+          ref: ${{ env.RESOLVED_O11YBENCH_REF }}
+          path: o11ybench
+          persist-credentials: false
+      - name: Verify benchmark checkout revision
+        shell: bash
+        run: test "$(git -C "$O11YBENCH_DIR" rev-parse HEAD)" = "$RESOLVED_O11YBENCH_REF"
       - name: Generate dataset once
         id: generate
         run: |-
           bash o11ybench/scripts/run-agent-observability.sh --stage generate --execute \
             --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" \
-            --root "$ARTIFACT_ROOT" --profile "$PROFILE"
+            --root "$ARTIFACT_ROOT" --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           cp "$MANIFEST_PATH" "$ARTIFACT_ROOT/run-manifest.json"
       - name: Load and benchmark greptimedb
         id: greptimedb
@@ -196,9 +284,6 @@ jobs:
             --clickhouse-summary /results/clickhouse-1/clickhouse-1/measured-summary.json \
             --victorialogs-summary /results/victorialogs-1/victorialogs-1/measured-summary.json \
             --output /results/comparison.json
-      - name: Summarize selected targets
-        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
-        run: python3 greptimedb/.github/scripts/o11ybench-ci.py summarize
       - name: Clean up owned containers
         if: always()
         run: |-

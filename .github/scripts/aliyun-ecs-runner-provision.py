@@ -58,6 +58,7 @@ RUNNER_LABEL_PREFIX = "query-regression-ecs"
 MANAGED_BY_TAG_KEY = "managed-by"
 MANAGED_BY_TAG_VALUE = "query-regression-ci"
 RUN_TAG_KEY = "query-regression-run-id"
+TTL_TAG_KEY = "runner-ttl-hours"
 
 # Runner cache paths on the instance system disk. They are created empty
 # every provision and deleted with the VM.
@@ -100,6 +101,14 @@ class ProvisionConfig:
     # Runner identity inside the image; the workflow asserts the same values.
     runner_uid: str = "1001"
     runner_gid: str = "1001"
+    system_disk_gib: int = SYSTEM_DISK_GIB
+    ttl_hours: int | None = None
+
+    def __post_init__(self) -> None:
+        if not 20 <= self.system_disk_gib <= 2048:
+            raise ValueError("system-disk-gib must be between 20 and 2048")
+        if self.ttl_hours is not None and not 1 <= self.ttl_hours <= 168:
+            raise ValueError("ttl-hours must be between 1 and 168")
 
 
 def runner_name_for_run(run_id: str) -> str:
@@ -372,13 +381,24 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         internet_max_bandwidth_out=100,
         system_disk=ecs_models.RunInstancesRequestSystemDisk(
             category="cloud_essd",
-            size=str(SYSTEM_DISK_GIB),
+            size=str(config.system_disk_gib),
         ),
         user_data=user_data,
         tag=[
-            ecs_models.RunInstancesRequestTag(key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE),
+            ecs_models.RunInstancesRequestTag(
+                key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE
+            ),
             ecs_models.RunInstancesRequestTag(key=RUN_TAG_KEY, value=config.run_id),
-        ],
+        ]
+        + (
+            [
+                ecs_models.RunInstancesRequestTag(
+                    key=TTL_TAG_KEY, value=str(config.ttl_hours)
+                )
+            ]
+            if config.ttl_hours is not None
+            else []
+        ),
     )
     response = client.run_instances(request)
     instance_id = response.body.instance_id_sets.instance_id_set[0]
@@ -450,6 +470,14 @@ def main() -> int:
     parser.add_argument("--security-group-id", default=os.environ.get("ALIYUN_ECS_SECURITY_GROUP_ID"))
     parser.add_argument("--image-id", default=os.environ.get("QUERY_REGRESSION_ECS_IMAGE_ID"))
     parser.add_argument("--instance-type", default=os.environ.get("ALIYUN_ECS_INSTANCE_TYPE"))
+    parser.add_argument(
+        "--system-disk-gib",
+        type=int,
+        default=os.environ.get("ALIYUN_ECS_SYSTEM_DISK_GIB", str(SYSTEM_DISK_GIB)),
+    )
+    parser.add_argument(
+        "--ttl-hours", type=int, default=os.environ.get("ALIYUN_ECS_TTL_HOURS") or None
+    )
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--github-token", default=os.environ.get("GH_PERSONAL_ACCESS_TOKEN"))
@@ -461,7 +489,7 @@ def main() -> int:
     missing = [
         name
         for name, value in vars(args).items()
-        if name not in ("resource_group_id",)
+        if name not in ("resource_group_id", "ttl_hours")
         and (value is None or (isinstance(value, str) and not value))
     ]
     if missing:
@@ -480,6 +508,8 @@ def main() -> int:
         resource_group_id=args.resource_group_id or None,
         runner_uid=args.runner_uid,
         runner_gid=args.runner_gid,
+        system_disk_gib=args.system_disk_gib,
+        ttl_hours=args.ttl_hours,
     )
     return provision(config)
 

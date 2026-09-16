@@ -26,6 +26,14 @@ inputs:
   instance-type:
     description: ECS instance type
     required: true
+  system-disk-gib:
+    description: System disk size in GiB (20..2048)
+    required: false
+    default: '80'
+  ttl-hours:
+    description: Optional per-instance janitor TTL (1..168 hours); empty preserves the janitor fallback
+    required: false
+    default: ''
   resource-group-id:
     description: Optional ECS resource group
     required: false
@@ -63,6 +71,8 @@ runs:
       ALIYUN_ECS_SECURITY_GROUP_ID: ${{ inputs.security-group-id }}
       QUERY_REGRESSION_ECS_IMAGE_ID: ${{ inputs.image-id }}
       ALIYUN_ECS_INSTANCE_TYPE: ${{ inputs.instance-type }}
+      ALIYUN_ECS_SYSTEM_DISK_GIB: ${{ inputs.system-disk-gib }}
+      ALIYUN_ECS_TTL_HOURS: ${{ inputs.ttl-hours }}
       ALIYUN_ECS_RESOURCE_GROUP_ID: ${{ inputs.resource-group-id }}
       QUERY_REGRESSION_RUNNER_UID: ${{ inputs.runner-uid }}
       QUERY_REGRESSION_RUNNER_GID: ${{ inputs.runner-gid }}

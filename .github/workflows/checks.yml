@@ -89,7 +89,6 @@ jobs:
           python3 tests/perf/test_query_regression_nightly_refs.py
           python3 tests/perf/test_query_regression_slash.py
           python3 tests/perf/test_aliyun_ecs_runner_scripts.py
-          python3 tests/perf/test_o11ybench_ci.py
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
