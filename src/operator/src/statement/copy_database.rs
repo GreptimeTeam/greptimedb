@@ -45,7 +45,7 @@ pub(crate) const COPY_DATABASE_TIME_END_KEY: &str = "end_time";
 pub(crate) const CONTINUE_ON_ERROR_KEY: &str = "continue_on_error";
 pub(crate) const PARALLELISM_KEY: &str = "parallelism";
 
-fn is_directory_location(location: &str) -> bool {
+pub(super) fn is_directory_location(location: &str) -> bool {
     if location.ends_with('/') {
         return true;
     }
@@ -64,7 +64,7 @@ fn is_directory_location(location: &str) -> bool {
 }
 
 /// Get parallelism from options, default to total CPU cores.
-fn parse_parallelism_from_option_map(options: &HashMap<String, String>) -> usize {
+pub(super) fn parse_parallelism_from_option_map(options: &HashMap<String, String>) -> usize {
     options
         .get(PARALLELISM_KEY)
         .and_then(|v| v.parse::<usize>().ok())

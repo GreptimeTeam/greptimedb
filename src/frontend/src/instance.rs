@@ -15,6 +15,7 @@
 pub mod builder;
 mod dashboard;
 mod entity_graph;
+mod export_database;
 mod grpc;
 mod influxdb;
 mod jaeger;
@@ -2875,6 +2876,84 @@ mod tests {
         targets: Option<PermissionTableTargets>,
     ) {
         assert_eq!(CheckedAction { action, targets }, checker.take_check());
+    }
+
+    #[tokio::test]
+    async fn database_export_authorizes_all_tables_before_preparation() -> TestResult<()> {
+        struct ExportAcl(std::sync::Mutex<Vec<PermissionTableTargets>>);
+        impl PermissionChecker for ExportAcl {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                assert!(matches!(
+                    req,
+                    PermissionReq::SqlStatement(Statement::Copy(
+                        sql::statements::copy::Copy::CopyDatabase(
+                            sql::statements::copy::CopyDatabase::To(_)
+                        )
+                    ))
+                ));
+                Ok(PermissionResp::Allow)
+            }
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                self.0.lock().unwrap().push(targets.clone());
+                let PermissionTableTargets::Resolved(tables) = targets else {
+                    panic!("unresolved export")
+                };
+                if req.is_readonly() {
+                    // The first table is readable; the later table has only write access.
+                    Ok(if tables.iter().any(|t| t.table == "target") {
+                        PermissionResp::Reject
+                    } else {
+                        PermissionResp::Allow
+                    })
+                } else {
+                    self.check_permission(QueryContext::arc().current_user(), req)
+                }
+            }
+        }
+        let checker = Arc::new(ExportAcl(Default::default()));
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let instance = test_instance_with_plugins(
+            test_logical_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let req = table::requests::CopyDatabaseRequest {
+            catalog_name: "greptime".into(),
+            schema_name: "public".into(),
+            location: "invalid-destination".into(),
+            with: Default::default(),
+            connection: Default::default(),
+            time_range: None,
+        };
+        let result = instance
+            .prepare_database_export(req.clone(), None, &QueryContext::arc())
+            .await;
+        assert!(matches!(result, Err(Error::Permission { .. })));
+        let expected = PermissionTableTargets::resolved(vec![
+            PermissionTableTarget::new("greptime", "public", "source"),
+            PermissionTableTarget::new("greptime", "public", "target"),
+        ]);
+        assert_eq!(*checker.0.lock().unwrap(), vec![expected.clone(), expected]);
+        // An empty selection must still check the operation privilege.
+        instance
+            .plugins
+            .insert::<PermissionCheckerRef>(Arc::new(WriteOnlyPermissionChecker));
+        let result = instance
+            .prepare_database_export(req, Some(&[]), &QueryContext::arc())
+            .await;
+        assert!(matches!(result, Err(Error::Permission { .. })));
+        Ok(())
     }
 
     #[tokio::test]

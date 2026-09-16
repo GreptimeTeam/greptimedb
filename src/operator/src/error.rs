@@ -85,6 +85,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Invalid database export: {reason}"))]
+    InvalidDatabaseExport { reason: String },
+
+    #[snafu(display("Database export cancelled"))]
+    DatabaseExportCancelled {},
+
     #[snafu(display("Invalid logical table export: {reason}"))]
     InvalidLogicalTableExport { reason: String },
 
@@ -1080,6 +1086,8 @@ impl ErrorExt for Error {
             Error::InvalidTimeIndexType { .. } | Error::InvalidTimezone { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::InvalidDatabaseExport { .. } => StatusCode::InvalidArguments,
+            Error::DatabaseExportCancelled { .. } => StatusCode::Cancelled,
             Error::InvalidLogicalTableExport { .. } => StatusCode::InvalidArguments,
             Error::LogicalTableExportResource { .. } => StatusCode::Suspended,
             Error::LogicalTableExportCancelled { .. } => StatusCode::Cancelled,

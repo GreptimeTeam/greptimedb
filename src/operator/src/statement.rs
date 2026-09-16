@@ -22,6 +22,7 @@ mod cursor;
 pub mod ddl;
 mod describe;
 mod dml;
+pub mod export_database;
 pub mod export_logical_tables;
 mod kill;
 pub mod semantic_graph;
