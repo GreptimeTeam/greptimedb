@@ -803,6 +803,15 @@ fn bench_extrema_functions(c: &mut Criterion) {
                 .map(|offset| (offset as u32, 240))
                 .collect::<Vec<_>>(),
         ),
+        // A query ending one window past the last sample closes on an empty window.
+        (
+            "w240_step240_trailing_empty",
+            (0..=num_points - 240)
+                .step_by(240)
+                .map(|offset| (offset as u32, 240))
+                .chain([(0, 0)])
+                .collect::<Vec<_>>(),
+        ),
         ("backwards_reset_rebuild_w40_step5", backwards_ranges),
         (
             "low_coverage_full_backing_w4",

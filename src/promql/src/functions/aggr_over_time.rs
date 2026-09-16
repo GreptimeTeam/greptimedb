@@ -251,8 +251,7 @@ const MAX_SLIDING_STEP_FRACTION: u64 = 4;
 /// The shape is read from the whole batch rather than from its leading windows.
 /// `RangeManipulate` holds the window duration and the evaluation step fixed, but the
 /// sample counts still vary: a series that starts inside the query range gets a first
-/// window covering roughly one step, and a window covering no sample at all is emitted
-/// as `(0, 0)`. Averages survive both; the first two windows do not.
+/// window covering roughly one step. Averages survive that; the first two windows do not.
 ///
 /// A wrong answer costs time, not correctness — both evaluators return the same bits.
 fn reuses_candidates(window_keys: &[i64]) -> bool {
@@ -261,15 +260,28 @@ fn reuses_candidates(window_keys: &[i64]) -> bool {
     }
 
     let windows = window_keys.len() as u64;
-    let total_length: u64 = window_keys.iter().map(|&key| unpack(key).1 as u64).sum();
+    let mut total_length = 0u64;
+    let mut lowest_offset = u32::MAX;
+    let mut highest_offset = 0u32;
+    for &key in window_keys {
+        let (offset, length) = unpack(key);
+        // `RangeManipulate` emits a window covering no sample as `(0, 0)`, including
+        // the trailing one a query gets when its last evaluation lands exactly one
+        // window past the last sample. Its offset says nothing about the batch.
+        if length == 0 {
+            continue;
+        }
+        total_length += u64::from(length);
+        lowest_offset = lowest_offset.min(offset);
+        highest_offset = highest_offset.max(offset);
+    }
     // What reuse skips re-reading: the distance the left bound travels over the batch.
-    let first_offset = unpack(window_keys[0]).0;
-    let last_offset = unpack(window_keys[window_keys.len() - 1]).0;
-    let total_advance = u64::from(last_offset.saturating_sub(first_offset));
+    let total_advance = u64::from(highest_offset.saturating_sub(lowest_offset));
 
     // `total_length / windows >= MIN_SLIDING_WINDOW_LENGTH` and
     // `total_advance / (windows - 1) <= (total_length / windows) / MAX_SLIDING_STEP_FRACTION`,
-    // cross-multiplied to keep the averages exact.
+    // cross-multiplied to keep the averages exact. Empty windows stay in the window
+    // count, which only makes both conditions stricter.
     total_length >= windows * MIN_SLIDING_WINDOW_LENGTH
         && total_advance * MAX_SLIDING_STEP_FRACTION * windows <= total_length * (windows - 1)
 }
@@ -957,6 +969,19 @@ mod test {
                 .collect::<Vec<_>>();
             assert!(reuses_candidates(&window_keys(&ranges)));
         }
+    }
+
+    #[test]
+    fn empty_windows_do_not_shorten_the_measured_advance() {
+        // A query whose last evaluation lands one window past the last sample ends on
+        // a (0, 0) window. Its zero offset must not read as a batch that never moved,
+        // which would put disjoint windows on the evaluator built for overlap.
+        let disjoint = (0..4u32)
+            .map(|index| (index * 240, 240))
+            .collect::<Vec<_>>();
+        assert!(!reuses_candidates(&window_keys(&disjoint)));
+        let with_trailing_empty = [disjoint.as_slice(), &[(0, 0)]].concat();
+        assert!(!reuses_candidates(&window_keys(&with_trailing_empty)));
     }
 
     #[test]
