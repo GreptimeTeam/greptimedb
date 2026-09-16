@@ -13,6 +13,9 @@
 // limitations under the License.
 
 pub(crate) mod bloom_filter;
+mod column;
+#[cfg(test)]
+mod column_test;
 pub(crate) mod fulltext_index;
 mod indexer;
 pub mod intermediate;

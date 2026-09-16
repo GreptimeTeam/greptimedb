@@ -38,6 +38,7 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
+use crate::sst::index::column::column_index_rows;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
@@ -58,6 +59,9 @@ pub struct BloomFilterIndexer {
 
     /// Codec for decoding primary keys.
     codec: IndexValuesCodec,
+
+    /// Reusable buffer for non-string materialized index values.
+    value_buf: Vec<u8>,
 
     /// Whether the indexing process has been aborted.
     aborted: bool,
@@ -124,6 +128,7 @@ impl BloomFilterIndexer {
             creators,
             temp_file_provider,
             codec,
+            value_buf: Vec::new(),
             aborted: false,
             stats: Statistics::new(TYPE_BLOOM_FILTER_INDEX),
             global_memory_usage,
@@ -185,7 +190,7 @@ impl BloomFilterIndexer {
     /// Returns the number of rows and bytes written.
     ///
     /// TODO(zhongzc): duplicate with `mito2::sst::index::inverted_index::creator::InvertedIndexCreator`
-    pub async fn finish(
+    pub(crate) async fn finish(
         &mut self,
         puffin_writer: &mut SstPuffinWriter,
     ) -> Result<(RowCount, ByteCount)> {
@@ -304,19 +309,16 @@ impl BloomFilterIndexer {
                     .context(crate::error::ConvertVectorSnafu)?;
                 let sort_field = SortField::new(vector.data_type());
 
-                for i in 0..n {
-                    let value = vector.get_ref(i);
-                    let elems = (!value.is_null())
-                        .then(|| {
-                            let mut buf = vec![];
-                            IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)
-                                .context(EncodeSnafu)?;
-                            Ok(buf)
-                        })
-                        .transpose()?;
+                for (row, count) in column_index_rows(batch, column_meta.semantic_type) {
+                    let elem = IndexValueCodec::encode_value(
+                        vector.get_ref(row),
+                        &sort_field,
+                        &mut self.value_buf,
+                    )
+                    .context(EncodeSnafu)?;
 
                     creator
-                        .push_row_elems(elems)
+                        .push_n_row_elem(count, elem)
                         .await
                         .context(PushBloomFilterValueSnafu)?;
                 }

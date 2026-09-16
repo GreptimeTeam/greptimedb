@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(iter_partition_in_place)]
+#![feature(hash_set_entry)]
 
 pub mod bitmap;
 pub mod bloom_filter;

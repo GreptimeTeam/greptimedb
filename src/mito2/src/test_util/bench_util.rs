@@ -33,6 +33,8 @@ use store_api::storage::RegionId;
 use table::predicate::Predicate;
 
 use crate::memtable::KeyValues;
+pub use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
+pub use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::test_util::memtable_util::region_metadata_to_row_schema;
 
 pub struct Host {
