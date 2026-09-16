@@ -383,6 +383,47 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
             vec![],
         ),
 
+        // GreptimeDB has no pluggable components.
+        PLUGINS => (
+            string_columns(&[
+                "PLUGIN_NAME",
+                "PLUGIN_VERSION",
+                "PLUGIN_STATUS",
+                "PLUGIN_TYPE",
+                "PLUGIN_TYPE_VERSION",
+                "PLUGIN_LIBRARY",
+                "PLUGIN_LIBRARY_VERSION",
+                "PLUGIN_AUTHOR",
+                "PLUGIN_DESCRIPTION",
+                "PLUGIN_LICENSE",
+                "LOAD_OPTION",
+            ]),
+            vec![],
+        ),
+
+        // Privileges are not exposed through `information_schema`, same as the other
+        // `*_privileges` tables above.
+        USER_PRIVILEGES => (
+            string_columns(&["GRANTEE", "TABLE_CATALOG", "PRIVILEGE_TYPE", "IS_GRANTABLE"]),
+            vec![],
+        ),
+
+        // Sessions are reported through `information_schema.process_list` and
+        // `SHOW PROCESSLIST`; this table carries the MySQL column shape only.
+        PROCESSLIST => (
+            vec![
+                bigint_column("ID"),
+                string_column("USER"),
+                string_column("HOST"),
+                string_column("DB"),
+                string_column("COMMAND"),
+                bigint_column("TIME"),
+                string_column("STATE"),
+                string_column("INFO"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 
