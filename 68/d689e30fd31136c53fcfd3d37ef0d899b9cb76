@@ -1,0 +1,19 @@
+src/operator/src/insert.rs
+  s_5bcaf68390e7c4::t_68193ecf9c3f5f 346-353,2109-2196
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "68d689e30fd31136c53fcfd3d37ef0d899b9cb76",
+  "prompts": {},
+  "sessions": {
+    "s_5bcaf68390e7c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ee4-560d-7e31-838b-8d023b84ada5",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
