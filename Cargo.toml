@@ -369,8 +369,8 @@ datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.g
 datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
-datafusion-pg-catalog = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "3c77e6c32b8db80635a0d2f4b318a36b31170bc3" }
-arrow-pg = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "3c77e6c32b8db80635a0d2f4b318a36b31170bc3" }
+datafusion-pg-catalog = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
+arrow-pg = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
 
 # Temporary: use the GreptimeTeam fork of tikv-jemalloc-sys embedding
