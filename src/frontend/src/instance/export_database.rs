@@ -16,20 +16,46 @@ use auth::{
     PermissionAction, PermissionChecker, PermissionCheckerRef, PermissionReq,
     PermissionTableTarget, PermissionTableTargets,
 };
-use operator::statement::export_database::PreparedDatabaseExport;
+use operator::statement::export_database::{DatabaseExportSummary, PreparedDatabaseExport};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::ast::{Ident, ObjectName};
 use sql::statements::copy::{Copy, CopyDatabase, CopyDatabaseArgument};
 use sql::statements::statement::Statement;
 use table::requests::CopyDatabaseRequest;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{PermissionSnafu, Result};
 use crate::instance::Instance;
 
 impl Instance {
-    // PR04b will connect this boundary to request ownership and V2 metadata.
     #[allow(dead_code)]
+    async fn export_database(
+        &self,
+        req: CopyDatabaseRequest,
+        names: Option<&[String]>,
+        cancellation: &CancellationToken,
+        ctx: QueryContextRef,
+    ) -> Result<DatabaseExportSummary> {
+        let plan = self.prepare_database_export(req, names, &ctx).await?;
+        Ok(self
+            .statement_executor
+            .export_database(plan, cancellation, ctx)
+            .await?)
+    }
+
+    /// Exercise the internal authenticated entry without exposing SQL/CLI activation.
+    #[cfg(feature = "testing")]
+    pub async fn export_database_for_test(
+        &self,
+        req: CopyDatabaseRequest,
+        names: Option<&[String]>,
+        cancellation: &CancellationToken,
+        ctx: QueryContextRef,
+    ) -> Result<DatabaseExportSummary> {
+        self.export_database(req, names, cancellation, ctx).await
+    }
+
     pub(crate) async fn prepare_database_export(
         &self,
         req: CopyDatabaseRequest,
