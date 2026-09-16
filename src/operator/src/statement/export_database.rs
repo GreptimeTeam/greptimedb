@@ -59,6 +59,14 @@ enum DatabaseExportJob {
 }
 
 fn validate_directory(location: &str) -> Result<()> {
+    ensure!(
+        is_directory_location(location),
+        error::InvalidCopyDatabasePathSnafu { value: location }
+    );
+    #[cfg(windows)]
+    if common_datasource::object_store::handle_windows_path(location).is_some() {
+        return Ok(());
+    }
     let parsed_directory = match Url::parse(location) {
         Ok(url) => {
             url.query().is_none() && url.fragment().is_none() && is_directory_location(url.path())
@@ -66,7 +74,7 @@ fn validate_directory(location: &str) -> Result<()> {
         Err(_) => true,
     };
     ensure!(
-        is_directory_location(location) && parsed_directory,
+        parsed_directory,
         error::InvalidCopyDatabasePathSnafu { value: location }
     );
     Ok(())
@@ -365,6 +373,15 @@ mod tests {
         for location in ["/copy/fresh/", "file:///copy/fresh/", "s3://bucket/fresh/"] {
             validate_directory(location).unwrap();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_names_are_literal_paths() {
+        for location in ["C:/copy/fresh#1/", r"C:\copy\fresh#1\"] {
+            validate_directory(location).unwrap();
+        }
+        assert!(validate_directory("C:/copy/fresh#1").is_err());
     }
 
     #[tokio::test]
