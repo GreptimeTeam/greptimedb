@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::helper::vectors_to_rows;
 use api::v1::Rows;
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use partition::manager::PartitionRuleManager;
@@ -36,17 +37,31 @@ impl<'a> TableToRegion<'a> {
         }
     }
 
+    /// Converts column vectors into rows without partition routing.
+    pub fn prepare(&self, request: TableInsertRequest) -> Result<Rows> {
+        let row_count = row_count(&request.columns_values)?;
+        let schema = column_schema(self.table_info, &request.columns_values)?;
+        let rows = vectors_to_rows(request.columns_values.values(), row_count);
+        Ok(Rows { schema, rows })
+    }
+
     pub async fn convert(
         &self,
         request: TableInsertRequest,
     ) -> Result<InstantAndNormalInsertRequests> {
-        let row_count = row_count(&request.columns_values)?;
-        let schema = column_schema(self.table_info, &request.columns_values)?;
-        let rows = api::helper::vectors_to_rows(request.columns_values.values(), row_count);
+        let skip_wal = request.skip_wal;
+        let rows = self.prepare(request)?;
+        self.partition(rows, skip_wal).await
+    }
 
-        let rows = Rows { schema, rows };
+    /// Routes already prepared rows while retaining TTL and WAL behavior.
+    pub async fn partition(
+        &self,
+        rows: Rows,
+        skip_wal: bool,
+    ) -> Result<InstantAndNormalInsertRequests> {
         let requests = Partitioner::new(self.partition_manager)
-            .partition_insert_requests(self.table_info, rows, request.skip_wal)
+            .partition_insert_requests(self.table_info, rows, skip_wal)
             .await?;
 
         let requests = RegionInsertRequests { requests };
@@ -72,15 +87,28 @@ mod tests {
     use api::v1::helper::tag_column_schema;
     use api::v1::region::InsertRequest as RegionInsertRequest;
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, PartitionExprVersion, Row, Value};
+    use api::v1::{ColumnDataType, PartitionExprVersion, Row, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::vectors::{Int32Vector, VectorRef};
     use store_api::storage::RegionId;
+    use table::requests::InsertRequest as TableInsertRequest;
 
-    use super::*;
+    use crate::req_convert::insert::table_to_region::TableToRegion;
     use crate::test_util::{
         create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
     };
+
+    #[tokio::test]
+    async fn test_prepare_preserves_rows_before_routing() {
+        let backend = prepare_mocked_backend().await;
+        let partition_manager = create_partition_rule_manager(backend).await;
+        let table_info = new_test_table_info(1, "table_1", vec![0u32, 1, 2].into_iter());
+        let converter = TableToRegion::new(&table_info, &partition_manager);
+        let values = vec![Some(1), None, Some(11), Some(101)];
+        let request = build_table_request(Arc::new(Int32Vector::from(values.clone())));
+        let expected = build_region_request(values, 0, None, false).rows.unwrap();
+        assert_eq!(converter.prepare(request).unwrap(), expected);
+    }
 
     #[tokio::test]
     async fn test_insert_request_table_to_region() {

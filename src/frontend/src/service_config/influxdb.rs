@@ -49,7 +49,7 @@ impl Default for InfluxdbOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::InfluxdbOptions;
+    use crate::service_config::influxdb::InfluxdbOptions;
 
     #[test]
     fn test_influxdb_options() {
