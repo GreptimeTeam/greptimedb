@@ -1052,11 +1052,21 @@ fn to_keyvalue(key: String, value: JsonValue) -> Option<KeyValue> {
             value_type: ValueType::String,
             value: Value::String(value.clone()),
         }),
-        JsonValue::Number(value) => Some(KeyValue {
-            key,
-            value_type: ValueType::Int64,
-            value: Value::Int64(value.as_i64().unwrap_or(0)),
-        }),
+        JsonValue::Number(value) => {
+            if value.is_i64() {
+                Some(KeyValue {
+                    key,
+                    value_type: ValueType::Int64,
+                    value: Value::Int64(value.as_i64()?),
+                })
+            } else {
+                Some(KeyValue {
+                    key,
+                    value_type: ValueType::Float64,
+                    value: Value::Float64(value.as_f64()?),
+                })
+            }
+        }
         JsonValue::Bool(value) => Some(KeyValue {
             key,
             value_type: ValueType::Boolean,
@@ -1200,6 +1210,23 @@ mod tests {
 
     use super::*;
     use crate::http::{ColumnSchema, HttpRecordsOutput, OutputSchema};
+
+    #[test]
+    fn test_numeric_tag_types() {
+        for (input, value_type, value) in [
+            (json!(42), ValueType::Int64, Value::Int64(42)),
+            (json!(1.5), ValueType::Float64, Value::Float64(1.5)),
+        ] {
+            assert_eq!(
+                to_keyvalue("tag".to_string(), input),
+                Some(KeyValue {
+                    key: "tag".to_string(),
+                    value_type,
+                    value,
+                })
+            );
+        }
+    }
 
     #[test]
     fn test_services_from_records() {

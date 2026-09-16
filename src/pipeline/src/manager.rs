@@ -80,6 +80,8 @@ impl SelectInfo {
 pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V0_NAME: &str = "greptime_trace_v0";
 pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME: &str = "greptime_trace_v1";
+/// Built-in OTLP trace pipeline that stores semi-structured fields as JSON2.
+pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME: &str = "greptime_trace_v2";
 
 /// Enum for holding information of a pipeline, which is either pipeline itself,
 /// or information that be used to retrieve a pipeline from `PipelineHandler`
@@ -146,6 +148,7 @@ pub enum PipelineWay {
     Pipeline(PipelineDefinition),
     OtlpTraceDirectV0,
     OtlpTraceDirectV1,
+    OtlpTraceDirectV2,
 }
 
 impl PipelineWay {
@@ -155,7 +158,9 @@ impl PipelineWay {
         default_pipeline: Option<PipelineWay>,
     ) -> Result<PipelineWay> {
         if let Some(pipeline_name) = name {
-            if pipeline_name == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+            if pipeline_name == GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME {
+                Ok(PipelineWay::OtlpTraceDirectV2)
+            } else if pipeline_name == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
                 Ok(PipelineWay::OtlpTraceDirectV1)
             } else if pipeline_name == GREPTIME_INTERNAL_TRACE_PIPELINE_V0_NAME {
                 Ok(PipelineWay::OtlpTraceDirectV0)

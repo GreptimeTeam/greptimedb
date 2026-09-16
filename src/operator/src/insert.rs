@@ -68,8 +68,9 @@ use table::TableRef;
 use table::metadata::TableInfo;
 use table::requests::{
     AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, SEMANTIC_PER_TABLE_INDEX_KEY,
-    TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TRACE_TABLE_PARTITIONS_HINT_KEY,
-    VALID_TABLE_OPTION_KEYS, is_semantic_option_key, validate_semantic_option,
+    SEMANTIC_PIPELINE, TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TABLE_DATA_MODEL_TRACE_V2,
+    TRACE_TABLE_PARTITIONS_HINT_KEY, VALID_TABLE_OPTION_KEYS, is_semantic_option_key,
+    validate_semantic_option,
 };
 use table::table_reference::TableReference;
 
@@ -625,6 +626,9 @@ impl Inserter {
                     }
                 };
                 let table_info = table.table_info();
+                if matches!(auto_create_table_type, AutoCreateTableType::Trace { .. }) {
+                    validate_trace_table_model(&table_info, ctx)?;
+                }
                 if table_info.is_ttl_instant_table() {
                     instant_table_ids.insert(table_info.table_id());
                 }
@@ -650,6 +654,9 @@ impl Inserter {
             match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
+                    if matches!(auto_create_table_type, AutoCreateTableType::Trace { .. }) {
+                        validate_trace_table_model(&table_info, ctx)?;
+                    }
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
@@ -841,7 +848,9 @@ impl Inserter {
                         // use table_options to mark table model version
                         create_table.table_options.insert(
                             TABLE_DATA_MODEL.to_string(),
-                            TABLE_DATA_MODEL_TRACE_V1.to_string(),
+                            ctx.extension(SEMANTIC_PIPELINE)
+                                .unwrap_or(TABLE_DATA_MODEL_TRACE_V1)
+                                .to_string(),
                         );
 
                         let table = self
@@ -1158,7 +1167,10 @@ impl Inserter {
         );
 
         match res {
-            Ok(table) => Ok(table),
+            Ok(table) => {
+                validate_trace_table_model(&table.table_info(), ctx)?;
+                Ok(table)
+            }
             Err(err) => {
                 error!(err; "Failed to create table {}", table_ref);
                 Err(err)
@@ -1253,6 +1265,28 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
             );
             Ok(())
         })?;
+    }
+    Ok(())
+}
+
+/// Rejects writes from a different built-in trace model before schema mutation.
+/// Unstamped, explicitly created tables remain subject to normal schema validation.
+pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef) -> Result<()> {
+    let Some(expected @ (TABLE_DATA_MODEL_TRACE_V1 | TABLE_DATA_MODEL_TRACE_V2)) =
+        ctx.extension(SEMANTIC_PIPELINE)
+    else {
+        return Ok(());
+    };
+    if let Some(actual) = table_info.meta.options.extra_options.get(TABLE_DATA_MODEL) {
+        ensure!(
+            actual == expected,
+            InvalidInsertRequestSnafu {
+                reason: format!(
+                    "Trace table `{}` uses {actual}, but the request uses {expected}",
+                    table_info.name,
+                ),
+            }
+        );
     }
     Ok(())
 }
