@@ -35,6 +35,7 @@ use client::Client;
 use client::client_manager::NodeClients;
 use cmd::frontend::create_heartbeat_task;
 use common_base::Plugins;
+use common_datasource::object_store::LocalFileAccess;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -172,6 +173,7 @@ pub struct GreptimeDbClusterBuilder {
     frontend_auto_create_table: bool,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
+    local_file_access: LocalFileAccess,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -206,6 +208,7 @@ impl GreptimeDbClusterBuilder {
             frontend_auto_create_table: true,
             shared_home_dir: None,
             meta_selector: None,
+            local_file_access: LocalFileAccess::default(),
         }
     }
 
@@ -266,6 +269,12 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_meta_selector(mut self, selector: SelectorRef) -> Self {
         self.meta_selector = Some(selector);
+        self
+    }
+
+    /// Configure the frontend COPY sandbox for filesystem integration tests.
+    pub fn with_local_file_access(mut self, access: LocalFileAccess) -> Self {
+        self.local_file_access = access;
         self
     }
 
@@ -512,6 +521,7 @@ impl GreptimeDbClusterBuilder {
             meta_client.clone(),
             Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
+        .with_local_file_access(self.local_file_access.clone())
         .with_local_cache_invalidator(cache_registry)
         .try_build()
         .await

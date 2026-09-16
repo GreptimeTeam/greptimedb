@@ -12,13 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::arrow::record_batch::RecordBatch;
-use futures::stream::BoxStream;
+//! Protocol-independent building blocks for timing-based batching.
+//!
+//! Payload preparation, grouping keys, write execution and request completion
+//! remain the caller's responsibility.
 
-mod stream;
-
-pub(crate) use stream::NestedSchemaAligner;
-
-use crate::error::Result;
-
-pub(crate) type ProjectedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;
+pub mod flush_limiter;
+pub mod flush_policy;
+pub mod flush_timer;
+pub mod notifier;
+pub mod pending_batch;
+pub mod pending_worker;
+pub mod request_limiter;
+pub mod worker_registry;

@@ -392,6 +392,167 @@ async fn test_json2_v1_region_reopen_and_compaction() -> WhateverResult<()> {
 }
 
 #[tokio::test]
+async fn test_json2_mixed_subject_compaction_preserves_values() -> WhateverResult<()> {
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("append_mode", "true")
+        .insert_option("memtable.type", "bulk")
+        .insert_option("sst_format", "flat")
+        .build();
+    let table_dir = request.table_dir.clone();
+    let schema = test_util::rows_schema(&request);
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: std::time::Duration::from_secs(3600),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1027, 0);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    // #9133: the second SST stores a heterogeneous subject in its remainder.
+    let values = [
+        json!({"subject": {"cid": "first", "uri": "at://first"}}),
+        json!({"subject": "did:plc:x"}),
+        json!({"subject": {"cid": "last", "uri": "at://last"}}),
+        json!({"subject": {"cid": 42}}),
+    ];
+    for (offset, batch) in [(0, &values[..1]), (1, &values[1..])] {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: batch
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| {
+                        row(vec![
+                            ValueData::StringValue("tag".into()),
+                            ValueData::JsonValue(encode_json_value(JsonValue::from(value.clone()))),
+                            ValueData::TimestampMillisecondValue((offset + i) as i64 * 1000),
+                        ])
+                    })
+                    .collect(),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let old_ids = engine
+        .scanner(region_id, ScanRequest::default())
+        .await?
+        .file_ids();
+    assert_eq!(2, old_ids.len());
+    for _ in 0..2 {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 86400,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            1,
+            scanner.num_files(),
+            "a swallowed merge failure must not pass"
+        );
+        assert!(scanner.file_ids().iter().all(|id| !old_ids.contains(id)));
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut actual = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                actual.push(JsonArray::from(&array).try_get_value(i)?);
+            }
+        }
+        assert_eq!(values.as_slice(), actual.as_slice());
+        reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    json_type_hint: HashMap::from([(
+                        "field_0".into(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "subject".into(),
+                            JsonNativeType::String,
+                        )])),
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut subjects = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                subjects.push(JsonArray::from(&array).try_get_value(i)?);
+            }
+        }
+        let expected = values.iter().map(|value| {
+            let subject = &value["subject"];
+            json!({"subject": subject.as_str().map(str::to_string).unwrap_or_else(|| subject.to_string())})
+        }).collect::<Vec<_>>();
+        assert_eq!(
+            expected, subjects,
+            "projection must read values spilled to remainder"
+        );
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![1]),
+                    json_type_hint: HashMap::from([(
+                        "field_0".into(),
+                        JsonNativeType::Object(JsonObjectType::from([(
+                            "subject".into(),
+                            JsonNativeType::Object(JsonObjectType::from([(
+                                "cid".into(),
+                                JsonNativeType::String,
+                            )])),
+                        )])),
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+        let mut cids = Vec::new();
+        for batch in batches.iter() {
+            let array = batch.column_by_name("field_0").unwrap().clone();
+            for i in 0..array.len() {
+                cids.push(JsonArray::from(&array).try_get_value(i)?["subject"]["cid"].clone());
+            }
+        }
+        assert_eq!(
+            vec![json!("first"), json!(null), json!("last"), json!("42")],
+            cids
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_flush_aligns_different_json2_layouts() -> WhateverResult<()> {
     let mut request = CreateRequestBuilder::new()
         .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
@@ -892,8 +1053,10 @@ async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
         Some(9),
         0,
         "\
-++
-++",
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+",
     )
     .await;
 }
@@ -2387,6 +2550,7 @@ fn build_bulk_insert_request(
     let (schema, record_batch) = encode_to_flight_data(payload.clone());
 
     RegionBulkInsertsRequest {
+        skip_wal: false,
         region_id,
         payload,
         raw_data: ArrowIpc {
@@ -2396,6 +2560,139 @@ fn build_bulk_insert_request(
         },
         partition_expr_version: None,
         aligned_schema_version: None,
+    }
+}
+
+#[tokio::test]
+async fn test_bulk_skip_wal_recovery() {
+    check_bulk_skip_wal_recovery(false, false).await;
+    check_bulk_skip_wal_recovery(false, true).await;
+    check_bulk_skip_wal_recovery(true, false).await;
+    check_bulk_skip_wal_recovery(true, true).await;
+}
+
+async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut request = build_bulk_insert_request(region_id, 0, 4);
+    request.skip_wal = skip_wal;
+    let affected = engine
+        .handle_request(region_id, RegionRequest::BulkInserts(request))
+        .await
+        .unwrap();
+    assert_eq!(affected.affected_rows, 4);
+    let region = engine.get_region(region_id).unwrap();
+    let current = region.version_control.current();
+    assert_eq!(current.committed_sequence, 4);
+    assert_eq!(current.last_entry_id, u64::from(!skip_wal));
+    assert_eq!(current.version.flushed_entry_id, 0);
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>(),
+        4
+    );
+    if flush {
+        test_util::flush_region(&engine, region_id, None).await;
+        let current = region.version_control.current();
+        assert_eq!(current.last_entry_id, u64::from(!skip_wal));
+        assert_eq!(current.version.flushed_sequence, 4);
+        assert_eq!(
+            engine
+                .region_statistic(region_id)
+                .unwrap()
+                .manifest
+                .data_flushed_entry_id(),
+            u64::from(!skip_wal)
+        );
+    }
+    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>(),
+        if skip_wal && !flush { 0 } else { 4 }
+    );
+}
+
+#[tokio::test]
+async fn test_bulk_skip_wal_flush_watermarks() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(
+                CreateRequestBuilder::new()
+                    .insert_option("memtable.type", "bulk")
+                    .build(),
+            ),
+        )
+        .await
+        .unwrap();
+    // Establish a persisted baseline, skip one bulk write, then resume WAL.
+    for (round, skip_wal) in [false, true, false].into_iter().enumerate() {
+        let region = engine.get_region(region_id).unwrap();
+        let before = region.version_control.current();
+        let mut request = build_bulk_insert_request(region_id, round * 4, (round + 1) * 4);
+        request.skip_wal = skip_wal;
+        let affected = engine
+            .handle_request(region_id, RegionRequest::BulkInserts(request))
+            .await
+            .unwrap();
+        assert_eq!(affected.affected_rows, 4);
+        let expected_entry_id = before.last_entry_id + u64::from(!skip_wal);
+        let after = region.version_control.current();
+        assert_eq!(after.last_entry_id, expected_entry_id);
+        assert_eq!(after.committed_sequence, before.committed_sequence + 4);
+        assert_eq!(
+            after.version.flushed_sequence,
+            before.version.flushed_sequence
+        );
+        assert_eq!(
+            engine
+                .region_statistic(region_id)
+                .unwrap()
+                .manifest
+                .data_flushed_entry_id(),
+            before.version.flushed_entry_id
+        );
+        test_util::flush_region(&engine, region_id, None).await;
+        let after = region.version_control.current();
+        assert_eq!(after.last_entry_id, expected_entry_id);
+        assert_eq!(after.version.flushed_sequence, (round as u64 + 1) * 4);
+        assert_eq!(
+            engine
+                .region_statistic(region_id)
+                .unwrap()
+                .manifest
+                .data_flushed_entry_id(),
+            expected_entry_id
+        );
     }
 }
 
@@ -2612,9 +2909,8 @@ async fn test_bulk_write_sequence_not_committed_before_install() {
     }
 }
 
-/// Non-preserving compaction must keep the physical input sequence below the
-/// admission barrier. Otherwise a later row at the barrier can collide with
-/// the compacted row when ordinary reads deduplicate overlapping SSTs.
+/// Compaction must not allocate a new sequence that can collide with the next
+/// write. Preserve the input's effective row sequence and file-level bound.
 #[tokio::test]
 async fn test_non_preserve_compaction_sequence_collision() {
     for flat_format in [false, true] {
@@ -2684,8 +2980,7 @@ async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format
     );
 
     // Both current SSTs are compacted through the real picker, merger, writer,
-    // and manifest update. With committed/flushed sequence 2, the untrusted
-    // output's admission barrier is exactly 3.
+    // and manifest update. Both the row version and inherited file bound stay 2.
     engine
         .handle_request(
             region_id,
@@ -2708,14 +3003,13 @@ async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format
     assert!(!compacted.meta_ref().preserve_row_sequence);
     assert_eq!(1, compacted.num_rows());
     assert_eq!(
-        Some(std::num::NonZeroU64::new(3).unwrap()),
+        Some(std::num::NonZeroU64::new(2).unwrap()),
         compacted.meta_ref().sequence,
-        "admission barrier is input max 2 plus one"
+        "compaction must inherit the input bound without allocating a sequence"
     );
 
     // Hide FileMeta.sequence so this is a direct physical read, not a reader
-    // admission-barrier override. The output must contain physical sequence 2,
-    // not zero and not the output barrier 3.
+    // override. The output must contain physical sequence 2, not zero or 3.
     let mut physical_meta = compacted.meta_ref().clone();
     physical_meta.sequence = None;
     let mut reader = region
@@ -2742,10 +3036,8 @@ async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format
         "after compaction: {after_compaction}"
     );
 
-    // The next write receives physical sequence 3, equal to the compacted
-    // output's admission barrier. It must still win because the compacted row
-    // remains physically at sequence 2; an old zero/barrier encoding would
-    // collide here and incorrectly retain value 2.
+    // The next write receives sequence 3 and must win. The old zero/barrier
+    // encoding promoted the compacted row to 3 and could incorrectly retain 2.
     test_util::put_rows(
         &engine,
         region_id,
@@ -2780,7 +3072,7 @@ async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format
         .find(|file| file.meta_ref().level == 1)
         .expect("compacted L1 SST");
     assert_eq!(
-        Some(std::num::NonZeroU64::new(3).unwrap()),
+        Some(std::num::NonZeroU64::new(2).unwrap()),
         compacted.meta_ref().sequence
     );
 
@@ -2791,24 +3083,27 @@ async fn test_non_preserve_compaction_sequence_collision_with_format(flat_format
     );
 }
 
-/// Compaction rewrites a legacy (unmarked) input as an untrusted output with
-/// the region-local admission barrier. Its physical rows retain the known
-/// input maximum, while exact scans skip it once C reaches that barrier and
-/// fail closed while C is below it.
+/// A legacy input must retain its admission boundary without gaining row trust.
+/// A later flush can advance beyond manifest.committed_sequence, so compaction
+/// must inherit the maximum input bound rather than sample that stale frontier.
+#[rstest::rstest]
 #[tokio::test]
-async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
+async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input(
+    #[values(false, true)] flat_format: bool,
+    #[values(false, true)] flush_after_edit: bool,
+) {
     let mut env =
         TestEnv::with_prefix("test_compaction_output_not_laundered_from_legacy_input").await;
     // Suppress automatic edit-triggered compactions. The high TWCS trigger below
     // also prevents flush-triggered compaction from consuming the inputs, so the
     // explicit Compact below is the only compaction in flight (deterministic).
-    let engine = env
-        .create_engine(MitoConfig {
-            min_compaction_interval: std::time::Duration::from_secs(60 * 60),
-            schedule_compaction_after_edit: false,
-            ..Default::default()
-        })
-        .await;
+    let config = MitoConfig {
+        default_flat_format: flat_format,
+        min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
@@ -2818,6 +3113,8 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         .insert_option("compaction.twcs.trigger_file_num", "100")
         .build();
     let column_schemas = test_util::rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    let region_options = request.options.clone();
 
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -2877,6 +3174,30 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         "seeded file should be unmarked"
     );
 
+    let mut expected_sequences = vec![1, 2, 3, 4, 5, 6];
+    let expected_bound = if flush_after_edit {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas,
+                rows: test_util::build_rows(6, 9),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+        expected_sequences.extend([8, 9, 10]);
+        10
+    } else {
+        7
+    };
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(Some(7), manifest.committed_sequence);
+    assert_eq!(
+        if flush_after_edit { 10 } else { 6 },
+        manifest.flushed_sequence
+    );
+
     // Compact: the rewritten output must NOT be laundered back to marked.
     engine
         .handle_request(
@@ -2903,25 +3224,24 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
     assert_eq!(
         1,
         outputs.len(),
-        "two inputs should rewrite into one output file"
+        "all inputs should rewrite into one output file"
     );
     assert!(
         !outputs[0].meta_ref().preserve_row_sequence,
         "legacy input must not be laundered into a marked output"
     );
 
-    // The compacted output is sequence-less and carries the current region's
-    // admission barrier rather than any source-domain sequence.
+    // Inherit the admitted legacy bound and, if present, the newer flush bound.
     let barrier = outputs[0]
         .meta_ref()
         .sequence
         .expect("compaction output barrier")
         .get();
-    assert_eq!(8, barrier);
+    assert_eq!(expected_bound, barrier);
 
-    // Reinstalling the legacy input assigns it sequence 7, so the physical
-    // parquet retains that known input maximum rather than encoding either
-    // zero or the output admission barrier 8. The manifest marker stays false.
+    // Reinstalling the legacy input assigns its metadata sequence 7, but the
+    // existing rows keep sequences 1..=6. Compaction must not rewrite them to
+    // the metadata bound, including when newer flushed rows join the merge.
     let mut sequence_meta = outputs[0].meta_ref().clone();
     sequence_meta.sequence = None;
     let sequence_handle = FileHandle::new(
@@ -2935,22 +3255,34 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         .await
         .unwrap()
         .expect("compaction output reader");
-    let batch = reader
-        .next_record_batch()
-        .await
-        .unwrap()
-        .expect("compaction output batch");
-    let sequence = batch
-        .column(batch.num_columns() - 2)
-        .as_any()
-        .downcast_ref::<datatypes::arrow::array::UInt64Array>()
-        .expect("sequence column");
-    assert!(
-        sequence
-            .values()
-            .iter()
-            .all(|sequence| *sequence == barrier - 1)
+    let mut sequences = Vec::new();
+    while let Some(batch) = reader.next_record_batch().await.unwrap() {
+        let sequence = batch
+            .column(batch.num_columns() - 2)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+            .expect("sequence column");
+        sequences.extend_from_slice(sequence.values());
+    }
+    sequences.sort_unstable();
+    assert_eq!(expected_sequences, sequences);
+
+    // The inherited bound and untrusted marker must survive manifest recovery.
+    let engine = env.reopen_engine(engine, config).await;
+    test_util::reopen_region(&engine, region_id, table_dir, false, region_options).await;
+    let version = engine.get_region(region_id).unwrap().version();
+    let files: Vec<_> = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .collect();
+    assert_eq!(1, files.len());
+    assert_eq!(
+        Some(expected_bound),
+        files[0].meta_ref().sequence.map(|s| s.get())
     );
+    assert!(!files[0].meta_ref().preserve_row_sequence);
 
     // A cursor before the barrier must fail closed.
     let err = engine
@@ -2966,9 +3298,27 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input() {
         .await
         .err()
         .expect("newer barrier must disable exact scanning");
-    assert!(matches!(err, Error::SequenceRangeUnsupported { .. }));
+    if flush_after_edit {
+        // Without exact capability, the lower-bound fence is checked first.
+        assert!(
+            matches!(
+                err,
+                Error::IncrementalQueryStale {
+                    given_seq: 9,
+                    min_readable_seq: 10,
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    } else {
+        assert!(
+            matches!(err, Error::SequenceRangeUnsupported { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
 
-    // Once C reaches the barrier the sequence-less file is skipped, so exact
+    // Once C reaches the barrier the untrusted file is skipped, so exact
     // capability is restored without attempting row-level filtering.
     let scanner = engine
         .scanner(

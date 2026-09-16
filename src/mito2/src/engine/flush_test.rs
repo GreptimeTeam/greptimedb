@@ -17,7 +17,7 @@
 use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -27,6 +27,7 @@ use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use parquet::basic::{Encoding, Type as PhysicalType};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::ManifestVersion;
@@ -54,7 +55,7 @@ use crate::test_util::{
     prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
     rows_schema, single_kafka_log_store_factory,
 };
-use crate::time_provider::TimeProvider;
+use crate::time_provider::mock::MockTimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
 
 async fn set_write_buffer_size_to_current_usage(engine: &MitoEngine, region_id: RegionId) {
@@ -279,7 +280,9 @@ async fn test_manual_flush_with_format(flat_format: bool) {
         )
         .await;
 
-    let request = CreateRequestBuilder::new().build();
+    let request = CreateRequestBuilder::new()
+        .insert_option("experimental_sst_float_field_encoding", "byte_stream_split")
+        .build();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -294,6 +297,38 @@ async fn test_manual_flush_with_format(flat_format: bool) {
     put_rows(&engine, region_id, rows).await;
 
     flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let file = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("flushed SST")
+        .clone();
+    let reader = region
+        .access_layer
+        .read_sst(file)
+        .build()
+        .await
+        .unwrap()
+        .expect("flushed SST reader");
+    assert!(
+        reader
+            .parquet_metadata()
+            .row_groups()
+            .iter()
+            .flat_map(|row_group| row_group.columns())
+            .any(|column| {
+                column.column_path().string() == "field_0"
+                    && column.column_type() == PhysicalType::DOUBLE
+                    && column
+                        .encodings()
+                        .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+            })
+    );
 
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).await.unwrap();
@@ -1022,8 +1057,10 @@ async fn test_flush_empty_with_format(flat_format: bool) {
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
-++
-++";
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
@@ -1332,43 +1369,6 @@ fn kafka_wal_options(topic: &Option<String>) -> HashMap<String, String> {
             )])
         })
         .unwrap_or_default()
-}
-
-#[derive(Debug)]
-pub(crate) struct MockTimeProvider {
-    now: AtomicI64,
-    elapsed: AtomicI64,
-}
-
-impl TimeProvider for MockTimeProvider {
-    fn current_time_millis(&self) -> i64 {
-        self.now.load(Ordering::Relaxed)
-    }
-
-    fn elapsed_since(&self, _current_millis: i64) -> i64 {
-        self.elapsed.load(Ordering::Relaxed)
-    }
-
-    fn wait_duration(&self, _duration: Duration) -> Duration {
-        Duration::from_millis(20)
-    }
-}
-
-impl MockTimeProvider {
-    pub(crate) fn new(now: i64) -> Self {
-        Self {
-            now: AtomicI64::new(now),
-            elapsed: AtomicI64::new(0),
-        }
-    }
-
-    pub(crate) fn set_now(&self, now: i64) {
-        self.now.store(now, Ordering::Relaxed);
-    }
-
-    fn set_elapsed(&self, elapsed: i64) {
-        self.elapsed.store(elapsed, Ordering::Relaxed);
-    }
 }
 
 #[tokio::test]

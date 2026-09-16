@@ -1129,6 +1129,7 @@ fn bench_range_manipulate_wall_time(c: &mut Criterion) {
             0,
             (evaluations as i64 - 1) * RANGE_MANIPULATE_CADENCE_MS,
             RANGE_MANIPULATE_CADENCE_MS,
+            0,
             window_points as i64 * RANGE_MANIPULATE_CADENCE_MS,
             "timestamp".to_string(),
             field_columns,

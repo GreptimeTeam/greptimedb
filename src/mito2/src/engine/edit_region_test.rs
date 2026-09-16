@@ -35,12 +35,12 @@ use tokio::sync::{Barrier, mpsc, oneshot};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::EventListener;
 use crate::manifest::action::RegionEdit;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::sst::file::FileMeta;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
+use crate::time_provider::mock::MockTimeProvider;
 
 #[tokio::test]
 async fn test_edit_region_schedule_compaction() {
@@ -700,6 +700,7 @@ fn build_bulk_insert_request(
     let (schema, record_batch) = encode_to_flight_data(payload.clone());
 
     RegionBulkInsertsRequest {
+        skip_wal: false,
         region_id,
         payload,
         raw_data: ArrowIpc {

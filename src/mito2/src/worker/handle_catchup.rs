@@ -134,6 +134,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .await?;
         debug_assert!(!reopened_region.is_writable());
         self.regions.insert_region(reopened_region.clone());
+        if let Some(state) = &self.series_index_task_state {
+            state.wake();
+        }
 
         Ok(reopened_region)
     }

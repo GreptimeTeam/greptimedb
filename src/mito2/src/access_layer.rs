@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -567,6 +568,8 @@ pub struct SstWriteRequest {
     pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub storage: Option<String>,
+    /// Optional uniform row sequence for writes that do not preserve sequences.
+    /// Compaction passes `None` to retain the reader's effective input sequences.
     pub max_sequence: Option<SequenceNumber>,
     pub sst_write_format: FormatType,
 
@@ -655,14 +658,17 @@ impl TempFileCleaner {
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
-    let atomic_write_dir = join_dir(root, ATOMIC_WRITE_DIR);
-    clean_dir(&atomic_write_dir).await?;
+    // Preserve native filesystem prefixes such as Windows UNC shares.
+    let atomic_write_dir = Path::new(root).join(ATOMIC_WRITE_DIR);
+    clean_dir(&atomic_write_dir.to_string_lossy()).await?;
 
     // Compatible code. Remove this after a major release.
     let old_atomic_temp_dir = join_dir(root, OLD_ATOMIC_WRITE_DIR);
     clean_dir(&old_atomic_temp_dir).await?;
 
-    let builder = Fs::default().root(root).atomic_write_dir(&atomic_write_dir);
+    let builder = Fs::default()
+        .root(root)
+        .atomic_write_dir(&atomic_write_dir.to_string_lossy());
     let store = ObjectStore::new(builder).context(OpenDalSnafu)?;
 
     Ok(with_instrument_layers(store, false))
@@ -757,5 +763,39 @@ impl FilePathProvider for RegionFilePathFactory {
 
     fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
         location::sst_file_path(&self.table_dir, file_id, self.path_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_new_fs_cache_store() {
+        let root = common_test_util::temp_dir::create_temp_dir("fs-cache-store");
+        let dirs = [
+            root.path().join(ATOMIC_WRITE_DIR),
+            PathBuf::from(join_dir(
+                root.path().to_str().unwrap(),
+                OLD_ATOMIC_WRITE_DIR,
+            )),
+        ];
+        for dir in &dirs {
+            tokio::fs::create_dir_all(dir).await.unwrap();
+            tokio::fs::write(dir.join("stale"), b"stale").await.unwrap();
+        }
+        let store = new_fs_cache_store(root.path().to_str().unwrap())
+            .await
+            .unwrap();
+        for dir in &dirs {
+            assert!(!dir.join("stale").exists());
+        }
+        store.write("index", "contents").await.unwrap();
+        assert_eq!(
+            tokio::fs::read(root.path().join("index")).await.unwrap(),
+            b"contents"
+        );
     }
 }

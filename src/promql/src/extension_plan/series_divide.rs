@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -20,6 +19,7 @@ use std::task::{Context, Poll};
 use datafusion::arrow::array::{Array, ArrayRef, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
@@ -30,8 +30,8 @@ use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
+    PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion_expr::col;
 use datatypes::arrow::compute;
@@ -334,8 +334,11 @@ pub struct SeriesDivideExec {
 }
 
 impl ExecutionPlan for SeriesDivideExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn schema(&self) -> SchemaRef {
@@ -346,18 +349,18 @@ impl ExecutionPlan for SeriesDivideExec {
         self.input.properties()
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
         if self.tag_columns.is_empty() {
-            return vec![Distribution::SinglePartition];
+            return InputDistributionRequirements::new(vec![Distribution::SinglePartition]);
         }
         let schema = self.input.schema();
-        vec![Distribution::HashPartitioned(
+        InputDistributionRequirements::new(vec![Distribution::KeyPartitioned(
             self.tag_columns
                 .iter()
                 // Safety: the tag column names is verified in the planning phase
                 .map(|tag| Arc::new(ColumnExpr::new_with_schema(tag, &schema).unwrap()) as _)
                 .collect(),
-        )]
+        )])
     }
 
     fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
@@ -554,7 +557,9 @@ impl Stream for SeriesDivideStream {
                     }
                     error => return Poll::Ready(error),
                 };
-                self.buffer.push(batch);
+                if batch.num_rows() != 0 {
+                    self.buffer.push(batch);
+                }
                 continue;
             }
         }
@@ -624,7 +629,8 @@ impl SeriesDivideStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::array::{
-        DictionaryArray, Int32Array, LargeStringArray, StringArray, StringViewArray, UInt32Array,
+        DictionaryArray, Int32Array, Int64Array, LargeStringArray, StringArray, StringViewArray,
+        UInt32Array,
     };
     use datafusion::arrow::datatypes::{DataType, Field, Int32Type, Schema, UInt32Type};
     use datafusion::common::ToDFSchema;
@@ -1244,5 +1250,217 @@ mod test {
                 .unwrap();
             assert!(tsid_array.iter().all(|v| v == Some(expected_tsid)));
         }
+    }
+
+    /// The input stream may legally start with a batch that has zero rows.
+    /// `SeriesDivideStream` must skip it and keep working on the real rows that
+    /// follow (here: two batches of the very same tagged series).
+    #[tokio::test]
+    async fn test_stream_leading_empty_batch_then_same_tags() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("path", DataType::Utf8, false),
+            Field::new(
+                "time_index",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let make_batch = |hosts: Vec<&str>, paths: Vec<&str>, times: Vec<i64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(hosts)),
+                    Arc::new(StringArray::from(paths)),
+                    Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                        times,
+                    )),
+                ],
+            )
+            .unwrap()
+        };
+
+        let memory_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[vec![
+                    RecordBatch::new_empty(schema.clone()),
+                    make_batch(
+                        vec!["server1", "server1"],
+                        vec!["/var/log", "/var/log"],
+                        vec![1000, 2000],
+                    ),
+                    make_batch(vec!["server1"], vec!["/var/log"], vec![3000]),
+                ]],
+                schema.clone(),
+                None,
+            )
+            .unwrap(),
+        )));
+
+        let divide_exec = Arc::new(SeriesDivideExec {
+            tag_columns: vec!["host".to_string(), "path".to_string()],
+            time_index_column: "time_index".to_string(),
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+
+        let mut stream = divide_exec
+            .execute(0, SessionContext::default().task_ctx())
+            .unwrap();
+
+        let batch = stream.next().await.unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        let expected = [
+            ("server1", "/var/log", 1000i64),
+            ("server1", "/var/log", 2000),
+            ("server1", "/var/log", 3000),
+        ];
+        for (row, (host, path, time)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                string_array_value_at_index(batch.column(0), row),
+                Some(host)
+            );
+            assert_eq!(
+                string_array_value_at_index(batch.column(1), row),
+                Some(path)
+            );
+            assert_eq!(
+                batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>()
+                    .unwrap()
+                    .value(row),
+                time
+            );
+        }
+        assert!(stream.next().await.is_none());
+    }
+
+    /// Several leading empty batches (and one empty batch in the middle of a
+    /// series) must not disturb series division: the two series are still
+    /// emitted separately, including the last one flushed at end of input.
+    #[tokio::test]
+    async fn test_stream_repeated_empty_batches_and_two_series() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+            Field::new(
+                "time_index",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let make_batch = |hosts: Vec<&str>, values: Vec<i64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(hosts)),
+                    Arc::new(Int64Array::from(values.clone())),
+                    Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                        values.iter().map(|v| v * 1000).collect::<Vec<_>>(),
+                    )),
+                ],
+            )
+            .unwrap()
+        };
+
+        let memory_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[vec![
+                    RecordBatch::new_empty(schema.clone()),
+                    RecordBatch::new_empty(schema.clone()),
+                    make_batch(vec!["server1", "server1"], vec![1, 2]),
+                    RecordBatch::new_empty(schema.clone()),
+                    make_batch(vec!["server1"], vec![3]),
+                    make_batch(vec!["server2", "server2"], vec![4, 5]),
+                ]],
+                schema.clone(),
+                None,
+            )
+            .unwrap(),
+        )));
+
+        let divide_exec = Arc::new(SeriesDivideExec {
+            tag_columns: vec!["host".to_string()],
+            time_index_column: "time_index".to_string(),
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+
+        let mut stream = divide_exec
+            .execute(0, SessionContext::default().task_ctx())
+            .unwrap();
+
+        for (expected_host, expected_values) in
+            [("server1", vec![1i64, 2, 3]), ("server2", vec![4, 5])]
+        {
+            let batch = stream.next().await.unwrap().unwrap();
+            assert_eq!(batch.num_rows(), expected_values.len());
+            for (row, value) in expected_values.into_iter().enumerate() {
+                assert_eq!(
+                    string_array_value_at_index(batch.column(0), row),
+                    Some(expected_host)
+                );
+                assert_eq!(
+                    batch
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .value(row),
+                    value
+                );
+            }
+        }
+        assert!(stream.next().await.is_none());
+    }
+
+    /// A stream that only ever yields zero-row batches must terminate with no
+    /// batches instead of failing.
+    #[tokio::test]
+    async fn test_stream_all_empty_batches_yields_nothing() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+            Field::new(
+                "time_index",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let memory_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[vec![
+                    RecordBatch::new_empty(schema.clone()),
+                    RecordBatch::new_empty(schema.clone()),
+                    RecordBatch::new_empty(schema.clone()),
+                ]],
+                schema.clone(),
+                None,
+            )
+            .unwrap(),
+        )));
+
+        let divide_exec = Arc::new(SeriesDivideExec {
+            tag_columns: vec!["host".to_string()],
+            time_index_column: "time_index".to_string(),
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+
+        let mut stream = divide_exec
+            .execute(0, SessionContext::default().task_ctx())
+            .unwrap();
+        assert!(stream.next().await.is_none());
+
+        let collected =
+            datafusion::physical_plan::collect(divide_exec, SessionContext::default().task_ctx())
+                .await
+                .unwrap();
+        assert!(collected.is_empty());
     }
 }

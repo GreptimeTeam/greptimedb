@@ -25,7 +25,7 @@ pub fn resolve_addr(bind_addr: &str, server_addr: Option<&str>) -> String {
             } else {
                 // otherwise, resolve port from bind_addr
                 // should be safe to unwrap here because bind_addr is already validated
-                let port = bind_addr.split(':').nth(1).unwrap();
+                let port = bind_addr.rsplit_once(':').unwrap().1;
                 format!("{server_addr}:{port}")
             }
         }
@@ -48,6 +48,16 @@ mod tests {
         assert_eq!(
             "tomcat:3002",
             super::resolve_addr("127.0.0.1:3001", Some("tomcat:3002"))
+        );
+
+        assert_eq!(
+            "tomcat:3001",
+            super::resolve_addr("[::]:3001", Some("tomcat"))
+        );
+
+        assert_eq!(
+            "tomcat:3001",
+            super::resolve_addr("[2001:db8::10]:3001", Some("tomcat"))
         );
 
         assert_eq!(

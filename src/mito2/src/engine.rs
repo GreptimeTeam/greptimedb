@@ -225,6 +225,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         // so the engine (and thus the GC worker) can fire `on_region_gc`.
         let region_hook = self.plugins.get::<RegionHookRef>();
         let workers = WorkerGroup::start(
+            self.data_home,
             config.clone(),
             self.log_store.clone(),
             self.object_store_manager,
@@ -1620,6 +1621,7 @@ impl MitoEngine {
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
+                    data_home,
                     config.clone(),
                     log_store,
                     object_store_manager,

@@ -35,7 +35,7 @@ use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged, only_enables_skip_wal};
+use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged, only_sets_skip_wal};
 use crate::ddl::comment_on::CommentOnProcedure;
 use crate::ddl::create_database::{CreateDatabaseMetadataCommitterRef, CreateDatabaseProcedure};
 use crate::ddl::create_flow::CreateFlowProcedure;
@@ -433,7 +433,7 @@ impl DdlManager {
             .alter_table
             .kind
             .as_ref()
-            .is_some_and(only_enables_skip_wal);
+            .is_some_and(only_sets_skip_wal);
 
         let mut route_change_retries = 0;
         loop {

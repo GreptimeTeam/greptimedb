@@ -43,6 +43,7 @@ datafusion-expr.workspace = true
 datafusion-expr-common.workspace = true
 datafusion-functions.workspace = true
 datafusion-optimizer.workspace = true
+datafusion-pg-catalog.workspace = true
 datafusion-physical-expr.workspace = true
 datafusion-proto.workspace = true
 datafusion-sql.workspace = true

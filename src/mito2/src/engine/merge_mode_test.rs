@@ -16,6 +16,9 @@
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
+use datafusion_expr::{col, lit};
+use datatypes::arrow::array::AsArray;
+use datatypes::arrow::datatypes::UInt64Type;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
@@ -26,6 +29,192 @@ use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_delete_rows_for_key, build_rows_with_fields, delete_rows,
     delete_rows_schema, flush_region, put_rows, reopen_region, rows_schema,
 };
+
+#[rstest::rstest]
+#[tokio::test]
+async fn test_partial_compaction_preserves_last_row_put_versions(
+    #[values(false, true)] flat_format: bool,
+) {
+    let mut env = TestEnv::new().await;
+    let config = MitoConfig {
+        default_flat_format: flat_format,
+        min_compaction_interval: std::time::Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let request = CreateRequestBuilder::new()
+        .field_num(2)
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .insert_option("merge_mode", "last_row")
+        .build();
+    let table_dir = request.table_dir.clone();
+    let region_opts = request.options.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // A(x=1), B(x=2) share a key and timestamp; C is unrelated.
+    // Promoting A when merging A+C must not hide the unselected B.
+    let a = build_rows_with_fields("a", &[10], &[(Some(1), None)]);
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: a,
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let mut b = build_rows_with_fields("a", &[10], &[(Some(2), None)]);
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0);
+    for _ in 0..3000 {
+        b.extend(build_rows_with_fields(
+            &format!("{:032x}", rand::Rng::random::<u128>(&mut rng)),
+            &[1],
+            &[(Some(2), None)],
+        ));
+    }
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: b,
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let b_id = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .find(|file| file.meta_ref().num_rows == 3001)
+        .unwrap()
+        .file_id();
+    let c = build_rows_with_fields("z", &[10], &[(None, Some(3))]);
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: c,
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    // Sixteen small inputs plus the large middle-version file B. The normal
+    // byte-balanced candidate excludes B.
+    for i in 0..14 {
+        let rows = build_rows_with_fields("z", &[100 + i], &[(Some(4), None)]);
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let scan = || ScanRequest {
+        filters: vec![col("tag_0").eq(lit("a"))],
+        ..Default::default()
+    };
+    let before =
+        RecordBatches::try_collect(engine.scan_to_stream(region_id, scan()).await.unwrap())
+            .await
+            .unwrap()
+            .pretty_print()
+            .unwrap();
+    let expected = "\
++-------+---------+---------+---------------------+
+| tag_0 | field_0 | field_1 | ts                  |
++-------+---------+---------+---------------------+
+| a     | 2.0     |         | 1970-01-01T00:00:10 |
++-------+---------+---------+---------------------+";
+    assert_eq!(expected, before);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    let after = RecordBatches::try_collect(engine.scan_to_stream(region_id, scan()).await.unwrap())
+        .await
+        .unwrap()
+        .pretty_print()
+        .unwrap();
+    assert_eq!(expected, after, "flat_format={flat_format}");
+    let version = engine.get_region(region_id).unwrap().version();
+    let files: Vec<_> = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .collect();
+    assert_eq!(2, files.len());
+    assert!(files.iter().any(|file| file.file_id() == b_id));
+    assert!(
+        files
+            .iter()
+            .all(|file| !file.meta_ref().preserve_row_sequence)
+    );
+    let region = engine.get_region(region_id).unwrap();
+    let mut output_sequences = std::collections::HashSet::new();
+    for file in files.iter().filter(|file| file.file_id() != b_id) {
+        let mut reader = region
+            .access_layer
+            .read_sst((*file).clone())
+            .build()
+            .await
+            .unwrap()
+            .unwrap();
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
+            output_sequences.extend(
+                batch
+                    .column(batch.num_columns() - 2)
+                    .as_primitive::<UInt64Type>()
+                    .values()
+                    .iter()
+                    .copied(),
+            );
+        }
+    }
+    assert!(
+        output_sequences.len() > 1,
+        "compaction must retain effective input sequences"
+    );
+    let engine = env.reopen_engine(engine, config).await;
+    reopen_region(&engine, region_id, table_dir, false, region_opts).await;
+    let reopened =
+        RecordBatches::try_collect(engine.scan_to_stream(region_id, scan()).await.unwrap())
+            .await
+            .unwrap()
+            .pretty_print()
+            .unwrap();
+    assert_eq!(expected, reopened);
+}
 
 #[tokio::test]
 async fn test_merge_mode_write_query() {
