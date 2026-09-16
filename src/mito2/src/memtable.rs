@@ -150,6 +150,10 @@ pub struct MemtableStats {
     pub num_ranges: usize,
     /// The maximum sequence number in the memtable.
     pub max_sequence: SequenceNumber,
+    /// Lower bound of the row sequences written to this memtable or range.
+    /// May remain below the actual minimum after deduplication. Zero is conservative
+    /// when a range does not track its minimum; the value is unused for empty memtables.
+    pub min_sequence: SequenceNumber,
     /// Number of estimated timeseries in memtable.
     pub series_count: usize,
 }
@@ -282,6 +286,11 @@ pub trait Memtable: Send + Sync + fmt::Debug {
 
     /// Returns the [MemtableStats] info of Memtable.
     fn stats(&self) -> MemtableStats;
+
+    /// Returns a conservative row-sequence lower bound without computing full statistics.
+    /// Returns zero when write statistics are unavailable. Callers must ignore
+    /// empty memtables when using this bound to constrain compaction.
+    fn min_sequence(&self) -> SequenceNumber;
 
     /// Forks this (immutable) memtable and returns a new mutable memtable with specific memtable `id`.
     ///
