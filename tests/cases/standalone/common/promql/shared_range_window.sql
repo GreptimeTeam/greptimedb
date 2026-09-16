@@ -100,7 +100,37 @@ TQL EVAL (0, 90, '30s') idelta(shared_counter[1m]) + irate(shared_counter[1m]);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 90, '30s') changes(shared_counter[1m]) + deriv(shared_counter[1m]);
 
+-- More than two operands, nested under both sides of an operator.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 90, '30s') (rate(shared_counter[1m]) + irate(shared_counter[1m])) * (delta(shared_counter[1m]) - idelta(shared_counter[1m]));
+
 DROP TABLE shared_counter;
+
+-- `rate` and `increase` read the temporality label to pick raw-delta math, so the
+-- shared projection has to keep that label available to the function expressions.
+CREATE TABLE shared_temporality (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    series STRING,
+    otlp_aggregation_temporality STRING,
+    PRIMARY KEY (series, otlp_aggregation_temporality)
+);
+
+INSERT INTO shared_temporality VALUES
+    (60000, 10, 'delta', 'delta'),
+    (120000, 20, 'delta', 'delta'),
+    (180000, 15, 'delta', 'delta'),
+    (60000, 10, 'cumulative', NULL),
+    (120000, 20, 'cumulative', NULL),
+    (180000, 30, 'cumulative', NULL);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') rate(shared_temporality[3m]) + increase(shared_temporality[3m]);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') increase(shared_temporality[3m]) / count_over_time(shared_temporality[3m]);
+
+DROP TABLE shared_temporality;
 
 -- Isolated samples: a window holding one sample has no rate, so the product must
 -- disappear instead of turning into a row without a sample.

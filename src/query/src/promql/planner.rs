@@ -1093,6 +1093,7 @@ impl PromPlanner {
             .build()
             .context(DataFusionPlanningSnafu)?;
 
+        // All calls read the same plan, so the leaves differ only in their function column.
         let leaves = call_contexts
             .into_iter()
             .map(|ctx| PlannedIslandLeaf {

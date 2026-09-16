@@ -347,7 +347,65 @@ TQL EVAL (0, 90, '30s') changes(shared_counter[1m]) + deriv(shared_counter[1m]);
 | a    | 1970-01-01T00:01:30 | 1.3333333333333333                                                                  |
 +------+---------------------+-------------------------------------------------------------------------------------+
 
+-- More than two operands, nested under both sides of an operator.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 90, '30s') (rate(shared_counter[1m]) + irate(shared_counter[1m])) * (delta(shared_counter[1m]) - idelta(shared_counter[1m]));
+
++------+---------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| host | ts                  | shared_counter.prom_rate(ts_range,val,ts,Int64(60000)) + shared_counter.prom_irate(ts_range,val) * shared_counter.prom_delta(ts_range,val,ts,Int64(60000)) - shared_counter.prom_idelta(ts_range,val) |
++------+---------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| a    | 1970-01-01T00:00:30 | 6.666666666666666                                                                                                                                                                                     |
+| a    | 1970-01-01T00:01:00 | -5.0                                                                                                                                                                                                  |
+| a    | 1970-01-01T00:01:30 | 5.833333333333332                                                                                                                                                                                     |
++------+---------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
 DROP TABLE shared_counter;
+
+Affected Rows: 0
+
+-- `rate` and `increase` read the temporality label to pick raw-delta math, so the
+-- shared projection has to keep that label available to the function expressions.
+CREATE TABLE shared_temporality (
+    ts TIMESTAMP TIME INDEX,
+    greptime_value DOUBLE,
+    series STRING,
+    otlp_aggregation_temporality STRING,
+    PRIMARY KEY (series, otlp_aggregation_temporality)
+);
+
+Affected Rows: 0
+
+INSERT INTO shared_temporality VALUES
+    (60000, 10, 'delta', 'delta'),
+    (120000, 20, 'delta', 'delta'),
+    (180000, 15, 'delta', 'delta'),
+    (60000, 10, 'cumulative', NULL),
+    (120000, 20, 'cumulative', NULL),
+    (180000, 30, 'cumulative', NULL);
+
+Affected Rows: 6
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') rate(shared_temporality[3m]) + increase(shared_temporality[3m]);
+
++------------+------------------------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| series     | otlp_aggregation_temporality | ts                  | shared_temporality.prom_rate(ts_range,greptime_value,ts,Int64(180000)) + shared_temporality.prom_increase(ts_range,greptime_value,ts,Int64(180000)) |
++------------+------------------------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| cumulative |                              | 1970-01-01T00:03:00 | 30.166666666666668                                                                                                                                  |
+| delta      | delta                        | 1970-01-01T00:03:00 | 45.25                                                                                                                                               |
++------------+------------------------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (180, 180, '1m') increase(shared_temporality[3m]) / count_over_time(shared_temporality[3m]);
+
++------------+------------------------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------+
+| series     | otlp_aggregation_temporality | ts                  | shared_temporality.prom_increase(ts_range,greptime_value,ts,Int64(180000)) / shared_temporality.prom_count_over_time(ts_range,greptime_value) |
++------------+------------------------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------+
+| cumulative |                              | 1970-01-01T00:03:00 | 10.0                                                                                                                                          |
+| delta      | delta                        | 1970-01-01T00:03:00 | 15.0                                                                                                                                          |
++------------+------------------------------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE shared_temporality;
 
 Affected Rows: 0
 
