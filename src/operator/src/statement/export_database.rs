@@ -29,20 +29,19 @@ use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_
 use table::TableRef;
 use table::metadata::TableType;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
-use table::table_reference::TableReference;
 use tokio_util::sync::CancellationToken;
-use url::Url;
 
 use crate::error::{self, InvalidDatabaseExportSnafu, Result};
 use crate::statement::StatementExecutor;
-use crate::statement::copy_database::{is_directory_location, parse_parallelism_from_option_map};
+use crate::statement::database_copy::{
+    DatabaseExportFile, parse_parallelism_from_option_map, validate_export_directory,
+};
 use crate::statement::export_logical_tables::{LogicalTableExport, LogicalTableExportLimits};
 
 /// A validated request-scoped selection, not a metadata snapshot or an ACL token.
 pub struct PreparedDatabaseExport {
     request: CopyDatabaseRequest,
     jobs: Vec<DatabaseExportJob>,
-    output_files: Vec<String>,
 }
 
 impl PreparedDatabaseExport {
@@ -54,74 +53,14 @@ impl PreparedDatabaseExport {
 }
 
 enum DatabaseExportJob {
-    Ordinary(TableRef),
+    Ordinary {
+        table: TableRef,
+        output: DatabaseExportFile,
+    },
     Metric(LogicalTableExport),
 }
 
-fn validate_directory(location: &str) -> Result<()> {
-    ensure!(
-        is_directory_location(location),
-        error::InvalidCopyDatabasePathSnafu { value: location }
-    );
-    #[cfg(windows)]
-    if common_datasource::object_store::handle_windows_path(location).is_some() {
-        return Ok(());
-    }
-    let parsed_directory = match Url::parse(location) {
-        Ok(url) => {
-            url.query().is_none() && url.fragment().is_none() && is_directory_location(url.path())
-        }
-        Err(_) => true,
-    };
-    ensure!(
-        parsed_directory,
-        error::InvalidCopyDatabasePathSnafu { value: location }
-    );
-    Ok(())
-}
-
 impl StatementExecutor {
-    /// Capture each selected data table once. Views, temporary and Metric physical
-    /// tables do not have data outputs. `None` selects the whole schema.
-    pub async fn capture_database_export_tables(
-        &self,
-        req: &CopyDatabaseRequest,
-        names: Option<&[String]>,
-        ctx: &QueryContextRef,
-    ) -> Result<Vec<TableRef>> {
-        let mut names = match names {
-            Some(names) => names.to_vec(),
-            None => self
-                .catalog_manager
-                .table_names(&req.catalog_name, &req.schema_name, Some(ctx))
-                .await
-                .context(error::CatalogSnafu)?,
-        };
-        names.sort();
-        let mut tables = Vec::new();
-        for name in names {
-            let table = self
-                .get_table(&TableReference::full(
-                    &req.catalog_name,
-                    &req.schema_name,
-                    &name,
-                ))
-                .await?;
-            let info = table.table_info();
-            if table.table_type() == TableType::Base
-                && (info.meta.engine != METRIC_ENGINE_NAME
-                    || info
-                        .meta
-                        .options
-                        .extra_options
-                        .contains_key(LOGICAL_TABLE_METADATA_KEY))
-            {
-                tables.push(table);
-            }
-        }
-        Ok(tables)
-    }
-
     /// Validate all jobs and destinations before executing any query or writer.
     /// Callers must authorize every captured table before calling this method.
     pub async fn prepare_database_export(
@@ -129,7 +68,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         tables: Vec<TableRef>,
     ) -> Result<PreparedDatabaseExport> {
-        validate_directory(&req.location)?;
+        validate_export_directory(&req.location)?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         ensure!(
             matches!(format, Format::Parquet(_)),
@@ -139,24 +78,20 @@ impl StatementExecutor {
         let local =
             scheme.eq_ignore_ascii_case(FS_SCHEMA) || scheme.eq_ignore_ascii_case(FILE_SCHEMA);
         let mut filenames = HashSet::new();
-        let mut output_files = Vec::with_capacity(tables.len());
         let mut logical = Vec::new();
         let mut jobs = Vec::new();
         for table in tables {
             let info = table.table_info();
             let name = &info.name;
+            let output = DatabaseExportFile::new(&req.location, name, ".parquet")?;
             ensure!(
-                !name.is_empty()
-                    && name != "."
-                    && name != ".."
-                    && !name.contains(['/', '\\', '\0', '?', '#', '%', ':'])
-                    && filenames.insert(if local {
-                        name.to_ascii_lowercase()
-                    } else {
-                        name.clone()
-                    }),
+                filenames.insert(if local {
+                    output.path.to_ascii_lowercase()
+                } else {
+                    output.path.clone()
+                }),
                 InvalidDatabaseExportSnafu {
-                    reason: format!("unsafe or duplicate output name: {name}")
+                    reason: format!("duplicate output name: {name}")
                 }
             );
             ensure!(
@@ -167,7 +102,6 @@ impl StatementExecutor {
                     reason: "expected base tables in the selected schema"
                 }
             );
-            output_files.push(format!("{}{name}.parquet", req.location));
             if info.meta.engine == METRIC_ENGINE_NAME {
                 ensure!(
                     info.meta
@@ -180,7 +114,7 @@ impl StatementExecutor {
                 );
                 logical.push(table);
             } else {
-                jobs.push(DatabaseExportJob::Ordinary(table));
+                jobs.push(DatabaseExportJob::Ordinary { table, output });
             }
         }
         let ids = logical
@@ -225,18 +159,14 @@ impl StatementExecutor {
                 .with_context(|| InvalidDatabaseExportSnafu {
                     reason: format!("missing physical table {id} in the selected schema"),
                 })?;
-            jobs.push(DatabaseExportJob::Metric(LogicalTableExport::try_new(
-                table, &tables,
-            )?));
+            jobs.push(DatabaseExportJob::Metric(
+                LogicalTableExport::try_new_in_directory(table, &tables, &req.location)?,
+            ));
         }
         build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
             .await
             .context(error::BuildBackendSnafu)?;
-        Ok(PreparedDatabaseExport {
-            request: req,
-            jobs,
-            output_files,
-        })
+        Ok(PreparedDatabaseExport { request: req, jobs })
     }
 }
 
@@ -257,6 +187,18 @@ impl StatementExecutor {
         cancellation: &CancellationToken,
         ctx: QueryContextRef,
     ) -> Result<DatabaseExportSummary> {
+        let mut output_files = Vec::new();
+        for job in &plan.jobs {
+            match job {
+                DatabaseExportJob::Ordinary { output, .. } => {
+                    output_files.push(output.location.clone())
+                }
+                DatabaseExportJob::Metric(unit) => {
+                    output_files.extend(unit.output_files().map(|file| file.location.clone()))
+                }
+            }
+        }
+        output_files.sort();
         let req = &plan.request;
         let rows = run_jobs(
             plan.jobs,
@@ -278,13 +220,13 @@ impl StatementExecutor {
                             )
                             .await
                             .map(|summary| summary.rows),
-                        DatabaseExportJob::Ordinary(table) => {
+                        DatabaseExportJob::Ordinary { table, output } => {
                             let info = table.table_info();
                             let copy = CopyTableRequest {
                                 catalog_name: info.catalog_name.clone(),
                                 schema_name: info.schema_name.clone(),
                                 table_name: info.name.clone(),
-                                location: format!("{}{}.parquet", req.location, info.name),
+                                location: output.location,
                                 with: req.with.clone(),
                                 connection: req.connection.clone(),
                                 pattern: None,
@@ -299,10 +241,7 @@ impl StatementExecutor {
             },
         )
         .await?;
-        Ok(DatabaseExportSummary {
-            rows,
-            output_files: plan.output_files,
-        })
+        Ok(DatabaseExportSummary { rows, output_files })
     }
 }
 
@@ -365,31 +304,6 @@ mod tests {
     use tokio::sync::{Semaphore, mpsc};
 
     use super::*;
-
-    #[test]
-    fn directory_url_components_cannot_capture_output_names() {
-        for location in [
-            "file:///copy/fresh?attempt=/",
-            "file:///copy/fresh#attempt/",
-            "s3://bucket/fresh?attempt=/",
-            "s3://bucket/fresh#attempt/",
-            "file:///copy/fresh",
-        ] {
-            assert!(validate_directory(location).is_err(), "{location}");
-        }
-        for location in ["/copy/fresh/", "file:///copy/fresh/", "s3://bucket/fresh/"] {
-            validate_directory(location).unwrap();
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_directory_names_are_literal_paths() {
-        for location in ["C:/copy/fresh#1/", r"C:\copy\fresh#1\"] {
-            validate_directory(location).unwrap();
-        }
-        assert!(validate_directory("C:/copy/fresh#1").is_err());
-    }
 
     #[tokio::test]
     async fn bounded_admission_and_drain() {

@@ -51,6 +51,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{self, InvalidLogicalTableExportSnafu, LogicalTableExportResourceSnafu, Result};
 use crate::statement::StatementExecutor;
+use crate::statement::database_copy::DatabaseExportFile;
 
 /// Export preprocessing and per-file limits. Query memory and spill remain
 /// governed by the query engine.
@@ -101,7 +102,7 @@ pub struct LogicalTableExport {
 }
 
 struct LogicalTableProjection {
-    name: String,
+    output: DatabaseExportFile,
     schema: SchemaRef,
     projection: Vec<usize>,
 }
@@ -110,6 +111,14 @@ impl LogicalTableExport {
     /// Capture schemas from selected Metric table references.
     /// Export validates their physical-table association against table routes.
     pub fn try_new(physical: TableRef, tables: &[TableRef]) -> Result<Self> {
+        Self::try_new_in_directory(physical, tables, "")
+    }
+
+    pub(super) fn try_new_in_directory(
+        physical: TableRef,
+        tables: &[TableRef],
+        directory: &str,
+    ) -> Result<Self> {
         let physical_info = physical.table_info();
         ensure!(
             physical_info.meta.engine == METRIC_ENGINE_NAME
@@ -187,7 +196,7 @@ impl LogicalTableExport {
                     .insert(
                         info.table_id(),
                         LogicalTableProjection {
-                            name: name.clone(),
+                            output: DatabaseExportFile::new(directory, name, ".parquet")?,
                             schema,
                             projection: indices,
                         }
@@ -214,6 +223,10 @@ impl LogicalTableExport {
             scan_projection,
             logical_tables,
         })
+    }
+
+    pub(super) fn output_files(&self) -> impl Iterator<Item = &DatabaseExportFile> {
+        self.logical_tables.values().map(|table| &table.output)
     }
 
     async fn validate_table_routes(&self, manager: &TableRouteManager) -> Result<()> {
@@ -485,7 +498,7 @@ impl ActiveWriter {
         store: &ObjectStore,
         limits: LogicalTableExportLimits,
     ) -> Result<Self> {
-        let path = format!("{}.parquet", table.name);
+        let path = table.output.path.clone();
         ensure!(
             !store
                 .exists(&path)

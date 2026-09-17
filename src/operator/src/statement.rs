@@ -19,6 +19,7 @@ mod copy_query_to;
 mod copy_table_from;
 mod copy_table_to;
 mod cursor;
+mod database_copy;
 pub mod ddl;
 mod describe;
 mod dml;

@@ -54,7 +54,7 @@ async fn values(instance: &Arc<Instance>, query: &str) -> Vec<Vec<datatypes::val
         .collect()
 }
 
-async fn source_tables(
+async fn create_metric_export_source_tables(
     instance: &Arc<Instance>,
     physical: &str,
     encoding: &str,
@@ -98,7 +98,8 @@ async fn source_tables(
 async fn roundtrip(instance: &Arc<Instance>) {
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     for (physical, encoding) in [("phy", "dense"), ("other_phy", "sparse")] {
-        let (names, tables, renamed) = source_tables(instance, physical, encoding).await;
+        let (names, tables, renamed) =
+            create_metric_export_source_tables(instance, physical, encoding).await;
         let unit = LogicalTableExport::try_new(table(instance, &renamed).await, &tables).unwrap();
         let range =
             TimestampRange::new(Timestamp::new_millisecond(2), Timestamp::new_millisecond(4))
@@ -208,7 +209,7 @@ async fn physical_export_distributed_roundtrip() {
     roundtrip(cluster.fe_instance()).await;
 }
 
-fn database_request(directory: &std::path::Path) -> table::requests::CopyDatabaseRequest {
+fn database_export_request(directory: &std::path::Path) -> table::requests::CopyDatabaseRequest {
     table::requests::CopyDatabaseRequest {
         catalog_name: "greptime".into(),
         schema_name: "public".into(),
@@ -226,10 +227,10 @@ fn database_request(directory: &std::path::Path) -> table::requests::CopyDatabas
     }
 }
 
-async fn database_roundtrip(instance: &Arc<Instance>) {
+async fn database_export_roundtrip(instance: &Arc<Instance>) {
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
-    let (a, _, physical) = source_tables(instance, "db_a", "dense").await;
-    let (b, _, _) = source_tables(instance, "db_b", "sparse").await;
+    let (a, _, physical) = create_metric_export_source_tables(instance, "db_a", "dense").await;
+    let (b, _, _) = create_metric_export_source_tables(instance, "db_b", "sparse").await;
     sql(
         instance,
         "CREATE TABLE audit (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host))",
@@ -244,7 +245,7 @@ async fn database_roundtrip(instance: &Arc<Instance>) {
     let selected = vec![a[0].clone(), a[2].clone(), b[1].clone(), "audit".into()];
     let mut names = selected.clone();
     names.extend([physical, "dashboard".into()]);
-    let req = database_request(&destination.path().join("data"));
+    let req = database_export_request(&destination.path().join("data"));
     let executor = instance.statement_executor();
     let captured = executor
         .capture_database_export_tables(&req, None, &QueryContext::arc())
@@ -344,7 +345,7 @@ async fn database_roundtrip(instance: &Arc<Instance>) {
             .await
         );
     }
-    let ordinary_req = database_request(&destination.path().join("captured"));
+    let ordinary_req = database_export_request(&destination.path().join("captured"));
     let captured = executor
         .capture_database_export_tables(
             &ordinary_req,
@@ -388,7 +389,7 @@ async fn database_roundtrip(instance: &Arc<Instance>) {
     );
     for suffix in ["?attempt=/", "#attempt/"] {
         let path = destination.path().join("invalid_destination");
-        let mut req = database_request(&path);
+        let mut req = database_export_request(&path);
         req.location = format!("{}{suffix}", url::Url::from_file_path(&path).unwrap());
         req.with.insert("parallelism".into(), "1".into());
         let result = instance
@@ -407,10 +408,22 @@ async fn database_roundtrip(instance: &Arc<Instance>) {
             })
         ));
         assert!(!path.exists());
+        assert!(
+            tests_integration::test_util::try_execute_sql(
+                instance,
+                &format!(
+                    "COPY DATABASE public TO '{}{suffix}' WITH (FORMAT='parquet')",
+                    url::Url::from_file_path(&path).unwrap()
+                )
+            )
+            .await
+            .is_err()
+        );
+        assert!(!path.exists());
     }
     let token = CancellationToken::new();
     token.cancel();
-    let req = database_request(&destination.path().join("cancelled"));
+    let req = database_export_request(&destination.path().join("cancelled"));
     let result = instance
         .export_database_for_test(req, Some(&names), &token, QueryContext::arc())
         .await;
@@ -429,7 +442,7 @@ async fn database_export_standalone_roundtrip() {
     let standalone = GreptimeDbStandaloneBuilder::new("database_export")
         .build()
         .await;
-    database_roundtrip(standalone.fe_instance()).await;
+    database_export_roundtrip(standalone.fe_instance()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -445,7 +458,7 @@ async fn database_export_distributed_roundtrip() {
         )
         .build(false)
         .await;
-    database_roundtrip(cluster.fe_instance()).await;
+    database_export_roundtrip(cluster.fe_instance()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -459,7 +472,8 @@ async fn database_export_rejects_invalid_members_before_output() {
         .build()
         .await;
     let instance = standalone.fe_instance();
-    let (_, tables, physical) = source_tables(instance, "invalid_phy", "dense").await;
+    let (_, tables, physical) =
+        create_metric_export_source_tables(instance, "invalid_phy", "dense").await;
     let executor = instance.statement_executor();
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     for name in ["Foo", "foo"] {
@@ -475,7 +489,7 @@ async fn database_export_rejects_invalid_members_before_output() {
         case_tables[1].table_info().table_id()
     );
     let case_path = destination.path().join("case_aliases");
-    let mut case_req = database_request(&case_path);
+    let mut case_req = database_export_request(&case_path);
     case_req.with.insert("parallelism".into(), "1".into());
     let result = instance
         .export_database_for_test(
@@ -488,7 +502,7 @@ async fn database_export_rejects_invalid_members_before_output() {
     assert!(matches!(result,
         Err(frontend::error::Error::TableOperation {
             source: operator::error::Error::InvalidDatabaseExport { reason }, ..
-        }) if reason == "unsafe or duplicate output name: foo"));
+        }) if reason == "duplicate output name: foo"));
     assert!(!case_path.exists());
     case_req.location = "s3://export-bucket/data/".into();
     case_req.connection.extend([
@@ -501,7 +515,7 @@ async fn database_export_rejects_invalid_members_before_output() {
         .await
         .unwrap();
     assert_eq!(plan.job_count_for_test(), 2);
-    let req = database_request(&destination.path().join("data"));
+    let req = database_export_request(&destination.path().join("data"));
     let key = TableRouteKey::new(tables[2].table_info().table_id()).to_bytes();
     let original = standalone
         .kv_backend
@@ -588,11 +602,112 @@ async fn database_export_rejects_invalid_members_before_output() {
         .await;
     assert!(matches!(result,
         Err(operator::error::Error::InvalidDatabaseExport { reason })
-            if reason == format!("unsafe or duplicate output name: {duplicate_name}")));
+            if reason == format!("duplicate output name: {duplicate_name}")));
     assert_eq!(
         std::fs::read_dir(destination.path().join("data"))
             .unwrap()
             .count(),
         0
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn database_export_preserves_valid_table_names() {
+    let standalone = GreptimeDbStandaloneBuilder::new("database_export_names")
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    sql(instance, "CREATE TABLE names_physical (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE=metric WITH (physical_metric_table='')").await;
+    let mut names = vec!["ordinary#b".to_string(), "metric#b".to_string()];
+    if !cfg!(windows) {
+        names.extend(["ordinary:b".to_string(), "metric:b".to_string()]);
+    }
+    for name in &names {
+        let engine = if name.starts_with("metric") {
+            "ENGINE=metric WITH (on_physical_table='names_physical')"
+        } else {
+            ""
+        };
+        sql(instance, &format!("CREATE TABLE \"{name}\" (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) {engine}")).await;
+        sql(
+            instance,
+            &format!("INSERT INTO \"{name}\" (ts,val,host) VALUES (1,42,'h')"),
+        )
+        .await;
+    }
+    sql(
+        instance,
+        "CREATE VIEW names_view AS SELECT * FROM \"ordinary#b\"",
+    )
+    .await;
+    let mut outputs = Vec::new();
+    for (attempt, file_url, legacy) in [
+        ("plain", false, false),
+        ("url", true, false),
+        ("legacy", true, true),
+    ] {
+        let directory = destination.path().join(attempt);
+        let mut req = database_export_request(&directory);
+        req.time_range = None;
+        if file_url {
+            req.location = url::Url::from_directory_path(&directory)
+                .unwrap()
+                .to_string();
+        }
+        if legacy {
+            let output = sql(
+                instance,
+                &format!(
+                    "COPY DATABASE public TO '{}' WITH (FORMAT='parquet')",
+                    req.location
+                ),
+            )
+            .await;
+            assert!(matches!(output.data, OutputData::AffectedRows(rows) if rows == names.len()));
+        } else {
+            let summary = instance
+                .export_database_for_test(req, None, &CancellationToken::new(), QueryContext::arc())
+                .await
+                .unwrap();
+            assert_eq!(summary.rows, names.len());
+            let expected = names
+                .iter()
+                .map(|name| {
+                    let path = directory.join(format!("{name}.parquet"));
+                    if file_url {
+                        url::Url::from_file_path(path).unwrap().to_string()
+                    } else {
+                        path.to_str().unwrap().to_string()
+                    }
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                summary
+                    .output_files
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected
+            );
+        }
+        for name in &names {
+            let path = directory.join(format!("{name}.parquet"));
+            assert!(path.is_file());
+            outputs.push(url::Url::from_file_path(path).unwrap().to_string());
+        }
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), names.len());
+    }
+    sql(instance, "CREATE TABLE names_restored (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY)").await;
+    for location in outputs {
+        sql(instance, "TRUNCATE TABLE names_restored").await;
+        sql(
+            instance,
+            &format!("COPY names_restored FROM '{location}' WITH (FORMAT='parquet')"),
+        )
+        .await;
+        assert_eq!(
+            values(instance, "SELECT * FROM names_restored").await,
+            values(instance, "SELECT * FROM \"ordinary#b\"").await
+        );
+    }
 }

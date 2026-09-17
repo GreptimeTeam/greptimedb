@@ -239,7 +239,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
 impl DistExtensionPlanner {
     /// Extract fully resolved table name from logical plan
     fn extract_full_table_name(plan: &LogicalPlan) -> Result<Option<TableName>> {
-        let mut extractor = TableNameExtractor::default();
+        let mut extractor = TableScanExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
     }
@@ -249,10 +249,10 @@ impl DistExtensionPlanner {
         table_name: &TableName,
         logical_plan: &LogicalPlan,
     ) -> Result<Vec<RegionId>> {
-        let mut extractor = TableNameExtractor::default();
+        let mut extractor = TableScanExtractor::default();
         let _ = logical_plan.visit(&mut extractor)?;
         // Resolving by name again could bind an authorized scan to a replacement table.
-        let table = match extractor.table {
+        let table = match extractor.captured_table {
             Some(table) => table,
             None => self
                 .catalog_manager
@@ -471,14 +471,14 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
         .collect()
 }
 
-/// Visitor to extract table name from logical plan (TableScan node)
+/// Extract the scan name and captured table identity from a logical plan.
 #[derive(Default)]
-struct TableNameExtractor {
+struct TableScanExtractor {
     pub table_name: Option<TableName>,
-    table: Option<TableRef>,
+    captured_table: Option<TableRef>,
 }
 
-impl TreeNodeVisitor<'_> for TableNameExtractor {
+impl TreeNodeVisitor<'_> for TableScanExtractor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
@@ -490,7 +490,7 @@ impl TreeNodeVisitor<'_> for TableNameExtractor {
                         .downcast_ref::<DfTableProviderAdapter>()
                 {
                     if provider.table().table_type() == TableType::Base {
-                        self.table = Some(provider.table());
+                        self.captured_table = Some(provider.table());
                         let info = provider.table().table_info();
                         self.table_name = Some(TableName::new(
                             info.catalog_name.clone(),
