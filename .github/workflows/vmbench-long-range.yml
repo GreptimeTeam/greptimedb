@@ -30,10 +30,6 @@ on:
         type: string
         default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
         required: true
-      o11ybench_ref:
-        description: Optional full commit SHA override (default uses runtime image revision)
-        type: string
-        required: false
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
@@ -47,7 +43,7 @@ on:
       system_disk_gib:
         description: System disk GiB (20..2048)
         type: number
-        default: 40
+        default: 80
         required: true
       benchmark_timeout_minutes:
         description: Benchmark job timeout in minutes (1..360)
@@ -75,7 +71,6 @@ env:
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
-  O11YBENCH_REF: ${{ inputs.o11ybench_ref }}
   RUNTIME_IMAGE: ${{ inputs.runtime_image }}
   ECS_INSTANCE_TYPE: ${{ inputs.ecs_instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -121,7 +116,6 @@ jobs:
         resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
         revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
         [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
-        [[ -z "$O11YBENCH_REF" || "$O11YBENCH_REF" == "$revision" ]]
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
         printf 'run_id=long-range-%s-%s\nplan_artifact=vmbench-plan-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
         args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET"
