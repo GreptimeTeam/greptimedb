@@ -37,7 +37,7 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260917-de5ca8a7@sha256:a15499cdd85b481b711751e2330cf63694545dfc3033edf40c0523fedb82073f
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260917-65906ca9@sha256:5af45e298019474d4c5089d63031a15f9bceb663890dd87fa0a56876c99c8597
         required: true
       ecs_instance_type:
         description: ECS instance type (independent of Query Regression)
@@ -100,7 +100,7 @@ jobs:
         persist-credentials: false
     - name: Test existing ECS lifecycle helpers
       run: python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
-    - name: Validate budgets and build the benchmark plan
+    - name: Validate budgets and build warm and lukewarm plans
       id: plan
       env:
         RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
@@ -125,8 +125,6 @@ jobs:
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
         printf 'run_id=long-range-%s-%s\nplan_artifact=vmbench-plan-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
         args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET"
-          --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          --output-root "/tmp/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           --run-classification controlled_server_benchmark --no-open-browser)
         # Tags become target-spec fields; reject separators before passing them to the planner.
@@ -140,11 +138,23 @@ jobs:
           args+=(--target "$target:name=$target,image=$repo:$tag,url=$url")
         done
         # The packaged planner owns profile, target and resource-limit validation.
-        docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" > "$RUNNER_TEMP/vmbench-plan.json"
+        mkdir -p "$RUNNER_TEMP/vmbench-plans"
+        for policy in warm lukewarm_cold_batch; do
+          query_args=()
+          if [[ "$policy" == lukewarm_cold_batch ]]; then
+            query_args=(--mode serial)
+          fi
+          # Keep the original runner defaults: warm serial 5/1, c1/c4 30s/5s;
+          # lukewarm serial 3/0. Separate plans preserve the existing lifecycle.
+          docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
+            --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$policy" \
+            --output-root "/tmp/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$policy" \
+            --cache-policy "$policy" "${query_args[@]}" > "$RUNNER_TEMP/vmbench-plans/$policy.json"
+        done
     - uses: actions/upload-artifact@v4
       with:
         name: vmbench-plan-${{ github.run_id }}-${{ github.run_attempt }}
-        path: ${{ runner.temp }}/vmbench-plan.json
+        path: ${{ runner.temp }}/vmbench-plans/
         if-no-files-found: error
         retention-days: 1
   provision:
@@ -173,6 +183,7 @@ jobs:
         image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
         instance-type: ${{ env.ECS_INSTANCE_TYPE }}
         enable-docker: 'true'
+        enable-host-cache-clear: 'true'
         system-disk-gib: ${{ needs.validate.outputs.system_disk_gib }}
         ttl-hours: ${{ inputs.janitor_ttl_hours }}
         resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
@@ -212,6 +223,7 @@ jobs:
         test "$(git -C "$O11YBENCH_DIR" rev-parse HEAD)" = "$RESOLVED_O11YBENCH_REF"
         jq --version
         docker info
+        sudo -n -l -- tee /proc/sys/vm/drop_caches
         df -h /tmp /var/lib/docker
         # Fail before generation if either dataset space or Docker storage is too small.
         for path in /tmp /var/lib/docker; do
@@ -221,31 +233,47 @@ jobs:
         docker pull "$RESOLVED_RUNTIME_IMAGE"
         docker image inspect "$RESOLVED_RUNTIME_IMAGE" > "$METADATA_ROOT/runtime-image.json"
         test "$(jq -r '.[0].Config.Labels["org.opencontainers.image.revision"]' "$METADATA_ROOT/runtime-image.json")" = "$RESOLVED_O11YBENCH_REF"
-        plan="$METADATA_ROOT/vmbench-plan.json"
+        plan="$METADATA_ROOT/warm.json"
         while IFS=$'\t' read -r target reference; do
           echo "Resolving $target: $reference"
           docker pull "$reference"
           docker image inspect "$reference" > "$METADATA_ROOT/$target-image.json"
           digest=$(jq -er '.[0].RepoDigests[0]' "$METADATA_ROOT/$target-image.json")
-          jq --arg target "$target" --arg image "$digest" '.targets |= map(if .name == $target then .image = $image else . end)' "$plan" > "$plan.tmp"
-          mv "$plan.tmp" "$plan"
+          for policy in warm lukewarm_cold_batch; do
+            policy_plan="$METADATA_ROOT/$policy.json"
+            jq --arg target "$target" --arg image "$digest" '.targets |= map(if .name == $target then .image = $image else . end)' "$policy_plan" > "$policy_plan.tmp"
+            mv "$policy_plan.tmp" "$policy_plan"
+          done
         done < <(jq -r '.targets[] | [.name, .image] | @tsv' "$plan")
-    - name: Review execution plan
+    - name: Review execution plans
       run: |
-        python3 o11ybench/scripts/run_benchmark_plan.py \
-          --plan "$METADATA_ROOT/vmbench-plan.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --dry-run \
-          > "$METADATA_ROOT/execution-plan.json"
-        cat "$METADATA_ROOT/execution-plan.json"
-    - name: Generate, load, benchmark and render HTML
+        set -euo pipefail
+        for policy in warm lukewarm_cold_batch; do
+          python3 o11ybench/scripts/run_benchmark_plan.py \
+            --plan "$METADATA_ROOT/$policy.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --dry-run \
+            > "$METADATA_ROOT/$policy-execution-plan.json"
+          cat "$METADATA_ROOT/$policy-execution-plan.json"
+        done
+    - name: Warm serial and concurrent benchmarks
       run: |
         set -euo pipefail
         python3 -u o11ybench/scripts/run_benchmark_plan.py \
-          --plan "$METADATA_ROOT/vmbench-plan.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --execute \
-          2>&1 | tee "$METADATA_ROOT/execution.log"
-        python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT"
+          --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --execute \
+          2>&1 | tee "$METADATA_ROOT/warm-execution.log"
+        python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT-warm"
+    - name: Lukewarm cold-hot benchmark
+      run: |
+        set -euo pipefail
+        python3 -u o11ybench/scripts/run_benchmark_plan.py \
+          --plan "$METADATA_ROOT/lukewarm_cold_batch.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --execute \
+          2>&1 | tee "$METADATA_ROOT/lukewarm-execution.log"
+        python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT-lukewarm_cold_batch"
     - name: Clean up owned containers
       if: always()
-      run: docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID" | xargs -r docker rm -fv
+      run: |
+        for policy in warm lukewarm_cold_batch; do
+          docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-$policy" | xargs -r docker rm -fv
+        done
     - name: Upload HTML and results (no dataset or DB files)
       if: always()
       uses: actions/upload-artifact@v4
@@ -253,9 +281,10 @@ jobs:
         name: vmbench-long-range-${{ github.run_id }}-${{ github.run_attempt }}
         path: |
           ${{ env.METADATA_ROOT }}
-          ${{ env.ARTIFACT_ROOT }}
-          !${{ env.ARTIFACT_ROOT }}/data/*.bin
-          !${{ env.ARTIFACT_ROOT }}/**/db-data/**
+          ${{ env.ARTIFACT_ROOT }}-warm
+          ${{ env.ARTIFACT_ROOT }}-lukewarm_cold_batch
+          !${{ env.ARTIFACT_ROOT }}-*/data/*.bin
+          !${{ env.ARTIFACT_ROOT }}-*/**/db-data/**
         if-no-files-found: warn
         retention-days: 14
   teardown:

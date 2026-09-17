@@ -104,6 +104,7 @@ class ProvisionConfig:
     system_disk_gib: int = SYSTEM_DISK_GIB
     ttl_hours: int | None = None
     enable_docker: bool = False
+    enable_host_cache_clear: bool = False
 
     def __post_init__(self) -> None:
         if not 20 <= self.system_disk_gib <= 2048:
@@ -128,6 +129,7 @@ def render_user_data(
     runner_uid: str = "1001",
     runner_gid: str = "1001",
     enable_docker: bool = False,
+    enable_host_cache_clear: bool = False,
 ) -> str:
     """Render the cloud-init shell script for the runner instance."""
     docker_setup = ""
@@ -139,6 +141,23 @@ systemctl start docker
 runner_user=$(id -nu {runner_uid})
 usermod -aG docker "$runner_user"
 runuser -u "$runner_user" -- docker info
+
+'''
+    cache_clear_setup = ""
+    if enable_host_cache_clear:
+        if not runner_uid.isascii() or not runner_uid.isdigit():
+            raise ValueError("runner-uid must be numeric for host cache clearing")
+        cache_clear_setup = f'''# Opt-in host-wide cache control for dedicated benchmark instances only.
+command -v sudo
+command -v visudo
+tee_path=$(command -v tee)
+[[ "$tee_path" == /usr/bin/tee || "$tee_path" == /bin/tee ]]
+runner_user=$(id -nu {runner_uid})
+install -d -m 0755 /etc/sudoers.d
+printf '#{runner_uid} ALL=(root) NOPASSWD: %s /proc/sys/vm/drop_caches\\n' "$tee_path" > /etc/sudoers.d/o11ybench-cache-clear
+chmod 0440 /etc/sudoers.d/o11ybench-cache-clear
+visudo -cf /etc/sudoers.d/o11ybench-cache-clear
+runuser -u "$runner_user" -- sudo -n -l -- tee /proc/sys/vm/drop_caches
 
 '''
     destinations = " ".join(f'"{dst}"' for dst in CACHE_PATHS)
@@ -180,7 +199,7 @@ set -euo pipefail
 
 {swap_setup}
 
-{docker_setup}cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
+{docker_setup}{cache_clear_setup}cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
 RUNNER_NAME={runner_name}
 RUNNER_LABELS={runner_label}
 RUNNER_TOKEN={runner_token}
@@ -435,6 +454,7 @@ def provision(config: ProvisionConfig) -> int:
             config.runner_uid,
             config.runner_gid,
             enable_docker=config.enable_docker,
+            enable_host_cache_clear=config.enable_host_cache_clear,
         )
     )
 
@@ -498,6 +518,10 @@ def main() -> int:
         "--enable-docker", choices=("true", "false"),
         default=os.environ.get("ALIYUN_ECS_ENABLE_DOCKER", "false"),
     )
+    parser.add_argument(
+        "--enable-host-cache-clear", choices=("true", "false"),
+        default=os.environ.get("ALIYUN_ECS_ENABLE_HOST_CACHE_CLEAR", "false"),
+    )
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--github-token", default=os.environ.get("GH_PERSONAL_ACCESS_TOKEN"))
@@ -531,6 +555,7 @@ def main() -> int:
         system_disk_gib=args.system_disk_gib,
         ttl_hours=args.ttl_hours,
         enable_docker=args.enable_docker == "true",
+        enable_host_cache_clear=args.enable_host_cache_clear == "true",
     )
     return provision(config)
 
