@@ -308,6 +308,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Corrupted WAL object, {}", reason))]
+    CorruptedWalObject {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -352,6 +359,8 @@ impl ErrorExt for Error {
             | WaitProduceResultReceiver { .. }
             | WaitDumpIndex { .. }
             | MetaLengthExceededLimit { .. } => StatusCode::Internal,
+
+            CorruptedWalObject { .. } => StatusCode::Unexpected,
 
             // Object store related errors
             CreateWriter { .. } | WriteIndex { .. } | ReadIndex { .. } | Io { .. } => {
