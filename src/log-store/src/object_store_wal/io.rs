@@ -31,7 +31,7 @@ const OBJECT_SUFFIX: &str = ".wal";
 
 /// Outcome of a conditional create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PutResult {
+pub(crate) enum PutResult {
     /// This call created the object.
     Created,
     /// The object already held the same content, so the call was a retry.
@@ -40,15 +40,15 @@ pub(super) enum PutResult {
 
 /// An object discovered by a LIST.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ListedObject {
-    pub(super) object_seq: u64,
-    pub(super) path: String,
+pub(crate) struct ListedObject {
+    pub(crate) object_seq: u64,
+    pub(crate) path: String,
     /// Length of the object in bytes, as reported by the listing.
-    pub(super) size: u64,
+    pub(crate) size: u64,
 }
 
 /// Reads and writes the WAL objects under one prefix.
-pub(super) struct ObjectStoreIo {
+pub(crate) struct ObjectStoreIo {
     store: ObjectStore,
     object_prefix: String,
 }
@@ -57,7 +57,7 @@ impl ObjectStoreIo {
     /// Binds `store` to the objects under `prefix`. The store must support
     /// conditional creates, which is what keeps a retried write from
     /// overwriting a durable object.
-    pub(super) fn new(store: ObjectStore, prefix: impl AsRef<str>) -> Result<Self> {
+    pub(crate) fn new(store: ObjectStore, prefix: impl AsRef<str>) -> Result<Self> {
         let object_prefix = normalize_prefix(prefix.as_ref())?;
         ensure!(
             store.info().capability().write_with_if_not_exists,
@@ -78,7 +78,7 @@ impl ObjectStoreIo {
     /// compares its content fails, the read failure is returned, so that its
     /// retry hint says whether comparing again may settle the outcome. Any
     /// other create failure is returned as the write failure it is.
-    pub(super) async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+    pub(crate) async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
         let path = self.object_path(object_seq);
         let write_result = self
             .store
@@ -106,7 +106,7 @@ impl ObjectStoreIo {
     }
 
     /// Reads the object `object_seq`.
-    pub(super) async fn get(&self, object_seq: u64) -> Result<Bytes> {
+    pub(crate) async fn get(&self, object_seq: u64) -> Result<Bytes> {
         let path = self.object_path(object_seq);
         self.store
             .read(&path)
@@ -120,7 +120,7 @@ impl ObjectStoreIo {
 
     /// Reads `len` bytes of the object `object_seq` starting at `offset`. The
     /// range must lie inside the object; one that reaches past its end fails.
-    pub(super) async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+    pub(crate) async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
         let path = self.object_path(object_seq);
         let end = offset
             .checked_add(len)
@@ -140,7 +140,7 @@ impl ObjectStoreIo {
 
     /// Lists the objects under the prefix, ordered by object sequence. Keys
     /// that do not follow the object layout are ignored.
-    pub(super) async fn list(&self) -> Result<Vec<ListedObject>> {
+    pub(crate) async fn list(&self) -> Result<Vec<ListedObject>> {
         let entries = self
             .store
             .list(&self.object_prefix)
@@ -164,7 +164,7 @@ impl ObjectStoreIo {
         Ok(objects)
     }
 
-    pub(super) fn object_path(&self, object_seq: u64) -> String {
+    pub(crate) fn object_path(&self, object_seq: u64) -> String {
         format!(
             "{}{object_seq:0OBJECT_SEQ_WIDTH$}{OBJECT_SUFFIX}",
             self.object_prefix

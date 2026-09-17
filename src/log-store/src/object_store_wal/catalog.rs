@@ -29,7 +29,7 @@ use crate::object_store_wal::format::FooterEntry;
 /// Indexes objects by sequence and, per region, the objects that hold entries
 /// of that region.
 #[derive(Debug, Default)]
-pub(super) struct ObjectCatalog {
+pub(crate) struct ObjectCatalog {
     objects: BTreeMap<u64, Vec<FooterEntry>>,
     regions: BTreeMap<RegionId, BTreeMap<u64, FooterEntry>>,
 }
@@ -39,7 +39,7 @@ impl ObjectCatalog {
     /// in any order, which lets recovery index them as it discovers them.
     /// Inserting a sequence that is already indexed is rejected, whether or not
     /// the footer matches the indexed one.
-    pub(super) fn insert_object(
+    pub(crate) fn insert_object(
         &mut self,
         object_seq: u64,
         mut footer: Vec<FooterEntry>,
@@ -136,7 +136,7 @@ impl ObjectCatalog {
 
     /// Returns the objects that hold entries of `region_id` overlapping
     /// `start_entry_id..=end_entry_id`, ordered by object sequence.
-    pub(super) fn objects_for_entry_range(
+    pub(crate) fn objects_for_entry_range(
         &self,
         region_id: RegionId,
         start_entry_id: u64,
@@ -164,7 +164,7 @@ impl ObjectCatalog {
     }
 
     /// Returns the largest entry id indexed for `region_id`.
-    pub(super) fn region_max_entry_id(&self, region_id: RegionId) -> Option<u64> {
+    pub(crate) fn region_max_entry_id(&self, region_id: RegionId) -> Option<u64> {
         self.regions
             .get(&region_id)?
             .last_key_value()
@@ -181,7 +181,7 @@ impl ObjectCatalog {
     /// contiguous scheme carry no object information, and every new id of a
     /// region must be greater than every id it already has. A sequence at or
     /// above [`OBJECT_SEQ_LIMIT`] does not fit an entry id and is rejected.
-    pub(super) fn next_object_seq(&self) -> Result<u64> {
+    pub(crate) fn next_object_seq(&self) -> Result<u64> {
         let after_last = match self.objects.last_key_value() {
             None => 0,
             Some((&last_object_seq, _)) => last_object_seq
@@ -206,7 +206,7 @@ impl ObjectCatalog {
     }
 
     /// Iterates over the indexed objects ordered by object sequence.
-    pub(super) fn objects_in_order(&self) -> impl Iterator<Item = (u64, &[FooterEntry])> + '_ {
+    pub(crate) fn objects_in_order(&self) -> impl Iterator<Item = (u64, &[FooterEntry])> + '_ {
         self.objects
             .iter()
             .map(|(&object_seq, footer)| (object_seq, footer.as_slice()))

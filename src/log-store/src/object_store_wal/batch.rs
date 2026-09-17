@@ -28,14 +28,14 @@ use crate::error::{Result, WalEntryPositionExhaustedSnafu};
 /// Bits of an entry id that hold the position of the entry among the entries
 /// of its region inside the object; the remaining high bits hold the object
 /// sequence.
-pub(super) const POSITION_BITS: u32 = 20;
+pub(crate) const POSITION_BITS: u32 = 20;
 /// Positions are `1..POSITION_LIMIT`, so an object holds at most 2^20 - 1
 /// entries of one region and a batch seals before a region reaches the limit.
 /// This is a theoretical bound: an object is sealed by size long before.
-pub(super) const POSITION_LIMIT: u64 = 1 << POSITION_BITS;
+pub(crate) const POSITION_LIMIT: u64 = 1 << POSITION_BITS;
 /// Object sequences are `0..OBJECT_SEQ_LIMIT`, the 44 bits an entry id leaves
 /// above the position.
-pub(super) const OBJECT_SEQ_LIMIT: u64 = 1 << (u64::BITS - POSITION_BITS);
+pub(crate) const OBJECT_SEQ_LIMIT: u64 = 1 << (u64::BITS - POSITION_BITS);
 
 /// Returns the id of the entry at `position` among the entries of its region
 /// in the object `object_seq`.
@@ -55,7 +55,7 @@ pub fn entry_id(object_seq: u64, position: u64) -> EntryId {
 ///
 /// An id assigned under the earlier contiguous scheme carries no object
 /// information, but the floor keeps every new id above it just the same.
-pub(super) fn sequence_floor(entry_id: EntryId) -> u64 {
+pub(crate) fn sequence_floor(entry_id: EntryId) -> u64 {
     if entry_id == 0 {
         0
     } else {
@@ -70,7 +70,7 @@ pub(super) fn sequence_floor(entry_id: EntryId) -> u64 {
 /// takes when it is sealed, so a batch that is rolled back and admitted again
 /// under the same sequence hands out the same ids.
 #[derive(Debug)]
-pub(super) struct OpenBatch {
+pub(crate) struct OpenBatch {
     max_bytes: usize,
     entries: Vec<Entry>,
     estimated_bytes: usize,
@@ -80,7 +80,7 @@ pub(super) struct OpenBatch {
 }
 
 impl OpenBatch {
-    pub(super) fn new(max_bytes: usize) -> Self {
+    pub(crate) fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes,
             entries: Vec::new(),
@@ -92,7 +92,7 @@ impl OpenBatch {
 
     /// Returns true when admitting `entries` would take a region past the
     /// position range, so that `entries` need a batch of their own.
-    pub(super) fn would_exhaust_positions(&self, entries: &[Entry]) -> bool {
+    pub(crate) fn would_exhaust_positions(&self, entries: &[Entry]) -> bool {
         self.check_positions(entries).is_err()
     }
 
@@ -100,7 +100,7 @@ impl OpenBatch {
     /// assigning each the next position of its region, and returns the last id
     /// assigned to every region in `entries`. Nothing is admitted when a
     /// region would run past the position range.
-    pub(super) fn admit(
+    pub(crate) fn admit(
         &mut self,
         object_seq: u64,
         mut entries: Vec<Entry>,
@@ -141,29 +141,29 @@ impl OpenBatch {
         Ok(())
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Returns the estimated size of the admitted entries.
-    pub(super) fn estimated_bytes(&self) -> usize {
+    pub(crate) fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
     }
 
     /// Returns when the first admitted entry was admitted, if any.
-    pub(super) fn first_admitted_at(&self) -> Option<Instant> {
+    pub(crate) fn first_admitted_at(&self) -> Option<Instant> {
         self.first_admitted_at
     }
 
     /// Returns true once the admitted entries reach the size limit.
-    pub(super) fn should_seal(&self) -> bool {
+    pub(crate) fn should_seal(&self) -> bool {
         !self.is_empty() && self.estimated_bytes >= self.max_bytes
     }
 
     /// Takes the admitted entries out of the batch together with the time the
     /// first of them was admitted. The next admission starts at position one
     /// again, under the next sequence.
-    pub(super) fn seal(&mut self) -> (Vec<Entry>, Instant) {
+    pub(crate) fn seal(&mut self) -> (Vec<Entry>, Instant) {
         self.estimated_bytes = 0;
         self.positions.clear();
         let first_admitted_at = self.first_admitted_at.take().unwrap_or_else(Instant::now);
@@ -172,7 +172,7 @@ impl OpenBatch {
 
     /// Drops the admitted entries, so the next admission under the same
     /// sequence hands out the same ids again.
-    pub(super) fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         let _ = self.seal();
     }
 }
