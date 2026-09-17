@@ -14,6 +14,8 @@
 
 //! Measures flat-format tag column extraction from encoded sparse primary keys:
 //! `decode_primary_keys` plus one `get_tag_column` call per projected tag.
+//! The `pk_tag_filters` group measures precise filtering with 1/2/4/8/16/32
+//! predicates over 40 tags, using both one and 32 rows per primary key.
 //! Input generation is excluded from the timed section.
 //!
 //! Run on the baseline revision with `--save-baseline before`, then on the candidate
@@ -24,7 +26,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::{
     ArrayRef, BinaryDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
@@ -92,15 +94,15 @@ fn metadata(tags: u32) -> RegionMetadataRef {
 
 /// Builds a sparse flat batch whose primary key dictionary holds
 /// `ROWS / rows_per_key` distinct keys with `tags` labels each.
-fn input(shape: &Shape) -> RecordBatch {
+fn input(tags: u32, rows_per_key: usize) -> RecordBatch {
     let codec = SparsePrimaryKeyCodec::schemaless();
     let mut keys = BinaryDictionaryBuilder::<UInt32Type>::new();
-    for series in 0..ROWS / shape.rows_per_key {
+    for series in 0..ROWS / rows_per_key {
         let mut key = Vec::new();
         codec
             .encode_internal((series / 128) as u32, series as u64, &mut key)
             .unwrap();
-        let labels: Vec<_> = (0..shape.tags)
+        let labels: Vec<_> = (0..tags)
             .map(|id| (id, format!("tag-{id:03}-value-{series:010}")))
             .collect();
         codec
@@ -109,7 +111,7 @@ fn input(shape: &Shape) -> RecordBatch {
                 &mut key,
             )
             .unwrap();
-        for _ in 0..shape.rows_per_key {
+        for _ in 0..rows_per_key {
             keys.append(&key).unwrap();
         }
     }
@@ -167,7 +169,7 @@ fn bench_pk_tag_column(c: &mut Criterion) {
             rows_per_key: 1,
         },
     ] {
-        let batch = input(&shape);
+        let batch = input(shape.tags, shape.rows_per_key);
         // Project the last `projected_tags` tag columns.
         let projected: Vec<u32> = (shape.tags - shape.projected_tags..shape.tags).collect();
         group.bench_function(shape.name, |b| {
@@ -193,18 +195,33 @@ fn bench_pk_tag_column(c: &mut Criterion) {
                 black_box(decoded.get_sparse_tag_columns(black_box(&columns)).unwrap());
             });
         });
-
-        let filters: Vec<_> = projected
-            .iter()
-            .map(|id| col(format!("tag_{id}")).gt_eq(lit("")))
-            .collect();
-        let filter = tag_filter_for_bench(metadata(shape.tags), &filters);
-        group.bench_function(format!("{}/filters", shape.name), |b| {
-            b.iter(|| black_box(filter(black_box(batch.clone())).unwrap()));
-        });
     }
     group.finish();
 }
 
-criterion_group!(benches, bench_pk_tag_column);
+fn bench_pk_tag_filters(c: &mut Criterion) {
+    const TAGS: u32 = 40;
+    let metadata = metadata(TAGS);
+    let mut group = c.benchmark_group("pk_tag_filters");
+    for rows_per_key in [1, 32] {
+        let batch = input(TAGS, rows_per_key);
+        for predicate_count in [1, 2, 4, 8, 16, 32] {
+            // Use distinct tags at the end of the key to exercise offset discovery.
+            // Every row matches, so increasing the predicate count does not change selectivity.
+            let filters: Vec<_> = (TAGS - predicate_count..TAGS)
+                .map(|id| col(format!("tag_{id}")).gt_eq(lit("")))
+                .collect();
+            let filter = tag_filter_for_bench(metadata.clone(), &filters);
+            // Validate the workload outside the timed section.
+            assert_eq!(filter(batch.clone()).unwrap().unwrap().num_rows(), ROWS);
+            group.bench_function(
+                BenchmarkId::new(format!("{rows_per_key}rpk"), predicate_count),
+                |b| b.iter(|| black_box(filter(black_box(batch.clone())).unwrap())),
+            );
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_pk_tag_column, bench_pk_tag_filters);
 criterion_main!(benches);
