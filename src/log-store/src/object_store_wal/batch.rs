@@ -226,7 +226,6 @@ mod tests {
         let region_b = RegionId::new(1, 2);
         let mut batch = OpenBatch::new(usize::MAX);
 
-        // Both regions take positions from the same sequence, each its own.
         let first = batch
             .admit(5, vec![entry(region_a, 1), entry(region_b, 1)])
             .unwrap();
@@ -256,8 +255,6 @@ mod tests {
             entry_ids(&batch.seal().0)
         );
         assert!(batch.is_empty());
-        // The next object starts at position one again: the ids of a region
-        // across consecutive objects differ by the position width.
         assert_eq!(
             HashMap::from([(region_a, entry_id(6, 1))]),
             batch.admit(6, vec![entry(region_a, 1)]).unwrap()
@@ -288,7 +285,6 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let mut batch = OpenBatch::new(usize::MAX);
 
-        // An empty admission admits nothing, so the clock does not start.
         assert!(batch.admit(0, Vec::new()).unwrap().is_empty());
         assert!(batch.is_empty());
         assert_eq!(None, batch.first_admitted_at());
@@ -297,7 +293,6 @@ mod tests {
         batch.admit(0, vec![entry(region_id, 1)]).unwrap();
         let first_admitted_at = batch.first_admitted_at().unwrap();
         assert!(first_admitted_at >= before);
-        // Later admissions keep the time of the first entry.
         batch.admit(0, vec![entry(region_id, 1)]).unwrap();
         assert_eq!(Some(first_admitted_at), batch.first_admitted_at());
         assert_eq!(first_admitted_at, batch.seal().1);
