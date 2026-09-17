@@ -29,73 +29,73 @@ const TRAILER_MAGIC: &[u8; 8] = b"GTWALTRL";
 const FORMAT_VERSION: u16 = 1;
 
 /// Length of the object header: magic, version, object sequence, writer instance.
-pub(super) const HEADER_LEN: usize = 8 + 2 + 8 + 16;
+pub(crate) const HEADER_LEN: usize = 8 + 2 + 8 + 16;
 /// Length of the fixed trailer: footer offset, footer length, footer CRC32,
 /// object CRC32 and magic.
-pub(super) const TRAILER_LEN: usize = 8 + 8 + 4 + 4 + 8;
+pub(crate) const TRAILER_LEN: usize = 8 + 8 + 4 + 4 + 8;
 const SEGMENT_HEADER_LEN: usize = 8 + 4;
 /// Length of one footer entry: region id, entry id range, entry count, segment
 /// offset, segment length and segment CRC32.
-pub(super) const FOOTER_ENTRY_LEN: usize = 8 + 8 + 8 + 4 + 8 + 8 + 4;
+pub(crate) const FOOTER_ENTRY_LEN: usize = 8 + 8 + 8 + 4 + 8 + 8 + 4;
 /// Length of the entry count the footer starts with.
 const FOOTER_COUNT_LEN: usize = 4;
 
 /// Header of a WAL object.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Header {
-    pub(super) object_seq: u64,
-    pub(super) writer_instance: [u8; 16],
+pub(crate) struct Header {
+    pub(crate) object_seq: u64,
+    pub(crate) writer_instance: [u8; 16],
 }
 
 /// A single WAL entry inside an object.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Record {
-    pub(super) region_id: RegionId,
-    pub(super) entry_id: u64,
-    pub(super) payload: Bytes,
+pub(crate) struct Record {
+    pub(crate) region_id: RegionId,
+    pub(crate) entry_id: u64,
+    pub(crate) payload: Bytes,
 }
 
 /// Footer entry describing the segment of one region.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct FooterEntry {
-    pub(super) region_id: RegionId,
-    pub(super) min_entry_id: u64,
-    pub(super) max_entry_id: u64,
-    pub(super) entry_count: u32,
-    pub(super) segment_offset: u64,
-    pub(super) segment_len: u64,
-    pub(super) segment_crc32: u32,
+pub(crate) struct FooterEntry {
+    pub(crate) region_id: RegionId,
+    pub(crate) min_entry_id: u64,
+    pub(crate) max_entry_id: u64,
+    pub(crate) entry_count: u32,
+    pub(crate) segment_offset: u64,
+    pub(crate) segment_len: u64,
+    pub(crate) segment_crc32: u32,
 }
 
 /// Fixed-size trailer locating the footer of an object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct FixedTrailer {
-    pub(super) footer_offset: u64,
-    pub(super) footer_len: u64,
-    pub(super) footer_crc32: u32,
-    pub(super) object_crc32: u32,
+pub(crate) struct FixedTrailer {
+    pub(crate) footer_offset: u64,
+    pub(crate) footer_len: u64,
+    pub(crate) footer_crc32: u32,
+    pub(crate) object_crc32: u32,
 }
 
 /// An encoded object together with the metadata a writer indexes it by.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct EncodedObject {
-    pub(super) bytes: Bytes,
-    pub(super) footer: Vec<FooterEntry>,
-    pub(super) trailer: FixedTrailer,
+pub(crate) struct EncodedObject {
+    pub(crate) bytes: Bytes,
+    pub(crate) footer: Vec<FooterEntry>,
+    pub(crate) trailer: FixedTrailer,
 }
 
 /// A decoded object with its records ordered by region id and entry id.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct DecodedObject {
-    pub(super) header: Header,
-    pub(super) records: Vec<Record>,
-    pub(super) footer: Vec<FooterEntry>,
+pub(crate) struct DecodedObject {
+    pub(crate) header: Header,
+    pub(crate) records: Vec<Record>,
+    pub(crate) footer: Vec<FooterEntry>,
 }
 
 /// Encodes `records` into one object. Records are grouped into a segment per
 /// region; entry ids within a region must be unique.
-pub(super) fn encode_object(header: Header, records: &[Record]) -> Result<EncodedObject> {
+pub(crate) fn encode_object(header: Header, records: &[Record]) -> Result<EncodedObject> {
     ensure!(
         !records.is_empty(),
         CorruptedWalObjectSnafu {
@@ -174,14 +174,14 @@ pub(super) fn encode_object(header: Header, records: &[Record]) -> Result<Encode
 /// Returns the length of the object whose footer is `footer`, derived from the
 /// layout: the segments tile the body after the header, and the footer, which
 /// holds an entry count and one entry per segment, and the trailer follow them.
-pub(super) fn object_len(footer: &[FooterEntry]) -> u64 {
+pub(crate) fn object_len(footer: &[FooterEntry]) -> u64 {
     let segments = footer.iter().map(|entry| entry.segment_len).sum::<u64>();
     let framing = HEADER_LEN + FOOTER_COUNT_LEN + footer.len() * FOOTER_ENTRY_LEN + TRAILER_LEN;
     segments + framing as u64
 }
 
 /// Decodes the header from the first [`HEADER_LEN`] bytes of an object.
-pub(super) fn decode_header(bytes: &[u8]) -> Result<Header> {
+pub(crate) fn decode_header(bytes: &[u8]) -> Result<Header> {
     ensure!(
         bytes.len() >= HEADER_LEN,
         CorruptedWalObjectSnafu {
@@ -218,7 +218,7 @@ pub(super) fn decode_header(bytes: &[u8]) -> Result<Header> {
 }
 
 /// Decodes the trailer from the last [`TRAILER_LEN`] bytes of an object.
-pub(super) fn decode_trailer(bytes: &[u8]) -> Result<FixedTrailer> {
+pub(crate) fn decode_trailer(bytes: &[u8]) -> Result<FixedTrailer> {
     ensure!(
         bytes.len() >= TRAILER_LEN,
         CorruptedWalObjectSnafu {
@@ -250,7 +250,7 @@ pub(super) fn decode_trailer(bytes: &[u8]) -> Result<FixedTrailer> {
 }
 
 /// Decodes the footer that `trailer` points at.
-pub(super) fn decode_footer(bytes: &[u8], trailer: FixedTrailer) -> Result<Vec<FooterEntry>> {
+pub(crate) fn decode_footer(bytes: &[u8], trailer: FixedTrailer) -> Result<Vec<FooterEntry>> {
     let footer_len = to_usize(trailer.footer_len, "footer length")?;
     ensure!(
         bytes.len() >= footer_len,
@@ -346,7 +346,7 @@ pub(super) fn decode_footer(bytes: &[u8], trailer: FixedTrailer) -> Result<Vec<F
 }
 
 /// Decodes the segment that `entry` describes.
-pub(super) fn decode_segment(bytes: &[u8], entry: &FooterEntry) -> Result<Vec<Record>> {
+pub(crate) fn decode_segment(bytes: &[u8], entry: &FooterEntry) -> Result<Vec<Record>> {
     let segment_len = to_usize(entry.segment_len, "segment length")?;
     ensure!(
         bytes.len() >= segment_len,
@@ -439,11 +439,11 @@ pub(super) fn decode_segment(bytes: &[u8], entry: &FooterEntry) -> Result<Vec<Re
 
 /// Lower bound on the length of an object: header, a footer holding only its
 /// entry count and the trailer.
-pub(super) const MIN_OBJECT_LEN: usize = HEADER_LEN + 4 + TRAILER_LEN;
+pub(crate) const MIN_OBJECT_LEN: usize = HEADER_LEN + 4 + TRAILER_LEN;
 
 /// Locates the footer inside an object of `object_len` bytes from its trailer.
 /// The footer must follow the header and end where the trailer starts.
-pub(super) fn footer_range(trailer: FixedTrailer, object_len: usize) -> Result<Range<usize>> {
+pub(crate) fn footer_range(trailer: FixedTrailer, object_len: usize) -> Result<Range<usize>> {
     ensure!(
         object_len >= MIN_OBJECT_LEN,
         CorruptedWalObjectSnafu {
@@ -473,7 +473,7 @@ pub(super) fn footer_range(trailer: FixedTrailer, object_len: usize) -> Result<R
 /// Checks that the segments `footer` describes tile the object body: the first
 /// starts right after the header, each follows the previous one without a gap
 /// or overlap, and the last ends where the footer at `footer_start` begins.
-pub(super) fn verify_segment_ranges(footer: &[FooterEntry], footer_start: usize) -> Result<()> {
+pub(crate) fn verify_segment_ranges(footer: &[FooterEntry], footer_start: usize) -> Result<()> {
     let mut expected_offset = HEADER_LEN;
     for entry in footer {
         let start = to_usize(entry.segment_offset, "segment offset")?;
@@ -512,7 +512,7 @@ pub(super) fn verify_segment_ranges(footer: &[FooterEntry], footer_start: usize)
 /// reads only the header, trailer and footer, so this is the reference
 /// decoder that tests check the store against.
 #[cfg(test)]
-pub(super) fn decode_object(bytes: &[u8]) -> Result<DecodedObject> {
+pub(crate) fn decode_object(bytes: &[u8]) -> Result<DecodedObject> {
     ensure!(
         bytes.len() >= MIN_OBJECT_LEN,
         CorruptedWalObjectSnafu {
