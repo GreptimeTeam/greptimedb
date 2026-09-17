@@ -19,7 +19,7 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use base64::prelude::{BASE64_STANDARD, Engine};
 use bytes::Bytes;
@@ -39,6 +39,7 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Custom serde functions for Bytes fields serialized as base64 strings.
 fn serialize_bytes_option<S>(bytes: &Option<Bytes>, serializer: S) -> Result<S::Ok, S::Error>
@@ -484,6 +485,9 @@ impl FileMeta {
 #[derive(Clone)]
 pub struct FileHandle {
     inner: Arc<FileHandleInner>,
+    /// Version-local schema and cache; physical lifecycle state stays shared.
+    primary_key_mapper: Option<Arc<PrimaryKeyRangeMapper>>,
+    primary_key_range: Arc<OnceLock<Option<(Bytes, Bytes)>>>,
 }
 
 impl fmt::Debug for FileHandle {
@@ -497,10 +501,14 @@ impl fmt::Debug for FileHandle {
 }
 
 impl FileHandle {
+    /// Creates a physical handle. Its comparable PK range is unknown until a
+    /// target schema is bound by the owning SST version.
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
         let pk_range = meta.primary_key_range();
         FileHandle {
             inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range)),
+            primary_key_mapper: None,
+            primary_key_range: Arc::new(OnceLock::new()),
         }
     }
 
@@ -511,7 +519,13 @@ impl FileHandle {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileHandle {
         FileHandle {
-            inner: Arc::new(FileHandleInner::new(meta, file_purger, primary_key_range)),
+            inner: Arc::new(FileHandleInner::new(
+                meta,
+                file_purger,
+                primary_key_range.clone(),
+            )),
+            primary_key_mapper: None,
+            primary_key_range: Arc::new(OnceLock::from(primary_key_range)),
         }
     }
 
@@ -612,12 +626,34 @@ impl FileHandle {
         self.inner.deleted.load(Ordering::Relaxed)
     }
 
+    /// Returns complete, comparable bounds in this handle's pinned schema.
+    /// Unknown bounds must be treated conservatively by pruning and compaction.
     pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
-        self.inner.primary_key_range.read().unwrap().clone()
+        if let Some(range) = self.primary_key_range.get() {
+            return range.clone();
+        }
+        let mapper = self.primary_key_mapper.as_ref()?;
+        // Legacy statistics may be loaded later. Do not cache their absence.
+        let raw = self.inner.primary_key_range.read().unwrap().clone()?;
+        self.primary_key_range
+            .get_or_init(|| mapper.map(self.region_id(), raw))
+            .clone()
+    }
+
+    pub(crate) fn with_primary_key_mapper(mut self, mapper: Arc<PrimaryKeyRangeMapper>) -> Self {
+        self.primary_key_mapper = Some(mapper);
+        self.primary_key_range = Arc::new(OnceLock::new());
+        self
     }
 
     pub(crate) fn set_primary_key_range(&self, primary_key_range: (Bytes, Bytes)) {
-        *self.inner.primary_key_range.write().unwrap() = Some(primary_key_range);
+        // SST contents are immutable. Hydrate missing raw statistics without
+        // replacing the source of already cached schema views.
+        self.inner
+            .primary_key_range
+            .write()
+            .unwrap()
+            .get_or_insert(primary_key_range);
     }
 }
 

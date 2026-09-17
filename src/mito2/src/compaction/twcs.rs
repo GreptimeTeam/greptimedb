@@ -1106,6 +1106,75 @@ mod tests {
     }
 
     #[test]
+    fn test_cross_schema_pk_overlap_before_window_aggregation() {
+        use crate::test_util::sst_util::{new_primary_key, sst_region_metadata};
+
+        let metadata = Arc::new(sst_region_metadata());
+        let mut old = FileMeta {
+            region_id: metadata.region_id,
+            file_id: FileId::random(),
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            primary_key_min: Some(new_primary_key(&["a"]).into()),
+            primary_key_max: Some(new_primary_key(&["b"]).into()),
+            ..Default::default()
+        };
+        let mut completed = new_primary_key(&["b"]);
+        completed.push(0); // The appended nullable tag's default.
+        let new = FileMeta {
+            file_id: FileId::random(),
+            time_range: (
+                Timestamp::new_millisecond(500),
+                Timestamp::new_millisecond(2000),
+            ),
+            primary_key_min: Some(completed.clone().into()),
+            primary_key_max: Some(completed.clone().into()),
+            ..old.clone()
+        };
+        assert!(old.primary_key_max < new.primary_key_min);
+        let mut ssts = SstVersion::new(metadata);
+        let old_id = old.file_id;
+        let new_id = new.file_id;
+        ssts.add_files(
+            crate::test_util::new_noop_file_purger(),
+            [old.clone(), new].into_iter(),
+        );
+        let old_file = &ssts.levels()[0].files[&old_id];
+        let new_file = &ssts.levels()[0].files[&new_id];
+        let windows = assign_to_windows([old_file, new_file].into_iter(), 1);
+        assert_eq!(2, windows.len());
+        assert!(
+            windows
+                .values()
+                .all(|window| window_has_overlap(window, &windows))
+        );
+
+        let mut window = Window::new_with_file(old_file.clone());
+        window.add_file(new_file.clone());
+        assert!(selected_overlaps_unselected(
+            std::slice::from_ref(new_file),
+            &window
+        ));
+        assert_eq!(
+            Some(completed.into()),
+            window
+                .primary_key_range
+                .as_ref()
+                .map(|range| range.1.clone())
+        );
+
+        // In the same target schema, a genuinely disjoint range still prunes.
+        old.file_id = FileId::random();
+        old.primary_key_max = old.primary_key_min.clone();
+        let disjoint_id = old.file_id;
+        ssts.add_files(crate::test_util::new_noop_file_purger(), [old].into_iter());
+        let files = &ssts.levels()[0].files;
+        assert!(!files[&disjoint_id].overlap_inclusive(&files[&new_id]));
+    }
+
+    #[test]
     fn test_valid_max_input_files_env_overrides_default() {
         assert_eq!(64, parse_max_input_files(Some("64")));
     }
@@ -1252,7 +1321,7 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let metadata = metadata_for_test();
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(metadata.clone());
         ssts.add_files(
             Arc::new(crate::sst::file_purger::NoopFilePurger),
             [100, 101].into_iter().map(|sequence| FileMeta {
