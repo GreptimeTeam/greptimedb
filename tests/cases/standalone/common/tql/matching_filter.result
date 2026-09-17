@@ -225,6 +225,36 @@ tql eval(0, 5, '5s') counter_metric / ignoring(device) gauge_metric{host="host1"
 | host1 | eth1   | 1970-01-01T00:00:05 | 5.0                                   |
 +-------+--------+---------------------+---------------------------------------+
 
+-- An ignored label is not a matching label: the left operand keeps its `eth1` series.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / ignoring(device) gauge_metric{device="eth0"};
+
++-------+--------+---------------------+---------------------------------------+
+| host  | device | ts                  | counter_metric.val / gauge_metric.val |
++-------+--------+---------------------+---------------------------------------+
+| host1 | eth0   | 1970-01-01T00:00:00 | 10.0                                  |
+| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                   |
+| host1 | eth0   | 1970-01-01T00:00:05 | 10.0                                  |
+| host1 | eth0   | 1970-01-01T00:00:05 | 5.0                                   |
+| host2 | eth0   | 1970-01-01T00:00:00 | 20.0                                  |
+| host2 | eth0   | 1970-01-01T00:00:05 | 20.0                                  |
++-------+--------+---------------------+---------------------------------------+
+
+-- Same for a label left out of `on(...)`.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / on(host) gauge_metric{device="eth0"};
+
++-------+--------+---------------------+---------------------------------------+
+| host  | device | ts                  | counter_metric.val / gauge_metric.val |
++-------+--------+---------------------+---------------------------------------+
+| host1 | eth0   | 1970-01-01T00:00:00 | 10.0                                  |
+| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                   |
+| host1 | eth0   | 1970-01-01T00:00:05 | 10.0                                  |
+| host1 | eth0   | 1970-01-01T00:00:05 | 5.0                                   |
+| host2 | eth0   | 1970-01-01T00:00:00 | 20.0                                  |
+| host2 | eth0   | 1970-01-01T00:00:05 | 20.0                                  |
++-------+--------+---------------------+---------------------------------------+
+
 -- Matcher kinds other than equality are enforced by the join just the same.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{host=~"host1"};

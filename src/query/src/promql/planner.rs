@@ -1510,8 +1510,10 @@ impl PromPlanner {
 
                 // Both operands are planned before the rewrite because a selector matcher may
                 // constrain a value field, and only the planned contexts tell tags and fields
-                // apart. Re-planning adds a tag filter to a leaf selector, which leaves the
-                // table reference, time index and field columns of that operand unchanged.
+                // apart. The rewrite only adds matchers to a selector, which changes neither
+                // the table reference, the time index, nor the field columns of the operand
+                // that encloses it, so the values captured above stay valid for a re-planned
+                // operand.
                 if let Some(rewritten) = matching_filters::propagate(
                     binary_expr,
                     &left_context.tag_columns,

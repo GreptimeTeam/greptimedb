@@ -84,6 +84,14 @@ tql eval(0, 5, '5s') counter_metric / ignoring(missing_label) gauge_metric{host=
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / ignoring(device) gauge_metric{host="host1"};
 
+-- An ignored label is not a matching label: the left operand keeps its `eth1` series.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / ignoring(device) gauge_metric{device="eth0"};
+
+-- Same for a label left out of `on(...)`.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / on(host) gauge_metric{device="eth0"};
+
 -- Matcher kinds other than equality are enforced by the join just the same.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{host=~"host1"};
