@@ -26,8 +26,10 @@ use store_api::storage::RegionId;
 use crate::compaction::CompactionOutput;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
+use crate::compaction::last_non_null::inputs_precede_memtables;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::error::{JoinSnafu, Result};
+use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
 
 /// Compaction picker that splits the time range of all involved files to windows, and merges
@@ -102,6 +104,9 @@ impl WindowedCompactionPicker {
             .map(|file| file.file_id())
             .collect::<HashSet<_>>();
 
+        let last_non_null = current_version.options.merge_mode() == MergeMode::LastNonNull;
+        // Busy SSTs remain LastNonNull dependencies: skipping an intermediate
+        // version would allow older fields to be promoted above it.
         let windows = assign_files_to_time_windows(
             time_window,
             current_version
@@ -109,9 +114,21 @@ impl WindowedCompactionPicker {
                 .levels()
                 .iter()
                 .flat_map(|level| level.files.values())
-                .filter(|file| !expired_file_ids.contains(&file.file_id())),
+                .filter(|file| !expired_file_ids.contains(&file.file_id()))
+                .filter(|file| last_non_null || !file.compacting()),
         );
         let windows = filter_time_windows(windows, self.time_range);
+
+        // One SST can span several outputs. Deferring only an unsafe window
+        // would remove that SST without rewriting all its remaining segments.
+        if last_non_null
+            && windows.values().any(|(_, inputs)| {
+                inputs.iter().any(FileHandle::compacting)
+                    || !inputs_precede_memtables(inputs, current_version.memtable_min_sequence)
+            })
+        {
+            return (vec![], expired_ssts, time_window);
+        }
 
         (build_output(windows), expired_ssts, time_window)
     }
@@ -120,6 +137,11 @@ impl WindowedCompactionPicker {
 #[async_trait::async_trait]
 impl Picker for WindowedCompactionPicker {
     async fn pick(&self, compaction_region: &CompactionRegion) -> Result<Option<PickerOutput>> {
+        // TODO: With per-region compaction concurrency, the scheduler must wait
+        // for all running compactions to finish and apply their SST edits, and
+        // drain or cancel queued compactions before capturing current_version
+        // for SWCS. Block new compactions through snapshot capture and picking
+        // so the strict-window plan sees the complete SST view.
         let picker = self.clone();
         let region_id = compaction_region.current_version.metadata.region_id;
         let current_version = compaction_region.current_version.clone();
@@ -233,9 +255,6 @@ fn assign_files_to_time_windows<'a>(
     let mut buckets = BTreeMap::new();
 
     for file in files {
-        if file.compacting() {
-            continue;
-        }
         let (start, end) = file.time_range();
         let bounds = file_time_bucket_span(
             // safety: converting whatever timestamp to seconds will not overflow.
@@ -280,6 +299,7 @@ fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -289,7 +309,7 @@ mod tests {
 
     use crate::compaction::compactor::CompactionVersion;
     use crate::compaction::window::{WindowedCompactionPicker, file_time_bucket_span};
-    use crate::region::options::RegionOptions;
+    use crate::region::options::{MergeMode, RegionOptions};
     use crate::sst::file::{FileMeta, Level};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::version::SstVersion;
@@ -320,6 +340,7 @@ mod tests {
         CompactionVersion {
             metadata,
             ssts: Arc::new(ssts),
+            memtable_min_sequence: None,
             options: RegionOptions {
                 ttl: ttl.map(|t| t.into()),
                 auto_flush_interval: None,
@@ -515,6 +536,75 @@ mod tests {
         assert!(expired_ssts.is_empty());
         assert_eq!(HOUR / 1000, window_seconds);
         assert!(outputs.is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::requested_window(0)]
+    #[case::transitive_window(1)]
+    #[case::unrelated_window(3)]
+    fn test_busy_dependencies_defer_last_non_null_plan_until_released(
+        #[case] busy_window: i64,
+        #[values(MergeMode::LastRow, MergeMode::LastNonNull)] merge_mode: MergeMode,
+    ) {
+        // A and C span both output windows. Skipping a busy intermediate B
+        // would allow an unsafe A+C merge; deferring just one output would
+        // lose the other segment of these shared inputs when they are removed.
+        let [a, b, c, expired] = std::array::from_fn(|_| FileId::random());
+        let files = [
+            (a, 0, 2 * HOUR - 1, 0),
+            (b, busy_window * HOUR, (busy_window + 1) * HOUR - 1, 1),
+            (c, 0, 2 * HOUR - 1, 0),
+            (expired, -2 * HOUR, -2 * HOUR, 0),
+        ];
+        let mut version = build_version(&files, Some(Duration::from_millis(3 * HOUR as u64)));
+        version.options.merge_mode = Some(merge_mode);
+        // No memtable barrier: only the busy SST dependency may defer this plan.
+        assert_eq!(None, version.memtable_min_sequence);
+        let busy_file = version.ssts.levels()[1].files().next().unwrap();
+        let picker =
+            WindowedCompactionPicker::new(Some(HOUR / 1000)).with_time_range(TimestampRange::new(
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(HOUR),
+            ));
+
+        for busy in [true, false] {
+            busy_file.set_compacting(busy);
+            let (outputs, expired_ssts, _) = picker.pick_inner(
+                version.metadata.region_id,
+                &version,
+                Timestamp::new_millisecond(2 * HOUR),
+            );
+            assert_eq!(1, expired_ssts.len());
+            assert_eq!(expired, expired_ssts[0].meta_ref().file_id);
+            assert!(!expired_ssts[0].compacting());
+
+            if busy && merge_mode == MergeMode::LastNonNull && busy_window < 2 {
+                assert!(outputs.is_empty(), "the entire dependent plan must wait");
+                continue;
+            }
+
+            assert_eq!(2, outputs.len());
+            for (window, output) in outputs.iter().enumerate() {
+                let window = window as i64;
+                let mut expected = HashSet::from([a, c]);
+                if !busy && busy_window == window {
+                    expected.insert(b);
+                }
+                let actual: HashSet<_> = output
+                    .inputs
+                    .iter()
+                    .map(|file| file.meta_ref().file_id)
+                    .collect();
+                assert_eq!(expected, actual);
+                assert_eq!(
+                    TimestampRange::new(
+                        Timestamp::new_millisecond(window * HOUR),
+                        Timestamp::new_millisecond((window + 1) * HOUR),
+                    ),
+                    output.output_time_range
+                );
+            }
+        }
     }
 
     #[test]

@@ -1027,6 +1027,85 @@ mod tests {
     }
 
     #[test]
+    fn exact_sequence_filter_component_composition_covers_tombstones_and_last_non_null() {
+        use store_api::storage::SequenceRange;
+
+        use crate::read::scan_util::filter_flat_batch_by_sequence;
+
+        let filter = |batch| {
+            filter_flat_batch_by_sequence(
+                batch,
+                Some(SequenceRange::GtLtEq { min: 1, max: 3 }),
+                true,
+            )
+            .unwrap()
+            .unwrap()
+        };
+
+        // The shared merge presents duplicate rows newest-first: the in-range
+        // tombstone (seq 3) reaches shared dedup and suppresses the eligible
+        // put (seq 2) across batches.
+        let output = FlatDedupIterator::new(
+            vec![
+                Ok(filter(new_record_batch_multi_fields(
+                    &[b"series"],
+                    &[1000],
+                    &[3],
+                    &[OpType::Delete],
+                    &[(None, None)],
+                ))),
+                Ok(filter(new_record_batch_multi_fields(
+                    &[b"series"],
+                    &[1000],
+                    &[2],
+                    &[OpType::Put],
+                    &[(Some(10), None)],
+                ))),
+            ]
+            .into_iter(),
+            FlatLastNonNull::new(1, true),
+        )
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
+        assert!(output.is_empty());
+
+        // A newest outside-range tombstone is removed before shared dedup and
+        // cannot suppress the eligible put.
+        let output = FlatDedupIterator::new(
+            vec![Ok(filter(new_record_batch_multi_fields(
+                &[b"series", b"series"],
+                &[1000, 1000],
+                &[4, 2],
+                &[OpType::Delete, OpType::Put],
+                &[(None, None), (Some(10), None)],
+            )))]
+            .into_iter(),
+            FlatLastNonNull::new(1, true),
+        )
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
+        assert_eq!(1, output[0].num_rows());
+
+        // A newest outside-range non-null value is removed before
+        // LastNonNull, so it cannot fill the eligible row's null field.
+        let output = FlatDedupIterator::new(
+            vec![Ok(filter(new_record_batch_multi_fields(
+                &[b"series", b"series"],
+                &[1000, 1000],
+                &[4, 2],
+                &[OpType::Put, OpType::Put],
+                &[(None, Some(40)), (Some(10), None)],
+            )))]
+            .into_iter(),
+            FlatLastNonNull::new(1, true),
+        )
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
+        assert_eq!(1, output[0].num_rows());
+        assert!(output[0].column(2).is_null(0));
+    }
+
+    #[test]
     fn test_flat_last_non_null_no_duplications() {
         let input = vec![
             new_record_batch(

@@ -157,25 +157,24 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
       - name: Provision ECS runner
         id: provision
-        env:
-          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
-          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
-          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          ALIYUN_ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
-          ALIYUN_ECS_VSWITCH_ID: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
-          ALIYUN_ECS_SECURITY_GROUP_ID: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
-          ALIYUN_ECS_INSTANCE_TYPE: ${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}
-          ALIYUN_ECS_RESOURCE_GROUP_ID: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
-          QUERY_REGRESSION_ECS_IMAGE_ID: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
-          QUERY_REGRESSION_RUNNER_UID: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
-          QUERY_REGRESSION_RUNNER_GID: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
-        run: >-
-          uv run .github/scripts/aliyun-ecs-runner-provision.py
+        uses: ./.github/actions/aliyun-ecs-create
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          vswitch-id: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
+          security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
+          instance-type: ${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}
+          # Preserve query regression's original resource and janitor budgets.
+          system-disk-gib: '80'
+          ttl-hours: '4'
+          resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
+          image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
+          runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+          runner-gid: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
 
   query-regression:
     needs: [provision, test-tooling]
@@ -896,16 +895,12 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
       - name: Teardown ECS runner
-        env:
-          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
-          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
-          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          ALIYUN_ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
-          QUERY_REGRESSION_ECS_INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
-          QUERY_REGRESSION_ECS_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
-        run: >-
-          uv run .github/scripts/aliyun-ecs-runner-teardown.py
+        uses: ./.github/actions/aliyun-ecs-delete
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          instance-id: ${{ needs.provision.outputs.instance_id }}
+          runner-name: ${{ needs.provision.outputs.runner_name }}

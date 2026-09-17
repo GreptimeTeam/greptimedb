@@ -78,7 +78,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::tests::{
+    use crate::test_util::{
         create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
     };
 

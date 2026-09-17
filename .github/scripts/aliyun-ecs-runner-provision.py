@@ -58,6 +58,7 @@ RUNNER_LABEL_PREFIX = "query-regression-ecs"
 MANAGED_BY_TAG_KEY = "managed-by"
 MANAGED_BY_TAG_VALUE = "query-regression-ci"
 RUN_TAG_KEY = "query-regression-run-id"
+TTL_TAG_KEY = "runner-ttl-hours"
 
 # Runner cache paths on the instance system disk. They are created empty
 # every provision and deleted with the VM.
@@ -100,6 +101,15 @@ class ProvisionConfig:
     # Runner identity inside the image; the workflow asserts the same values.
     runner_uid: str = "1001"
     runner_gid: str = "1001"
+    system_disk_gib: int = SYSTEM_DISK_GIB
+    ttl_hours: int | None = None
+    enable_docker: bool = False
+
+    def __post_init__(self) -> None:
+        if not 20 <= self.system_disk_gib <= 2048:
+            raise ValueError("system-disk-gib must be between 20 and 2048")
+        if self.ttl_hours is not None and not 1 <= self.ttl_hours <= 168:
+            raise ValueError("ttl-hours must be between 1 and 168")
 
 
 def runner_name_for_run(run_id: str) -> str:
@@ -117,8 +127,20 @@ def render_user_data(
     repo: str,
     runner_uid: str = "1001",
     runner_gid: str = "1001",
+    enable_docker: bool = False,
 ) -> str:
     """Render the cloud-init shell script for the runner instance."""
+    docker_setup = ""
+    if enable_docker:
+        docker_setup = f'''# Reuse Docker CE from the ECS image; run before dropping runner privileges.
+command -v docker
+command -v jq
+systemctl start docker
+runner_user=$(id -nu {runner_uid})
+usermod -aG docker "$runner_user"
+runuser -u "$runner_user" -- docker info
+
+'''
     destinations = " ".join(f'"{dst}"' for dst in CACHE_PATHS)
     cache_setup = f"""# Caches live on the system disk, are deleted with the instance, and every
 # run compiles cold. Within-run reuse (base warming candidate via the shared
@@ -158,7 +180,7 @@ set -euo pipefail
 
 {swap_setup}
 
-cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
+{docker_setup}cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
 RUNNER_NAME={runner_name}
 RUNNER_LABELS={runner_label}
 RUNNER_TOKEN={runner_token}
@@ -372,13 +394,24 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         internet_max_bandwidth_out=100,
         system_disk=ecs_models.RunInstancesRequestSystemDisk(
             category="cloud_essd",
-            size=str(SYSTEM_DISK_GIB),
+            size=str(config.system_disk_gib),
         ),
         user_data=user_data,
         tag=[
-            ecs_models.RunInstancesRequestTag(key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE),
+            ecs_models.RunInstancesRequestTag(
+                key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE
+            ),
             ecs_models.RunInstancesRequestTag(key=RUN_TAG_KEY, value=config.run_id),
-        ],
+        ]
+        + (
+            [
+                ecs_models.RunInstancesRequestTag(
+                    key=TTL_TAG_KEY, value=str(config.ttl_hours)
+                )
+            ]
+            if config.ttl_hours is not None
+            else []
+        ),
     )
     response = client.run_instances(request)
     instance_id = response.body.instance_id_sets.instance_id_set[0]
@@ -399,6 +432,7 @@ def provision(config: ProvisionConfig) -> int:
             config.repo,
             config.runner_uid,
             config.runner_gid,
+            enable_docker=config.enable_docker,
         )
     )
 
@@ -450,6 +484,18 @@ def main() -> int:
     parser.add_argument("--security-group-id", default=os.environ.get("ALIYUN_ECS_SECURITY_GROUP_ID"))
     parser.add_argument("--image-id", default=os.environ.get("QUERY_REGRESSION_ECS_IMAGE_ID"))
     parser.add_argument("--instance-type", default=os.environ.get("ALIYUN_ECS_INSTANCE_TYPE"))
+    parser.add_argument(
+        "--system-disk-gib",
+        type=int,
+        default=os.environ.get("ALIYUN_ECS_SYSTEM_DISK_GIB", str(SYSTEM_DISK_GIB)),
+    )
+    parser.add_argument(
+        "--ttl-hours", type=int, default=os.environ.get("ALIYUN_ECS_TTL_HOURS") or None
+    )
+    parser.add_argument(
+        "--enable-docker", choices=("true", "false"),
+        default=os.environ.get("ALIYUN_ECS_ENABLE_DOCKER", "false"),
+    )
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--github-token", default=os.environ.get("GH_PERSONAL_ACCESS_TOKEN"))
@@ -461,7 +507,7 @@ def main() -> int:
     missing = [
         name
         for name, value in vars(args).items()
-        if name not in ("resource_group_id",)
+        if name not in ("resource_group_id", "ttl_hours")
         and (value is None or (isinstance(value, str) and not value))
     ]
     if missing:
@@ -480,6 +526,9 @@ def main() -> int:
         resource_group_id=args.resource_group_id or None,
         runner_uid=args.runner_uid,
         runner_gid=args.runner_gid,
+        system_disk_gib=args.system_disk_gib,
+        ttl_hours=args.ttl_hours,
+        enable_docker=args.enable_docker == "true",
     )
     return provision(config)
 
