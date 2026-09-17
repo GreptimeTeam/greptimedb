@@ -56,6 +56,15 @@ pub const PARTITION_INFO_CACHE_NAME: &str = "partition_info_cache";
 /// Builds cache registry for datanode, including:
 /// - Schema cache.
 /// - Table id to schema name cache.
+/// - Table info cache.
+/// - Table name cache.
+/// - Table cache.
+/// - Table route cache.
+/// - Partition info cache.
+///
+/// The table/route caches are needed by the catalog manager and by the partition rule manager of
+/// the datanode, which are used to plan the `MergeScan` nodes of the plans received from the
+/// frontend (e.g. a nested merge scan that queries another datanode).
 pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
     // Builds table id schema name cache that never expires.
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY).build();
@@ -73,9 +82,55 @@ pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry 
         kv_backend.clone(),
     ));
 
+    // Builds table info cache
+    let cache = default_cache();
+    let table_info_cache = Arc::new(new_table_info_cache(
+        TABLE_INFO_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    // Builds table name cache
+    let cache = default_cache();
+    let table_name_cache = Arc::new(new_table_name_cache(
+        TABLE_NAME_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    // Builds table cache
+    let cache = default_cache();
+    let table_cache = Arc::new(new_table_cache(
+        TABLE_CACHE_NAME.to_string(),
+        cache,
+        table_info_cache.clone(),
+        table_name_cache.clone(),
+    ));
+
+    // Builds table route cache
+    let cache = default_cache();
+    let table_route_cache = Arc::new(new_table_route_cache(
+        TABLE_ROUTE_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    // Builds partition info cache
+    let cache = default_cache();
+    let partition_info_cache = Arc::new(new_partition_info_cache(
+        PARTITION_INFO_CACHE_NAME.to_string(),
+        cache,
+        table_route_cache.clone(),
+    ));
+
     CacheRegistryBuilder::default()
         .add_cache(table_id_schema_cache)
         .add_cache(schema_cache)
+        .add_cache(table_info_cache)
+        .add_cache(table_name_cache)
+        .add_cache(table_cache)
+        .add_cache(table_route_cache)
+        .add_cache(partition_info_cache)
         .build()
 }
 
