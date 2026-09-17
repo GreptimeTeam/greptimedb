@@ -57,7 +57,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     /// Shared experimental ordinary-table batching; independent of Prom batching.
-    pub experimental_pending_rows_batcher: PendingRowsBatcherOptions,
+    pub pending_rows_batcher: PendingRowsBatcherOptions,
     pub jaeger: JaegerOptions,
     pub otlp: OtlpOptions,
     pub prom_store: PromStoreOptions,
@@ -99,7 +99,7 @@ impl Default for StandaloneOptions {
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
-            experimental_pending_rows_batcher: PendingRowsBatcherOptions::default(),
+            pending_rows_batcher: PendingRowsBatcherOptions::default(),
             jaeger: JaegerOptions::default(),
             otlp: OtlpOptions::default(),
             prom_store: PromStoreOptions::default(),
@@ -133,7 +133,7 @@ impl Configurable for StandaloneOptions {
             "heartbeat_env_vars",
             "wal.broker_endpoints",
             "event_recorder.event_types",
-            "experimental_pending_rows_batcher.protocols",
+            "pending_rows_batcher.protocols",
         ])
     }
 }
@@ -162,7 +162,7 @@ impl StandaloneOptions {
             postgres: cloned_opts.postgres,
             opentsdb: cloned_opts.opentsdb,
             influxdb: cloned_opts.influxdb,
-            experimental_pending_rows_batcher: cloned_opts.experimental_pending_rows_batcher,
+            pending_rows_batcher: cloned_opts.pending_rows_batcher,
             jaeger: cloned_opts.jaeger,
             otlp: cloned_opts.otlp,
             prom_store: cloned_opts.prom_store,
@@ -219,7 +219,7 @@ mod tests {
     fn test_batcher_protocols_from_env() {
         temp_env::with_vars(
             [(
-                "STANDALONE_BATCHER_TEST__EXPERIMENTAL_PENDING_ROWS_BATCHER__PROTOCOLS",
+                "STANDALONE_BATCHER_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
                 Some("influxdb,http_sql"),
             )],
             || {
@@ -227,7 +227,7 @@ mod tests {
                     StandaloneOptions::load_layered_options(None, "STANDALONE_BATCHER_TEST")
                         .unwrap();
                 assert_eq!(
-                    options.experimental_pending_rows_batcher.protocols,
+                    options.pending_rows_batcher.protocols,
                     vec![
                         servers::http::BatchingProtocol::Influxdb,
                         servers::http::BatchingProtocol::HttpSql
@@ -242,12 +242,12 @@ mod tests {
         let defaults: StandaloneOptions = toml::from_str("").unwrap();
         assert!(
             !defaults
-                .experimental_pending_rows_batcher
+                .pending_rows_batcher
                 .pending_rows_batching_enabled()
         );
         let options: StandaloneOptions = toml::from_str(
             r#"
-[experimental_pending_rows_batcher]
+[pending_rows_batcher]
 protocols = ["influxdb", "http_sql"]
 pending_rows_flush_interval = "5ms"
 max_batch_rows = 25
@@ -255,35 +255,25 @@ flow_notification_queue_capacity = 17
 "#,
         )
         .unwrap();
-        assert_eq!(options.experimental_pending_rows_batcher.max_batch_rows, 25);
-        assert_eq!(options.experimental_pending_rows_batcher.protocols.len(), 2);
+        assert_eq!(options.pending_rows_batcher.max_batch_rows, 25);
+        assert_eq!(options.pending_rows_batcher.protocols.len(), 2);
         assert_eq!(
             options
-                .experimental_pending_rows_batcher
+                .pending_rows_batcher
                 .flow_notification_queue_capacity
                 .get(),
             17
         );
-        assert!(
-            options
-                .experimental_pending_rows_batcher
-                .pending_rows_batching_enabled()
-        );
+        assert!(options.pending_rows_batcher.pending_rows_batching_enabled());
         let serialized = toml::to_string(&options).unwrap();
         let parsed: StandaloneOptions = toml::from_str(&serialized).unwrap();
         assert_eq!(options.influxdb, parsed.influxdb);
         assert_eq!(options.opentsdb, parsed.opentsdb);
-        assert_eq!(
-            options.experimental_pending_rows_batcher,
-            parsed.experimental_pending_rows_batcher
-        );
+        assert_eq!(options.pending_rows_batcher, parsed.pending_rows_batcher);
         let frontend = options.frontend_options();
         assert_eq!(options.influxdb, frontend.influxdb);
         assert_eq!(options.opentsdb, frontend.opentsdb);
-        assert_eq!(
-            options.experimental_pending_rows_batcher,
-            frontend.experimental_pending_rows_batcher
-        );
+        assert_eq!(options.pending_rows_batcher, frontend.pending_rows_batcher);
     }
 
     #[test]

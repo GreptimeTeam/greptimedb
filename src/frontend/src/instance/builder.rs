@@ -259,9 +259,10 @@ impl FrontendBuilder {
                 )
                 .map(|batcher| batcher as Arc<dyn PendingRowsBatcher>)
             };
-        let inserter = Arc::new(create_inserter().with_pending_rows_batcher(build_batcher(
-            &self.options.experimental_pending_rows_batcher,
-        )));
+        let inserter = Arc::new(
+            create_inserter()
+                .with_pending_rows_batcher(build_batcher(&self.options.pending_rows_batcher)),
+        );
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),

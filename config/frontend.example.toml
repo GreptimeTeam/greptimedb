@@ -54,7 +54,7 @@ addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
 ## When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is
 ## raised to at least the largest active flush interval plus 1 second. The intervals come from
-## `prom_store.pending_rows_flush_interval` and `experimental_pending_rows_batcher.pending_rows_flush_interval`.
+## `prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`.
 timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
@@ -233,7 +233,7 @@ default_merge_mode = "last_non_null"
 ## Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.
 ## Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.
 ## Effective shared Prom settings take precedence; existing prom_store settings remain compatible.
-[experimental_pending_rows_batcher]
+[pending_rows_batcher]
 # protocols = [
 #     "influxdb",
 #     "opentsdb",
