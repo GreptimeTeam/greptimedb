@@ -716,10 +716,10 @@ async fn database_export_preserves_valid_table_names() {
             assert_eq!(
                 values(
                     instance,
-                    &format!("SELECT * FROM names_restored.\"{name}\"")
+                    &format!("SELECT ts, val, host FROM names_restored.\"{name}\"")
                 )
                 .await,
-                values(instance, &format!("SELECT * FROM \"{name}\"")).await,
+                values(instance, &format!("SELECT ts, val, host FROM \"{name}\"")).await,
             );
             sql(
                 instance,
