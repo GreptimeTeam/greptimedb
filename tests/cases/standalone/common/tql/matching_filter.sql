@@ -77,21 +77,44 @@ tql eval(0, 5, '5s') counter_metric offset 5s / on(host, device) gauge_metric{ho
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host) gauge_metric{host="host1"};
 
--- Modifiers, operators and operands outside the rewritten subset.
+-- `ignoring(...)`: every label that is not ignored is a matching label.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / ignoring(missing_label) gauge_metric{host="host1"};
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval(0, 5, '5s') counter_metric > on(host, device) gauge_metric{host="host1"};
+tql eval(0, 5, '5s') counter_metric / ignoring(device) gauge_metric{host="host1"};
 
+-- Matcher kinds other than equality are enforced by the join just the same.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{host=~"host1"};
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval(0, 5, '5s') counter_metric / on(host) group_left sum by(host)(gauge_metric{host="host1"});
+tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{host!="host2"};
 
 -- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{device!~"eth1"};
+
+-- Aggregations that partition by their grouping labels.
+-- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') sum by(host)(counter_metric) / on(host) sum by(host)(gauge_metric{host="host1"});
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') sum by(host)(counter_metric{device="eth0"}) / on(host) sum by(host)(gauge_metric);
+
+-- A label the aggregation drops is not a matching label.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / on(host) sum by(host)(gauge_metric{device="eth0"});
+
+-- `topk` carries its input labels through, so its input must not be filtered.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') topk(1, counter_metric) / on(host, device) gauge_metric{host="host1"};
+
+-- Operators and modifiers outside the rewritten subset.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric > on(host, device) gauge_metric{host="host1"};
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / on(host) group_left sum by(host)(gauge_metric{host="host1"});
 
 drop table gauge_metric;
 

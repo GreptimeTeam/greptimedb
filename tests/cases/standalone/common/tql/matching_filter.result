@@ -196,7 +196,7 @@ tql eval(0, 5, '5s') counter_metric / on(host) gauge_metric{host="host1"};
 | host1 | eth1   | 1970-01-01T00:00:05 | 5.0                                   |
 +-------+--------+---------------------+---------------------------------------+
 
--- Modifiers, operators and operands outside the rewritten subset.
+-- `ignoring(...)`: every label that is not ignored is a matching label.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / ignoring(missing_label) gauge_metric{host="host1"};
 
@@ -210,17 +210,22 @@ tql eval(0, 5, '5s') counter_metric / ignoring(missing_label) gauge_metric{host=
 +-------+--------+---------------------+---------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval(0, 5, '5s') counter_metric > on(host, device) gauge_metric{host="host1"};
+tql eval(0, 5, '5s') counter_metric / ignoring(device) gauge_metric{host="host1"};
 
-+---------------------+------+-------+--------+
-| ts                  | val  | host  | device |
-+---------------------+------+-------+--------+
-| 1970-01-01T00:00:00 | 10.0 | host1 | eth0   |
-| 1970-01-01T00:00:00 | 20.0 | host1 | eth1   |
-| 1970-01-01T00:00:05 | 10.0 | host1 | eth0   |
-| 1970-01-01T00:00:05 | 20.0 | host1 | eth1   |
-+---------------------+------+-------+--------+
++-------+--------+---------------------+---------------------------------------+
+| host  | device | ts                  | counter_metric.val / gauge_metric.val |
++-------+--------+---------------------+---------------------------------------+
+| host1 | eth0   | 1970-01-01T00:00:00 | 10.0                                  |
+| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                   |
+| host1 | eth0   | 1970-01-01T00:00:05 | 10.0                                  |
+| host1 | eth0   | 1970-01-01T00:00:05 | 5.0                                   |
+| host1 | eth1   | 1970-01-01T00:00:00 | 10.0                                  |
+| host1 | eth1   | 1970-01-01T00:00:00 | 5.0                                   |
+| host1 | eth1   | 1970-01-01T00:00:05 | 10.0                                  |
+| host1 | eth1   | 1970-01-01T00:00:05 | 5.0                                   |
++-------+--------+---------------------+---------------------------------------+
 
+-- Matcher kinds other than equality are enforced by the join just the same.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{host=~"host1"};
 
@@ -234,6 +239,90 @@ tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{host=~"host1
 +-------+--------+---------------------+---------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{host!="host2"};
+
++-------+--------+---------------------+---------------------------------------+
+| host  | device | ts                  | counter_metric.val / gauge_metric.val |
++-------+--------+---------------------+---------------------------------------+
+| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                   |
+| host1 | eth0   | 1970-01-01T00:00:05 | 5.0                                   |
+| host1 | eth1   | 1970-01-01T00:00:00 | 10.0                                  |
+| host1 | eth1   | 1970-01-01T00:00:05 | 10.0                                  |
++-------+--------+---------------------+---------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / on(host, device) gauge_metric{device!~"eth1"};
+
++-------+--------+---------------------+---------------------------------------+
+| host  | device | ts                  | counter_metric.val / gauge_metric.val |
++-------+--------+---------------------+---------------------------------------+
+| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                   |
+| host1 | eth0   | 1970-01-01T00:00:05 | 5.0                                   |
+| host2 | eth0   | 1970-01-01T00:00:00 | 20.0                                  |
+| host2 | eth0   | 1970-01-01T00:00:05 | 20.0                                  |
++-------+--------+---------------------+---------------------------------------+
+
+-- Aggregations that partition by their grouping labels.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') sum by(host)(counter_metric) / on(host) sum by(host)(gauge_metric{host="host1"});
+
++-------+---------------------+-----------------------------------------------------------------------------+
+| host  | ts                  | counter_metric.sum(counter_metric.val) / gauge_metric.sum(gauge_metric.val) |
++-------+---------------------+-----------------------------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 7.5                                                                         |
+| host1 | 1970-01-01T00:00:05 | 7.5                                                                         |
++-------+---------------------+-----------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') sum by(host)(counter_metric{device="eth0"}) / on(host) sum by(host)(gauge_metric);
+
++-------+---------------------+-----------------------------------------------------------------------------+
+| host  | ts                  | counter_metric.sum(counter_metric.val) / gauge_metric.sum(gauge_metric.val) |
++-------+---------------------+-----------------------------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 2.5                                                                         |
+| host1 | 1970-01-01T00:00:05 | 2.5                                                                         |
+| host2 | 1970-01-01T00:00:00 | 20.0                                                                        |
+| host2 | 1970-01-01T00:00:05 | 20.0                                                                        |
++-------+---------------------+-----------------------------------------------------------------------------+
+
+-- A label the aggregation drops is not a matching label.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric / on(host) sum by(host)(gauge_metric{device="eth0"});
+
++-------+---------------------+---------------------------------------------------------+
+| host  | ts                  | counter_metric.val / gauge_metric.sum(gauge_metric.val) |
++-------+---------------------+---------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 10.0                                                    |
+| host1 | 1970-01-01T00:00:00 | 5.0                                                     |
+| host1 | 1970-01-01T00:00:05 | 10.0                                                    |
+| host1 | 1970-01-01T00:00:05 | 5.0                                                     |
+| host2 | 1970-01-01T00:00:00 | 20.0                                                    |
+| host2 | 1970-01-01T00:00:05 | 20.0                                                    |
++-------+---------------------+---------------------------------------------------------+
+
+-- `topk` carries its input labels through, so its input must not be filtered.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') topk(1, counter_metric) / on(host, device) gauge_metric{host="host1"};
+
++------+--------+----+---------------------------------------+
+| host | device | ts | counter_metric.val / gauge_metric.val |
++------+--------+----+---------------------------------------+
++------+--------+----+---------------------------------------+
+
+-- Operators and modifiers outside the rewritten subset.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') counter_metric > on(host, device) gauge_metric{host="host1"};
+
++---------------------+------+-------+--------+
+| ts                  | val  | host  | device |
++---------------------+------+-------+--------+
+| 1970-01-01T00:00:00 | 10.0 | host1 | eth0   |
+| 1970-01-01T00:00:00 | 20.0 | host1 | eth1   |
+| 1970-01-01T00:00:05 | 10.0 | host1 | eth0   |
+| 1970-01-01T00:00:05 | 20.0 | host1 | eth1   |
++---------------------+------+-------+--------+
+
+-- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host) group_left sum by(host)(gauge_metric{host="host1"});
 
 +-------+---------------------+---------------------------------------------------------+
@@ -244,16 +333,6 @@ tql eval(0, 5, '5s') counter_metric / on(host) group_left sum by(host)(gauge_met
 | host1 | 1970-01-01T00:00:05 | 2.5                                                     |
 | host1 | 1970-01-01T00:00:05 | 5.0                                                     |
 +-------+---------------------+---------------------------------------------------------+
-
--- SQLNESS SORT_RESULT 3 1
-tql eval(0, 5, '5s') sum by(host)(counter_metric) / on(host) sum by(host)(gauge_metric{host="host1"});
-
-+-------+---------------------+-----------------------------------------------------------------------------+
-| host  | ts                  | counter_metric.sum(counter_metric.val) / gauge_metric.sum(gauge_metric.val) |
-+-------+---------------------+-----------------------------------------------------------------------------+
-| host1 | 1970-01-01T00:00:00 | 7.5                                                                         |
-| host1 | 1970-01-01T00:00:05 | 7.5                                                                         |
-+-------+---------------------+-----------------------------------------------------------------------------+
 
 drop table gauge_metric;
 

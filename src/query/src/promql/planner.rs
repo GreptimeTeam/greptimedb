@@ -13363,6 +13363,9 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             r#"metric_a / metric_b{host="foo"}"#,
             r#"metric_a / on(host, device) metric_b{host="foo"}"#,
             r#"count_over_time(metric_a[1m]) / on(host) count_over_time(metric_b{host="foo"}[1m])"#,
+            r#"metric_a / ignoring(device) metric_b{host="foo"}"#,
+            r#"sum by(host) (metric_a) / on(host) sum by(host) (metric_b{host="foo"})"#,
+            r#"metric_a / on(host) avg without(device) (metric_b{host="foo"})"#,
         ] {
             let plan = build_matching_filter_plan(query).await;
             assert_eq!(
@@ -13371,6 +13374,15 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                 "{query}\n{plan}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_skips_selecting_aggregations() {
+        // `topk` carries its input labels through, so filtering its input would change which
+        // series it returns.
+        let query = r#"topk(1, metric_a) / on(host, device) metric_b{host="foo"}"#;
+        let plan = build_matching_filter_plan(query).await;
+        assert_eq!(plan.matches("foo").count(), 1, "{query}\n{plan}");
     }
 
     #[tokio::test]
@@ -13388,11 +13400,10 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     #[tokio::test]
     async fn binary_matching_label_filter_skips_unproven_expressions() {
         for query in [
-            r#"metric_a / ignoring(device) metric_b{host="foo"}"#,
             r#"metric_a > on(host, device) metric_b{host="foo"}"#,
             r#"metric_a / on(host) group_left metric_b{host="foo"}"#,
-            r#"metric_a / on(host, device) sum by(host, device)(metric_b{host="foo"})"#,
-            r#"metric_a / on(host, device) metric_b{host=~"foo"}"#,
+            r#"metric_a / on(host) label_replace(metric_b{host="foo"},"extra","e","host",".*")"#,
+            r#"metric_a / on(device) metric_b{host="foo"}"#,
         ] {
             let plan = build_matching_filter_plan(query).await;
             assert_eq!(plan.matches("foo").count(), 1, "{query}\n{plan}");
