@@ -2,11 +2,21 @@ name: Agent Observability Benchmark
 on:
   workflow_dispatch:
     inputs:
-      targets:
-        description: all or comma-separated greptimedb,clickhouse,victorialogs
-        type: string
-        default: greptimedb
-        required: true
+      run_greptimedb:
+        description: Run GreptimeDB
+        type: boolean
+        default: true
+        required: false
+      run_clickhouse:
+        description: Run ClickHouse
+        type: boolean
+        default: false
+        required: false
+      run_victorialogs:
+        description: Run VictoriaLogs
+        type: boolean
+        default: false
+        required: false
       dataset:
         description: 'Dataset size: S=5K, P=10M, M=100M'
         type: choice
@@ -36,18 +46,19 @@ on:
         type: string
         required: false
       runtime_image:
-        description: Optional Aliyun runtime image override (default uses repository variable)
+        description: Aliyun runtime image (tag or digest reference)
         type: string
-        required: false
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260917-39fadf81@sha256:3390c7810a14a926870cb132ab97fef4dce3b4dc801e15b3bf8a870bd26eb035
+        required: true
       ecs_instance_type:
         description: ECS instance type (independent of Query Regression)
         type: string
         default: ecs.c9i.2xlarge
         required: true
       system_disk_gib:
-        description: ECS system disk size in GiB (20..2048; includes corpus, DB, images and swap)
+        description: System disk GiB; 0 = auto (S 80, P 100, M 500), or 20..2048
         type: number
-        default: 500
+        default: 0
         required: true
       benchmark_timeout_minutes:
         description: Benchmark job timeout in minutes (1..360)
@@ -62,23 +73,22 @@ on:
       db_cpus:
         description: CPU limit per DB container
         type: string
-        default: '4'
+        default: '8'
         required: true
       db_memory:
         description: Memory limit per DB container
         type: string
-        default: 8g
+        default: 16g
         required: true
 permissions:
   contents: read
 env:
-  TARGETS: ${{ inputs.targets }}
   PROFILE: ${{ inputs.dataset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   CLICKHOUSE_TAG: ${{ inputs.clickhouse_tag }}
   VICTORIALOGS_TAG: ${{ inputs.victorialogs_tag }}
   O11YBENCH_REF: ${{ inputs.o11ybench_ref }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image || vars.O11YBENCH_RUNTIME_IMAGE }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
   ECS_INSTANCE_TYPE: ${{ inputs.ecs_instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
   BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
@@ -90,6 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
+      targets: ${{ steps.inputs.outputs.targets }}
+      system_disk_gib: ${{ steps.inputs.outputs.system_disk_gib }}
       greptimedb: ${{ steps.inputs.outputs.greptimedb }}
       clickhouse: ${{ steps.inputs.outputs.clickhouse }}
       victorialogs: ${{ steps.inputs.outputs.victorialogs }}
@@ -103,33 +115,44 @@ jobs:
       - name: Validate requested benchmark
         id: inputs
         shell: bash
+        env:
+          greptimedb: ${{ inputs.run_greptimedb }}
+          clickhouse: ${{ inputs.run_clickhouse }}
+          victorialogs: ${{ inputs.run_victorialogs }}
         run: |
           set -euo pipefail
           # Validate cloud lifecycle budgets before provisioning; runtime owns workload validation.
           [[ -n "$ECS_INSTANCE_TYPE" ]]
+          case "$PROFILE" in
+            S) auto_disk_gib=80 ;;
+            P) auto_disk_gib=100 ;;
+            M) auto_disk_gib=500 ;;
+            *) echo "Unknown dataset: $PROFILE" >&2; exit 1 ;;
+          esac
+          [[ "$SYSTEM_DISK_GIB" != 0 ]] || SYSTEM_DISK_GIB=$auto_disk_gib
           for value in "$SYSTEM_DISK_GIB" "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
             [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Resource budgets must be positive integers' >&2; exit 1; }
           done
           ((SYSTEM_DISK_GIB >= 20 && SYSTEM_DISK_GIB <= 2048))
+          printf 'system_disk_gib=%s\n' "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
+          printf 'Dataset %s: system disk %s GiB\n' "$PROFILE" "$SYSTEM_DISK_GIB"
           ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
           # Reserve 45m provision + 15m teardown + 60m queue headroom before expiry.
           ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120)) || {
             echo 'Janitor TTL must cover benchmark timeout plus 2 hours' >&2; exit 1;
           }
           [[ -z "$O11YBENCH_REF" || "$O11YBENCH_REF" =~ ^[0-9a-f]{40}$ ]]
-          [[ -n "$RUNTIME_IMAGE" ]] || { echo 'Configure O11YBENCH_RUNTIME_IMAGE or supply runtime_image' >&2; exit 1; }
-          selected="$TARGETS"
-          [[ "$selected" != all ]] || selected=greptimedb,clickhouse,victorialogs
-          [[ "$selected" =~ ^(greptimedb|clickhouse|victorialogs)(,(greptimedb|clickhouse|victorialogs))*$ ]]
-          declare -A enabled
-          IFS=, read -ra targets <<< "$selected"
-          for target in "${targets[@]}"; do
-            [[ -z ${enabled[$target]:-} ]] || { echo "Duplicate target: $target" >&2; exit 1; }
-            enabled[$target]=true
-          done
+          [[ -n "$RUNTIME_IMAGE" ]] || { echo 'runtime_image must not be empty' >&2; exit 1; }
+          selected=
           for target in greptimedb clickhouse victorialogs; do
-            printf '%s=%s\n' "$target" "${enabled[$target]:-false}" >> "$GITHUB_OUTPUT"
+            enabled=${!target}
+            printf '%s=%s\n' "$target" "$enabled" >> "$GITHUB_OUTPUT"
+            if [[ "$enabled" == true ]]; then
+              selected="${selected:+$selected,}$target"
+            fi
           done
+          [[ -n "$selected" ]] || { echo 'Select at least one database' >&2; exit 1; }
+          printf 'targets=%s\n' "$selected" >> "$GITHUB_OUTPUT"
   provision:
     needs: validate
     runs-on: ubuntu-latest
@@ -156,7 +179,7 @@ jobs:
           image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
           instance-type: ${{ env.ECS_INSTANCE_TYPE }}
           enable-docker: 'true'
-          system-disk-gib: ${{ inputs.system_disk_gib }}
+          system-disk-gib: ${{ needs.validate.outputs.system_disk_gib }}
           ttl-hours: ${{ inputs.janitor_ttl_hours }}
           resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
           runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
@@ -166,8 +189,10 @@ jobs:
       - validate
       - provision
     runs-on: ${{ needs.provision.outputs.label }}
-    timeout-minutes: ${{ inputs.benchmark_timeout_minutes }}
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
     env:
+      TARGETS: ${{ needs.validate.outputs.targets }}
+      SYSTEM_DISK_GIB: ${{ needs.validate.outputs.system_disk_gib }}
       OWNER: o11ybench-${{ github.run_id }}-${{ github.run_attempt }}
       ARTIFACT_ROOT: ${{ github.workspace }}/benchmark-data/${{ github.run_id }}-${{ github.run_attempt }}
       MANIFEST_PATH: ${{ github.workspace }}/run-manifest.json
@@ -199,10 +224,10 @@ jobs:
           [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
           images='{}'
           resolve_image() {
-            local target=$1 reference=$2 variable=$3 metadata id revision
+            local target=$1 reference=$2 variable=$3 metadata resolved revision
             docker pull "$reference"
             metadata=$(docker image inspect "$reference")
-            id=$(jq -er '.[0].Id' <<< "$metadata")
+            resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
             if [[ "$target" == runtime ]]; then
               revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
               [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo 'Runtime lacks a full commit revision' >&2; return 1; }
@@ -210,7 +235,7 @@ jobs:
               actual=$revision
               printf 'RESOLVED_O11YBENCH_REF=%s\n' "$revision" >> "$GITHUB_ENV"
             fi
-            printf '%s=%s\n' "$variable" "$id" >> "$GITHUB_ENV"
+            printf '%s=%s\n' "$variable" "$resolved" >> "$GITHUB_ENV"
             images=$(jq --arg target "$target" --arg requested "$reference" --argjson metadata "$metadata" \
               '. + {($target): {requested: $requested, id: $metadata[0].Id, digests: ($metadata[0].RepoDigests // [])}}' <<< "$images")
           }
