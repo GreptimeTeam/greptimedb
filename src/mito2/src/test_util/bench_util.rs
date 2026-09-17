@@ -21,6 +21,7 @@ use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use datafusion_common::Column;
 use datafusion_expr::{Expr, lit};
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use rand::Rng;
@@ -33,9 +34,44 @@ use store_api::storage::RegionId;
 use table::predicate::Predicate;
 
 use crate::memtable::KeyValues;
+use crate::read::read_columns::ReadColumns;
 pub use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
 pub use crate::sst::index::inverted_index::creator::InvertedIndexer;
+use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
+use crate::sst::parquet::flat_format::FlatReadFormat;
+use crate::sst::parquet::reader::SimpleFilterContext;
 use crate::test_util::memtable_util::region_metadata_to_row_schema;
+
+/// Builds a precise-filter benchmark with tags left encoded in the primary key.
+pub fn tag_filter_for_bench(
+    metadata: RegionMetadataRef,
+    filters: &[Expr],
+) -> impl Fn(RecordBatch) -> crate::error::Result<Option<RecordBatch>> {
+    let read_format = FlatReadFormat::new(
+        metadata.clone(),
+        ReadColumns::new([metadata.time_index_column().column_id]),
+        None,
+        "bench",
+        true,
+    )
+    .unwrap();
+    let base = RangeBase {
+        filters: filters
+            .iter()
+            .map(|expr| SimpleFilterContext::new_opt(&metadata, None, expr).unwrap())
+            .collect(),
+        dyn_filters: vec![],
+        read_format,
+        expected_metadata: None,
+        prune_schema: metadata.schema.clone(),
+        codec: mito_codec::row_converter::build_primary_key_codec(&metadata),
+        compat_batch: None,
+        compaction_projection_mapper: None,
+        pre_filter_mode: PreFilterMode::All,
+        partition_filter: None,
+    };
+    move |batch| base.precise_filter_flat(batch, false, false)
+}
 
 pub struct Host {
     pub hostname: String,

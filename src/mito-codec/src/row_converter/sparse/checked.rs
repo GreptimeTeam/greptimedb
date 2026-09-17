@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Buf;
 use snafu::{OptionExt, ensure};
 use store_api::storage::ColumnId;
 
@@ -83,6 +84,16 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
         }
         self.cache.finished = true;
         Ok(None)
+    }
+
+    /// Returns the table id from the non-null prefix validated by [`Self::new`].
+    pub fn table_id(&self) -> u32 {
+        (&self.pk[TABLE_ID_VALUE_OFFSET + 1..]).get_u32()
+    }
+
+    /// Returns the series id from the non-null prefix validated by [`Self::new`].
+    pub fn tsid(&self) -> u64 {
+        (&self.pk[TSID_VALUE_OFFSET + 1..]).get_u64()
     }
 }
 
@@ -206,6 +217,19 @@ mod tests {
                 }
                 assert!(view.encoded_value(999).unwrap().is_none());
             }
+        }
+    }
+
+    #[test]
+    fn reserved_ids_preserve_unsigned_values() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut cache = SparseOffsetsCache::new();
+        for (table_id, tsid) in [(0, 0), (42, u64::MAX), (u32::MAX, 42)] {
+            let mut pk = Vec::new();
+            codec.encode_internal(table_id, tsid, &mut pk).unwrap();
+            let view = SparsePrimaryKeyView::new(&pk, &mut cache).unwrap();
+            assert_eq!(view.table_id(), table_id);
+            assert_eq!(view.tsid(), tsid);
         }
     }
 
