@@ -1,0 +1,280 @@
+name: VMBench Long Range
+on:
+  workflow_dispatch:
+    inputs:
+      run_greptimedb:
+        description: Run GreptimeDB
+        type: boolean
+        default: true
+        required: false
+      run_victoriametrics:
+        description: Run VictoriaMetrics
+        type: boolean
+        default: false
+        required: false
+      range_preset:
+        description: Long-range query window (fixed dataset per preset)
+        type: choice
+        options:
+        - 1w
+        - 1mo
+        default: 1w
+        required: true
+      greptimedb_tag:
+        description: Docker Hub greptime/greptimedb tag
+        type: string
+        default: latest
+        required: true
+      victoriametrics_tag:
+        description: Docker Hub victoriametrics/victoria-metrics tag or tag@sha256 digest
+        type: string
+        default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
+        required: true
+      runtime_image:
+        description: Aliyun runtime image (tag or digest reference)
+        type: string
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260917-65906ca9@sha256:5af45e298019474d4c5089d63031a15f9bceb663890dd87fa0a56876c99c8597
+        required: true
+      ecs_instance_type:
+        description: ECS instance type (independent of Query Regression)
+        type: string
+        default: ecs.c9i.2xlarge
+        required: true
+      system_disk_gib:
+        description: System disk GiB (20..2048)
+        type: number
+        default: 80
+        required: true
+      benchmark_timeout_minutes:
+        description: Benchmark job timeout in minutes (1..360)
+        type: number
+        default: 360
+        required: true
+      janitor_ttl_hours:
+        description: Instance lifetime before janitor eligibility (1..168 hours; at least timeout + 2h)
+        type: number
+        default: 8
+        required: true
+      db_cpus:
+        description: CPU limit per DB container
+        type: string
+        default: '8'
+        required: true
+      db_memory:
+        description: Memory limit per DB container
+        type: string
+        default: 16g
+        required: true
+permissions:
+  contents: read
+env:
+  RANGE_PRESET: ${{ inputs.range_preset }}
+  GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
+  VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  ECS_INSTANCE_TYPE: ${{ inputs.ecs_instance_type }}
+  SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
+  BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
+  JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
+  DB_CPUS: ${{ inputs.db_cpus }}
+  DB_MEMORY: ${{ inputs.db_memory }}
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      system_disk_gib: ${{ steps.plan.outputs.system_disk_gib }}
+      runtime_image: ${{ steps.plan.outputs.runtime_image }}
+      o11ybench_ref: ${{ steps.plan.outputs.o11ybench_ref }}
+      run_id: ${{ steps.plan.outputs.run_id }}
+      plan_artifact: ${{ steps.plan.outputs.plan_artifact }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Test existing ECS lifecycle helpers
+      run: python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
+    - name: Validate budgets and build warm plan
+      id: plan
+      env:
+        RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
+        RUN_VICTORIAMETRICS: ${{ inputs.run_victoriametrics }}
+      run: |
+        set -euo pipefail
+        [[ -n "$ECS_INSTANCE_TYPE" ]]
+        for value in "$SYSTEM_DISK_GIB" "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
+          [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Resource budgets must be positive integers'; exit 1; }
+        done
+        ((SYSTEM_DISK_GIB >= 20 && SYSTEM_DISK_GIB <= 2048))
+        ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
+        # Match the existing ECS workflow's provision, teardown and queue headroom.
+        ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120))
+        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
+        docker pull "$RUNTIME_IMAGE"
+        metadata=$(docker image inspect "$RUNTIME_IMAGE")
+        resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
+        revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
+        [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+        printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
+        printf 'run_id=long-range-%s-%s\nplan_artifact=vmbench-plan-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+        args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET"
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
+          --run-classification controlled_server_benchmark --no-open-browser)
+        # Tags become target-spec fields; reject separators before passing them to the planner.
+        for target in greptimedb victoriametrics; do
+          case "$target" in
+            greptimedb) enabled=$RUN_GREPTIMEDB; tag=$GREPTIMEDB_TAG; repo=greptime/greptimedb; url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range ;;
+            victoriametrics) enabled=$RUN_VICTORIAMETRICS; tag=$VICTORIAMETRICS_TAG; repo=victoriametrics/victoria-metrics; url=http://127.0.0.1:18428/api/v1/query_range ;;
+          esac
+          [[ "$enabled" == true ]] || continue
+          [[ "$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?$ ]]
+          args+=(--target "$target:name=$target,image=$repo:$tag,url=$url")
+        done
+        # The packaged planner owns profile, target and resource-limit validation.
+        mkdir -p "$RUNNER_TEMP/vmbench-plans"
+        # Keep the original warm defaults: serial 5/1 and c1/c4 30s/5s.
+        docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
+          --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
+          --output-root "/tmp/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
+          --cache-policy warm > "$RUNNER_TEMP/vmbench-plans/warm.json"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: vmbench-plan-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/vmbench-plans/
+        if-no-files-found: error
+        retention-days: 1
+  provision:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      label: ${{ steps.ecs.outputs.label }}
+      instance_id: ${{ steps.ecs.outputs.instance_id }}
+      runner_name: ${{ steps.ecs.outputs.runner_name }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Create ephemeral ECS runner
+      id: ecs
+      uses: ./greptimedb/.github/actions/aliyun-ecs-create
+      with:
+        access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+        access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+        github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+        vswitch-id: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
+        security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
+        image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
+        instance-type: ${{ env.ECS_INSTANCE_TYPE }}
+        enable-docker: 'true'
+        system-disk-gib: ${{ needs.validate.outputs.system_disk_gib }}
+        ttl-hours: ${{ inputs.janitor_ttl_hours }}
+        resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
+        runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+        runner-gid: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
+  benchmark:
+    needs:
+    - validate
+    - provision
+    runs-on: ${{ needs.provision.outputs.label }}
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
+    env:
+      RESOLVED_RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
+      RESOLVED_O11YBENCH_REF: ${{ needs.validate.outputs.o11ybench_ref }}
+      RUN_ID: ${{ needs.validate.outputs.run_id }}
+      ARTIFACT_ROOT: /tmp/o11ybench-${{ needs.validate.outputs.run_id }}
+      METADATA_ROOT: ${{ github.workspace }}/vmbench-metadata
+      O11YBENCH_DIR: ${{ github.workspace }}/o11ybench
+      TSDG_PARALLELISM: '8'
+    steps:
+    - name: Checkout matching benchmark tools
+      uses: actions/checkout@v4
+      with:
+        repository: GreptimeTeam/o11ybench
+        token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        ref: ${{ env.RESOLVED_O11YBENCH_REF }}
+        path: o11ybench
+        persist-credentials: false
+    - uses: actions/download-artifact@v4
+      with:
+        name: ${{ needs.validate.outputs.plan_artifact }}
+        path: ${{ env.METADATA_ROOT }}
+    - name: Check runner and resolve database images
+      run: |
+        set -euo pipefail
+        [[ "$(uname -m)" == x86_64 ]]
+        test "$(git -C "$O11YBENCH_DIR" rev-parse HEAD)" = "$RESOLVED_O11YBENCH_REF"
+        jq --version
+        docker info
+        df -h /tmp /var/lib/docker
+        # Fail before generation if either dataset space or Docker storage is too small.
+        for path in /tmp /var/lib/docker; do
+          available=$(df -Pk "$path" | awk 'NR == 2 {print $4}')
+          ((available >= 10 * 1024 * 1024)) || { echo "Need at least 10 GiB free on $path"; exit 1; }
+        done
+        docker pull "$RESOLVED_RUNTIME_IMAGE"
+        docker image inspect "$RESOLVED_RUNTIME_IMAGE" > "$METADATA_ROOT/runtime-image.json"
+        test "$(jq -r '.[0].Config.Labels["org.opencontainers.image.revision"]' "$METADATA_ROOT/runtime-image.json")" = "$RESOLVED_O11YBENCH_REF"
+        plan="$METADATA_ROOT/warm.json"
+        while IFS=$'\t' read -r target reference; do
+          echo "Resolving $target: $reference"
+          docker pull "$reference"
+          docker image inspect "$reference" > "$METADATA_ROOT/$target-image.json"
+          digest=$(jq -er '.[0].RepoDigests[0]' "$METADATA_ROOT/$target-image.json")
+          jq --arg target "$target" --arg image "$digest" '.targets |= map(if .name == $target then .image = $image else . end)' "$plan" > "$plan.tmp"
+          mv "$plan.tmp" "$plan"
+        done < <(jq -r '.targets[] | [.name, .image] | @tsv' "$plan")
+    - name: Review execution plan
+      run: |
+        set -euo pipefail
+        python3 o11ybench/scripts/run_benchmark_plan.py \
+          --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --dry-run \
+          > "$METADATA_ROOT/warm-execution-plan.json"
+        cat "$METADATA_ROOT/warm-execution-plan.json"
+    - name: Warm serial and concurrent benchmarks
+      run: |
+        set -euo pipefail
+        python3 -u o11ybench/scripts/run_benchmark_plan.py \
+          --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --execute \
+          2>&1 | tee "$METADATA_ROOT/warm-execution.log"
+        python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT-warm"
+    - name: Clean up owned containers
+      if: always()
+      run: |
+        docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
+    - name: Upload HTML and results (no dataset or DB files)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: vmbench-long-range-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          ${{ env.METADATA_ROOT }}
+          ${{ env.ARTIFACT_ROOT }}-warm
+          !${{ env.ARTIFACT_ROOT }}-warm/data/*.bin
+          !${{ env.ARTIFACT_ROOT }}-warm/**/db-data/**
+        if-no-files-found: warn
+        retention-days: 14
+  teardown:
+    needs:
+    - provision
+    - benchmark
+    if: ${{ always() && needs.provision.outputs.instance_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Delete ECS and unregister runner
+      uses: ./greptimedb/.github/actions/aliyun-ecs-delete
+      with:
+        access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+        access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+        github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+        instance-id: ${{ needs.provision.outputs.instance_id }}
+        runner-name: ${{ needs.provision.outputs.runner_name }}
