@@ -95,6 +95,10 @@ fn metadata(tags: u32) -> RegionMetadataRef {
 /// Builds a sparse flat batch whose primary key dictionary holds
 /// `ROWS / rows_per_key` distinct keys with `tags` labels each.
 fn input(tags: u32, rows_per_key: usize) -> RecordBatch {
+    input_with_label_len(tags, rows_per_key, 24)
+}
+
+fn input_with_label_len(tags: u32, rows_per_key: usize, label_len: usize) -> RecordBatch {
     let codec = SparsePrimaryKeyCodec::schemaless();
     let mut keys = BinaryDictionaryBuilder::<UInt32Type>::new();
     for series in 0..ROWS / rows_per_key {
@@ -103,7 +107,14 @@ fn input(tags: u32, rows_per_key: usize) -> RecordBatch {
             .encode_internal((series / 128) as u32, series as u64, &mut key)
             .unwrap();
         let labels: Vec<_> = (0..tags)
-            .map(|id| (id, format!("tag-{id:03}-value-{series:010}")))
+            .map(|id| {
+                let mut value = format!("tag-{id:03}-value-{series:010}");
+                value.extend(std::iter::repeat_n(
+                    'x',
+                    label_len.saturating_sub(value.len()),
+                ));
+                (id, value)
+            })
             .collect();
         codec
             .encode_raw_tag_value(
@@ -203,8 +214,8 @@ fn bench_pk_tag_filters(c: &mut Criterion) {
     const TAGS: u32 = 40;
     let metadata = metadata(TAGS);
     let mut group = c.benchmark_group("pk_tag_filters");
-    for rows_per_key in [1, 32] {
-        let batch = input(TAGS, rows_per_key);
+    for (rows_per_key, label_len) in [(1, 24), (32, 24), (1, 1024), (32, 1024)] {
+        let batch = input_with_label_len(TAGS, rows_per_key, label_len);
         for predicate_count in [1, 2, 4, 8, 16, 32] {
             // Use distinct tags at the end of the key to exercise offset discovery.
             // Every row matches, so increasing the predicate count does not change selectivity.
@@ -215,7 +226,10 @@ fn bench_pk_tag_filters(c: &mut Criterion) {
             // Validate the workload outside the timed section.
             assert_eq!(filter(batch.clone()).unwrap().unwrap().num_rows(), ROWS);
             group.bench_function(
-                BenchmarkId::new(format!("{rows_per_key}rpk"), predicate_count),
+                BenchmarkId::new(
+                    format!("{rows_per_key}rpk_{label_len}bytes"),
+                    predicate_count,
+                ),
                 |b| b.iter(|| black_box(filter(black_box(batch.clone())).unwrap())),
             );
         }
