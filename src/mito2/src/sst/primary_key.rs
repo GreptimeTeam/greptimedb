@@ -19,9 +19,12 @@ use std::sync::OnceLock;
 use bytes::Bytes;
 use datatypes::prelude::ConcreteDataType;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::storage::RegionId;
+
+use crate::error::{DecodePrimaryKeyRangeSnafu, InvalidPrimaryKeyRangeSnafu, Result};
 
 /// Shared by files in a version. Raw SST bounds always remain in their original schema.
 #[derive(Debug)]
@@ -62,34 +65,70 @@ impl PrimaryKeyRangeMapper {
         mapper
     }
 
-    /// Returns unknown unless the range can be mapped without changing its ordering.
+    /// Returns the schema version used to interpret the bounds.
+    pub(crate) fn schema_version(&self) -> u64 {
+        self.metadata.schema_version
+    }
+
+    /// Returns unknown for foreign regions or defaults that cannot be safely encoded.
+    /// Invalid bounds return an error so callers can diagnose them before falling back
+    /// to unknown. Neither the error nor its source includes the encoded keys.
     pub(crate) fn map(
         &self,
         region_id: RegionId,
         (min, max): (Bytes, Bytes),
-    ) -> Option<(Bytes, Bytes)> {
-        if min > max || region_id != self.metadata.region_id {
-            return None;
+    ) -> Result<Option<(Bytes, Bytes)>> {
+        ensure!(
+            min <= max,
+            InvalidPrimaryKeyRangeSnafu {
+                reason: "min is greater than max",
+            }
+        );
+        if region_id != self.metadata.region_id {
+            return Ok(None);
         }
         // Sparse-to-sparse read compatibility preserves encoded keys verbatim.
         if self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
-            return Some((min, max));
+            return Ok(Some((min, max)));
         }
         // Ordinary same-region Dense ALTER only appends PK fields and preserves
         // prefix order/types. SyncColumns violating that invariant is out of scope.
-        let prefix_len = self.codec.decode_prefix_len(&min).ok()?;
-        if self.codec.decode_prefix_len(&max).ok()? != prefix_len {
-            return None;
-        }
+        let prefix_len = self.range_prefix_len(&min, &max)?;
         if prefix_len == self.codec.num_fields() {
-            return Some((min, max));
+            return Ok(Some((min, max)));
         }
-        let suffix = self.suffixes[prefix_len]
+        let Some(suffix) = self.suffixes[prefix_len]
             .get_or_init(|| self.encode_suffix(prefix_len))
-            .as_ref()?;
+            .as_ref()
+        else {
+            return Ok(None);
+        };
         // Fixed-layout Dense keys are prefix-free, so appending one constant
         // suffix is monotone. Transform each file before aggregating any ranges.
-        Some((append_suffix(min, suffix), append_suffix(max, suffix)))
+        Ok(Some((
+            append_suffix(min, suffix),
+            append_suffix(max, suffix),
+        )))
+    }
+
+    fn range_prefix_len(&self, min: &[u8], max: &[u8]) -> Result<usize> {
+        let min_len = self
+            .codec
+            .decode_prefix_len(min)
+            .context(DecodePrimaryKeyRangeSnafu { endpoint: "min" })?;
+        let max_len = self
+            .codec
+            .decode_prefix_len(max)
+            .context(DecodePrimaryKeyRangeSnafu { endpoint: "max" })?;
+        ensure!(
+            min_len == max_len,
+            InvalidPrimaryKeyRangeSnafu {
+                reason: format!(
+                    "endpoints have different field counts: min {min_len}, max {max_len}"
+                ),
+            }
+        );
+        Ok(min_len)
     }
 
     fn encode_suffix(&self, prefix_len: usize) -> Option<Bytes> {
@@ -350,7 +389,9 @@ mod tests {
             let prefix = encode(&metadata, &defaults[..count]);
             assert_eq!(
                 Some((expected.clone(), expected.clone())),
-                mapper.map(metadata.region_id, (prefix.clone(), prefix))
+                mapper
+                    .map(metadata.region_id, (prefix.clone(), prefix))
+                    .unwrap()
             );
         }
     }
@@ -374,6 +415,7 @@ mod tests {
             assert!(
                 mapper
                     .map(mapper.metadata.region_id, (raw.clone(), raw))
+                    .unwrap()
                     .is_some()
             );
         }
@@ -395,14 +437,18 @@ mod tests {
                 let prefix = encode(&next_metadata, &values[..prefix_len]);
                 assert_eq!(
                     Some((expected.clone(), expected.clone())),
-                    next_mapper.map(next_metadata.region_id, (prefix.clone(), prefix))
+                    next_mapper
+                        .map(next_metadata.region_id, (prefix.clone(), prefix))
+                        .unwrap()
                 );
             }
             let old_expected = encode(&mapper.metadata, &values[..count - 1]);
             let raw = encode(&mapper.metadata, &values[..1]);
             assert_eq!(
                 Some((old_expected.clone(), old_expected)),
-                mapper.map(mapper.metadata.region_id, (raw.clone(), raw))
+                mapper
+                    .map(mapper.metadata.region_id, (raw.clone(), raw))
+                    .unwrap()
             );
             mapper = next_mapper;
         }
@@ -437,7 +483,9 @@ mod tests {
         let expected = known.then(|| (Bytes::from_static(&[0]), Bytes::from_static(&[0])));
         assert_eq!(
             expected,
-            mapper.map(metadata.region_id, (Bytes::new(), Bytes::new()))
+            mapper
+                .map(metadata.region_id, (Bytes::new(), Bytes::new()))
+                .unwrap()
         );
         if known {
             let encoded_null = encode(&metadata, &[Value::Null]);
@@ -445,22 +493,131 @@ mod tests {
         }
     }
 
+    // Invalid order/layout is an error; foreign bounds and unavailable defaults
+    // remain unknown. Exercise both endpoints without an inverted range masking decoding.
+    #[rstest]
+    #[case::dense(PrimaryKeyEncoding::Dense)]
+    #[case::sparse(PrimaryKeyEncoding::Sparse)]
+    fn test_reversed_pk_bounds_return_error(#[case] encoding: PrimaryKeyEncoding) {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+        use mito_codec::row_converter::build_primary_key_codec;
+
+        let mut metadata = (*metadata(&[Value::from("")])).clone();
+        metadata.primary_key_encoding = encoding;
+        let metadata = Arc::new(metadata);
+        let codec = build_primary_key_codec(&metadata);
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        codec
+            .encode_values(&[(0, Value::from("a"))], &mut a)
+            .unwrap();
+        codec
+            .encode_values(&[(0, Value::from("b"))], &mut b)
+            .unwrap();
+        let mapper = PrimaryKeyRangeMapper::new(metadata);
+        let err = mapper
+            .map(mapper.metadata.region_id, (b.into(), a.into()))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::InvalidPrimaryKeyRange { .. }
+        ));
+        assert_eq!(StatusCode::Internal, err.status_code());
+    }
+
     #[test]
-    fn test_dense_invalid_ranges_are_unknown() {
+    fn test_different_pk_prefix_lengths_return_error() {
         let metadata = metadata(&[Value::from(""), Value::Int64(42)]);
         let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
+        let min = encode(&metadata, &[Value::from("a")]);
+        let max = encode(&metadata, &[Value::from("b"), Value::Int64(42)]);
+        assert!(matches!(
+            mapper.map(metadata.region_id, (min, max)),
+            Err(crate::error::Error::InvalidPrimaryKeyRange { .. })
+        ));
+    }
+
+    #[rstest]
+    #[case::min("min")]
+    #[case::max("max")]
+    fn test_truncated_pk_endpoint_preserves_decode_error(#[case] endpoint: &'static str) {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+
+        let metadata = metadata(&[Value::from("")]);
+        let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
+        let mut min = encode(&metadata, &[Value::from("a")]);
+        let mut max = encode(&metadata, &[Value::from("b")]);
+        if endpoint == "min" {
+            min.truncate(min.len() - 1);
+        } else {
+            max.truncate(max.len() - 1);
+        }
+        let err = mapper.map(metadata.region_id, (min, max)).unwrap_err();
+        assert_eq!(StatusCode::Internal, err.status_code());
+        assert!(matches!(err, crate::error::Error::DecodePrimaryKeyRange {
+            endpoint: actual,
+            source: mito_codec::error::Error::InvalidDensePrimaryKey { .. },
+            ..
+        } if actual == endpoint));
+    }
+
+    #[test]
+    fn test_foreign_pk_bounds_are_unknown_without_decoding() {
+        let mapper = PrimaryKeyRangeMapper::new(metadata(&[Value::from("")]));
+        // Foreign files may use a different layout, so don't decode them as local Dense keys.
+        let key = Bytes::from_static(&[2]);
+        assert_eq!(
+            None,
+            mapper.map(RegionId::new(2, 1), (key.clone(), key)).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_invalid_file_ranges_log_once_and_keep_possible_overlap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use common_telemetry::tracing_subscriber::Layer;
+        use common_telemetry::tracing_subscriber::layer::Context;
+        use common_telemetry::tracing_subscriber::prelude::*;
+        use tracing::{Event, Level, Subscriber};
+
+        struct WarningCounter(Arc<AtomicUsize>);
+        impl<S: Subscriber> Layer<S> for WarningCounter {
+            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+                if *event.metadata().level() == Level::WARN {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let subscriber =
+            common_telemetry::tracing_subscriber::registry().with(WarningCounter(warnings.clone()));
+        let metadata = metadata(&[Value::from("")]);
+        let mapper = Arc::new(PrimaryKeyRangeMapper::new(metadata.clone()));
+        let healthy_meta = file_meta(&metadata, &[Value::from("c")]);
+        let healthy = FileHandle::new(healthy_meta, new_noop_file_purger())
+            .with_primary_key_mapper(mapper.clone());
         let a = encode(&metadata, &[Value::from("a")]);
         let b = encode(&metadata, &[Value::from("b")]);
-        let full = encode(&metadata, &[Value::from("b"), Value::Int64(42)]);
-        for range in [
-            (b.clone(), a.clone()),
-            (a.clone(), full.clone()),
-            (full.slice(..full.len() - 1), full.clone()),
-            (Bytes::from_static(&[2]), b.clone()),
-        ] {
-            assert_eq!(None, mapper.map(metadata.region_id, range));
-        }
-        assert_eq!(None, mapper.map(RegionId::new(2, 1), (a, b)));
+
+        tracing::subscriber::with_default(subscriber, || {
+            for (min, max) in [(b.clone(), a.clone()), (a.slice(..a.len() - 1), b)] {
+                let mut meta = file_meta(&metadata, &[Value::from("a")]);
+                meta.primary_key_min = Some(min);
+                meta.primary_key_max = Some(max);
+                let file = FileHandle::new(meta, new_noop_file_purger())
+                    .with_primary_key_mapper(mapper.clone());
+                assert_eq!(None, file.primary_key_range());
+                assert_eq!(None, file.clone().primary_key_range());
+                // These raw ranges look disjoint from c; unknown must prevent pruning.
+                assert!(file.overlap_inclusive(&healthy));
+                assert!(healthy.overlap_inclusive(&file));
+            }
+        });
+        assert_eq!(2, warnings.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -477,7 +634,9 @@ mod tests {
         let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
         assert_eq!(
             None,
-            mapper.map(metadata.region_id, (Bytes::new(), Bytes::new()))
+            mapper
+                .map(metadata.region_id, (Bytes::new(), Bytes::new()))
+                .unwrap()
         );
         let key = encode(
             &metadata,
@@ -485,7 +644,7 @@ mod tests {
         );
         assert_eq!(
             Some((key.clone(), key.clone())),
-            mapper.map(metadata.region_id, (key.clone(), key))
+            mapper.map(metadata.region_id, (key.clone(), key)).unwrap()
         );
     }
 
@@ -504,7 +663,7 @@ mod tests {
         let mapper = PrimaryKeyRangeMapper::new(metadata);
         assert_eq!(
             Some((key.clone(), key.clone())),
-            mapper.map(region_id, (key.clone(), key))
+            mapper.map(region_id, (key.clone(), key)).unwrap()
         );
     }
 

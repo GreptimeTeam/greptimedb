@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
@@ -628,6 +628,8 @@ impl FileHandle {
 
     /// Returns complete, comparable bounds in this handle's pinned schema.
     /// Unknown bounds must be treated conservatively by pruning and compaction.
+    /// Invalid bounds are logged once per cached schema view and treated as unknown,
+    /// since unusable pruning statistics alone must not fail reads or compaction.
     pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
         if let Some(range) = self.primary_key_range.get() {
             return range.clone();
@@ -636,7 +638,14 @@ impl FileHandle {
         // Legacy statistics may be loaded later. Do not cache their absence.
         let raw = self.inner.primary_key_range.read().unwrap().clone()?;
         self.primary_key_range
-            .get_or_init(|| mapper.map(self.region_id(), raw))
+            .get_or_init(|| match mapper.map(self.region_id(), raw) {
+                Ok(range) => range,
+                Err(err) => {
+                    warn!(err; "Invalid SST primary key range; using unknown bounds, region: {}, file: {}, schema version: {}",
+                        self.region_id(), self.file_id(), mapper.schema_version());
+                    None
+                }
+            })
             .clone()
     }
 
