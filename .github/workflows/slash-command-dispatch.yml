@@ -34,3 +34,4 @@ jobs:
           issue-type: pull-request
           commands: |
             query-regression
+            ci

@@ -24,6 +24,12 @@ on:
       - 'grafana/**'
       - 'Makefile'
   workflow_dispatch:
+    inputs:
+      ci_command:
+        description: Internal comment-command marker
+        required: false
+        default: false
+        type: boolean
 
 name: Docs CI
 
@@ -32,6 +38,7 @@ name: Docs CI
 
 jobs:
   typos:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: Spell Check with Typos
     runs-on: ubuntu-latest
     steps:
@@ -41,6 +48,7 @@ jobs:
       - uses: crate-ci/typos@master
 
   license-header-check:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     name: Check License Header
     steps:
@@ -50,6 +58,7 @@ jobs:
       - uses: korandoru/hawkeye@v5
 
   required-checks:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: ${{ matrix.check }}
     runs-on: ubuntu-slim
     strategy:
