@@ -48,6 +48,28 @@ teardown = load_module(
 )
 
 
+class GitHubApiResponseTest(unittest.TestCase):
+    def test_success_response_body(self):
+        cases = ((200, b'{"runners": []}', {"runners": []}), (204, b"", {}))
+        for status, body, expected in cases:
+            with self.subTest(status=status):
+                response = Mock(status=status)
+                response.read.return_value = body
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                with patch.object(provision.urllib.request, "urlopen", return_value=response):
+                    self.assertEqual(provision.github_api("token", "DELETE", "/test"), expected)
+
+    def test_invalid_json_still_fails(self):
+        response = Mock(status=200)
+        response.read.return_value = b"not json"
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with patch.object(provision.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(ValueError):
+                provision.github_api("token", "GET", "/test")
+
+
 class ProvisionNamingTest(unittest.TestCase):
     def test_runner_name_and_label_derive_from_run_id(self) -> None:
         self.assertEqual(provision.runner_name_for_run("12345"), "qreg-ecs-12345")

@@ -58,6 +58,11 @@ impl SeriesIndexFileHandle {
         }
     }
 
+    /// Returns the region and file identity used for storage and deletion.
+    pub(crate) fn file_id(&self) -> RegionFileId {
+        self.inner.file_id
+    }
+
     pub(crate) fn entry(&self) -> &SeriesIndexEntry {
         &self.inner.entry
     }

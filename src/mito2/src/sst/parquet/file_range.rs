@@ -16,7 +16,7 @@
 //! is usually a row group in a parquet file.
 
 use std::collections::{HashMap, HashSet};
-use std::ops::BitAnd;
+use std::ops::{BitAnd, Range};
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
@@ -29,19 +29,21 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::Schema;
 use futures::StreamExt;
 use mito_codec::row_converter::PrimaryKeyCodec;
+use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
+use tokio::sync::OnceCell;
 
 use crate::cache::CacheStrategy;
 use crate::error::{
-    ComputeArrowSnafu, DecodeStatsSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
-    RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
+    ComputeArrowSnafu, DecodeStatsSnafu, EvalPartitionFilterSnafu, InvalidRecordBatchSnafu,
+    NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
 };
 use crate::read::compat::FlatCompatBatch;
 use crate::read::flat_projection::CompactionProjectionMapper;
@@ -59,7 +61,9 @@ use crate::sst::parquet::reader::{
     SimpleFilterContext,
 };
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
+use crate::sst::parquet::row_selection::{intersect_row_selections, row_selection_from_row_ranges};
 use crate::sst::parquet::stats::RowGroupPruningStats;
+use crate::sst::range_index::{SstRangeIndexSearcher, range_index_path};
 
 /// Checks if a row group contains delete operations by examining the min value of op_type column.
 ///
@@ -100,6 +104,11 @@ pub struct FileRange {
 }
 
 impl FileRange {
+    /// Returns the shared range-index searcher, opening it on first use.
+    pub(crate) async fn range_index_searcher(&self) -> Result<Option<&SstRangeIndexSearcher>> {
+        self.context.range_index_searcher().await
+    }
+
     /// Returns the region metadata stored in this SST.
     pub(crate) fn region_metadata(&self) -> &RegionMetadataRef {
         self.context.read_format().metadata()
@@ -340,6 +349,40 @@ impl FileRange {
         Ok(Some(FlatRowGroupReader::new(self.context.clone(), stream)))
     }
 
+    /// Returns the source SST row-group index.
+    pub(crate) fn row_group_index(&self) -> usize {
+        self.row_group_idx
+    }
+
+    /// Builds a reader from absolute row-group offsets supplied by a range index.
+    /// Existing pruning is intersected before reading, without predicate prefiltering.
+    pub(crate) async fn reader_by_row_ranges(
+        &self,
+        ranges: Vec<Range<usize>>,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
+    ) -> Result<Option<FlatRowGroupReader>> {
+        let num_rows = self
+            .context
+            .reader_builder
+            .parquet_metadata()
+            .row_group(self.row_group_idx)
+            .num_rows() as usize;
+        let Some(selected) = refine_row_range_selection(ranges, num_rows, &self.row_selection)?
+        else {
+            return Ok(None);
+        };
+        let stream = self
+            .context
+            .reader_builder
+            .build_without_prefilter(self.context.build_context(
+                self.row_group_idx,
+                Some(selected),
+                fetch_metrics,
+            ))
+            .await?;
+        Ok(Some(FlatRowGroupReader::new(self.context.clone(), stream)))
+    }
+
     /// Returns the helper to compat batches.
     pub(crate) fn compat_batch(&self) -> Option<&FlatCompatBatch> {
         self.context.compat_batch()
@@ -372,6 +415,32 @@ impl FileRange {
     }
 }
 
+/// Intersects source-row offsets, rather than offsets within an already selected stream.
+fn refine_row_range_selection(
+    ranges: Vec<Range<usize>>,
+    num_rows: usize,
+    original: &Option<RowSelection>,
+) -> Result<Option<RowSelection>> {
+    let mut previous_end = 0;
+    for range in &ranges {
+        ensure!(
+            range.start >= previous_end && range.start < range.end && range.end <= num_rows,
+            InvalidRecordBatchSnafu {
+                reason: format!(
+                    "invalid range-index row range {range:?} after {previous_end}, row group has {num_rows} rows"
+                ),
+            }
+        );
+        previous_end = range.end;
+    }
+    let selected = row_selection_from_row_ranges(ranges.into_iter(), num_rows);
+    let selected = match original {
+        Some(original) => intersect_row_selections(original, &selected),
+        None => selected,
+    };
+    Ok((selected.row_count() > 0).then_some(selected))
+}
+
 fn refine_primary_key_selection(
     masks: &[BooleanArray],
     original: &Option<RowSelection>,
@@ -389,6 +458,10 @@ fn refine_primary_key_selection(
 
 /// Context shared by ranges of the same parquet SST.
 pub struct FileRangeContext {
+    /// Store for a range index registered in the scan's index snapshot.
+    range_index_store: Option<ObjectStore>,
+    /// Lazily opened range index shared by all ranges of this file.
+    range_index_searcher: OnceCell<SstRangeIndexSearcher>,
     /// Row group reader builder for the file.
     reader_builder: RowGroupReaderBuilder,
     /// Base of the context.
@@ -399,11 +472,32 @@ pub type FileRangeContextRef = Arc<FileRangeContext>;
 
 impl FileRangeContext {
     /// Creates a new [FileRangeContext].
-    pub(crate) fn new(reader_builder: RowGroupReaderBuilder, base: RangeBase) -> Self {
+    pub(crate) fn new(
+        reader_builder: RowGroupReaderBuilder,
+        base: RangeBase,
+        range_index_store: Option<ObjectStore>,
+    ) -> Self {
         Self {
             reader_builder,
             base,
+            range_index_store,
+            range_index_searcher: OnceCell::new(),
         }
+    }
+
+    /// Opens the range index once, retaining the SST handle throughout its use.
+    async fn range_index_searcher(&self) -> Result<Option<&SstRangeIndexSearcher>> {
+        let Some(store) = &self.range_index_store else {
+            return Ok(None);
+        };
+        self.range_index_searcher
+            .get_or_try_init(|| async {
+                let file = self.reader_builder.file_handle();
+                let path = range_index_path(file.region_id(), file.file_id().file_id());
+                SstRangeIndexSearcher::open(store.clone(), &path).await
+            })
+            .await
+            .map(Some)
     }
 
     /// Returns filters pushed down.
@@ -1167,6 +1261,56 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn test_refine_row_range_selection() {
+        let original = Some(RowSelection::from(vec![
+            RowSelector::skip(2),
+            RowSelector::select(3),
+            RowSelector::skip(1),
+            RowSelector::select(2),
+        ]));
+        let selected = refine_row_range_selection(vec![0..3, 4..7, 9..10], 10, &original)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selected,
+            RowSelection::from(vec![
+                RowSelector::skip(2),
+                RowSelector::select(1),
+                RowSelector::skip(1),
+                RowSelector::select(1),
+                RowSelector::skip(1),
+                RowSelector::select(1),
+                RowSelector::skip(1),
+            ])
+        );
+        assert!(
+            refine_row_range_selection(vec![0..2, 8..10], 10, &original)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            refine_row_range_selection(vec![], 10, &None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            refine_row_range_selection(vec![2..4, 4..6], 10, &None)
+                .unwrap()
+                .unwrap(),
+            RowSelection::from(vec![RowSelector::skip(2), RowSelector::select(4)])
+        );
+        for ranges in [
+            std::iter::once(0..11).collect(),
+            std::iter::once(11..12).collect(),
+            std::iter::once(3..3).collect(),
+            vec![4..6, 5..7],
+            vec![4..6, 0..2],
+        ] {
+            assert!(refine_row_range_selection(ranges, 10, &None).is_err());
+        }
     }
 
     #[test]

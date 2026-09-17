@@ -40,7 +40,7 @@ use datafusion::physical_plan::metrics::{
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, apply_expression_roots,
+    SendableRecordBatchStream, StatisticsArgs, apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
@@ -1264,8 +1264,12 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
-        if partition.is_some() {
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> Result<Arc<Statistics>> {
+        if args.partition().is_some() {
             return Ok(Arc::new(Statistics::new_unknown(&self.arrow_schema)));
         }
 

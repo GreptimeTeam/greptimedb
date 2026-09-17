@@ -29,6 +29,7 @@ use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
+use object_store::ObjectStore;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
@@ -153,6 +154,8 @@ pub struct MitoRegion {
     pub(crate) version_control: VersionControlRef,
     /// Snapshot controller for range and series indexes.
     pub(crate) series_index_version_control: SeriesIndexVersionControl,
+    /// Store containing the region's series indexes.
+    pub(crate) series_index_store: Option<ObjectStore>,
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Context to maintain manifest for this region.
@@ -2049,6 +2052,7 @@ mod tests {
             region_id: metadata.region_id,
             version_control,
             series_index_version_control: Default::default(),
+            series_index_store: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             file_purger: crate::test_util::new_noop_file_purger(),
@@ -2553,6 +2557,7 @@ mod tests {
             region_id: metadata.region_id,
             version_control,
             series_index_version_control: Default::default(),
+            series_index_store: None,
             access_layer,
             manifest_ctx: manifest_ctx.clone(),
             file_purger: crate::test_util::new_noop_file_purger(),

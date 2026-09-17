@@ -68,6 +68,7 @@ use crate::metrics::{
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
+use crate::series_index::SeriesIndexReadContext;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
@@ -191,6 +192,8 @@ macro_rules! handle_index_error {
 
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
+    /// Index snapshot and store used to determine range-index availability.
+    series_index: Option<SeriesIndexReadContext>,
     /// SST directory.
     table_dir: String,
     /// Path type for generating file paths.
@@ -247,6 +250,7 @@ impl ParquetReaderBuilder {
         object_store: ObjectStore,
     ) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
+            series_index: None,
             table_dir,
             path_type,
             file_handle,
@@ -272,6 +276,13 @@ impl ParquetReaderBuilder {
             defer_optional_page_index: false,
             batch_size: DEFAULT_READ_BATCH_SIZE,
         }
+    }
+
+    /// Sets the captured series-index context for range-index reads.
+    #[must_use]
+    pub(crate) fn series_index(mut self, context: Option<SeriesIndexReadContext>) -> Self {
+        self.series_index = context;
+        self
     }
 
     /// Sets the scan-wide hint for rows in a decoded batch.
@@ -692,6 +703,19 @@ impl ParquetReaderBuilder {
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
 
+        let range_index_store = self.series_index.as_ref().and_then(|context| {
+            let region_id = self
+                .expected_metadata
+                .as_ref()
+                .unwrap_or(&region_meta)
+                .region_id;
+            (self.file_handle.region_id() == region_id
+                && context
+                    .version
+                    .range_indexes
+                    .contains(&self.file_handle.file_id().file_id()))
+            .then(|| context.store.clone())
+        });
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
@@ -706,6 +730,7 @@ impl ParquetReaderBuilder {
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,
             },
+            range_index_store,
         );
 
         metrics.build_cost += start.elapsed();

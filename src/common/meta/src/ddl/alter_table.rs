@@ -223,7 +223,9 @@ impl AlterTableProcedure {
                                 .get(&region_id.region_number())
                                 .cloned()
                                 .unwrap_or_default(),
-                            WalOptions::RaftEngine | WalOptions::Kafka(_)
+                            WalOptions::RaftEngine
+                                | WalOptions::Kafka(_)
+                                | WalOptions::ObjectStore(_)
                         )
                     }),
                     UnsupportedSnafu {

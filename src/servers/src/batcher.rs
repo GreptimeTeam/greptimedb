@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Build and Compute the dataflow
+//! Ordinary-table batching and shared notification components.
 
-mod render;
-mod state;
-mod types;
+mod flow_notifier;
+mod flow_sender;
+pub mod table;
 
-pub(crate) use render::Context;
-pub(crate) use state::DataflowState;
-pub(crate) use types::ErrCollector;
+#[cfg(test)]
+mod test_util;

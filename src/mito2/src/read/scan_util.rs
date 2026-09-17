@@ -1513,7 +1513,7 @@ pub(crate) async fn scan_flat_file_ranges(
 /// batches have already been virtualized to the target-local file barrier, so
 /// they are filtered using the effective batch sequence. Local untrusted files
 /// pass through because exact capability excludes them before row filtering.
-fn filter_flat_batch_by_sequence(
+pub(crate) fn filter_flat_batch_by_sequence(
     record_batch: RecordBatch,
     sequence_range: Option<SequenceRange>,
     file_sequence_trusted: bool,
