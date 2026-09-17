@@ -69,10 +69,10 @@ a module map, read/write paths, change-coupling points, and gotchas:
 - [`tests/compatibility/AGENTS.md`](tests/compatibility/AGENTS.md)
 - [`tests/perf/AGENTS.md`](tests/perf/AGENTS.md)
 
-## Rust imports
+## Rust style
 
-Prefer crate-rooted imports (`use crate::...`) over `use super::...` in
-production code. Relative imports using `super` are allowed in tests.
+Follow [`docs/style-guide.md`](docs/style-guide.md) for Rust style, module
+design, naming, and reuse guidance.
 
 ## Read before changing code
 
